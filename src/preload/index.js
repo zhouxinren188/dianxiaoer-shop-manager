@@ -4,7 +4,10 @@ const { contextBridge, ipcRenderer } = require('electron')
 const validInvokeChannels = [
   'check-for-updates',
   'start-download-update',
-  'quit-and-install'
+  'quit-and-install',
+  'window-minimize',
+  'window-maximize',
+  'window-close'
 ]
 
 const validOnChannels = [

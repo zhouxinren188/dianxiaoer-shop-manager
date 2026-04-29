@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session } = require('electron')
+const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 const { initUpdater, registerIpc } = require('./updater')
 
@@ -9,6 +9,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 680,
     title: '店小二网店管家',
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -46,7 +47,19 @@ function createWindow() {
   return mainWindow
 }
 
-// 注册 IPC 通道
+// 注册窗口控制 IPC
+ipcMain.handle('window-minimize', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.minimize()
+})
+ipcMain.handle('window-maximize', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win) win.isMaximized() ? win.unmaximize() : win.maximize()
+})
+ipcMain.handle('window-close', (event) => {
+  BrowserWindow.fromWebContents(event.sender)?.close()
+})
+
+// 注册更新 IPC 通道
 registerIpc()
 
 app.whenReady().then(async () => {
