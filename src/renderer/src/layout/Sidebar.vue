@@ -71,13 +71,62 @@
         <el-icon><User /></el-icon>
         <span>用户中心</span>
       </el-menu-item>
+      <el-menu-item index="/user/store-manage" @click="navigate('/user/store-manage')">
+        <el-icon><OfficeBuilding /></el-icon>
+        <span>店铺管理</span>
+      </el-menu-item>
+
+      <!-- 工具 分组 -->
+      <div class="menu-group-title">工具</div>
+      <el-menu-item index="open-url" @click="handleOpenUrl">
+        <el-icon><Link /></el-icon>
+        <span>打开网址</span>
+      </el-menu-item>
+      <el-menu-item index="packet-capture" @click="handlePacketCapture" :class="{ 'capturing': isCapturing }">
+        <el-icon><Monitor /></el-icon>
+        <span>{{ isCapturing ? '停止抓包' : '抓包工具' }}</span>
+        <span v-if="isCapturing" class="capture-indicator"></span>
+      </el-menu-item>
     </el-menu>
+
+    <!-- 打开网址弹窗：选择店铺 -->
+    <el-dialog
+      v-model="openUrlDialogVisible"
+      title="选择店铺打开平台网址"
+      width="420px"
+      :append-to-body="true"
+    >
+      <el-select
+        v-model="selectedStoreId"
+        placeholder="请选择店铺"
+        style="width: 100%;"
+        filterable
+      >
+        <el-option
+          v-for="store in storeList"
+          :key="store.id"
+          :label="`${store.name} (${platformText(store.platform)})`"
+          :value="store.id"
+        />
+      </el-select>
+      <template #footer>
+        <el-button @click="openUrlDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!selectedStoreId" @click="confirmOpenUrl">打开</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 抓包结果弹窗 -->
+    <PacketResultDialog
+      v-model:visible="packetDialogVisible"
+      :data="packetData"
+    />
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import {
   Shop,
   HomeFilled,
@@ -88,8 +137,13 @@ import {
   Goods,
   Van,
   Ticket,
-  User
+  User,
+  OfficeBuilding,
+  Link,
+  Monitor
 } from '@element-plus/icons-vue'
+import { fetchStores } from '@/api/store'
+import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -98,6 +152,79 @@ const activeMenu = computed(() => route.path)
 
 function navigate(path) {
   router.push(path)
+}
+
+function platformText(platform) {
+  const map = { taobao: '淘宝', tmall: '天猫', jd: '京东', pdd: '拼多多', douyin: '抖音小店' }
+  return map[platform] || platform
+}
+
+// --- 打开网址功能 ---
+const openUrlDialogVisible = ref(false)
+const storeList = ref([])
+const selectedStoreId = ref(null)
+
+async function handleOpenUrl() {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  openUrlDialogVisible.value = true
+  selectedStoreId.value = null
+  try {
+    const data = await fetchStores({ pageSize: 100 })
+    storeList.value = data.list || []
+  } catch (err) {
+    ElMessage.error('加载店铺列表失败')
+  }
+}
+
+function confirmOpenUrl() {
+  const store = storeList.value.find(s => s.id === selectedStoreId.value)
+  if (!store) return
+
+  window.electronAPI.invoke('open-platform-window', {
+    storeId: store.id,
+    platform: store.platform
+  }).then(() => {
+    openUrlDialogVisible.value = false
+    ElMessage.success(`已打开「${store.name}」的平台网页`)
+  }).catch(err => {
+    ElMessage.error('打开失败: ' + err.message)
+  })
+}
+
+// --- 抓包工具功能 ---
+const isCapturing = ref(false)
+const packetDialogVisible = ref(false)
+const packetData = ref([])
+
+async function handlePacketCapture() {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+
+  if (!isCapturing.value) {
+    // 开始抓包
+    try {
+      await window.electronAPI.invoke('packet-capture-start')
+      isCapturing.value = true
+      ElMessage.success('抓包已开始')
+    } catch (err) {
+      ElMessage.error('启动抓包失败: ' + err.message)
+    }
+  } else {
+    // 停止抓包
+    try {
+      const result = await window.electronAPI.invoke('packet-capture-stop')
+      isCapturing.value = false
+      packetData.value = result.data || []
+      packetDialogVisible.value = true
+    } catch (err) {
+      ElMessage.error('停止抓包失败: ' + err.message)
+    }
+  }
 }
 </script>
 
@@ -190,5 +317,26 @@ function navigate(path) {
 :deep(.el-sub-menu .el-menu-item) {
   padding-left: 52px !important;
   min-width: auto;
+}
+
+/* 抓包中状态样式 */
+:deep(.el-menu-item.capturing) {
+  background-color: rgba(245, 108, 108, 0.15) !important;
+  color: #f56c6c !important;
+}
+
+.capture-indicator {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background-color: #f56c6c;
+  border-radius: 50%;
+  margin-left: 8px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.8); }
 }
 </style>

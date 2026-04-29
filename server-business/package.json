@@ -1,0 +1,15 @@
+{
+  "name": "dianxiaoer-business-server",
+  "version": "1.0.0",
+  "description": "店小二网店管家 - 业务API服务器",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node app.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  }
+}

@@ -7,7 +7,7 @@
           <el-icon :size="32" color="#1890ff"><UserFilled /></el-icon>
         </div>
         <div class="welcome-info">
-          <h1 class="welcome-title">{{ greeting }}，管理员。</h1>
+          <h1 class="welcome-title">{{ greeting }}，{{ currentUser }}。</h1>
           <p class="welcome-desc">今天是你使用店小二网店管家的第 1 天，目前有 {{ todoCount }} 项待办任务需要处理。</p>
         </div>
       </div>
@@ -88,6 +88,7 @@ import {
 } from '@element-plus/icons-vue'
 
 const todoCount = 8
+const currentUser = localStorage.getItem('currentUser') || '管理员'
 
 const greeting = computed(() => {
   const hour = new Date().getHours()

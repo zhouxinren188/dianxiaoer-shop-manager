@@ -3,6 +3,12 @@ import AppLayout from '@/layout/AppLayout.vue'
 
 const routes = [
   {
+    path: '/login',
+    name: 'Login',
+    component: () => import('@/views/login/LoginPage.vue'),
+    meta: { title: '登录' }
+  },
+  {
     path: '/',
     component: AppLayout,
     redirect: '/home',
@@ -54,6 +60,12 @@ const routes = [
         name: 'UserCenter',
         component: () => import('@/views/user/UserCenter.vue'),
         meta: { title: '用户中心' }
+      },
+      {
+        path: '/user/store-manage',
+        name: 'StoreManage',
+        component: () => import('@/views/user/StoreManage.vue'),
+        meta: { title: '店铺管理' }
       }
     ]
   }
@@ -62,6 +74,15 @@ const routes = [
 const router = createRouter({
   history: createWebHashHistory(),
   routes
+})
+
+router.beforeEach((to, from, next) => {
+  const token = localStorage.getItem('token')
+  if (to.path === '/login') {
+    token ? next('/') : next()
+  } else {
+    token ? next() : next('/login')
+  }
 })
 
 export default router

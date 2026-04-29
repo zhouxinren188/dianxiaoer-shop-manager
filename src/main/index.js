@@ -2,6 +2,9 @@ const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 const { initUpdater, registerIpc } = require('./updater')
 const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
+const { registerPlatformWindowIpc } = require('./platform-window')
+const { registerPacketCaptureIpc } = require('./packet-capture')
+const { startHeartbeat } = require('./cookie-heartbeat')
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -69,6 +72,9 @@ ipcMain.handle('window-close', (event) => {
 // 注册更新 IPC 通道
 registerIpc()
 
+// 注册抓包 IPC 通道
+registerPacketCaptureIpc()
+
 app.whenReady().then(async () => {
   // 启动前清除缓存，防止旧缓存导致页面内容错误
   try {
@@ -84,6 +90,12 @@ app.whenReady().then(async () => {
 
   // 注册热更新 IPC 通道
   registerHotUpdateIpc(mainWindow)
+
+  // 注册平台窗口 IPC 通道
+  registerPlatformWindowIpc(mainWindow)
+
+  // 启动 Cookie 心跳检测
+  startHeartbeat(mainWindow)
 
   // 启动后延迟检查热更新
   setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
