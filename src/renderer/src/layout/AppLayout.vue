@@ -105,20 +105,20 @@ function closeTab(tab) {
 
 .tab-bar {
   height: 40px;
-  background: #fff;
-  border-bottom: 1px solid #f0f0f0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 16px;
+  align-items: stretch;
   flex-shrink: 0;
 }
 
 .tab-bar-left {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 0;
   overflow-x: auto;
+  flex: 1;
+  min-width: 0;
+  background: #1890ff;
+  padding: 0 8px;
 }
 
 .tab-bar-left::-webkit-scrollbar {
@@ -130,40 +130,54 @@ function closeTab(tab) {
   align-items: center;
   gap: 20px;
   flex-shrink: 0;
-  margin-left: 16px;
+  padding: 0 16px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 .tab-item {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
-  border-radius: 4px;
+  padding: 4px 14px;
+  border-radius: 4px 4px 0 0;
   font-size: 12px;
-  color: #606266;
+  color: rgba(255, 255, 255, 0.8);
   cursor: pointer;
   white-space: nowrap;
-  border: 1px solid transparent;
+  border: none;
   transition: all 0.2s;
+  height: 32px;
+  margin-top: auto;
 }
 
 .tab-item:hover {
-  background: #f5f7fa;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .tab-item.active {
-  background: #e6f4ff;
+  background: #fff;
   color: #1890ff;
-  border-color: #91caff;
+  font-weight: 500;
 }
 
 .tab-close {
-  color: #909399;
+  color: rgba(255, 255, 255, 0.6);
   border-radius: 50%;
   transition: all 0.2s;
 }
 
+.tab-item.active .tab-close {
+  color: #909399;
+}
+
 .tab-close:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.tab-item.active .tab-close:hover {
   color: #fff;
   background: #909399;
 }
