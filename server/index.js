@@ -33,8 +33,9 @@ app.get('/api/users', async (req, res) => {
     const [countRows] = await pool.execute(countSql, params)
     const total = countRows[0].total
 
-    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?'
-    params.push(+pageSize, (+page - 1) * +pageSize)
+    const limit = Math.max(1, parseInt(pageSize, 10) || 10)
+    const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
+    sql += ` ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
 
     const [rows] = await pool.execute(sql, params)
 
@@ -70,6 +71,62 @@ app.get('/api/users', async (req, res) => {
     res.json(ok({ list, total }))
   } catch (err) {
     console.error(err)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 登录
+app.post('/api/login', async (req, res) => {
+  try {
+    const { username, password } = req.body
+    if (!username || !password) {
+      return res.status(400).json({ code: 1, message: '用户名和密码不能为空' })
+    }
+    const [rows] = await pool.execute(
+      'SELECT * FROM users WHERE username = ? AND status = ?',
+      [username, 'enabled']
+    )
+    if (!rows.length) {
+      return res.status(401).json({ code: 1, message: '账号或密码错误' })
+    }
+    const user = rows[0]
+    if (user.password_hash !== password) {
+      return res.status(401).json({ code: 1, message: '账号或密码错误' })
+    }
+    const token = 'token_' + Date.now() + '_' + Math.random().toString(36).slice(2)
+    res.json(ok({
+      accessToken: token,
+      tokenType: 'Bearer',
+      user: {
+        id: user.id,
+        username: user.username,
+        realName: user.real_name,
+        phone: user.phone,
+        userType: user.user_type,
+        role: user.role
+      }
+    }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取当前登录用户信息
+app.get('/api/me', async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'] || ''
+    const username = authHeader.replace('Bearer ', '').trim()
+    if (!username || !username.startsWith('token_')) {
+      return res.status(401).json({ code: 1, message: '未登录' })
+    }
+    const [rows] = await pool.execute('SELECT * FROM users WHERE status = ? LIMIT 1', ['enabled'])
+    if (!rows.length) return res.status(401).json({ code: 1, message: '用户不存在' })
+    const r = rows[0]
+    res.json(ok({
+      id: r.id, username: r.username, realName: r.real_name, phone: r.phone,
+      userType: r.user_type, role: r.role, status: r.status
+    }))
+  } catch (err) {
     res.status(500).json(fail(err.message))
   }
 })
@@ -241,20 +298,22 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
 
 app.get('/api/stores', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, name, platform, status } = req.query
+    const { page = 1, pageSize = 10, name, platform, status, online } = req.query
     let sql = 'SELECT * FROM stores WHERE 1=1'
     const params = []
 
     if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`) }
     if (platform) { sql += ' AND platform = ?'; params.push(platform) }
     if (status) { sql += ' AND status = ?'; params.push(status) }
+    if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
 
     const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
     const [countRows] = await pool.execute(countSql, params)
     const total = countRows[0].total
 
-    sql += ' ORDER BY id DESC LIMIT ? OFFSET ?'
-    params.push(+pageSize, (+page - 1) * +pageSize)
+    const limit = Math.max(1, parseInt(pageSize, 10) || 10)
+    const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
+    sql += ` ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
 
     const [rows] = await pool.execute(sql, params)
     res.json(ok({ list: rows, total }))
@@ -275,11 +334,11 @@ app.get('/api/stores/:id', async (req, res) => {
 
 app.post('/api/stores', async (req, res) => {
   try {
-    const { name, platform, account, merchant_id, shop_id, tags, status } = req.body
+    const { name, platform, account, password, merchant_id, shop_id, tags, status } = req.body
     const [result] = await pool.execute(
-      `INSERT INTO stores (name, platform, account, merchant_id, shop_id, tags, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [name, platform, account, merchant_id, shop_id, JSON.stringify(tags || []), status || 'enabled']
+      `INSERT INTO stores (name, platform, account, password, merchant_id, shop_id, tags, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name || '', platform || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled']
     )
     res.json(ok({ id: result.insertId, ...req.body }))
   } catch (err) {
@@ -289,11 +348,14 @@ app.post('/api/stores', async (req, res) => {
 
 app.put('/api/stores/:id', async (req, res) => {
   try {
+    const allowed = ['name', 'platform', 'account', 'password', 'merchant_id', 'shop_id', 'tags', 'status']
     const fields = []
     const values = []
     for (const [key, val] of Object.entries(req.body)) {
-      fields.push(`${key} = ?`)
-      values.push(val)
+      if (allowed.includes(key) && val !== undefined) {
+        fields.push(`${key} = ?`)
+        values.push(key === 'tags' ? JSON.stringify(val || []) : val)
+      }
     }
     if (!fields.length) return res.json(fail('没有要修改的字段'))
     values.push(req.params.id)
@@ -323,6 +385,16 @@ app.put('/api/stores/:id/toggle', async (req, res) => {
   }
 })
 
+app.put('/api/stores/:id/status', async (req, res) => {
+  try {
+    const online = req.body.online !== undefined ? (req.body.online ? 1 : 0) : 1
+    await pool.execute('UPDATE stores SET online = ? WHERE id = ?', [online, req.params.id])
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // ============ 仓库接口 ============
 
 app.get('/api/warehouses', async (req, res) => {
@@ -331,6 +403,129 @@ app.get('/api/warehouses', async (req, res) => {
     res.json(ok({ list: rows, total: rows.length }))
   } catch (err) {
     res.status(500).json(fail(err.message))
+  }
+})
+
+app.get('/api/warehouses/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM warehouses WHERE id = ?', [req.params.id])
+    if (!rows.length) return res.status(404).json(fail('仓库不存在'))
+    res.json(ok(rows[0]))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+app.post('/api/warehouses', async (req, res) => {
+  try {
+    const { name, code, location, contact, phone, status } = req.body
+    if (!name) return res.json(fail('仓库名称不能为空'))
+    const [result] = await pool.execute(
+      `INSERT INTO warehouses (name, code, location, contact, phone, status)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [name, code || '', location || '', contact || '', phone || '', status || 'enabled']
+    )
+    res.json(ok({ id: result.insertId, ...req.body }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+app.put('/api/warehouses/:id', async (req, res) => {
+  try {
+    const allowed = ['name', 'code', 'location', 'contact', 'phone', 'status']
+    const fields = []
+    const values = []
+    for (const [key, val] of Object.entries(req.body)) {
+      if (allowed.includes(key)) {
+        fields.push(`${key} = ?`)
+        values.push(val)
+      }
+    }
+    if (!fields.length) return res.json(fail('没有要修改的字段'))
+    values.push(req.params.id)
+    await pool.execute(`UPDATE warehouses SET ${fields.join(', ')} WHERE id = ?`, values)
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+app.delete('/api/warehouses/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM warehouses WHERE id = ?', [req.params.id])
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ Cookie 接口 ============
+
+// 获取所有启用店铺的 Cookie（带店铺信息）
+app.get('/api/cookies', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT c.id, c.store_id, c.cookie_data, c.domain, c.saved_at,
+              s.name AS store_name, s.platform, s.account
+       FROM cookies c
+       LEFT JOIN stores s ON c.store_id = s.id
+       ORDER BY c.saved_at DESC`
+    )
+    res.json(ok({ list: rows, total: rows.length }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取指定店铺的 Cookie
+app.get('/api/cookies/:storeId', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT * FROM cookies WHERE store_id = ?', [req.params.storeId]
+    )
+    if (!rows.length) return res.status(404).json(fail('该店铺无 Cookie 数据'))
+    res.json(ok(rows[0]))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 保存/更新店铺 Cookie（upsert）
+app.post('/api/cookies', async (req, res) => {
+  try {
+    const { store_id, cookie_data, domain } = req.body
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+    await pool.execute(
+      `INSERT INTO cookies (store_id, cookie_data, domain, saved_at)
+       VALUES (?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE cookie_data = VALUES(cookie_data), domain = VALUES(domain), saved_at = NOW()`,
+      [store_id, typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data || []), domain || '']
+    )
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 删除指定店铺的 Cookie
+app.delete('/api/cookies/:storeId', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM cookies WHERE store_id = ?', [req.params.storeId])
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 健康检查 ============
+
+app.get('/health', async (req, res) => {
+  try {
+    await pool.execute('SELECT 1')
+    res.json({ status: 'ok', time: new Date().toISOString() })
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message })
   }
 })
 

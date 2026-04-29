@@ -1,19 +1,39 @@
 const mysql = require('mysql2/promise')
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 3306,
+const dbConfig = {
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: process.env.DB_PORT || 3307,
   user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
+  password: process.env.DB_PASSWORD || 'jd123456',
   database: process.env.DB_NAME || 'dianxiaoer',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
   enableKeepAlive: true,
   keepAliveInitialDelay: 0
-})
+}
+
+const pool = mysql.createPool(dbConfig)
 
 async function initDB() {
+  // 先创建数据库（如果不存在）
+  const tempPool = mysql.createPool({
+    host: dbConfig.host,
+    port: dbConfig.port,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    waitForConnections: true,
+    connectionLimit: 1
+  })
+  const tempConn = await tempPool.getConnection()
+  try {
+    await tempConn.execute(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
+    console.log('[DB] 数据库已创建或已存在')
+  } finally {
+    tempConn.release()
+    await tempPool.end()
+  }
+
   const connection = await pool.getConnection()
   try {
     // 用户表
@@ -39,6 +59,7 @@ async function initDB() {
         name VARCHAR(100) NOT NULL,
         platform VARCHAR(20) DEFAULT '',
         account VARCHAR(100) DEFAULT '',
+        password VARCHAR(200) DEFAULT '',
         merchant_id VARCHAR(50) DEFAULT '',
         shop_id VARCHAR(50) DEFAULT '',
         tags JSON,
@@ -47,6 +68,10 @@ async function initDB() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    // 兼容已存在的 stores 表：添加 password 字段
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN password VARCHAR(200) DEFAULT '' AFTER account`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 仓库表
     await connection.execute(`
@@ -55,10 +80,19 @@ async function initDB() {
         name VARCHAR(100) NOT NULL,
         code VARCHAR(50) DEFAULT '',
         location VARCHAR(200) DEFAULT '',
+        contact VARCHAR(50) DEFAULT '',
+        phone VARCHAR(20) DEFAULT '',
         status ENUM('enabled', 'disabled') DEFAULT 'enabled',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    // 兼容已存在的表：添加 contact / phone 字段
+    try {
+      await connection.execute(`ALTER TABLE warehouses ADD COLUMN contact VARCHAR(50) DEFAULT ''`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE warehouses ADD COLUMN phone VARCHAR(20) DEFAULT ''`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 用户-店铺关联表
     await connection.execute(`
@@ -84,13 +118,25 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // Cookie 表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cookies (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        cookie_data LONGTEXT,
+        domain VARCHAR(50) DEFAULT '',
+        saved_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_id (store_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
     if (rows[0].count === 0) {
       await connection.execute(`
-        INSERT INTO users (id, username, real_name, phone, user_type, role, status, created_at)
-        VALUES (1, 'admin', '系统管理员', '13800138000', 'master', 'super_admin', 'enabled', NOW()),
-               (2, 'staff01', '张三', '13900139000', 'sub', 'staff', 'enabled', NOW())
+        INSERT INTO users (id, username, real_name, phone, password_hash, user_type, role, status, created_at)
+        VALUES (1, 'admin', '系统管理员', '13800138000', 'admin', 'master', 'super_admin', 'enabled', NOW()),
+               (2, 'staff01', '张三', '13900139000', '123456', 'sub', 'staff', 'enabled', NOW())
       `)
     }
 

@@ -21,7 +21,8 @@ const validInvokeChannels = [
   'close-platform-window',
   'packet-capture-start',
   'packet-capture-stop',
-  'packet-capture-status'
+  'packet-capture-status',
+  'open-external-url'
 ]
 
 const validOnChannels = [

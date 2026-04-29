@@ -62,6 +62,18 @@ const routes = [
         meta: { title: '供店发货' }
       },
       {
+        path: '/supplier/report',
+        name: 'SupplierReport',
+        component: () => import('@/views/supplier/SupplierReport.vue'),
+        meta: { title: '报表' }
+      },
+      {
+        path: '/supplier/store-sales-stats',
+        name: 'StoreSalesStats',
+        component: () => import('@/views/supplier/StoreSalesStats.vue'),
+        meta: { title: '店铺销售统计' }
+      },
+      {
         path: '/user/center',
         name: 'UserCenter',
         component: () => import('@/views/user/UserCenter.vue'),

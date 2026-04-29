@@ -62,6 +62,13 @@
         <span>供店发货</span>
       </el-menu-item>
 
+      <!-- 报表 分组 -->
+      <div class="menu-group-title">报表</div>
+      <el-menu-item index="/supplier/store-sales-stats" @click="navigate('/supplier/store-sales-stats')">
+        <el-icon><TrendCharts /></el-icon>
+        <span>店铺销售统计</span>
+      </el-menu-item>
+
       <!-- 任务中心 分组 -->
       <div class="menu-group-title">任务中心</div>
       <el-menu-item index="/tasks/todo" @click="navigate('/tasks/todo')">
@@ -82,10 +89,6 @@
 
       <!-- 工具 分组 -->
       <div class="menu-group-title">工具</div>
-      <el-menu-item index="add-store" @click="handleAddStore">
-        <el-icon><CirclePlus /></el-icon>
-        <span>新增店铺</span>
-      </el-menu-item>
       <el-menu-item index="open-url" @click="handleOpenUrl">
         <el-icon><Link /></el-icon>
         <span>打开网址</span>
@@ -97,29 +100,24 @@
       </el-menu-item>
     </el-menu>
 
-    <!-- 打开网址弹窗：选择店铺 -->
+    <!-- 打开网址弹窗 -->
     <el-dialog
       v-model="openUrlDialogVisible"
-      title="选择店铺打开平台网址"
-      width="420px"
+      title="打开网址"
+      width="460px"
       :append-to-body="true"
     >
-      <el-select
-        v-model="selectedStoreId"
-        placeholder="请选择店铺"
-        style="width: 100%;"
-        filterable
+      <el-input
+        v-model="inputUrl"
+        placeholder="请输入网址，如 https://www.example.com"
+        clearable
+        @keyup.enter="confirmOpenUrl"
       >
-        <el-option
-          v-for="store in storeList"
-          :key="store.id"
-          :label="`${store.name} (${platformText(store.platform)})`"
-          :value="store.id"
-        />
-      </el-select>
+        <template #prepend>URL</template>
+      </el-input>
       <template #footer>
         <el-button @click="openUrlDialogVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!selectedStoreId" @click="confirmOpenUrl">打开</el-button>
+        <el-button type="primary" :disabled="!inputUrl.trim()" @click="confirmOpenUrl">打开</el-button>
       </template>
     </el-dialog>
 
@@ -149,10 +147,9 @@ import {
   OfficeBuilding,
   Link,
   Monitor,
-  CirclePlus,
-  Setting
+  Setting,
+  TrendCharts
 } from '@element-plus/icons-vue'
-import { fetchStores, createStore } from '@/api/store'
 import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 
 const route = useRoute()
@@ -164,90 +161,34 @@ function navigate(path) {
   router.push(path)
 }
 
-function platformText(platform) {
-  const map = { taobao: '淘宝', tmall: '天猫', jd: '京东', pdd: '拼多多', douyin: '抖音小店' }
-  return map[platform] || platform
-}
-
-// --- 新增店铺功能 ---
-const addStoreLoading = ref(false)
-
-async function handleAddStore() {
-  if (!window.electronAPI) {
-    ElMessage.warning('请在 Electron 环境中使用此功能')
-    return
-  }
-
-  addStoreLoading.value = true
-  try {
-    const now = new Date()
-    const timeStr = now.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).replace(/[\/\s:]/g, '')
-
-    // 自动创建店铺（默认京东）
-    const result = await createStore({
-      name: `京东店铺${timeStr}`,
-      platform: 'jd'
-    })
-    const newStoreId = result.id
-
-    // 直接打开 shop.jd.com
-    const openResult = await window.electronAPI.invoke('open-platform-window', {
-      storeId: newStoreId,
-      platform: 'jd'
-    })
-    if (!openResult || !openResult.success) {
-      throw new Error(openResult?.message || '打开平台窗口失败')
-    }
-
-    ElMessage.success('已创建店铺并打开 shop.jd.com，请在弹出的浏览器窗口中登录')
-
-    // 跳转到店铺管理页面
-    router.push('/user/store-manage')
-  } catch (err) {
-    ElMessage.error('操作失败: ' + err.message)
-  } finally {
-    addStoreLoading.value = false
-  }
-}
-
 // --- 打开网址功能 ---
 const openUrlDialogVisible = ref(false)
-const storeList = ref([])
-const selectedStoreId = ref(null)
+const inputUrl = ref('')
 
 async function handleOpenUrl() {
   if (!window.electronAPI) {
     ElMessage.warning('请在 Electron 环境中使用此功能')
     return
   }
+  inputUrl.value = ''
   openUrlDialogVisible.value = true
-  selectedStoreId.value = null
-  try {
-    const data = await fetchStores({ pageSize: 100 })
-    storeList.value = data.list || []
-  } catch (err) {
-    ElMessage.error('加载店铺列表失败')
-  }
 }
 
-function confirmOpenUrl() {
-  const store = storeList.value.find(s => s.id === selectedStoreId.value)
-  if (!store) return
+async function confirmOpenUrl() {
+  const url = inputUrl.value.trim()
+  if (!url) return
 
-  window.electronAPI.invoke('open-platform-window', {
-    storeId: store.id,
-    platform: store.platform
-  }).then(() => {
+  let finalUrl = url
+  if (!/^https?:\/\//i.test(finalUrl)) {
+    finalUrl = 'https://' + finalUrl
+  }
+
+  try {
+    await window.electronAPI.invoke('open-external-url', { url: finalUrl })
     openUrlDialogVisible.value = false
-    ElMessage.success(`已打开「${store.name}」的平台网页`)
-  }).catch(err => {
-    ElMessage.error('打开失败: ' + err.message)
-  })
+  } catch (err) {
+    ElMessage.error('打开网址失败: ' + err.message)
+  }
 }
 
 // --- 抓包工具功能 ---
@@ -262,7 +203,6 @@ async function handlePacketCapture() {
   }
 
   if (!isCapturing.value) {
-    // 开始抓包
     try {
       await window.electronAPI.invoke('packet-capture-start')
       isCapturing.value = true
@@ -271,12 +211,15 @@ async function handlePacketCapture() {
       ElMessage.error('启动抓包失败: ' + err.message)
     }
   } else {
-    // 停止抓包
     try {
       const result = await window.electronAPI.invoke('packet-capture-stop')
       isCapturing.value = false
       packetData.value = result.data || []
-      packetDialogVisible.value = true
+      if (packetData.value.length > 0) {
+        packetDialogVisible.value = true
+      } else {
+        ElMessage.info('未捕获到任何请求')
+      }
     } catch (err) {
       ElMessage.error('停止抓包失败: ' + err.message)
     }

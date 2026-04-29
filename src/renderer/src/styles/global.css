@@ -53,3 +53,30 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* 消息提示从底部弹出 */
+.el-message {
+  top: auto !important;
+  bottom: 20px !important;
+  transform: translateX(-50%) translateY(0) !important;
+}
+
+.el-message.el-message-fade-enter-from {
+  transform: translateX(-50%) translateY(100%) !important;
+  opacity: 0 !important;
+}
+
+.el-message.el-message-fade-enter-to {
+  transform: translateX(-50%) translateY(0) !important;
+  opacity: 1 !important;
+}
+
+.el-message.el-message-fade-leave-from {
+  transform: translateX(-50%) translateY(0) !important;
+  opacity: 1 !important;
+}
+
+.el-message.el-message-fade-leave-to {
+  transform: translateX(-50%) translateY(100%) !important;
+  opacity: 0 !important;
+}

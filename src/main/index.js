@@ -84,6 +84,36 @@ ipcMain.handle('window-maximize', (event) => {
 ipcMain.handle('window-close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
+ipcMain.handle('open-external-url', (event, { url }) => {
+  if (!url) return { success: false, message: '网址为空' }
+
+  const urlWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: new URL(url).hostname,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  urlWin.loadURL(url).catch(err => {
+    console.error('[OpenURL] loadURL failed:', err.message)
+  })
+
+  // 如果正在抓包，立即监听此窗口的 session
+  try {
+    const { isCapturing, getCaptureCallback } = require('./packet-capture')
+    if (isCapturing()) {
+      urlWin.webContents.session.webRequest.onCompleted({ urls: ['*://*/*'] }, getCaptureCallback())
+    }
+  } catch {
+    // packet-capture 模块未加载时忽略
+  }
+
+  return { success: true }
+})
 
 // 窗口尺寸切换：登录页 <-> 主页
 ipcMain.handle('window-set-login-size', (event) => {

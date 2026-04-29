@@ -1,9 +1,40 @@
 const express = require('express')
 const cors = require('cors')
+const fs = require('fs')
+const path = require('path')
+const { app: electronApp } = require('electron')
 
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// ============ 本地文件持久化 ============
+function getDataDir() {
+  // Electron 用户数据目录：C:\Users\xxx\AppData\Roaming\dianxiaoer-shop-manager
+  return electronApp.getPath('userData')
+}
+
+function loadJson(filename, defaults) {
+  const filePath = path.join(getDataDir(), filename)
+  try {
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'))
+    }
+  } catch (e) {
+    console.error(`[DB] 加载 ${filename} 失败:`, e.message)
+  }
+  return defaults
+}
+
+function saveJson(filename, data) {
+  const dir = getDataDir()
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, filename), JSON.stringify(data, null, 2), 'utf8')
+  } catch (e) {
+    console.error(`[DB] 保存 ${filename} 失败:`, e.message)
+  }
+}
 
 // ============ 内存数据库 ============
 let userIdCounter = 3
@@ -15,18 +46,36 @@ const users = [
 const userStores = { 2: [1] }   // userId -> storeIds
 const userWarehouses = { 2: [1] } // userId -> warehouseIds
 
-const stores = [
-  { id: 1, name: '京东旗舰店', platform: 'jd', account: 'jdshop001', merchant_id: 'M001', shop_id: 'S001', tags: ['自营'], online: 1, status: 'enabled' },
+// 店铺数据：从本地文件加载，变更时保存
+const STORE_FILE = 'stores.json'
+const defaultStores = [
+  { id: 1, name: '京东旗舰店', platform: 'jd', account: 'jdshop001', merchant_id: 'M001', shop_id: 'S001', tags: ['自营'], online: 0, status: 'enabled' },
   { id: 2, name: '天猫专营店', platform: 'tmall', account: 'tmall001', merchant_id: 'M002', shop_id: 'S002', tags: ['品牌'], online: 0, status: 'enabled' },
-  { id: 3, name: '淘宝小店', platform: 'taobao', account: 'tb001', merchant_id: 'M003', shop_id: 'S003', tags: [], online: 1, status: 'disabled' }
+  { id: 3, name: '淘宝小店', platform: 'taobao', account: 'tb001', merchant_id: 'M003', shop_id: 'S003', tags: [], online: 0, status: 'disabled' }
 ]
 
-const warehouses = [
-  { id: 1, name: '默认仓库', code: 'WH001', location: '浙江省杭州市', status: 'enabled' },
-  { id: 2, name: '华东仓', code: 'WH002', location: '江苏省苏州市', status: 'enabled' },
-  { id: 3, name: '华南仓', code: 'WH003', location: '广东省深圳市', status: 'enabled' },
-  { id: 4, name: '华北仓', code: 'WH004', location: '北京市', status: 'disabled' }
+const stores = loadJson(STORE_FILE, defaultStores)
+let storeIdCounter = stores.length > 0 ? Math.max(...stores.map(s => s.id)) + 1 : 1
+
+function saveStores() {
+  saveJson(STORE_FILE, stores)
+}
+
+// 仓库数据：从本地文件加载，变更时保存
+const WAREHOUSE_FILE = 'warehouses.json'
+const defaultWarehouses = [
+  { id: 1, name: '默认仓库', code: 'WH001', location: '浙江省杭州市', contact: '', phone: '', status: 'enabled', createdAt: '2026-01-15 09:30:00' },
+  { id: 2, name: '华东仓', code: 'WH002', location: '江苏省苏州市', contact: '', phone: '', status: 'enabled', createdAt: '2026-03-20 14:20:00' },
+  { id: 3, name: '华南仓', code: 'WH003', location: '广东省深圳市', contact: '', phone: '', status: 'enabled', createdAt: '2026-03-21 10:00:00' },
+  { id: 4, name: '华北仓', code: 'WH004', location: '北京市', contact: '', phone: '', status: 'disabled', createdAt: '2026-03-22 11:00:00' }
 ]
+
+const warehouses = loadJson(WAREHOUSE_FILE, defaultWarehouses)
+let warehouseIdCounter = warehouses.length > 0 ? Math.max(...warehouses.map(w => w.id)) + 1 : 1
+
+function saveWarehouses() {
+  saveJson(WAREHOUSE_FILE, warehouses)
+}
 
 function now() {
   const d = new Date()
@@ -186,8 +235,21 @@ app.get('/api/stores/:id', (req, res) => {
 })
 
 app.post('/api/stores', (req, res) => {
-  const newStore = { id: stores.length + 1, ...req.body, online: 0, createdAt: now() }
+  const newStore = {
+    id: storeIdCounter++,
+    name: req.body.name || '',
+    platform: req.body.platform || '',
+    account: req.body.account || '',
+    password: req.body.password || '',
+    merchant_id: req.body.merchant_id || '',
+    shop_id: req.body.shop_id || '',
+    tags: req.body.tags || [],
+    status: req.body.status || 'enabled',
+    online: 0,
+    createdAt: now()
+  }
   stores.push(newStore)
+  saveStores()
   res.json(ok(newStore))
 })
 
@@ -195,6 +257,7 @@ app.put('/api/stores/:id', (req, res) => {
   const store = stores.find(s => s.id === +req.params.id)
   if (!store) return res.status(404).json(fail('店铺不存在'))
   Object.assign(store, req.body)
+  saveStores()
   res.json(ok(store))
 })
 
@@ -202,6 +265,7 @@ app.delete('/api/stores/:id', (req, res) => {
   const idx = stores.findIndex(s => s.id === +req.params.id)
   if (idx === -1) return res.status(404).json(fail('店铺不存在'))
   stores.splice(idx, 1)
+  saveStores()
   res.json(ok(true))
 })
 
@@ -209,13 +273,130 @@ app.put('/api/stores/:id/toggle', (req, res) => {
   const store = stores.find(s => s.id === +req.params.id)
   if (!store) return res.status(404).json(fail('店铺不存在'))
   store.status = req.body.status || 'enabled'
+  saveStores()
   res.json(ok(store))
+})
+
+// 更新店铺在线状态
+app.put('/api/stores/:id/status', (req, res) => {
+  const store = stores.find(s => s.id === +req.params.id)
+  if (!store) return res.status(404).json(fail('店铺不存在'))
+  store.online = req.body.online ? 1 : 0
+  saveStores()
+  res.json(ok(store))
+})
+
+// ============ Cookie 接口 ============
+
+// Cookie 数据：从本地文件加载，变更时保存
+const COOKIE_FILE = 'cookies.json'
+const cookieStore = loadJson(COOKIE_FILE, {})  // storeId -> { store_id, cookie_data, domain, saved_at }
+
+function saveCookies() {
+  saveJson(COOKIE_FILE, cookieStore)
+}
+
+// 获取所有 Cookie（心跳检测用）
+app.get('/api/cookies', (req, res) => {
+  const list = Object.values(cookieStore).map(c => {
+    const s = stores.find(x => x.id === c.store_id)
+    return {
+      store_id: c.store_id,
+      cookie_data: c.cookie_data,
+      domain: c.domain,
+      saved_at: c.saved_at,
+      platform: s ? s.platform : '',
+      store_name: s ? s.name : ''
+    }
+  }).filter(c => {
+    const s = stores.find(x => x.id === c.store_id)
+    return s && s.status === 'enabled'
+  })
+  res.json(ok(list))
+})
+
+// 获取指定店铺 Cookie
+app.get('/api/cookies/:storeId', (req, res) => {
+  const cookie = cookieStore[+req.params.storeId]
+  if (!cookie) return res.json(ok(null))
+  res.json(ok(cookie))
+})
+
+// 保存/更新 Cookie
+app.post('/api/cookies', (req, res) => {
+  const { store_id, cookie_data, domain } = req.body
+  if (!store_id || !cookie_data) {
+    return res.json(fail('store_id 和 cookie_data 为必填项'))
+  }
+  cookieStore[+store_id] = {
+    store_id: +store_id,
+    cookie_data: typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data),
+    domain: domain || '',
+    saved_at: now()
+  }
+  saveCookies()
+  res.json(ok(true))
+})
+
+// 删除指定店铺 Cookie
+app.delete('/api/cookies/:storeId', (req, res) => {
+  delete cookieStore[+req.params.storeId]
+  saveCookies()
+  res.json(ok(true))
+})
+
+// 健康检查
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', app: 'dianxiaoer-business' })
 })
 
 // ============ 仓库接口 ============
 
 app.get('/api/warehouses', (req, res) => {
   res.json(ok({ list: warehouses, total: warehouses.length }))
+})
+
+app.get('/api/warehouses/:id', (req, res) => {
+  const wh = warehouses.find(w => w.id === +req.params.id)
+  if (!wh) return res.status(404).json(fail('仓库不存在'))
+  res.json(ok(wh))
+})
+
+app.post('/api/warehouses', (req, res) => {
+  const { name, location, contact, phone, status } = req.body
+  if (!name) return res.json(fail('仓库名称不能为空'))
+  const newWh = {
+    id: warehouseIdCounter++,
+    name,
+    code: '',
+    location: location || '',
+    contact: contact || '',
+    phone: phone || '',
+    status: status || 'enabled',
+    createdAt: now()
+  }
+  warehouses.push(newWh)
+  saveWarehouses()
+  res.json(ok(newWh))
+})
+
+app.put('/api/warehouses/:id', (req, res) => {
+  const wh = warehouses.find(w => w.id === +req.params.id)
+  if (!wh) return res.status(404).json(fail('仓库不存在'))
+  const allowed = ['name', 'code', 'location', 'contact', 'phone', 'status']
+  for (const key of allowed) {
+    if (req.body[key] !== undefined) wh[key] = req.body[key]
+  }
+  saveWarehouses()
+  res.json(ok(wh))
+})
+
+app.delete('/api/warehouses/:id', (req, res) => {
+  const idx = warehouses.findIndex(w => w.id === +req.params.id)
+  if (idx === -1) return res.status(404).json(fail('仓库不存在'))
+  warehouses.splice(idx, 1)
+  saveWarehouses()
+  res.json(ok(true))
 })
 
 // ============ 启动 ============

@@ -4,6 +4,7 @@
     title="抓包结果"
     width="900px"
     top="5vh"
+    :append-to-body="true"
     @close="handleClose"
   >
     <div class="packet-header">

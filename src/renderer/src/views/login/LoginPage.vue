@@ -227,7 +227,7 @@ onMounted(() => {
   window.electronAPI?.invoke('window-set-login-size')
 })
 
-const API_BASE = 'https://150.158.54.108:3000'
+const API_BASE = 'http://150.158.54.108:3002'
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
@@ -243,9 +243,15 @@ async function handleLogin() {
         })
       })
       const res = await response.json()
-      if (res && res.success && res.accessToken) {
-        localStorage.setItem('accessToken', res.accessToken)
-        localStorage.setItem('currentUser', loginForm.username)
+      if (res && res.code === 0 && res.data && res.data.accessToken) {
+        const user = res.data.user
+        localStorage.setItem('accessToken', res.data.accessToken)
+        localStorage.setItem('currentUser', user.username)
+        localStorage.setItem('userInfo', JSON.stringify({
+          userType: user.userType,
+          role: user.role,
+          realName: user.realName
+        }))
         if (loginForm.remember) {
           localStorage.setItem('rememberedUser', loginForm.username)
         } else {

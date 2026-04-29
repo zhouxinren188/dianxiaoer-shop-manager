@@ -1,5 +1,4 @@
-// 后端服务地址
-// 多人协作时指向远程服务器，本地开发可改为 http://localhost:3002
+// 后端服务地址（远程服务器）
 const BASE_URL = 'http://150.158.54.108:3002'
 
 async function request(url, options = {}) {

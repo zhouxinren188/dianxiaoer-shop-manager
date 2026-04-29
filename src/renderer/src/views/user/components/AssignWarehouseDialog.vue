@@ -48,6 +48,7 @@ import { ref, computed, watch, nextTick } from 'vue'
 import { Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { assignUserWarehouses, fetchUserWarehouses } from '@/api/user'
+import { fetchWarehouses } from '@/api/warehouse'
 
 const props = defineProps({
   visible: Boolean,
@@ -78,14 +79,8 @@ function handleSelectionChange(selection) {
 }
 
 async function loadWarehouses() {
-  // 从本地模拟或全局获取仓库列表，实际应由后端接口提供
-  // 这里先预留结构，等待后端 /api/warehouses 接口
-  return [
-    { id: 1, name: '默认仓库', code: 'WH001', location: '浙江省杭州市', status: 'enabled' },
-    { id: 2, name: '华东仓', code: 'WH002', location: '江苏省苏州市', status: 'enabled' },
-    { id: 3, name: '华南仓', code: 'WH003', location: '广东省深圳市', status: 'enabled' },
-    { id: 4, name: '华北仓', code: 'WH004', location: '北京市', status: 'disabled' }
-  ]
+  const res = await fetchWarehouses()
+  return res.list || []
 }
 
 async function loadData() {

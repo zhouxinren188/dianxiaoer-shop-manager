@@ -173,7 +173,7 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import {
   Plus,
   Refresh,
@@ -183,26 +183,54 @@ import {
   Delete
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  fetchWarehouses,
+  createWarehouse,
+  updateWarehouse,
+  deleteWarehouse
+} from '@/api/warehouse'
 
 // 仓库列表数据
-const warehouseList = ref([
-  {
-    id: 'WH001',
-    name: '杭州主仓库',
-    address: '浙江省杭州市萧山区靖江街道保税大道999号',
-    contact: '王建国',
-    phone: '13800138001',
-    createTime: '2026-01-15 09:30:00'
-  },
-  {
-    id: 'WH002',
-    name: '广州分仓',
-    address: '广东省广州市白云区石井街道物流园路88号',
-    contact: '李晓明',
-    phone: '13900139002',
-    createTime: '2026-03-20 14:20:00'
+const warehouseList = ref([])
+const loading = ref(false)
+
+onMounted(() => {
+  loadWarehouses()
+})
+
+async function loadWarehouses() {
+  loading.value = true
+  try {
+    const res = await fetchWarehouses()
+    // 后端字段 location 映射为 address，created_at / createdAt 映射为 createTime
+    warehouseList.value = (res.list || []).map(item => {
+      const rawTime = item.created_at || item.createdAt || ''
+      let createTime = ''
+      if (rawTime) {
+        try {
+          createTime = new Date(rawTime).toLocaleString('zh-CN', {
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+          }).replace(/\//g, '-')
+        } catch (e) {
+          createTime = rawTime
+        }
+      }
+      return {
+        id: String(item.id),
+        name: item.name,
+        address: item.location || '',
+        contact: item.contact || '',
+        phone: item.phone || '',
+        createTime
+      }
+    })
+  } catch (err) {
+    ElMessage.error('加载仓库列表失败: ' + err.message)
+  } finally {
+    loading.value = false
   }
-])
+}
 
 // 对话框控制
 const dialogVisible = ref(false)
@@ -281,54 +309,54 @@ function handleView(item) {
   viewVisible.value = true
 }
 
-function handleDelete(item) {
-  ElMessageBox.confirm(
-    `确定要删除仓库 "${item.name}" 吗？删除后不可恢复。`,
-    '删除确认',
-    {
-      confirmButtonText: '确定删除',
-      cancelButtonText: '取消',
-      type: 'warning'
+async function handleDelete(item) {
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除仓库 "${item.name}" 吗？删除后不可恢复。`,
+      '删除确认',
+      {
+        confirmButtonText: '确定删除',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    await deleteWarehouse(item.id)
+    ElMessage.success('删除成功')
+    loadWarehouses()
+  } catch (err) {
+    if (err !== 'cancel') {
+      ElMessage.error('删除失败: ' + err.message)
     }
-  ).then(() => {
-    const index = warehouseList.value.findIndex(w => w.id === item.id)
-    if (index !== -1) {
-      warehouseList.value.splice(index, 1)
-      ElMessage.success('删除成功')
-    }
-  }).catch(() => {})
+  }
 }
 
-function handleSubmit() {
-  formRef.value.validate((valid) => {
-    if (!valid) return
+async function handleSubmit() {
+  const valid = await formRef.value.validate().catch(() => false)
+  if (!valid) return
 
+  try {
+    const payload = {
+      name: formData.name,
+      location: formData.address,
+      contact: formData.contact,
+      phone: formData.phone
+    }
     if (isEdit.value) {
-      const item = warehouseList.value.find(w => w.id === currentId.value)
-      if (item) {
-        item.name = formData.name
-        item.address = formData.address
-        item.contact = formData.contact
-        item.phone = formData.phone
-        ElMessage.success('修改成功')
-      }
+      await updateWarehouse(currentId.value, payload)
+      ElMessage.success('修改成功')
     } else {
-      const newId = 'WH' + String(Date.now()).slice(-6)
-      warehouseList.value.push({
-        id: newId,
-        name: formData.name,
-        address: formData.address,
-        contact: formData.contact,
-        phone: formData.phone,
-        createTime: new Date().toLocaleString()
-      })
+      await createWarehouse(payload)
       ElMessage.success('新增成功')
     }
     dialogVisible.value = false
-  })
+    loadWarehouses()
+  } catch (err) {
+    ElMessage.error((isEdit.value ? '修改' : '新增') + '失败: ' + err.message)
+  }
 }
 
 function handleRefresh() {
+  loadWarehouses()
   ElMessage.success('刷新成功')
 }
 </script>

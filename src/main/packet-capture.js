@@ -3,6 +3,15 @@ const { ipcMain, session } = require('electron')
 let capturing = false
 let capturedRequests = []
 let activeListeners = [] // 记录已注册监听的 session，用于清理
+let captureCallback = null // 抓包回调函数
+
+function isCapturing() {
+  return capturing
+}
+
+function getCaptureCallback() {
+  return captureCallback
+}
 
 function registerPacketCaptureIpc() {
   // 开始抓包
@@ -15,8 +24,7 @@ function registerPacketCaptureIpc() {
     capturing = true
     activeListeners = []
 
-    // 收集请求的回调
-    const onCompleted = (details) => {
+    captureCallback = (details) => {
       capturedRequests.push({
         url: details.url,
         method: details.method || 'GET',
@@ -30,7 +38,7 @@ function registerPacketCaptureIpc() {
 
     // 监听默认 session
     const defaultSes = session.defaultSession
-    defaultSes.webRequest.onCompleted({ urls: ['*://*/*'] }, onCompleted)
+    defaultSes.webRequest.onCompleted({ urls: ['*://*/*'] }, captureCallback)
     activeListeners.push(defaultSes)
 
     // 监听所有 persist:platform-* 分区的 session
@@ -40,7 +48,7 @@ function registerPacketCaptureIpc() {
       for (const [storeId] of platformWindows) {
         const partitionName = `persist:platform-${storeId}`
         const ses = session.fromPartition(partitionName)
-        ses.webRequest.onCompleted({ urls: ['*://*/*'] }, onCompleted)
+        ses.webRequest.onCompleted({ urls: ['*://*/*'] }, captureCallback)
         activeListeners.push(ses)
       }
     } catch {
@@ -66,6 +74,7 @@ function registerPacketCaptureIpc() {
     }
 
     capturing = false
+    captureCallback = null
     const result = [...capturedRequests]
     activeListeners = []
 
@@ -78,4 +87,4 @@ function registerPacketCaptureIpc() {
   })
 }
 
-module.exports = { registerPacketCaptureIpc }
+module.exports = { registerPacketCaptureIpc, isCapturing, getCaptureCallback }
