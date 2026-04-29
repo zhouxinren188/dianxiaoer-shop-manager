@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu } = require('electron')
+const { app, BrowserWindow, Menu, session } = require('electron')
 const path = require('path')
 
 function createWindow() {
@@ -22,11 +22,15 @@ function createWindow() {
   }
 
   // 加载页面
-  if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
-  }
+  const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
+  mainWindow.loadURL(devUrl).catch(err => {
+    console.error('loadURL failed:', err.message)
+    // 如果默认端口失败，尝试备用端口
+    const altUrl = devUrl.replace('5173', '5174')
+    mainWindow.loadURL(altUrl).catch(err2 => {
+      console.error('Alternate URL also failed:', err2.message)
+    })
+  })
 
   // 开发模式打开 DevTools
   if (!app.isPackaged) {
@@ -34,7 +38,14 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // 启动前清除缓存，防止旧缓存导致页面内容错误
+  try {
+    await session.defaultSession.clearCache()
+  } catch (e) {
+    // 忽略清理失败
+  }
+
   createWindow()
 
   app.on('activate', () => {
