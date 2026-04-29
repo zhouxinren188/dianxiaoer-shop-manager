@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, session } = require('electron')
 const path = require('path')
+const { initUpdater, registerIpc } = require('./updater')
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -36,7 +37,12 @@ function createWindow() {
   if (!app.isPackaged) {
     mainWindow.webContents.openDevTools()
   }
+
+  return mainWindow
 }
+
+// 注册 IPC 通道
+registerIpc()
 
 app.whenReady().then(async () => {
   // 启动前清除缓存，防止旧缓存导致页面内容错误
@@ -46,7 +52,10 @@ app.whenReady().then(async () => {
     // 忽略清理失败
   }
 
-  createWindow()
+  const mainWindow = createWindow()
+
+  // 初始化自动更新
+  initUpdater(mainWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

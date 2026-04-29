@@ -8,7 +8,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "dist": "electron-vite build && electron-builder --win",
-    "dist:dir": "electron-vite build && electron-builder --win --dir"
+    "dist:dir": "electron-vite build && electron-builder --win --dir",
+    "publish": "electron-vite build && electron-builder --win --publish always"
   },
   "build": {
     "appId": "com.dianxiaoer.shop-manager",
@@ -21,15 +22,32 @@
       "resources/**/*"
     ],
     "win": {
-      "target": "nsis",
-      "icon": "resources/icon.ico"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.ico",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "shortcutName": "店小二网店管家",
-      "language": 2052
+      "language": 2052,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "你的GitHub用户名",
+      "repo": "你的仓库名",
+      "releaseType": "release"
     }
   },
   "keywords": [],
@@ -37,6 +55,7 @@
   "license": "ISC",
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "electron-updater": "^6.8.3",
     "element-plus": "^2.13.7",
     "vue": "^3.5.33",
     "vue-router": "^5.0.6"

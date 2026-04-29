@@ -1,40 +1,40 @@
 <template>
   <div class="page-container">
-    <!-- 1. 筛选栏 + 右侧功能区 -->
+    <!-- 1. 筛选栏 + 功能区 -->
     <div class="filter-panel">
       <div class="filter-main">
         <div class="filter-grid">
           <div class="filter-item">
             <label class="filter-label">店铺标签</label>
-            <el-select v-model="searchForm.shopTag" multiple collapse-tags collapse-tags-tooltip placeholder="选择标签" clearable>
+            <el-select v-model="searchForm.shopTag" multiple collapse-tags collapse-tags-tooltip placeholder="请选择" clearable>
               <el-option v-for="t in shopTagOptions" :key="t" :label="t" :value="t" />
             </el-select>
           </div>
           <div class="filter-item">
-            <label class="filter-label">选择店铺</label>
-            <el-select v-model="searchForm.shopName" filterable placeholder="选择店铺" clearable>
+            <label class="filter-label">店铺选择</label>
+            <el-select v-model="searchForm.shopName" filterable placeholder="全部" clearable>
               <el-option v-for="s in shopOptions" :key="s" :label="s" :value="s" />
             </el-select>
           </div>
           <div class="filter-item">
             <label class="filter-label">订单编号</label>
-            <el-input v-model="searchForm.orderNo" placeholder="请输入订单编号" clearable />
+            <el-input v-model="searchForm.orderNo" placeholder="请输入站外订单编号" clearable />
           </div>
           <div class="filter-item">
             <label class="filter-label">商品名称</label>
-            <el-input v-model="searchForm.goodsName" placeholder="请输入商品名称" clearable />
+            <el-input v-model="searchForm.goodsName" placeholder="请输入关键词" clearable />
           </div>
           <div class="filter-item">
-            <label class="filter-label">出库单号</label>
-            <el-input v-model="searchForm.outboundNo" placeholder="请输入出库单号" clearable />
+            <label class="filter-label">发货单号</label>
+            <el-input v-model="searchForm.outboundNo" placeholder="" clearable />
           </div>
           <div class="filter-item">
-            <label class="filter-label">客户名称</label>
-            <el-input v-model="searchForm.customerName" placeholder="请输入客户名称" clearable />
+            <label class="filter-label">客户姓名</label>
+            <el-input v-model="searchForm.customerName" placeholder="请输入关键词" clearable />
           </div>
           <div class="filter-item">
             <label class="filter-label">客户电话</label>
-            <el-input v-model="searchForm.customerPhone" placeholder="请输入客户电话" clearable />
+            <el-input v-model="searchForm.customerPhone" placeholder="请输入关键词" clearable />
           </div>
           <div class="filter-item">
             <label class="filter-label">订单状态</label>
@@ -43,77 +43,55 @@
             </el-select>
           </div>
           <div class="filter-item">
-            <label class="filter-label">采购状态</label>
-            <el-select v-model="searchForm.purchaseStatus" placeholder="请选择" clearable>
-              <el-option v-for="s in purchaseStatusOptions" :key="s" :label="s" :value="s" />
-            </el-select>
-          </div>
-          <div class="filter-item">
             <label class="filter-label">问题事件</label>
-            <el-select v-model="searchForm.issueEvent" placeholder="请选择" clearable>
+            <el-select v-model="searchForm.issueEvent" placeholder="无筛选" clearable>
               <el-option v-for="e in issueEventOptions" :key="e" :label="e" :value="e" />
             </el-select>
           </div>
         </div>
-        <div class="filter-actions">
-          <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
-          <el-button :icon="Refresh" @click="handleReset">重置</el-button>
-        </div>
       </div>
 
-      <!-- 右侧功能区（可折叠） -->
-      <div class="func-panel" :class="{ collapsed: funcCollapsed }">
-        <div class="func-toggle" @click="funcCollapsed = !funcCollapsed">
-          <el-icon :size="14">
-            <ArrowRight v-if="funcCollapsed" />
-            <ArrowLeft v-else />
-          </el-icon>
-          <span>{{ funcCollapsed ? '展开' : '收起' }}</span>
+      <!-- 功能区（横向3列） -->
+      <div class="func-panel">
+        <div class="func-group">
+          <div class="func-group-title">出库设置</div>
+          <div class="func-item">
+            <div class="func-item-header">
+              <span class="func-item-label">自动出库</span>
+              <el-switch v-model="funcSettings.autoOutbound" @change="onFuncChange('autoOutbound', $event)" />
+            </div>
+            <p class="func-item-desc">(同步到物流的订单自动轨迹单出库)</p>
+          </div>
+          <div class="func-item">
+            <div class="func-item-header">
+              <span class="func-item-label">大件物流</span>
+              <el-switch v-model="funcSettings.largeLogistics" @change="onFuncChange('largeLogistics', $event)" />
+            </div>
+            <p class="func-item-desc">(不支持的物流将自动使用大件出库)</p>
+          </div>
         </div>
-        <div v-show="!funcCollapsed" class="func-content">
-          <!-- 出库设置 -->
-          <div class="func-group">
-            <div class="func-group-title">出库设置</div>
-            <div class="func-item">
-              <div class="func-item-header">
-                <span class="func-item-label">自动出库</span>
-                <el-switch v-model="funcSettings.autoOutbound" @change="onFuncChange('autoOutbound', $event)" />
-              </div>
-              <p class="func-item-desc">同步到物流的订单自动轨迹单出库</p>
+        <div class="func-group">
+          <div class="func-group-title">同步订单</div>
+          <div class="func-item">
+            <div class="func-item-header">
+              <span class="func-item-label">京东订单</span>
+              <el-switch v-model="funcSettings.syncJdOrder" @change="onFuncChange('syncJdOrder', $event)" />
             </div>
-            <div class="func-item">
-              <div class="func-item-header">
-                <span class="func-item-label">大件物流</span>
-                <el-switch v-model="funcSettings.largeLogistics" @change="onFuncChange('largeLogistics', $event)" />
-              </div>
-              <p class="func-item-desc">不支持的物流将自动使用大件出库</p>
-            </div>
+            <p class="func-item-desc">(每10分钟，同步1次店铺订单信息及状态)</p>
           </div>
-          <!-- 同步订单 -->
-          <div class="func-group">
-            <div class="func-group-title">同步订单</div>
-            <div class="func-item">
-              <div class="func-item-header">
-                <span class="func-item-label">京东订单</span>
-                <el-switch v-model="funcSettings.syncJdOrder" @change="onFuncChange('syncJdOrder', $event)" />
-              </div>
-              <p class="func-item-desc">每10分钟，同步1次店铺订单信息及状态</p>
+          <div class="func-item">
+            <div class="func-item-header">
+              <span class="func-item-label">采购订单</span>
+              <el-switch v-model="funcSettings.syncPurchaseOrder" @change="onFuncChange('syncPurchaseOrder', $event)" />
             </div>
-            <div class="func-item">
-              <div class="func-item-header">
-                <span class="func-item-label">采购订单</span>
-                <el-switch v-model="funcSettings.syncPurchaseOrder" @change="onFuncChange('syncPurchaseOrder', $event)" />
-              </div>
-              <p class="func-item-desc">每60分钟，同步1次采购订单状态及物流</p>
-            </div>
+            <p class="func-item-desc">(每60分钟，同步1次采购订单状态及物流)</p>
           </div>
-          <!-- 拍单账号 -->
-          <div class="func-group">
-            <div class="func-group-title">拍单账号</div>
-            <div class="func-btn-group">
-              <el-button type="danger" size="small" @click="onFuncBtnClick('accountManage')">账号管理</el-button>
-              <el-button size="small" @click="onFuncBtnClick('importAccount')">导入账号</el-button>
-            </div>
+        </div>
+        <div class="func-group">
+          <div class="func-group-title">拍单账号</div>
+          <div class="func-btn-group">
+            <el-button type="danger" size="small" @click="onFuncBtnClick('accountManage')">账号管理</el-button>
+            <el-button size="small" @click="onFuncBtnClick('importAccount')">导入账号</el-button>
           </div>
         </div>
       </div>
@@ -131,9 +109,21 @@
           <span>同步订单</span>
         </el-button>
       </div>
-      <div class="action-right">
+      <div class="action-center">
         <span class="action-stat">出库即将超时订单数：<em class="stat-num">{{ nearTimeoutCount }}</em></span>
         <span class="action-stat">超时未出库订单数：<em class="stat-num">{{ timeoutCount }}</em></span>
+      </div>
+      <div class="action-right">
+        <span class="action-right-label">拍单账号</span>
+        <el-select v-model="selectedAccount" placeholder="请选择" size="small" style="width: 140px;">
+          <el-option label="默认账号" value="default" />
+          <el-option label="账号1" value="account1" />
+          <el-option label="账号2" value="account2" />
+        </el-select>
+        <el-button class="action-btn action-btn-green" @click="handleTrackShip">
+          <el-icon><Van /></el-icon>
+          <span>轨迹发货</span>
+        </el-button>
       </div>
     </div>
 
@@ -150,57 +140,110 @@
       </span>
     </div>
 
-    <!-- 4. 数据表格 -->
+    <!-- 4. 卡片式订单列表 -->
     <div class="table-card">
-      <el-table
-        :data="pagedOrders"
-        stripe
-        @selection-change="handleSelectionChange"
-        style="width: 100%"
-      >
-        <el-table-column type="selection" width="50" />
-        <el-table-column type="index" label="序号" width="60" />
-        <el-table-column prop="orderNo" label="订单编号" width="180">
-          <template #default="{ row }">
-            <span class="order-link" @click="handleView(row)">{{ row.orderNo }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="outboundNo" label="出库单号" width="160" />
-        <el-table-column prop="shopName" label="店铺名称" min-width="120" />
-        <el-table-column prop="customerName" label="客户名称" min-width="100" />
-        <el-table-column prop="customerPhone" label="客户电话" width="130" />
-        <el-table-column prop="goodsName" label="商品名称" min-width="150" />
-        <el-table-column prop="amount" label="订单金额" width="110" align="right">
-          <template #default="{ row }">
-            <span class="amount-text">¥ {{ row.amount.toFixed(2) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="orderStatus" label="订单状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="orderStatusTagType(row.orderStatus)" size="small">{{ row.orderStatus }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="purchaseStatus" label="采购状态" width="100">
-          <template #default="{ row }">
-            <el-tag :type="purchaseStatusTagType(row.purchaseStatus)" size="small" effect="plain">{{ row.purchaseStatus }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="issueEvent" label="问题事件" width="120">
-          <template #default="{ row }">
-            <el-tag v-if="row.issueEvent" type="warning" size="small" effect="plain">{{ row.issueEvent }}</el-tag>
-            <span v-else class="text-muted">—</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="orderTime" label="下单时间" width="170" />
-        <el-table-column label="操作" width="100" fixed="right">
-          <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="handleView(row)">查看详情</el-button>
-          </template>
-        </el-table-column>
-        <template #empty>
-          <el-empty description="暂无订单数据" />
-        </template>
-      </el-table>
+      <!-- 表头 -->
+      <div class="order-table-header">
+        <div class="ot-col ot-col-check">
+          <el-checkbox v-model="selectAll" @change="handleSelectAll" />
+        </div>
+        <div class="ot-col ot-col-index">序号</div>
+        <div class="ot-col ot-col-goods">商品信息</div>
+        <div class="ot-col ot-col-price">单价/数量</div>
+        <div class="ot-col ot-col-amount">订单金额</div>
+        <div class="ot-col ot-col-time">下单时间</div>
+        <div class="ot-col ot-col-logistics">物流信息</div>
+        <div class="ot-col ot-col-aftersale">售后信息</div>
+        <div class="ot-col ot-col-action">操作</div>
+      </div>
+
+      <!-- 订单卡片列表 -->
+      <div class="order-list" v-if="pagedOrders.length">
+        <div
+          class="order-card"
+          v-for="(order, orderIdx) in pagedOrders"
+          :key="order.id"
+        >
+          <!-- 订单卡片头部条 -->
+          <div class="order-card-header">
+            <div class="order-header-left">
+              <el-checkbox v-model="order.selected" @change="handleOrderSelect" />
+              <span class="order-header-label">订单编号:</span>
+              <span class="order-header-no">{{ order.orderNo }}</span>
+              <span class="order-header-divider">|</span>
+              <span class="order-header-shop">{{ order.shopName }}</span>
+              <el-tag size="small" :type="shopTagColorType(order.shopTag)" effect="plain" class="order-header-platform">{{ order.shopTag }}</el-tag>
+              <span class="order-header-address">{{ order.address }}</span>
+            </div>
+            <div class="order-header-right">
+              <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
+              <el-tag :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
+            </div>
+          </div>
+
+          <!-- 订单卡片内容（商品行 + 订单信息） -->
+          <div class="order-card-body">
+            <!-- 左侧：商品行 -->
+            <div class="order-body-left">
+              <div
+                class="product-row"
+                v-for="(item, itemIdx) in order.items"
+                :key="itemIdx"
+                :class="{ 'product-row-border': itemIdx < order.items.length - 1 }"
+              >
+                <div class="ot-col ot-col-check"></div>
+                <div class="ot-col ot-col-index">
+                  <span v-if="itemIdx === 0" class="index-num">{{ (currentPage - 1) * pageSize + orderIdx + 1 }}</span>
+                </div>
+                <div class="ot-col ot-col-goods">
+                  <div class="goods-cell">
+                    <div class="goods-img" :style="{ background: item.imageColor }">
+                      <span class="goods-img-text">{{ item.name.charAt(0) }}</span>
+                    </div>
+                    <div class="goods-info">
+                      <p class="goods-name">{{ item.name }}</p>
+                      <p class="goods-sku" v-if="item.sku">{{ item.sku }}</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="ot-col ot-col-price">
+                  <div class="price-cell">
+                    <span class="price-value">¥{{ item.price.toFixed(2) }}</span>
+                    <span class="price-qty">x {{ item.quantity }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 右侧：订单级信息（纵向居中） -->
+            <div class="order-body-right">
+              <div class="ot-col ot-col-amount">
+                <span class="amount-main">¥{{ order.actualAmount.toFixed(2) }}</span>
+                <p class="amount-sub">含运费 ¥{{ order.shippingFee.toFixed(2) }}</p>
+              </div>
+              <div class="ot-col ot-col-time">
+                <span class="time-text">{{ order.orderTime }}</span>
+              </div>
+              <div class="ot-col ot-col-logistics">
+                <template v-if="order.logisticsCompany">
+                  <p class="logistics-company">{{ order.logisticsCompany }}</p>
+                  <p class="logistics-no">{{ order.logisticsNo }}</p>
+                </template>
+                <span v-else class="text-muted">--</span>
+              </div>
+              <div class="ot-col ot-col-aftersale">
+                <el-tag v-if="order.issueEvent" type="warning" size="small">{{ order.issueEvent }}</el-tag>
+                <span v-else class="text-muted">--</span>
+              </div>
+              <div class="ot-col ot-col-action">
+                <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <el-empty v-else description="暂无订单数据" style="padding: 60px 0;" />
 
       <!-- 分页 -->
       <div class="pagination-wrap">
@@ -220,7 +263,6 @@
     <!-- 5. 订单详情抽屉 -->
     <el-drawer v-model="drawerVisible" title="订单详情" size="640px" direction="rtl">
       <template v-if="currentOrder">
-        <!-- 订单头部 -->
         <div class="detail-header">
           <div class="detail-header-left">
             <span class="detail-order-no">{{ currentOrder.orderNo }}</span>
@@ -230,18 +272,16 @@
           <span class="detail-order-time">{{ currentOrder.orderTime }}</span>
         </div>
 
-        <!-- 基本信息 -->
         <div class="detail-section">
           <h4 class="detail-section-title">订单信息</h4>
           <div class="detail-grid-2col">
-            <div class="detail-row"><span class="detail-label">出库单号</span><span class="detail-value">{{ currentOrder.outboundNo || '—' }}</span></div>
+            <div class="detail-row"><span class="detail-label">出库单号</span><span class="detail-value">{{ currentOrder.outboundNo || '--' }}</span></div>
             <div class="detail-row"><span class="detail-label">店铺名称</span><span class="detail-value">{{ currentOrder.shopName }}</span></div>
             <div class="detail-row"><span class="detail-label">支付方式</span><span class="detail-value">{{ currentOrder.paymentMethod }}</span></div>
             <div class="detail-row"><span class="detail-label">客户名称</span><span class="detail-value">{{ currentOrder.customerName }}</span></div>
           </div>
         </div>
 
-        <!-- 商品信息表格 -->
         <div class="detail-section">
           <h4 class="detail-section-title">商品信息</h4>
           <table class="detail-goods-table">
@@ -276,16 +316,14 @@
           </table>
         </div>
 
-        <!-- 物流信息 -->
         <div class="detail-section">
           <h4 class="detail-section-title">物流信息</h4>
           <div class="detail-grid-2col">
-            <div class="detail-row"><span class="detail-label">物流公司</span><span class="detail-value">{{ currentOrder.logisticsCompany || '—' }}</span></div>
-            <div class="detail-row"><span class="detail-label">物流单号</span><span class="detail-value">{{ currentOrder.logisticsNo || '—' }}</span></div>
+            <div class="detail-row"><span class="detail-label">物流公司</span><span class="detail-value">{{ currentOrder.logisticsCompany || '--' }}</span></div>
+            <div class="detail-row"><span class="detail-label">物流单号</span><span class="detail-value">{{ currentOrder.logisticsNo || '--' }}</span></div>
           </div>
         </div>
 
-        <!-- 收货信息 -->
         <div class="detail-section">
           <h4 class="detail-section-title">收货信息</h4>
           <div class="detail-grid-2col">
@@ -295,13 +333,11 @@
           <div class="detail-row" style="margin-top: 8px;"><span class="detail-label">收货地址</span><span class="detail-value">{{ currentOrder.address }}</span></div>
         </div>
 
-        <!-- 问题事件 -->
         <div v-if="currentOrder.issueEvent" class="detail-section">
           <h4 class="detail-section-title">问题事件</h4>
           <el-tag type="warning">{{ currentOrder.issueEvent }}</el-tag>
         </div>
 
-        <!-- 底部操作按钮 -->
         <div class="detail-footer">
           <el-button size="small" @click="onDetailAction('viewOriginal')">查看原单</el-button>
           <el-button size="small" @click="onDetailAction('contactBuyer')">联系买家</el-button>
@@ -315,7 +351,7 @@
 
 <script setup>
 import { ref, reactive, computed } from 'vue'
-import { Search, Refresh, ArrowLeft, ArrowRight } from '@element-plus/icons-vue'
+import { Search, Refresh, Goods, Van } from '@element-plus/icons-vue'
 
 // ==================== 筛选项配置 ====================
 
@@ -343,11 +379,11 @@ const searchForm = reactive({
 const activeStatus = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
-const selectedRows = ref([])
+const selectAll = ref(false)
+const selectedAccount = ref('default')
 
-// ==================== 右侧功能区 ====================
+// ==================== 功能区 ====================
 
-const funcCollapsed = ref(false)
 const funcSettings = reactive({
   autoOutbound: true,
   largeLogistics: true,
@@ -356,25 +392,25 @@ const funcSettings = reactive({
 })
 
 function onFuncChange(key, value) {
-  // 预留：后续对接真实逻辑
   console.log(`[功能区开关] ${key}: ${value}`)
 }
 
 function onFuncBtnClick(action) {
-  // 预留：后续对接真实逻辑
   console.log(`[功能区按钮] ${action}`)
 }
 
 // ==================== 操作栏 ====================
 
 function handleQueryOrders() {
-  // 预留：后续对接查询逻辑
   console.log('[操作栏] 查询订单')
 }
 
 function handleSyncOrders() {
-  // 预留：后续对接同步逻辑
   console.log('[操作栏] 同步订单')
+}
+
+function handleTrackShip() {
+  console.log('[操作栏] 轨迹发货, 账号:', selectedAccount.value)
 }
 
 // ==================== Mock 数据 ====================
@@ -407,7 +443,25 @@ function generateMockOrders() {
     ['收纳箱'],
     ['电动牙刷']
   ]
-
+  const skuOptions = [
+    '颜色: 白色 | 规格: 标准版',
+    '颜色: 黑色 | 规格: Pro版',
+    '颜色: 银色 | 容量: 256GB',
+    '材质: 硅胶 | 适配: iPhone 15',
+    '尺寸: 42mm | 颜色: 黑色',
+    '功率: 65W | 接口: Type-C',
+    '材质: 铝合金 | 颜色: 银色',
+    '轴体: 红轴 | 背光: RGB',
+    '尺寸: 900x400mm | 厚度: 4mm',
+    '功率: 50W | 面积: 30m2',
+    '尺码: 42 | 颜色: 黑白',
+    '容量: 500ml | 颜色: 白色',
+    '分辨率: 1080P | 亮度: 800流明',
+    '长度: 2m | 版本: 2.1',
+    '容量: 50L | 颜色: 灰色',
+    '类型: 声波 | 颜色: 白色'
+  ]
+  const imageColors = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
   const logisticsCompanies = ['中通快递', '顺丰速运', '韵达快递', '圆通速递', '京东物流', '申通快递']
 
   const orders = []
@@ -429,7 +483,9 @@ function generateMockOrders() {
     const items = goods.map((g, idx) => ({
       name: g,
       quantity: idx === 0 ? Math.floor(Math.random() * 3) + 1 : 1,
-      price: parseFloat((Math.random() * 500 + 29.9).toFixed(2))
+      price: parseFloat((Math.random() * 500 + 29.9).toFixed(2)),
+      sku: skuOptions[Math.floor(Math.random() * skuOptions.length)],
+      imageColor: imageColors[Math.floor(Math.random() * imageColors.length)]
     }))
     const goodsTotal = items.reduce((sum, it) => sum + it.price * it.quantity, 0)
     const amount = parseFloat(goodsTotal.toFixed(2))
@@ -437,6 +493,7 @@ function generateMockOrders() {
 
     orders.push({
       id: i,
+      selected: false,
       orderNo: `DD202604${day}${String(i).padStart(4, '0')}`,
       outboundNo: hasOutbound ? `CK202604${day}${String(i).padStart(4, '0')}` : '',
       shopName: shop.name,
@@ -489,7 +546,6 @@ const pagedOrders = computed(() => {
   return filteredOrders.value.slice(start, start + pageSize.value)
 })
 
-// 状态统计
 const statusTabs = computed(() => {
   const all = mockOrders.value.length
   const counts = {}
@@ -502,9 +558,20 @@ const statusTabs = computed(() => {
   ]
 })
 
-// 超时统计
 const nearTimeoutCount = computed(() => mockOrders.value.filter((o) => o.timeoutStatus === 'nearTimeout').length)
 const timeoutCount = computed(() => mockOrders.value.filter((o) => o.timeoutStatus === 'timeout').length)
+
+// ==================== 选择功能 ====================
+
+function handleSelectAll(val) {
+  pagedOrders.value.forEach((order) => {
+    order.selected = val
+  })
+}
+
+function handleOrderSelect() {
+  selectAll.value = pagedOrders.value.length > 0 && pagedOrders.value.every((o) => o.selected)
+}
 
 // ==================== 详情抽屉 ====================
 
@@ -545,10 +612,6 @@ function handleStatusClick(status) {
   currentPage.value = 1
 }
 
-function handleSelectionChange(rows) {
-  selectedRows.value = rows
-}
-
 function handleSizeChange() {
   currentPage.value = 1
 }
@@ -556,7 +619,6 @@ function handleSizeChange() {
 function handleCurrentChange() {}
 
 function onDetailAction(action) {
-  // 预留：后续对接真实逻辑
   console.log(`[详情操作] ${action}`, currentOrder.value?.orderNo)
 }
 
@@ -571,6 +633,11 @@ function purchaseStatusTagType(status) {
   const map = { '待采购': 'warning', '采购中': '', '已采购': 'success', '采购失败': 'danger' }
   return map[status] || ''
 }
+
+function shopTagColorType(tag) {
+  const map = { '京东': 'danger', '天猫': '', '拼多多': 'warning', '抖音': 'success' }
+  return map[tag] || ''
+}
 </script>
 
 <style scoped>
@@ -578,14 +645,14 @@ function purchaseStatusTagType(status) {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
-/* ==================== 筛选栏 + 右侧功能区 ==================== */
+/* ==================== 筛选栏 + 功能区 ==================== */
 
 .filter-panel {
   background: #fff;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid #f0f0f0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   display: flex;
@@ -594,99 +661,58 @@ function purchaseStatusTagType(status) {
 
 .filter-main {
   flex: 1;
-  padding: 20px 24px 16px;
+  padding: 16px 20px;
   min-width: 0;
+  border-right: 1px solid #f0f0f0;
 }
 
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px 20px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px 16px;
 }
 
 .filter-item {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
 }
 
 .filter-label {
   font-size: 13px;
-  color: #6b7280;
+  color: #606266;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 :deep(.filter-item .el-input),
 :deep(.filter-item .el-select) {
-  width: 100%;
-}
-
-.filter-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #f5f5f5;
-}
-
-/* 右侧功能区 */
-.func-panel {
-  width: 280px;
-  border-left: 1px solid #f0f0f0;
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  transition: width 0.3s;
-  position: relative;
-}
-
-.func-panel.collapsed {
-  width: 36px;
-}
-
-.func-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 8px 0;
-  font-size: 12px;
-  color: #909399;
-  cursor: pointer;
-  border-bottom: 1px solid #f0f0f0;
-  transition: color 0.2s;
-}
-
-.func-toggle:hover {
-  color: #1890ff;
-}
-
-.func-content {
   flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
+  min-width: 0;
+}
+
+/* 功能区（横向3列） */
+.func-panel {
+  display: flex;
+  gap: 24px;
+  padding: 14px 20px;
+  flex-shrink: 0;
 }
 
 .func-group {
-  margin-bottom: 16px;
-}
-
-.func-group:last-child {
-  margin-bottom: 0;
+  min-width: 0;
 }
 
 .func-group-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   color: #1f2937;
-  margin-bottom: 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid #f5f5f5;
+  margin-bottom: 8px;
 }
 
 .func-item {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .func-item:last-child {
@@ -696,19 +722,21 @@ function purchaseStatusTagType(status) {
 .func-item-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 10px;
 }
 
 .func-item-label {
-  font-size: 13px;
+  font-size: 12px;
   color: #303133;
+  white-space: nowrap;
 }
 
 .func-item-desc {
   font-size: 11px;
   color: #9ca3af;
-  margin: 4px 0 0;
-  line-height: 1.4;
+  margin: 2px 0 0;
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .func-btn-group {
@@ -722,16 +750,18 @@ function purchaseStatusTagType(status) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 20px;
+  padding: 8px 16px;
   background: #fff;
   border-radius: 8px;
   border: 1px solid #f0f0f0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  gap: 16px;
 }
 
 .action-left {
   display: flex;
-  gap: 12px;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .action-btn {
@@ -760,21 +790,41 @@ function purchaseStatusTagType(status) {
   background: #2196F3;
 }
 
+.action-btn-green {
+  background: #52c41a;
+}
+
+.action-center {
+  display: flex;
+  gap: 20px;
+  flex: 1;
+  justify-content: center;
+}
+
 .action-right {
   display: flex;
-  gap: 24px;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.action-right-label {
+  font-size: 13px;
+  color: #606266;
+  white-space: nowrap;
 }
 
 .action-stat {
   font-size: 13px;
   color: #606266;
+  white-space: nowrap;
 }
 
 .stat-num {
   font-style: normal;
   color: #f5222d;
   font-weight: 700;
-  font-size: 16px;
+  font-size: 15px;
 }
 
 /* ==================== 状态统计栏 ==================== */
@@ -810,50 +860,341 @@ function purchaseStatusTagType(status) {
   margin-left: 2px;
 }
 
-/* ==================== 数据表格 ==================== */
+/* ==================== 卡片式订单列表 ==================== */
 
 .table-card {
   background: #fff;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid #f0f0f0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-  padding: 16px;
+  padding: 0;
+  overflow: hidden;
 }
 
-.order-link {
-  color: #1890ff;
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.order-link:hover {
-  text-decoration: underline;
-}
-
-.amount-text {
-  font-weight: 600;
-  font-family: 'Inter', monospace;
-  color: #1f2937;
-}
-
-.text-muted {
-  color: #d9d9d9;
-}
-
-:deep(.el-table th) {
-  background: #fafafa !important;
+/* 表头 */
+.order-table-header {
+  display: flex;
+  align-items: center;
+  background: #fafafa;
+  border-bottom: 1px solid #ebeef5;
+  padding: 10px 12px;
+  font-size: 13px;
   font-weight: 600;
   color: #303133;
 }
 
-:deep(.el-table) {
+/* 列宽定义 */
+.ot-col-check {
+  width: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ot-col-index {
+  width: 50px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.ot-col-goods {
+  flex: 1;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.ot-col-price {
+  width: 110px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-amount {
+  width: 120px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-time {
+  width: 150px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-logistics {
+  width: 150px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-aftersale {
+  width: 100px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-action {
+  width: 90px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+/* 订单列表 */
+.order-list {
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 订单卡片 */
+.order-card {
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+
+.order-card:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* 订单卡片头部 */
+.order-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f0f7f0;
+  border-bottom: 1px solid #e8e8e8;
+  padding: 7px 16px;
+  font-size: 12px;
+  border-left: 3px solid #52c41a;
+}
+
+.order-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.order-header-label {
+  color: #8c8c8c;
+  flex-shrink: 0;
+}
+
+.order-header-no {
+  font-weight: 600;
+  color: #1f2937;
+  flex-shrink: 0;
+}
+
+.order-header-divider {
+  color: #d9d9d9;
+  flex-shrink: 0;
+}
+
+.order-header-shop {
+  color: #595959;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.order-header-platform {
+  flex-shrink: 0;
+}
+
+.order-header-address {
+  color: #8c8c8c;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+/* 订单卡片内容 */
+.order-card-body {
+  display: flex;
+  background: #fff;
+}
+
+.order-body-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.product-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 0;
+  min-height: 68px;
+}
+
+.product-row-border {
+  border-bottom: 1px dashed #f0f0f0;
+}
+
+.index-num {
+  font-size: 13px;
+  color: #8c8c8c;
+  font-weight: 500;
+}
+
+/* 商品信息单元格 */
+.goods-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.goods-img {
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.goods-img-text {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.goods-info {
+  min-width: 0;
+}
+
+.goods-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f2937;
+  margin: 0 0 3px;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.goods-sku {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 单价数量 */
+.price-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.price-value {
+  font-size: 13px;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.price-qty {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* 右侧订单级信息 */
+.order-body-right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-left: 1px solid #f0f0f0;
+}
+
+.order-body-right .ot-col-amount,
+.order-body-right .ot-col-time,
+.order-body-right .ot-col-logistics,
+.order-body-right .ot-col-aftersale,
+.order-body-right .ot-col-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 4px;
+}
+
+.amount-main {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f5222d;
+  font-family: 'Inter', monospace;
+}
+
+.amount-sub {
+  font-size: 11px;
+  color: #9ca3af;
+  margin: 3px 0 0;
+}
+
+.time-text {
+  font-size: 12px;
+  color: #595959;
+  text-align: center;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.logistics-company {
+  font-size: 12px;
+  color: #1f2937;
+  margin: 0;
+  text-align: center;
+}
+
+.logistics-no {
+  font-size: 11px;
+  color: #1890ff;
+  margin: 2px 0 0;
+  text-align: center;
+  word-break: break-all;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-muted {
+  color: #d9d9d9;
   font-size: 13px;
 }
 
+/* 分页 */
 .pagination-wrap {
   display: flex;
   justify-content: flex-end;
-  margin-top: 16px;
+  padding: 12px 16px;
+  border-top: 1px solid #f0f0f0;
 }
 
 /* ==================== 订单详情抽屉 ==================== */
@@ -925,7 +1266,6 @@ function purchaseStatusTagType(status) {
   word-break: break-all;
 }
 
-/* 商品信息表格 */
 .detail-goods-table {
   width: 100%;
   border-collapse: collapse;
@@ -971,7 +1311,6 @@ function purchaseStatusTagType(status) {
   padding-right: 16px;
 }
 
-/* 底部操作按钮 */
 .detail-footer {
   display: flex;
   justify-content: flex-end;

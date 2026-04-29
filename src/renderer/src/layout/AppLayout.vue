@@ -4,26 +4,37 @@
       <Sidebar />
     </el-aside>
     <el-container class="app-right">
-      <el-header class="app-header">
-        <Topbar />
-      </el-header>
       <div class="tab-bar">
-        <div
-          v-for="tab in visitedTabs"
-          :key="tab.path"
-          class="tab-item"
-          :class="{ active: tab.path === route.path }"
-          @click="router.push(tab.path)"
-        >
-          <span>{{ tab.title }}</span>
-          <el-icon
-            v-if="visitedTabs.length > 1"
-            class="tab-close"
-            :size="12"
-            @click.stop="closeTab(tab)"
+        <div class="tab-bar-left">
+          <div
+            v-for="tab in visitedTabs"
+            :key="tab.path"
+            class="tab-item"
+            :class="{ active: tab.path === route.path }"
+            @click="router.push(tab.path)"
           >
-            <Close />
-          </el-icon>
+            <span>{{ tab.title }}</span>
+            <el-icon
+              v-if="visitedTabs.length > 1"
+              class="tab-close"
+              :size="12"
+              @click.stop="closeTab(tab)"
+            >
+              <Close />
+            </el-icon>
+          </div>
+        </div>
+        <div class="tab-bar-right">
+          <div class="topbar-action">
+            <el-badge :value="3" :max="99">
+              <el-icon :size="18"><Bell /></el-icon>
+            </el-badge>
+          </div>
+          <div class="topbar-action">
+            <el-icon :size="18"><Search /></el-icon>
+          </div>
+          <div class="topbar-divider"></div>
+          <span class="topbar-date">{{ currentDate }}</span>
         </div>
       </div>
       <el-main class="app-main">
@@ -34,11 +45,10 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Close } from '@element-plus/icons-vue'
+import { Close, Bell, Search } from '@element-plus/icons-vue'
 import Sidebar from './Sidebar.vue'
-import Topbar from './Topbar.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,6 +56,14 @@ const router = useRouter()
 const visitedTabs = ref([
   { path: '/home', title: '首页' }
 ])
+
+const currentDate = computed(() => {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${year}年${month}月${day}日`
+})
 
 watch(
   () => route.path,
@@ -85,30 +103,34 @@ function closeTab(tab) {
   overflow: hidden;
 }
 
-.app-header {
-  background-color: #fff;
-  border-bottom: 1px solid #f0f0f0;
-  padding: 0 24px;
-  display: flex;
-  align-items: center;
-  height: 56px;
-  flex-shrink: 0;
-}
-
 .tab-bar {
   height: 40px;
   background: #fff;
   border-bottom: 1px solid #f0f0f0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   padding: 0 16px;
-  gap: 4px;
-  overflow-x: auto;
   flex-shrink: 0;
 }
 
-.tab-bar::-webkit-scrollbar {
+.tab-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.tab-bar-left::-webkit-scrollbar {
   height: 0;
+}
+
+.tab-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-shrink: 0;
+  margin-left: 16px;
 }
 
 .tab-item {
@@ -144,6 +166,30 @@ function closeTab(tab) {
 .tab-close:hover {
   color: #fff;
   background: #909399;
+}
+
+.topbar-action {
+  cursor: pointer;
+  color: #606266;
+  display: flex;
+  align-items: center;
+  transition: color 0.2s;
+}
+
+.topbar-action:hover {
+  color: #1890ff;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 16px;
+  background: #e4e7ed;
+}
+
+.topbar-date {
+  font-size: 14px;
+  font-weight: 500;
+  color: #303133;
 }
 
 .app-main {

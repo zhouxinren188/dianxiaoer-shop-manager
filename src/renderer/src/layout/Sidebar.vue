@@ -51,6 +51,13 @@
         <span>商品管理</span>
       </el-menu-item>
 
+      <!-- 供货商管理 分组 -->
+      <div class="menu-group-title">供货商管理</div>
+      <el-menu-item index="/supplier/store-shipment" @click="navigate('/supplier/store-shipment')">
+        <el-icon><Van /></el-icon>
+        <span>供店发货</span>
+      </el-menu-item>
+
       <!-- 任务中心 分组 -->
       <div class="menu-group-title">任务中心</div>
       <el-menu-item index="/tasks/todo" @click="navigate('/tasks/todo')">
@@ -79,6 +86,7 @@ import {
   RefreshLeft,
   Document,
   Goods,
+  Van,
   Ticket,
   User
 } from '@element-plus/icons-vue'

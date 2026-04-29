@@ -44,6 +44,12 @@ const routes = [
         meta: { title: '代办任务' }
       },
       {
+        path: '/supplier/store-shipment',
+        name: 'StoreShipment',
+        component: () => import('@/views/supplier/StoreShipment.vue'),
+        meta: { title: '供店发货' }
+      },
+      {
         path: '/user/center',
         name: 'UserCenter',
         component: () => import('@/views/user/UserCenter.vue'),
