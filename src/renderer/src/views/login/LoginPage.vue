@@ -1,142 +1,155 @@
 <template>
   <div class="login-page">
-    <div class="login-left">
-      <div class="brand-area">
-        <div class="brand-icon">
-          <el-icon :size="28" color="#fff"><Shop /></el-icon>
-        </div>
-        <h1 class="brand-title">店小二网店管家</h1>
-        <p class="brand-desc">高效、智能的多店铺综合管理平台</p>
-        <div class="brand-features">
-          <div class="feature-item">
-            <el-icon :size="16"><TrendCharts /></el-icon>
-            <span>销售数据实时分析</span>
+    <div class="login-body">
+      <div class="login-left">
+        <!-- 拖拽区域覆盖左侧顶部 -->
+        <div class="drag-region"></div>
+        <div class="brand-area">
+          <div class="brand-icon">
+            <el-icon :size="28" color="#fff"><Shop /></el-icon>
           </div>
-          <div class="feature-item">
-            <el-icon :size="16"><Box /></el-icon>
-            <span>多仓库库存管理</span>
-          </div>
-          <div class="feature-item">
-            <el-icon :size="16"><Connection /></el-icon>
-            <span>供应链一站式协同</span>
+          <h1 class="brand-title">店小二网店管家</h1>
+          <p class="brand-desc">高效、智能的多店铺综合管理平台</p>
+          <div class="brand-features">
+            <div class="feature-item">
+              <el-icon :size="16"><TrendCharts /></el-icon>
+              <span>销售数据实时分析</span>
+            </div>
+            <div class="feature-item">
+              <el-icon :size="16"><Box /></el-icon>
+              <span>多仓库库存管理</span>
+            </div>
+            <div class="feature-item">
+              <el-icon :size="16"><Connection /></el-icon>
+              <span>供应链一站式协同</span>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-    <div class="login-right">
-      <div class="login-form-wrapper">
-        <!-- 登录表单 -->
-        <template v-if="!isRegister">
-          <h2 class="login-title">欢迎登录</h2>
-          <p class="login-subtitle">请输入您的账号和密码</p>
-          <el-form
-            ref="loginFormRef"
-            :model="loginForm"
-            :rules="loginRules"
-            @keyup.enter="handleLogin"
-          >
-            <el-form-item prop="username">
-              <el-input
-                v-model="loginForm.username"
-                placeholder="请输入账号"
-                :prefix-icon="User"
-                clearable
-              />
-            </el-form-item>
-            <el-form-item prop="password">
-              <el-input
-                v-model="loginForm.password"
-                type="password"
-                placeholder="请输入密码"
-                :prefix-icon="Lock"
-                show-password
-                clearable
-              />
-            </el-form-item>
-            <div class="login-options">
-              <el-checkbox v-model="loginForm.remember" size="small">记住密码</el-checkbox>
+      <div class="login-right">
+        <!-- 窗口控制按钮 -->
+        <div class="win-controls">
+          <button class="ctrl-btn" @click="handleMinimize">
+            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+          </button>
+          <button class="ctrl-btn close-btn" @click="handleClose">
+            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+          </button>
+        </div>
+        <div class="login-form-wrapper">
+          <!-- 登录表单 -->
+          <template v-if="!isRegister">
+            <h2 class="login-title">欢迎登录</h2>
+            <p class="login-subtitle">请输入您的账号和密码</p>
+            <el-form
+              ref="loginFormRef"
+              :model="loginForm"
+              :rules="loginRules"
+              @keyup.enter="handleLogin"
+            >
+              <el-form-item prop="username">
+                <el-input
+                  v-model="loginForm.username"
+                  placeholder="请输入账号"
+                  :prefix-icon="User"
+                  clearable
+                />
+              </el-form-item>
+              <el-form-item prop="password">
+                <el-input
+                  v-model="loginForm.password"
+                  type="password"
+                  placeholder="请输入密码"
+                  :prefix-icon="Lock"
+                  show-password
+                  clearable
+                />
+              </el-form-item>
+              <div class="login-options">
+                <el-checkbox v-model="loginForm.remember" size="small">记住密码</el-checkbox>
+              </div>
+              <el-form-item>
+                <el-button
+                  type="primary"
+                  class="login-btn"
+                  :loading="loading"
+                  @click="handleLogin"
+                >
+                  {{ loading ? '登录中...' : '登 录' }}
+                </el-button>
+              </el-form-item>
+            </el-form>
+            <div class="switch-tip">
+              还没有账号？<span class="switch-link" @click="isRegister = true">立即注册</span>
             </div>
-            <el-form-item>
-              <el-button
-                type="primary"
-                class="login-btn"
-                :loading="loading"
-                @click="handleLogin"
-              >
-                {{ loading ? '登录中...' : '登 录' }}
-              </el-button>
-            </el-form-item>
-          </el-form>
-          <div class="switch-tip">
-            还没有账号？<span class="switch-link" @click="isRegister = true">立即注册</span>
-          </div>
-        </template>
+          </template>
 
-        <!-- 注册表单 -->
-        <template v-else>
-          <h2 class="login-title">注册账号</h2>
-          <p class="login-subtitle">请填写以下信息完成注册</p>
-          <el-form
-            ref="registerFormRef"
-            :model="registerForm"
-            :rules="registerRules"
-            @keyup.enter="handleRegister"
-          >
-            <el-form-item prop="phone">
-              <el-input
-                v-model="registerForm.phone"
-                placeholder="请输入手机号"
-                :prefix-icon="Phone"
-                clearable
-                maxlength="11"
-              />
-            </el-form-item>
-            <el-form-item prop="username">
-              <el-input
-                v-model="registerForm.username"
-                placeholder="请输入账号"
-                :prefix-icon="User"
-                clearable
-              />
-            </el-form-item>
-            <el-form-item prop="password">
-              <el-input
-                v-model="registerForm.password"
-                type="password"
-                placeholder="请输入密码"
-                :prefix-icon="Lock"
-                show-password
-                clearable
-              />
-            </el-form-item>
-            <el-form-item prop="confirmPassword">
-              <el-input
-                v-model="registerForm.confirmPassword"
-                type="password"
-                placeholder="请再次输入密码"
-                :prefix-icon="Lock"
-                show-password
-                clearable
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button
-                type="primary"
-                class="login-btn"
-                :loading="loading"
-                @click="handleRegister"
-              >
-                {{ loading ? '注册中...' : '注 册' }}
-              </el-button>
-            </el-form-item>
-          </el-form>
-          <div class="switch-tip">
-            已有账号？<span class="switch-link" @click="isRegister = false">返回登录</span>
-          </div>
-        </template>
+          <!-- 注册表单 -->
+          <template v-else>
+            <h2 class="login-title">注册账号</h2>
+            <p class="login-subtitle">请填写以下信息完成注册</p>
+            <el-form
+              ref="registerFormRef"
+              :model="registerForm"
+              :rules="registerRules"
+              @keyup.enter="handleRegister"
+            >
+              <el-form-item prop="phone">
+                <el-input
+                  v-model="registerForm.phone"
+                  placeholder="请输入手机号"
+                  :prefix-icon="Phone"
+                  clearable
+                  maxlength="11"
+                />
+              </el-form-item>
+              <el-form-item prop="username">
+                <el-input
+                  v-model="registerForm.username"
+                  placeholder="请输入账号"
+                  :prefix-icon="User"
+                  clearable
+                />
+              </el-form-item>
+              <el-form-item prop="password">
+                <el-input
+                  v-model="registerForm.password"
+                  type="password"
+                  placeholder="请输入密码"
+                  :prefix-icon="Lock"
+                  show-password
+                  clearable
+                />
+              </el-form-item>
+              <el-form-item prop="confirmPassword">
+                <el-input
+                  v-model="registerForm.confirmPassword"
+                  type="password"
+                  placeholder="请再次输入密码"
+                  :prefix-icon="Lock"
+                  show-password
+                  clearable
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button
+                  type="primary"
+                  class="login-btn"
+                  :loading="loading"
+                  @click="handleRegister"
+                >
+                  {{ loading ? '注册中...' : '注 册' }}
+                </el-button>
+              </el-form-item>
+            </el-form>
+            <div class="switch-tip">
+              已有账号？<span class="switch-link" @click="isRegister = false">返回登录</span>
+            </div>
+          </template>
 
-        <div class="login-footer">
-          <span class="footer-text">v1.0.0</span>
+          <div class="login-footer">
+            <span class="footer-text">v1.0.1</span>
+          </div>
         </div>
       </div>
     </div>
@@ -144,7 +157,7 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Shop, User, Lock, Phone, TrendCharts, Box, Connection } from '@element-plus/icons-vue'
@@ -201,6 +214,19 @@ const registerRules = {
   ]
 }
 
+// 窗口控制
+function handleMinimize() {
+  window.electronAPI?.invoke('window-minimize')
+}
+function handleClose() {
+  window.electronAPI?.invoke('window-close')
+}
+
+// 进入登录页时确保窗口为登录尺寸
+onMounted(() => {
+  window.electronAPI?.invoke('window-set-login-size')
+})
+
 function getUsers() {
   try {
     return JSON.parse(localStorage.getItem('users') || '{}')
@@ -224,8 +250,14 @@ function handleLogin() {
         } else {
           localStorage.removeItem('rememberedUser')
         }
-        ElMessage.success('登录成功')
-        router.replace('/')
+        // 先切换窗口到主界面尺寸，再跳转路由
+        window.electronAPI?.invoke('window-set-main-size').then(() => {
+          ElMessage.success('登录成功')
+          router.replace('/')
+        }).catch(() => {
+          ElMessage.success('登录成功')
+          router.replace('/')
+        })
       } else {
         ElMessage.error('账号或密码错误')
       }
@@ -280,15 +312,33 @@ if (rememberedUser) {
   background: #f0f2f5;
 }
 
+/* 主体 */
+.login-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 .login-left {
   flex: 1;
   background: linear-gradient(135deg, #001529 0%, #003a70 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 24px;
   position: relative;
   overflow: hidden;
+}
+
+/* 左侧顶部拖拽区域 */
+.drag-region {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  -webkit-app-region: drag;
+  z-index: 10;
 }
 
 .login-left::before {
@@ -310,98 +360,133 @@ if (rememberedUser) {
 .brand-area {
   position: relative;
   z-index: 1;
-  max-width: 320px;
+  max-width: 220px;
 }
 
 .brand-icon {
-  width: 48px;
-  height: 48px;
+  width: 42px;
+  height: 42px;
   background: #1890ff;
-  border-radius: 12px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 24px;
+  margin-bottom: 16px;
   box-shadow: 0 6px 16px rgba(24, 144, 255, 0.4);
 }
 
 .brand-title {
   color: #fff;
-  font-size: 24px;
+  font-size: 18px;
   font-weight: 700;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   letter-spacing: 1px;
 }
 
 .brand-desc {
   color: rgba(255, 255, 255, 0.65);
-  font-size: 13px;
-  margin-bottom: 36px;
+  font-size: 12px;
+  margin-bottom: 24px;
   line-height: 1.6;
 }
 
 .brand-features {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .feature-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   color: rgba(255, 255, 255, 0.85);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .feature-item .el-icon {
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   background: rgba(24, 144, 255, 0.2);
-  border-radius: 6px;
+  border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
 }
 
+/* 右侧表单区 */
 .login-right {
-  width: 380px;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* 右上角窗口控制按钮 */
+.win-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  z-index: 10;
+  -webkit-app-region: no-drag;
+}
+.ctrl-btn {
+  width: 36px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #909399;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fff;
-  flex-shrink: 0;
+  cursor: pointer;
+}
+.ctrl-btn:hover {
+  background: #f0f0f0;
+  color: #303133;
+}
+.close-btn:hover {
+  background: #e81123;
+  color: #fff;
 }
 
 .login-form-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   width: 100%;
-  max-width: 300px;
-  padding: 0 24px;
+  max-width: 250px;
+  margin: 0 auto;
+  padding: 0 16px;
 }
 
 .login-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: #1f2937;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .login-subtitle {
-  font-size: 13px;
+  font-size: 12px;
   color: #909399;
-  margin-bottom: 28px;
+  margin-bottom: 20px;
 }
 
 .login-options {
   display: flex;
   align-items: center;
-  margin-bottom: 20px;
+  margin-bottom: 14px;
 }
 
 .login-btn {
   width: 100%;
-  height: 38px;
+  height: 36px;
   font-size: 14px;
   border-radius: 6px;
   letter-spacing: 4px;
@@ -409,19 +494,19 @@ if (rememberedUser) {
 
 .login-footer {
   text-align: center;
-  margin-top: 24px;
+  margin-top: 16px;
 }
 
 .footer-text {
   color: #c0c4cc;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .switch-tip {
   text-align: center;
-  font-size: 13px;
+  font-size: 12px;
   color: #909399;
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .switch-link {
@@ -439,6 +524,10 @@ if (rememberedUser) {
 
 :deep(.el-checkbox__label) {
   color: #909399;
-  font-size: 13px;
+  font-size: 12px;
+}
+
+:deep(.el-form-item) {
+  margin-bottom: 14px;
 }
 </style>
