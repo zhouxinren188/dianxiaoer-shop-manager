@@ -4,7 +4,7 @@
     <div class="welcome-card">
       <div class="welcome-left">
         <div class="welcome-avatar">
-          <el-icon :size="32" color="#1890ff"><UserFilled /></el-icon>
+          <el-icon :size="32" color="#2b5aed"><UserFilled /></el-icon>
         </div>
         <div class="welcome-info">
           <h1 class="welcome-title">{{ greeting }}，{{ currentUser }}。</h1>
@@ -104,8 +104,8 @@ const kpiData = [
     label: '本月销售额',
     value: '¥ 128,450.00',
     icon: DataLine,
-    iconBg: '#e6f4ff',
-    iconColor: '#1890ff',
+    iconBg: '#eaf0fd',
+    iconColor: '#2b5aed',
     trend: '12.5%',
     trendType: 'up',
     trendIcon: Top
@@ -171,7 +171,7 @@ const kpiData = [
 .welcome-avatar {
   width: 64px;
   height: 64px;
-  background: #e6f4ff;
+  background: #eaf0fd;
   border-radius: 50%;
   display: flex;
   align-items: center;

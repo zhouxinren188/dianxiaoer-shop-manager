@@ -846,13 +846,13 @@ function shopTagColorType(tag) {
 }
 
 .stat-item:hover {
-  color: #1890ff;
+  color: #2b5aed;
 }
 
 .stat-item.active {
-  color: #1890ff;
+  color: #2b5aed;
   font-weight: 500;
-  border-bottom-color: #1890ff;
+  border-bottom-color: #2b5aed;
 }
 
 .stat-count {
@@ -1174,7 +1174,7 @@ function shopTagColorType(tag) {
 
 .logistics-no {
   font-size: 11px;
-  color: #1890ff;
+  color: #2b5aed;
   margin: 2px 0 0;
   text-align: center;
   word-break: break-all;

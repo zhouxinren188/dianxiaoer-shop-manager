@@ -6,8 +6,17 @@ const cookiesRouter = require('./routes/cookies')
 const app = express()
 const PORT = 3002
 
+// 确保 Windows 下 stdout 使用 UTF-8
+process.stdout.setDefaultEncoding('utf8')
+
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
+
+// 强制响应头使用 UTF-8 编码
+app.use((req, res, next) => {
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  next()
+})
 
 // 路由
 app.use('/api/stores', storesRouter)

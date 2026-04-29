@@ -2,6 +2,20 @@ const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 const { initUpdater, registerIpc } = require('./updater')
 const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
+const { registerPlatformWindowIpc } = require('./platform-window')
+const { registerPacketCaptureIpc } = require('./packet-capture')
+const { startHeartbeat } = require('./cookie-heartbeat')
+const { startServer } = require('./server')
+
+// 允许自签名证书（仅用于连接内部服务器API）
+app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
+  if (url.includes('150.158.54.108')) {
+    event.preventDefault()
+    callback(true)
+  } else {
+    callback(false)
+  }
+})
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -19,9 +33,19 @@ function createWindow() {
     }
   })
 
-  // 生产模式隐藏菜单栏
+  // 生产模式隐藏菜单栏 & 禁用 DevTools 快捷键
   if (app.isPackaged) {
     Menu.setApplicationMenu(null)
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' ||
+        (input.control && input.shift && (input.key === 'I' || input.key === 'i' || input.key === 'J' || input.key === 'j' || input.key === 'C' || input.key === 'c')) ||
+        (input.control && (input.key === 'U' || input.key === 'u'))) {
+        event.preventDefault()
+      }
+    })
+    mainWindow.webContents.on('context-menu', (event) => {
+      event.preventDefault()
+    })
   }
 
   // 加载页面
@@ -78,18 +102,28 @@ ipcMain.handle('window-set-main-size', (event) => {
   if (!win) return
   win.setResizable(true)
   win.setMinimumSize(1024, 680)
-  win.setSize(1280, 800)
-  win.center()
-  // 开发模式切换到主界面时打开 DevTools
-  if (!require('electron').app.isPackaged) {
-    win.webContents.openDevTools()
-  }
+  win.maximize()
 })
 
 // 注册更新 IPC 通道
 registerIpc()
 
+// 注册抓包 IPC（使用 ipcMain.handle，需在 app.whenReady 前注册）
+registerPacketCaptureIpc()
+
 app.whenReady().then(async () => {
+  // 启动本地后端服务
+  startServer(3002)
+
+  // 允许 renderer 进程 fetch 访问自签名 HTTPS API
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    if (request.hostname === '150.158.54.108') {
+      callback(0)
+    } else {
+      callback(-3)
+    }
+  })
+
   // 启动前清除缓存，防止旧缓存导致页面内容错误
   try {
     await session.defaultSession.clearCache()
@@ -107,6 +141,12 @@ app.whenReady().then(async () => {
 
   // 启动后延迟检查热更新
   setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
+
+  // 注册平台窗口 IPC（需要 mainWindow 引用）
+  registerPlatformWindowIpc(mainWindow)
+
+  // 启动心跳检测
+  startHeartbeat(mainWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

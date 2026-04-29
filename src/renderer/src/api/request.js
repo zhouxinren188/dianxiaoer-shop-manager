@@ -1,7 +1,9 @@
+// 后端服务地址
+// 多人协作时指向远程服务器，本地开发可改为 http://localhost:3002
 const BASE_URL = 'http://150.158.54.108:3002'
 
 async function request(url, options = {}) {
-  const { method = 'GET', data, params } = options
+  const { method = 'GET', data, params, timeout = 10000 } = options
 
   let fullUrl = BASE_URL + url
   if (params) {
@@ -15,21 +17,48 @@ async function request(url, options = {}) {
     if (qs) fullUrl += '?' + qs
   }
 
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeout)
+
+  const headers = { 'Content-Type': 'application/json' }
+  const token = localStorage.getItem('accessToken')
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const fetchOptions = {
     method,
-    headers: { 'Content-Type': 'application/json' }
+    headers,
+    signal: controller.signal
   }
   if (data && method !== 'GET') {
     fetchOptions.body = JSON.stringify(data)
   }
 
-  const res = await fetch(fullUrl, fetchOptions)
-  const json = await res.json()
+  try {
+    const res = await fetch(fullUrl, fetchOptions)
+    clearTimeout(timer)
 
-  if (json.code !== 0) {
-    throw new Error(json.message || '请求失败')
+    const contentType = res.headers.get('content-type') || ''
+    const responseText = await res.text()
+
+    if (!contentType.includes('application/json')) {
+      throw new Error('服务器返回异常，请检查后端服务是否正常运行')
+    }
+
+    const json = JSON.parse(responseText)
+
+    if (json.code !== 0) {
+      throw new Error(json.message || '请求失败')
+    }
+    return json.data
+  } catch (err) {
+    clearTimeout(timer)
+    if (err.name === 'AbortError') {
+      throw new Error('请求超时，请检查业务服务器是否正常运行')
+    }
+    throw err
   }
-  return json.data
 }
 
 export function get(url, params) {

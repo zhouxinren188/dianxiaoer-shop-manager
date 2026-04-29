@@ -80,7 +80,7 @@ const currentDate = computed(() => {
 }
 
 .topbar-action:hover {
-  color: #1890ff;
+  color: #2b5aed;
 }
 
 .topbar-divider {

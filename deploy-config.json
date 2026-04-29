@@ -1,0 +1,12 @@
+{
+  "host": "150.158.54.108",
+  "port": 22,
+  "username": "root",
+  "privateKey": "",
+  "password": "jd123456",
+  "dbHost": "localhost",
+  "dbPort": "3306",
+  "dbUser": "root",
+  "dbPassword": "",
+  "dbName": "dianxiaoer"
+}

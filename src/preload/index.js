@@ -10,9 +10,18 @@ const validInvokeChannels = [
   'window-close',
   'window-set-login-size',
   'window-set-main-size',
+  'user-get-all',
+  'user-register',
+  'user-login',
   'hot-update-check',
   'hot-update-download',
-  'hot-update-restart'
+  'hot-update-restart',
+  'open-platform-window',
+  'confirm-platform-login',
+  'close-platform-window',
+  'packet-capture-start',
+  'packet-capture-stop',
+  'packet-capture-status'
 ]
 
 const validOnChannels = [
@@ -22,7 +31,9 @@ const validOnChannels = [
   'update-progress',
   'update-downloaded',
   'hot-update-available',
-  'hot-update-progress'
+  'hot-update-progress',
+  'platform-login-success',
+  'store-status-changed'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

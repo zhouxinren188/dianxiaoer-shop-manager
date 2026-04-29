@@ -10,15 +10,6 @@
         <el-form-item label="店铺名称">
           <el-input v-model="searchForm.name" placeholder="请输入店铺名称" clearable />
         </el-form-item>
-        <el-form-item label="平台类型">
-          <el-select v-model="searchForm.platform" placeholder="全部平台" clearable>
-            <el-option label="淘宝" value="taobao" />
-            <el-option label="天猫" value="tmall" />
-            <el-option label="京东" value="jd" />
-            <el-option label="拼多多" value="pdd" />
-            <el-option label="抖音小店" value="douyin" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="经营状态">
           <el-select v-model="searchForm.status" placeholder="全部状态" clearable>
             <el-option label="启用" value="enabled" />
@@ -54,12 +45,7 @@
 
       <el-table :data="tableData" stripe border v-loading="loading">
         <el-table-column prop="name" label="店铺名称" min-width="150" />
-        <el-table-column prop="platform" label="所属平台" width="110">
-          <template #default="{ row }">
-            <el-tag :type="platformType(row.platform)" size="small">{{ platformText(row.platform) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="account" label="登录账号" min-width="130" show-overflow-tooltip />
+        <el-table-column prop="account" label="登录账号" min-width="150" show-overflow-tooltip />
         <el-table-column prop="merchant_id" label="商家ID" width="120" show-overflow-tooltip />
         <el-table-column prop="shop_id" label="店铺ID" width="120" show-overflow-tooltip />
         <el-table-column label="标签" min-width="150">
@@ -91,20 +77,23 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" align="center" fixed="right">
+        <el-table-column label="操作" width="140" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" @click="handleLogin(row)">
-              <el-icon><Connection /></el-icon>
-              登录
-            </el-button>
-            <el-button link type="primary" @click="handleEdit(row)">
-              <el-icon><Edit /></el-icon>
-              编辑
-            </el-button>
-            <el-button link type="danger" @click="handleDelete(row)">
-              <el-icon><Delete /></el-icon>
-              删除
-            </el-button>
+            <el-tooltip content="登录后台" placement="top">
+              <el-button circle size="small" type="primary" @click="handleLogin(row)">
+                <el-icon><Connection /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="编辑信息" placement="top">
+              <el-button circle size="small" @click="handleEdit(row)">
+                <el-icon><Edit /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="删除店铺" placement="top">
+              <el-button circle size="small" type="danger" @click="handleDelete(row)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </el-tooltip>
           </template>
         </el-table-column>
       </el-table>
@@ -148,12 +137,11 @@
 import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { Search, Plus, Connection, Edit, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchStores, deleteStore, toggleStoreStatus } from '@/api/store'
+import { fetchStores, createStore, deleteStore, toggleStoreStatus } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
 
 const searchForm = reactive({
   name: '',
-  platform: '',
   status: '',
   online: ''
 })
@@ -181,16 +169,6 @@ const loginPending = reactive({
 // IPC 监听取消函数
 const removeListeners = []
 
-function platformType(platform) {
-  const map = { taobao: '', tmall: 'danger', jd: 'primary', pdd: 'success', douyin: 'warning' }
-  return map[platform] || 'info'
-}
-
-function platformText(platform) {
-  const map = { taobao: '淘宝', tmall: '天猫', jd: '京东', pdd: '拼多多', douyin: '抖音小店' }
-  return map[platform] || platform
-}
-
 async function loadStores() {
   loading.value = true
   try {
@@ -216,15 +194,47 @@ function handleSearch() {
 
 function handleReset() {
   searchForm.name = ''
-  searchForm.platform = ''
   searchForm.status = ''
   searchForm.online = ''
   handleSearch()
 }
 
-function handleAdd() {
-  editStoreData.value = null
-  editDialogVisible.value = true
+async function handleAdd() {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+
+  try {
+    const now = new Date()
+    const timeStr = now.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).replace(/[\/\s:]/g, '')
+
+    // 自动创建店铺（默认京东）
+    const result = await createStore({
+      name: `京东店铺${timeStr}`,
+      platform: 'jd'
+    })
+    const newStoreId = result.id
+
+    // 直接打开 shop.jd.com
+    const openResult = await window.electronAPI.invoke('open-platform-window', {
+      storeId: newStoreId,
+      platform: 'jd'
+    })
+    if (!openResult || !openResult.success) {
+      throw new Error(openResult?.message || '打开平台窗口失败')
+    }
+
+    ElMessage.success('已创建店铺并打开 shop.jd.com，请在弹出的浏览器窗口中登录')
+    loadStores()
+  } catch (err) {
+    ElMessage.error('操作失败: ' + err.message)
+  }
 }
 
 function handleEdit(row) {

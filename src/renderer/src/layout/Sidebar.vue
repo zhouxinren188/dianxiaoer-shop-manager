@@ -50,6 +50,10 @@
         <el-icon><Goods /></el-icon>
         <span>商品管理</span>
       </el-menu-item>
+      <el-menu-item index="/warehouse/setting" @click="navigate('/warehouse/setting')">
+        <el-icon><Setting /></el-icon>
+        <span>设置仓库</span>
+      </el-menu-item>
 
       <!-- 供货商管理 分组 -->
       <div class="menu-group-title">供货商管理</div>
@@ -67,9 +71,9 @@
 
       <!-- 用户中心 分组 -->
       <div class="menu-group-title">用户中心</div>
-      <el-menu-item index="/user/center" @click="navigate('/user/center')">
-        <el-icon><User /></el-icon>
-        <span>用户中心</span>
+      <el-menu-item index="/user/manage" @click="navigate('/user/manage')">
+        <el-icon><UserFilled /></el-icon>
+        <span>用户管理</span>
       </el-menu-item>
       <el-menu-item index="/user/store-manage" @click="navigate('/user/store-manage')">
         <el-icon><OfficeBuilding /></el-icon>
@@ -78,6 +82,10 @@
 
       <!-- 工具 分组 -->
       <div class="menu-group-title">工具</div>
+      <el-menu-item index="add-store" @click="handleAddStore">
+        <el-icon><CirclePlus /></el-icon>
+        <span>新增店铺</span>
+      </el-menu-item>
       <el-menu-item index="open-url" @click="handleOpenUrl">
         <el-icon><Link /></el-icon>
         <span>打开网址</span>
@@ -137,12 +145,14 @@ import {
   Goods,
   Van,
   Ticket,
-  User,
+  UserFilled,
   OfficeBuilding,
   Link,
-  Monitor
+  Monitor,
+  CirclePlus,
+  Setting
 } from '@element-plus/icons-vue'
-import { fetchStores } from '@/api/store'
+import { fetchStores, createStore } from '@/api/store'
 import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 
 const route = useRoute()
@@ -157,6 +167,52 @@ function navigate(path) {
 function platformText(platform) {
   const map = { taobao: '淘宝', tmall: '天猫', jd: '京东', pdd: '拼多多', douyin: '抖音小店' }
   return map[platform] || platform
+}
+
+// --- 新增店铺功能 ---
+const addStoreLoading = ref(false)
+
+async function handleAddStore() {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+
+  addStoreLoading.value = true
+  try {
+    const now = new Date()
+    const timeStr = now.toLocaleString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).replace(/[\/\s:]/g, '')
+
+    // 自动创建店铺（默认京东）
+    const result = await createStore({
+      name: `京东店铺${timeStr}`,
+      platform: 'jd'
+    })
+    const newStoreId = result.id
+
+    // 直接打开 shop.jd.com
+    const openResult = await window.electronAPI.invoke('open-platform-window', {
+      storeId: newStoreId,
+      platform: 'jd'
+    })
+    if (!openResult || !openResult.success) {
+      throw new Error(openResult?.message || '打开平台窗口失败')
+    }
+
+    ElMessage.success('已创建店铺并打开 shop.jd.com，请在弹出的浏览器窗口中登录')
+
+    // 跳转到店铺管理页面
+    router.push('/user/store-manage')
+  } catch (err) {
+    ElMessage.error('操作失败: ' + err.message)
+  } finally {
+    addStoreLoading.value = false
+  }
 }
 
 // --- 打开网址功能 ---
@@ -247,7 +303,7 @@ async function handlePacketCapture() {
 .logo-icon {
   width: 32px;
   height: 32px;
-  background: #1890ff;
+  background: #2b5aed;
   border-radius: 8px;
   display: flex;
   align-items: center;
@@ -300,7 +356,7 @@ async function handlePacketCapture() {
 }
 
 :deep(.el-menu-item.is-active) {
-  background-color: #1890ff !important;
+  background-color: #2b5aed !important;
   color: #fff !important;
 }
 

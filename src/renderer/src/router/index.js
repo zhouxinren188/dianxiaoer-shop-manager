@@ -44,6 +44,12 @@ const routes = [
         meta: { title: '商品管理' }
       },
       {
+        path: '/warehouse/setting',
+        name: 'WarehouseSetting',
+        component: () => import('@/views/warehouse/WarehouseSetting.vue'),
+        meta: { title: '设置仓库' }
+      },
+      {
         path: '/tasks/todo',
         name: 'TasksTodo',
         component: () => import('@/views/tasks/TodoTask.vue'),
@@ -62,6 +68,12 @@ const routes = [
         meta: { title: '用户中心' }
       },
       {
+        path: '/user/manage',
+        name: 'UserManage',
+        component: () => import('@/views/user/UserManage.vue'),
+        meta: { title: '用户管理' }
+      },
+      {
         path: '/user/store-manage',
         name: 'StoreManage',
         component: () => import('@/views/user/StoreManage.vue'),
@@ -77,7 +89,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to, from, next) => {
-  const token = localStorage.getItem('token')
+  const token = localStorage.getItem('accessToken')
   if (to.path === '/login') {
     token ? next('/') : next()
   } else {

@@ -10,6 +10,7 @@ function getDb() {
     db = new Database(DB_PATH)
     db.pragma('journal_mode = WAL')
     db.pragma('foreign_keys = ON')
+    db.pragma('encoding = "UTF-8"')
     initTables()
   }
   return db

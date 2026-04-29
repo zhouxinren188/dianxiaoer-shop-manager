@@ -184,13 +184,13 @@ function handleClose() {
 }
 
 .tab-item:hover {
-  color: #1890ff;
+  color: #2b5aed;
 }
 
 .tab-item.active {
-  color: #1890ff;
+  color: #2b5aed;
   font-weight: 500;
-  border-bottom: 2px solid #1890ff;
+  border-bottom: 2px solid #2b5aed;
 }
 
 .tab-close {
@@ -213,7 +213,7 @@ function handleClose() {
 }
 
 .topbar-action:hover {
-  color: #1890ff;
+  color: #2b5aed;
 }
 
 .topbar-divider {

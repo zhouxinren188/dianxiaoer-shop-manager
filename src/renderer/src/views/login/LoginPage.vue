@@ -1,9 +1,9 @@
 <template>
   <div class="login-page">
+    <!-- 顶部拖拽区域，覆盖整个窗口顶部 -->
+    <div class="drag-region-top"></div>
     <div class="login-body">
       <div class="login-left">
-        <!-- 拖拽区域覆盖左侧顶部 -->
-        <div class="drag-region"></div>
         <div class="brand-area">
           <div class="brand-icon">
             <el-icon :size="28" color="#fff"><Shop /></el-icon>
@@ -227,30 +227,30 @@ onMounted(() => {
   window.electronAPI?.invoke('window-set-login-size')
 })
 
-function getUsers() {
-  try {
-    return JSON.parse(localStorage.getItem('users') || '{}')
-  } catch {
-    return {}
-  }
-}
+const API_BASE = 'https://150.158.54.108:3000'
 
-function handleLogin() {
-  loginFormRef.value?.validate((valid) => {
+async function handleLogin() {
+  loginFormRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
-    setTimeout(() => {
-      const users = getUsers()
-      const { username, password } = loginForm
-      if (users[username] && users[username].password === password) {
-        localStorage.setItem('token', 'logged-in')
-        localStorage.setItem('currentUser', username)
+    try {
+      const response = await fetch(`${API_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginForm.username,
+          password: loginForm.password
+        })
+      })
+      const res = await response.json()
+      if (res && res.success && res.accessToken) {
+        localStorage.setItem('accessToken', res.accessToken)
+        localStorage.setItem('currentUser', loginForm.username)
         if (loginForm.remember) {
-          localStorage.setItem('rememberedUser', username)
+          localStorage.setItem('rememberedUser', loginForm.username)
         } else {
           localStorage.removeItem('rememberedUser')
         }
-        // 先切换窗口到主界面尺寸，再跳转路由
         window.electronAPI?.invoke('window-set-main-size').then(() => {
           ElMessage.success('登录成功')
           router.replace('/')
@@ -259,45 +259,49 @@ function handleLogin() {
           router.replace('/')
         })
       } else {
-        ElMessage.error('账号或密码错误')
+        ElMessage.error(res?.message || '账号或密码错误')
       }
-      loading.value = false
-    }, 800)
+    } catch (e) {
+      ElMessage.error('网络错误，无法连接服务器')
+    }
+    loading.value = false
   })
 }
 
-function handleRegister() {
-  registerFormRef.value?.validate((valid) => {
+async function handleRegister() {
+  registerFormRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
-    setTimeout(() => {
-      const users = getUsers()
-      if (users[registerForm.username]) {
-        ElMessage.error('该账号已存在')
-        loading.value = false
-        return
+    try {
+      const response = await fetch(`${API_BASE}/api/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: registerForm.username,
+          password: registerForm.password,
+          phone: registerForm.phone
+        })
+      })
+      const res = await response.json()
+      if (res && res.success) {
+        ElMessage.success('注册成功，请登录')
+        isRegister.value = false
+        loginForm.username = registerForm.username
+        registerForm.username = ''
+        registerForm.phone = ''
+        registerForm.password = ''
+        registerForm.confirmPassword = ''
+      } else {
+        ElMessage.error(res?.message || '注册失败')
       }
-      users[registerForm.username] = { password: registerForm.password, phone: registerForm.phone }
-      localStorage.setItem('users', JSON.stringify(users))
-      ElMessage.success('注册成功，请登录')
-      isRegister.value = false
-      loginForm.username = registerForm.username
-      registerForm.username = ''
-      registerForm.phone = ''
-      registerForm.password = ''
-      registerForm.confirmPassword = ''
-      loading.value = false
-    }, 800)
+    } catch (e) {
+      ElMessage.error('网络错误，无法连接服务器')
+    }
+    loading.value = false
   })
 }
 
-// 初始化默认管理员账号
-const users = getUsers()
-if (!users['admin']) {
-  users['admin'] = { password: 'admin', phone: '' }
-  localStorage.setItem('users', JSON.stringify(users))
-}
-
+// 读取记住的用户名
 const rememberedUser = localStorage.getItem('rememberedUser')
 if (rememberedUser) {
   loginForm.username = rememberedUser
@@ -309,7 +313,20 @@ if (rememberedUser) {
 .login-page {
   height: 100vh;
   display: flex;
+  flex-direction: column;
   background: #f0f2f5;
+  position: relative;
+}
+
+/* 顶部全局拖拽区域 */
+.drag-region-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  -webkit-app-region: drag;
+  z-index: 100;
 }
 
 /* 主体 */
@@ -328,17 +345,6 @@ if (rememberedUser) {
   padding: 24px;
   position: relative;
   overflow: hidden;
-}
-
-/* 左侧顶部拖拽区域 */
-.drag-region {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 30px;
-  -webkit-app-region: drag;
-  z-index: 10;
 }
 
 .login-left::before {
@@ -366,7 +372,7 @@ if (rememberedUser) {
 .brand-icon {
   width: 42px;
   height: 42px;
-  background: #1890ff;
+  background: #2b5aed;
   border-radius: 10px;
   display: flex;
   align-items: center;
@@ -510,7 +516,7 @@ if (rememberedUser) {
 }
 
 .switch-link {
-  color: #1890ff;
+  color: #2b5aed;
   cursor: pointer;
 }
 

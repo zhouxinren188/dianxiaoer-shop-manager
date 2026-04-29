@@ -4,6 +4,21 @@
   box-sizing: border-box;
 }
 
+/* 覆盖 Element Plus 主题色为深蓝 */
+:root {
+  --el-color-primary: #2b5aed;
+  --el-color-primary-light-1: #3f6bef;
+  --el-color-primary-light-2: #557cf1;
+  --el-color-primary-light-3: #6a8df3;
+  --el-color-primary-light-4: #7f9ef5;
+  --el-color-primary-light-5: #95adf6;
+  --el-color-primary-light-6: #aabef8;
+  --el-color-primary-light-7: #bfcffa;
+  --el-color-primary-light-8: #d5e0fc;
+  --el-color-primary-light-9: #eaf0fd;
+  --el-color-primary-dark-2: #2351d5;
+}
+
 html,
 body,
 #app {
