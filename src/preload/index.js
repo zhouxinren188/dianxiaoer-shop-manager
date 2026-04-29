@@ -7,7 +7,10 @@ const validInvokeChannels = [
   'quit-and-install',
   'window-minimize',
   'window-maximize',
-  'window-close'
+  'window-close',
+  'hot-update-check',
+  'hot-update-download',
+  'hot-update-restart'
 ]
 
 const validOnChannels = [
@@ -15,7 +18,9 @@ const validOnChannels = [
   'update-not-available',
   'update-error',
   'update-progress',
-  'update-downloaded'
+  'update-downloaded',
+  'hot-update-available',
+  'hot-update-progress'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

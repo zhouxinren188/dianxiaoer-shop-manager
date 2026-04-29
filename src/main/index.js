@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 const { initUpdater, registerIpc } = require('./updater')
+const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -25,8 +26,14 @@ function createWindow() {
 
   // 加载页面
   if (app.isPackaged) {
-    // 生产模式：加载本地构建文件
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+    // 生产模式：优先加载热更新目录，否则加载内置文件
+    const hotRendererPath = getHotUpdateRendererPath()
+    if (hotRendererPath) {
+      console.log('[Main] 从热更新目录加载:', hotRendererPath)
+      mainWindow.loadFile(hotRendererPath)
+    } else {
+      mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+    }
   } else {
     // 开发模式：加载 vite 开发服务器
     const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
@@ -72,8 +79,14 @@ app.whenReady().then(async () => {
 
   const mainWindow = createWindow()
 
-  // 初始化自动更新
+  // 初始化自动更新（electron-updater，GitHub Release 全量更新）
   initUpdater(mainWindow)
+
+  // 注册热更新 IPC 通道
+  registerHotUpdateIpc(mainWindow)
+
+  // 启动后延迟检查热更新
+  setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
