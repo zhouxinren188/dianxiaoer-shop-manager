@@ -25,7 +25,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "resources/icon.ico",
@@ -45,8 +47,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "你的GitHub用户名",
-      "repo": "你的仓库名",
+      "owner": "zhouxinren188",
+      "repo": "dianxiaoer-shop-manager",
       "releaseType": "release"
     }
   },

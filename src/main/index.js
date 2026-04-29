@@ -23,15 +23,20 @@ function createWindow() {
   }
 
   // 加载页面
-  const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
-  mainWindow.loadURL(devUrl).catch(err => {
-    console.error('loadURL failed:', err.message)
-    // 如果默认端口失败，尝试备用端口
-    const altUrl = devUrl.replace('5173', '5174')
-    mainWindow.loadURL(altUrl).catch(err2 => {
-      console.error('Alternate URL also failed:', err2.message)
+  if (app.isPackaged) {
+    // 生产模式：加载本地构建文件
+    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+  } else {
+    // 开发模式：加载 vite 开发服务器
+    const devUrl = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
+    mainWindow.loadURL(devUrl).catch(err => {
+      console.error('loadURL failed:', err.message)
+      const altUrl = devUrl.replace('5173', '5174')
+      mainWindow.loadURL(altUrl).catch(err2 => {
+        console.error('Alternate URL also failed:', err2.message)
+      })
     })
-  })
+  }
 
   // 开发模式打开 DevTools
   if (!app.isPackaged) {
