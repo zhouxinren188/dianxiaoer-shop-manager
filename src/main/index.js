@@ -4,6 +4,7 @@ const { initUpdater, registerIpc } = require('./updater')
 const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
 const { registerPlatformWindowIpc } = require('./platform-window')
 const { registerPacketCaptureIpc } = require('./packet-capture')
+const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 
@@ -140,6 +141,9 @@ registerIpc()
 
 // 注册抓包 IPC（使用 ipcMain.handle，需在 app.whenReady 前注册）
 registerPacketCaptureIpc()
+
+// 注册供销订单获取 IPC
+registerSupplyOrderIpc()
 
 app.whenReady().then(async () => {
   // 启动本地后端服务
