@@ -6,7 +6,7 @@ const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./pla
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
-const { registerSalesOrderIpc } = require('./sales-order-fetch')
+const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 const { setAuthToken } = require('./auth-store')
@@ -210,6 +210,9 @@ app.whenReady().then(async () => {
 
   // 启动心跳检测
   startHeartbeat(mainWindow)
+
+  // 启动订单自动同步（每10分钟，多店铺逐个执行）
+  startAutoSync(mainWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

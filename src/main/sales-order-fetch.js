@@ -38,6 +38,7 @@ const API_INTERCEPTOR = `
   if (window.__apiInterceptorInstalled) return;
   window.__apiInterceptorInstalled = true;
   window.__capturedResponses = [];
+  window.__debugRequestBodies = [];
 
   var ORDER_PAGE_SIZE = 50;
 
@@ -48,16 +49,28 @@ const API_INTERCEPTOR = `
 
   function patchBodyPageSize(body) {
     if (!body || typeof body !== 'string') return body;
+    var result = body;
     try {
-      if (body.charAt(0) === '{') {
-        var obj = JSON.parse(body);
-        var changed = false;
-        if ('pageSize' in obj) { obj.pageSize = ORDER_PAGE_SIZE; changed = true; }
-        if ('page_size' in obj) { obj.page_size = ORDER_PAGE_SIZE; changed = true; }
-        if (changed) return JSON.stringify(obj);
+      if (result.charAt(0) === '{') {
+        var obj = JSON.parse(result);
+        var jsonStr = JSON.stringify(obj);
+        if (jsonStr.indexOf('pageSize') !== -1 || jsonStr.indexOf('page_size') !== -1) {
+          jsonStr = jsonStr.replace(/"pageSize":\\s*\\d+/g, '"pageSize":' + ORDER_PAGE_SIZE);
+          jsonStr = jsonStr.replace(/"page_size":\\s*\\d+/g, '"page_size":' + ORDER_PAGE_SIZE);
+          return jsonStr;
+        }
+        return result;
       }
     } catch(e) {}
-    return body.replace(/(pageSize|page_size)=\\d+/g, '$1=' + ORDER_PAGE_SIZE);
+    // JSON 在 form 参数内 (如 body={"pageSize":10,...})
+    result = result.replace(/"pageSize"\\s*:\\s*\\d+/g, '"pageSize":' + ORDER_PAGE_SIZE);
+    result = result.replace(/"page_size"\\s*:\\s*\\d+/g, '"page_size":' + ORDER_PAGE_SIZE);
+    // URL编码的JSON (%22pageSize%22%3A10)
+    result = result.replace(/%22pageSize%22%3A\\d+/gi, '%22pageSize%22%3A' + ORDER_PAGE_SIZE);
+    result = result.replace(/%22page_size%22%3A\\d+/gi, '%22page_size%22%3A' + ORDER_PAGE_SIZE);
+    // 简单 key=value 格式 (pageSize=10 或 pageSize%3D10)
+    result = result.replace(/(pageSize|page_size)(=|%3D)\\d+/gi, '$1$2' + ORDER_PAGE_SIZE);
+    return result;
   }
 
   // 拦截 fetch
@@ -69,8 +82,20 @@ const API_INTERCEPTOR = `
       input = patchUrlPageSize(input);
     }
     // 修改 body 中的 pageSize
-    if (init && init.body && typeof init.body === 'string') {
-      init = Object.assign({}, init, { body: patchBodyPageSize(init.body) });
+    if (init && init.body) {
+      if (typeof init.body === 'string') {
+        // 调试：记录 queryOrderPage 的 body
+        if (urlStr.indexOf('queryOrderPage') !== -1) {
+          window.__debugRequestBodies.push({ type: 'fetch', bodyType: 'string', body: init.body.substring(0, 2000), url: urlStr.substring(0, 200) });
+        }
+        init = Object.assign({}, init, { body: patchBodyPageSize(init.body) });
+      } else {
+        // body 不是字符串，记录其类型用于调试
+        if (urlStr.indexOf('queryOrderPage') !== -1) {
+          var bodyTypeName = init.body.constructor ? init.body.constructor.name : typeof init.body;
+          window.__debugRequestBodies.push({ type: 'fetch', bodyType: bodyTypeName, body: '[non-string]', url: urlStr.substring(0, 200) });
+        }
+      }
     }
     return origFetch.call(this, input, init).then(function(response) {
       try {
@@ -108,10 +133,62 @@ const API_INTERCEPTOR = `
 
   XMLHttpRequest.prototype.send = function(body) {
     var xhr = this;
+    var xhrUrl = xhr.__captureUrl || '';
+
+    // 调试：记录 queryOrderPage 的请求 body 信息
+    if (xhrUrl.indexOf('queryOrderPage') !== -1) {
+      var debugInfo = { type: 'xhr', url: xhrUrl.substring(0, 200) };
+      if (body === null || body === undefined) {
+        debugInfo.bodyType = 'null';
+        debugInfo.body = null;
+      } else if (typeof body === 'string') {
+        debugInfo.bodyType = 'string';
+        debugInfo.body = body.substring(0, 2000);
+      } else if (body instanceof FormData) {
+        debugInfo.bodyType = 'FormData';
+        debugInfo.body = '[FormData]';
+        // 尝试读取 FormData 内容
+        try {
+          var fdEntries = [];
+          body.forEach(function(value, key) { fdEntries.push(key + '=' + (typeof value === 'string' ? value.substring(0, 500) : '[blob]')); });
+          debugInfo.body = fdEntries.join('&');
+        } catch(e) { debugInfo.body = '[FormData: cannot read]'; }
+      } else if (body instanceof URLSearchParams) {
+        debugInfo.bodyType = 'URLSearchParams';
+        debugInfo.body = body.toString().substring(0, 2000);
+      } else if (body instanceof ArrayBuffer || body instanceof Uint8Array) {
+        debugInfo.bodyType = 'ArrayBuffer';
+        try { debugInfo.body = new TextDecoder().decode(body).substring(0, 2000); } catch(e) { debugInfo.body = '[binary]'; }
+      } else {
+        debugInfo.bodyType = body.constructor ? body.constructor.name : typeof body;
+        debugInfo.body = '[unknown type]';
+      }
+      window.__debugRequestBodies.push(debugInfo);
+    }
+
     // 修改 body 中的 pageSize
     if (body && typeof body === 'string') {
       body = patchBodyPageSize(body);
+    } else if (body instanceof URLSearchParams) {
+      // 处理 URLSearchParams 格式
+      if (body.has('pageSize')) body.set('pageSize', ORDER_PAGE_SIZE);
+      if (body.has('page_size')) body.set('page_size', ORDER_PAGE_SIZE);
+      // 检查是否有嵌套 JSON 参数包含 pageSize
+      body.forEach(function(value, key) {
+        if (typeof value === 'string' && value.indexOf('pageSize') !== -1) {
+          body.set(key, patchBodyPageSize(value));
+        }
+      });
+    } else if (body instanceof FormData) {
+      // FormData 无法直接遍历修改，但检查 body 参数
+      try {
+        var bodyParam = body.get('body');
+        if (bodyParam && typeof bodyParam === 'string' && bodyParam.indexOf('pageSize') !== -1) {
+          body.set('body', patchBodyPageSize(bodyParam));
+        }
+      } catch(e) {}
     }
+
     xhr.addEventListener('load', function() {
       try {
         var respBody = xhr.responseText || '';
@@ -140,8 +217,11 @@ const READ_CAPTURED = `
 (function() {
   var data = window.__capturedResponses || [];
   window.__capturedResponses = [];
+  var debugBodies = window.__debugRequestBodies || [];
+  window.__debugRequestBodies = [];
   return {
     count: data.length,
+    debugBodies: debugBodies,
     responses: data.map(function(r) {
       return {
         type: r.type,
@@ -228,7 +308,7 @@ function fetchSalesOrders(storeId) {
 
     try {
       win = new BrowserWindow({
-        show: true,
+        show: false,
         width: 1200,
         height: 800,
         title: '[调试] 销售订单获取',
@@ -279,10 +359,6 @@ function fetchSalesOrders(storeId) {
         if (entryLoaded && !targetLoaded && currentUrl.includes('trade/orders')) {
           targetLoaded = true
           console.log('[SalesFetch] Target page loaded, start polling for API data...')
-          win.show()
-          win.moveTop()
-          win.focus()
-          win.webContents.focus()
           pollForAPIData()
           return
         }
@@ -303,6 +379,14 @@ function fetchSalesOrders(storeId) {
               if (captured.count > 0) {
                 allCapturedResponses.push(...captured.responses)
                 console.log(`[SalesFetch] poll #${pollCount}: +${captured.count} APIs (total: ${allCapturedResponses.length})`)
+
+                // 输出 queryOrderPage 的请求体调试信息
+                if (captured.debugBodies && captured.debugBodies.length > 0) {
+                  for (const db of captured.debugBodies) {
+                    console.log(`[SalesFetch] DEBUG requestBody: type=${db.type} bodyType=${db.bodyType} url=${db.url}`)
+                    console.log(`[SalesFetch] DEBUG body content: ${db.body ? db.body.substring(0, 500) : 'null'}`)
+                  }
+                }
 
                 for (const r of captured.responses) {
                   console.log(`  [${r.type}] ${r.method} ${r.url.substring(0, 120)} (${r.bodyLen}B)`)
@@ -589,6 +673,13 @@ function registerSalesOrderIpc() {
     if (!storeId) {
       return { success: false, message: '请选择店铺' }
     }
+
+    // 检查同步锁，避免重复同步
+    const lock = await requestSyncLock(storeId, 'sales')
+    if (!lock.granted) {
+      return { success: false, message: `该店铺正在同步中，请稍后再试（上次同步: ${lock.lastSyncAt || '刚刚'}）` }
+    }
+
     console.log('[SalesFetch] === Start storeId:', storeId, '===')
     const result = await fetchSalesOrders(storeId)
     console.log('[SalesFetch] === End:', result.success ? 'OK' : 'FAIL', '===')
@@ -596,4 +687,175 @@ function registerSalesOrderIpc() {
   })
 }
 
-module.exports = { registerSalesOrderIpc }
+// ============ 自动定时同步 ============
+const AUTO_SYNC_INTERVAL = 10 * 60 * 1000 // 10 分钟
+const AUTO_SYNC_FIRST_DELAY = 60 * 1000   // 启动后 60 秒开始第一次
+const LOCAL_SERVER = 'http://localhost:3002'
+const REMOTE_SERVER = 'http://150.158.54.108:3002'
+
+let autoSyncTimer = null
+let autoSyncRunning = false
+const DEVICE_ID = `device_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+function httpGetJson(url) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: 10000 }, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+  })
+}
+
+function httpPostJson(url, body) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const postData = JSON.stringify(body)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(postData)
+    req.end()
+  })
+}
+
+async function requestSyncLock(storeId, type = 'sales') {
+  // 必须请求远程服务器获取锁（多设备共享）
+  try {
+    const res = await httpPostJson(`${REMOTE_SERVER}/api/sync-lock/${storeId}`, {
+      deviceId: DEVICE_ID,
+      type
+    })
+    if (res && res.code === 0 && res.data) {
+      return res.data  // { granted: true/false, ... }
+    }
+    return { granted: false, message: '锁服务响应异常' }
+  } catch (err) {
+    console.log('[AutoSync] 请求同步锁失败:', err.message)
+    return { granted: false, message: '无法连接锁服务: ' + err.message }
+  }
+}
+
+async function autoSyncAllStores(mainWindow) {
+  if (autoSyncRunning) {
+    console.log('[AutoSync] 上一次同步尚未完成，跳过')
+    return
+  }
+  autoSyncRunning = true
+  console.log('[AutoSync] === 开始自动同步订单 ===')
+
+  try {
+    // 获取所有启用且有 Cookie 的店铺
+    const json = await httpGetJson(`${LOCAL_SERVER}/api/cookies`)
+    if (!json || json.code !== 0 || !json.data) {
+      console.log('[AutoSync] 获取店铺列表失败')
+      return
+    }
+
+    // 筛选京东平台店铺（目前 fetchSalesOrders 只支持 JD）
+    const jdStores = json.data.filter(s => s.platform === 'jd' && s.cookie_data)
+    if (jdStores.length === 0) {
+      console.log('[AutoSync] 无可同步的京东店铺')
+      return
+    }
+
+    console.log(`[AutoSync] 待同步店铺: ${jdStores.length} 个`)
+
+    // 逐个同步，避免并发风控
+    for (let i = 0; i < jdStores.length; i++) {
+      const store = jdStores[i]
+      console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 同步店铺: ${store.store_name} (ID:${store.store_id})`)
+
+      // 请求同步锁，避免多设备重复同步
+      const lock = await requestSyncLock(store.store_id, 'sales')
+      if (!lock.granted) {
+        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 跳过: 已被其他设备同步 (by:${lock.lockedBy}, at:${lock.lastSyncAt})`)
+        continue
+      }
+
+      // 通知渲染进程开始同步
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('auto-sync-start', {
+          storeId: store.store_id,
+          storeName: store.store_name
+        })
+      }
+
+      try {
+        const result = await fetchSalesOrders(store.store_id)
+        if (result.success) {
+          console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${result.data?.pageTotal || 0} 条订单`)
+        } else {
+          console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 失败: ${result.message}`)
+        }
+
+        // 通知渲染进程同步结果
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auto-sync-result', {
+            storeId: store.store_id,
+            storeName: store.store_name,
+            success: result.success,
+            orderCount: result.data?.pageTotal || 0,
+            message: result.message || ''
+          })
+        }
+      } catch (err) {
+        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 异常: ${err.message}`)
+      }
+
+      // 多店铺之间间隔 30 秒，避免频繁操作
+      if (i < jdStores.length - 1) {
+        console.log('[AutoSync] 等待 30 秒后同步下一个店铺...')
+        await new Promise(resolve => setTimeout(resolve, 30000))
+      }
+    }
+  } catch (err) {
+    console.log('[AutoSync] 自动同步异常:', err.message)
+  } finally {
+    autoSyncRunning = false
+    console.log('[AutoSync] === 自动同步结束 ===')
+  }
+}
+
+function startAutoSync(mainWindow) {
+  // 首次延迟执行
+  setTimeout(() => {
+    autoSyncAllStores(mainWindow)
+  }, AUTO_SYNC_FIRST_DELAY)
+
+  // 定时执行
+  autoSyncTimer = setInterval(() => {
+    autoSyncAllStores(mainWindow)
+  }, AUTO_SYNC_INTERVAL)
+
+  console.log('[AutoSync] 定时同步已启动，间隔: 10 分钟')
+}
+
+function stopAutoSync() {
+  if (autoSyncTimer) {
+    clearInterval(autoSyncTimer)
+    autoSyncTimer = null
+  }
+}
+
+module.exports = { registerSalesOrderIpc, startAutoSync, stopAutoSync }

@@ -96,10 +96,14 @@
           <el-icon><Search /></el-icon>
           <span>查询订单</span>
         </el-button>
-        <el-button class="action-btn action-btn-blue" @click="handleSyncOrders">
+        <el-button class="action-btn action-btn-blue" :disabled="loading || !!autoSyncStatus" @click="handleSyncOrders">
           <el-icon><Refresh /></el-icon>
           <span>同步订单</span>
         </el-button>
+        <span v-if="autoSyncStatus" class="auto-sync-tip">
+          <el-icon class="sync-spin"><Refresh /></el-icon>
+          {{ autoSyncStatus }} 订单正在同步中...
+        </span>
       </div>
       <div class="action-center">
         <span class="action-stat">出库即将超时订单数：<em class="stat-num">{{ nearTimeoutCount }}</em></span>
@@ -207,6 +211,32 @@
                     <div class="goods-info">
                       <p class="goods-name">{{ item.name }}</p>
                       <p class="goods-sku" v-if="item.sku">{{ item.sku }}</p>
+                      <div class="goods-search-row">
+                        <el-popover placement="bottom-start" trigger="hover" :width="180">
+                          <template #reference>
+                            <span class="goods-search-link">搜标题</span>
+                          </template>
+                          <div class="search-platform-list">
+                            <span class="search-platform-item" @click="handleSearchTitle(item, 'taobao')">淘宝</span>
+                            <span class="search-platform-divider">|</span>
+                            <span class="search-platform-item" @click="handleSearchTitle(item, '1688')">1688</span>
+                            <span class="search-platform-divider">|</span>
+                            <span class="search-platform-item" @click="handleSearchTitle(item, 'pdd')">拼多多</span>
+                          </div>
+                        </el-popover>
+                        <el-popover placement="bottom-start" trigger="hover" :width="180">
+                          <template #reference>
+                            <span class="goods-search-link">搜图片</span>
+                          </template>
+                          <div class="search-platform-list">
+                            <span class="search-platform-item" @click="handleSearchImage(item, 'taobao')">淘宝</span>
+                            <span class="search-platform-divider">|</span>
+                            <span class="search-platform-item" @click="handleSearchImage(item, '1688')">1688</span>
+                            <span class="search-platform-divider">|</span>
+                            <span class="search-platform-item" @click="handleSearchImage(item, 'pdd')">拼多多</span>
+                          </div>
+                        </el-popover>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -423,9 +453,7 @@
                   :style="selectedSourceIndex === idx ? 'background:#ecf5ff;border:1px solid #409eff;' : 'background:#f5f7fa;border:1px solid transparent;'"
                   @click="applySourceToPurchase(idx)">
                   <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
-                  <el-link :href="src.purchase_link" target="_blank" style="flex:1;min-width:0;" :underline="false" @click.stop>
-                    <span style="font-size:12px;">{{ src.purchase_link }}</span>
-                  </el-link>
+                  <span style="flex:1;min-width:0;font-size:12px;color:#409eff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="src.purchase_link">{{ src.purchase_link }}</span>
                   <span v-if="src.purchase_price" style="font-size:12px;color:#f56c6c;flex-shrink:0;">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
                 </div>
               </div>
@@ -671,6 +699,9 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const selectAll = ref(false)
 
+// 自动同步状态
+const autoSyncStatus = ref('')  // 正在同步的店铺名称，为空表示未在同步
+
 // ==================== 功能区 ====================
 
 const funcSettings = reactive({
@@ -816,6 +847,11 @@ async function handleSyncOrders() {
     return
   }
 
+  // 显示正在同步的店铺名
+  const currentStore = storeOptions.value.find(s => s.id === searchForm.storeId)
+  const storeName = currentStore ? currentStore.name : '店铺'
+  autoSyncStatus.value = storeName
+
   loading.value = true
   activeStatus.value = ''
   try {
@@ -837,12 +873,13 @@ async function handleSyncOrders() {
         await loadOrdersFromServer()
       }
     } else {
-      ElMessage.error(result.message || '获取订单失败')
+      ElMessage({ message: result.message || '获取订单失败', type: 'error', center: true })
     }
   } catch (err) {
-    ElMessage.error('获取订单失败: ' + err.message)
+    ElMessage({ message: '获取订单失败: ' + err.message, type: 'error', center: true })
   } finally {
     loading.value = false
+    autoSyncStatus.value = ''
   }
 }
 
@@ -1318,19 +1355,6 @@ async function handlePurchaseSubmit() {
       platform_order_no: purchaseInfo.platformOrderNo.trim()
     })
 
-    // 3. 保存SKU采购配置到服务器（供下次自动加载）
-    if (purchaseInfo.skuId) {
-      const sourceId = selectedSourceIndex.value >= 0 ? skuSources.value[selectedSourceIndex.value]?.id : null
-      saveSkuPurchaseConfig({
-        id: sourceId || undefined,
-        sku_id: purchaseInfo.skuId,
-        platform: purchaseInfo.platform,
-        purchase_link: purchaseInfo.sourceUrl,
-        purchase_price: purchaseInfo.purchasePrice,
-        remark: purchaseInfo.remark
-      }).catch(() => {})
-    }
-
     ElMessage.success('采购单创建并绑定成功')
     purchaseDialogVisible.value = false
   } catch (err) {
@@ -1343,6 +1367,16 @@ async function handlePurchaseSubmit() {
 function handleBindWarehouse(order, item, itemIdx) {
   console.log('[绑定仓库] 订单:', order.orderNo, '商品:', item.name, '索引:', itemIdx)
   ElMessage.info(`绑定仓库功能开发中：${item.name}`)
+}
+
+function handleSearchTitle(item, platform) {
+  console.log('[搜标题] 平台:', platform, '商品:', item.name)
+  ElMessage.info(`搜标题功能开发中（${platform}）：${item.name}`)
+}
+
+function handleSearchImage(item, platform) {
+  console.log('[搜图片] 平台:', platform, '商品:', item.name)
+  ElMessage.info(`搜图片功能开发中（${platform}）：${item.name}`)
 }
 
 // ==================== 计算属性 ====================
@@ -1486,10 +1520,25 @@ watch(() => searchForm.storeId, () => {
 onMounted(async () => {
   await loadStores()
   loadOrdersFromServer()
+
+  // 监听自动同步事件
+  if (window.electronAPI) {
+    window.electronAPI.onUpdate('auto-sync-start', (data) => {
+      autoSyncStatus.value = data.storeName || '店铺'
+    })
+    window.electronAPI.onUpdate('auto-sync-result', (data) => {
+      autoSyncStatus.value = ''
+      // 同步成功后自动刷新订单列表
+      if (data.success && data.storeId === searchForm.storeId) {
+        loadOrdersFromServer()
+      }
+    })
+  }
 })
 
 onUnmounted(() => {
   cleanupPurchaseListeners()
+  autoSyncStatus.value = ''
 })
 </script>
 
@@ -1641,6 +1690,25 @@ onUnmounted(() => {
 
 .action-btn-blue {
   background: #2196F3;
+}
+
+.auto-sync-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  font-size: 13px;
+  color: #e6a23c;
+  font-weight: 500;
+}
+
+.sync-spin {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .action-btn-green {
@@ -2026,6 +2094,51 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.goods-search-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.goods-search-link {
+  font-size: 12px;
+  color: #2b5aed;
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.goods-search-link:hover {
+  color: #1a3fc7;
+  text-decoration: underline;
+}
+
+.search-platform-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.search-platform-item {
+  font-size: 13px;
+  color: #2b5aed;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.search-platform-item:hover {
+  background: #eef2ff;
+  color: #1a3fc7;
+}
+
+.search-platform-divider {
+  color: #d9d9d9;
+  font-size: 12px;
 }
 
 /* 单价数量 */

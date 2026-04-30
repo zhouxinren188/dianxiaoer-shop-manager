@@ -33,7 +33,20 @@
       </div>
     </div>
 
-    <el-table :data="filteredData" stripe border max-height="500" size="small" @selection-change="handleSelectionChange">
+    <el-table :data="filteredData" stripe border max-height="500" size="small" @selection-change="handleSelectionChange" row-key="timestamp">
+      <el-table-column type="expand" width="40">
+        <template #default="{ row }">
+          <div class="packet-expand-content">
+            <div v-if="row.postBody" class="post-body-section">
+              <strong>POST Body:</strong>
+              <pre class="post-body-pre">{{ formatPostBody(row.postBody) }}</pre>
+            </div>
+            <div v-else class="post-body-section">
+              <span class="text-muted">无请求体数据</span>
+            </div>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column type="selection" width="40" />
       <el-table-column type="index" label="#" width="50" />
       <el-table-column label="方法" width="80">
@@ -45,6 +58,12 @@
       <el-table-column label="状态码" width="80" align="center">
         <template #default="{ row }">
           <span :style="{ color: statusColor(row.statusCode) }">{{ row.statusCode }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="Body" width="60" align="center">
+        <template #default="{ row }">
+          <el-tag v-if="row.postBody" type="warning" size="small">有</el-tag>
+          <span v-else class="text-muted">-</span>
         </template>
       </el-table-column>
       <el-table-column prop="resourceType" label="类型" width="90" show-overflow-tooltip />
@@ -108,6 +127,18 @@ function formatTime(ts) {
   return d.toTimeString().slice(0, 8)
 }
 
+function formatPostBody(body) {
+  if (!body) return ''
+  try {
+    // 尝试解析为 JSON 并格式化
+    const parsed = JSON.parse(body)
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    // 不是 JSON，原样返回
+    return body
+  }
+}
+
 function handleSelectionChange(rows) {
   selectedRows.value = rows
 }
@@ -118,6 +149,7 @@ function formatForCopy(items) {
     url: item.url,
     statusCode: item.statusCode,
     resourceType: item.resourceType,
+    postBody: item.postBody || null,
     timestamp: new Date(item.timestamp).toISOString()
   })), null, 2)
 }
@@ -161,5 +193,32 @@ function handleClose() {
 .packet-filters {
   display: flex;
   gap: 8px;
+}
+
+.packet-expand-content {
+  padding: 8px 16px;
+}
+
+.post-body-section {
+  font-size: 13px;
+}
+
+.post-body-pre {
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.text-muted {
+  color: #909399;
+  font-size: 12px;
 }
 </style>

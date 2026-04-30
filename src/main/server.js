@@ -500,6 +500,57 @@ app.post('/api/purchase-accounts/:id/cookie', (req, res) => {
   res.json(ok(true))
 })
 
+// ============ 同步锁（多设备协调） ============
+const syncLockMap = {}  // storeId -> { lockedAt, deviceId, type }
+const SYNC_LOCK_TTL = 8 * 60 * 1000  // 锁有效期 8 分钟
+
+// 请求同步锁
+app.post('/api/sync-lock/:storeId', (req, res) => {
+  const storeId = +req.params.storeId
+  const { deviceId, type } = req.body || {}  // type: 'sales' | 'purchase'
+  const lockKey = `${storeId}_${type || 'sales'}`
+  const now = Date.now()
+
+  const existing = syncLockMap[lockKey]
+  if (existing && (now - existing.lockedAt) < SYNC_LOCK_TTL) {
+    // 锁未过期，拒绝
+    return res.json(ok({
+      granted: false,
+      lastSyncAt: new Date(existing.lockedAt).toISOString(),
+      lockedBy: existing.deviceId,
+      remainingMs: SYNC_LOCK_TTL - (now - existing.lockedAt)
+    }))
+  }
+
+  // 授予锁
+  syncLockMap[lockKey] = { lockedAt: now, deviceId: deviceId || 'unknown', type: type || 'sales' }
+  res.json(ok({ granted: true }))
+})
+
+// 释放同步锁（同步完成后主动释放，可选）
+app.delete('/api/sync-lock/:storeId', (req, res) => {
+  const storeId = +req.params.storeId
+  const { type } = req.body || {}
+  const lockKey = `${storeId}_${type || 'sales'}`
+  delete syncLockMap[lockKey]
+  res.json(ok(true))
+})
+
+// 查询同步锁状态
+app.get('/api/sync-lock/:storeId', (req, res) => {
+  const storeId = +req.params.storeId
+  const type = req.query.type || 'sales'
+  const lockKey = `${storeId}_${type}`
+  const existing = syncLockMap[lockKey]
+  const now = Date.now()
+
+  if (existing && (now - existing.lockedAt) < SYNC_LOCK_TTL) {
+    res.json(ok({ locked: true, lockedAt: new Date(existing.lockedAt).toISOString(), lockedBy: existing.deviceId }))
+  } else {
+    res.json(ok({ locked: false }))
+  }
+})
+
 // ============ 启动 ============
 
 function startServer(port = 3002) {

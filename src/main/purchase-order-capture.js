@@ -1,6 +1,7 @@
 const { BrowserWindow, ipcMain, session } = require('electron')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
+const ProvinceData = require('./province-data')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 
@@ -98,7 +99,354 @@ const READ_CAPTURED_PURCHASES = `
 })()
 `
 
-// ============ 地址自动填充脚本 ============
+// ============ 地址自动填充脚本（参考dl系统） ============
+
+// 各平台地址管理页URL
+const ADDRESS_MANAGE_URLS = {
+  taobao: 'https://member1.taobao.com/member/fresh/deliver_address.htm',
+  '1688': 'https://wuliu.1688.com/foundation/receive_address_manager.htm'
+}
+
+/**
+ * 解析完整地址字符串为省/市/区/详细地址
+ * 参考dl系统的Util.parseAddress
+ */
+function parseAddress(address) {
+  if (!address) return null
+  address = address.replace(/\s/g, '')
+  address = address.replace('其他区', '')
+
+  for (const province in ProvinceData) {
+    const cities = ProvinceData[province]
+    if (address.indexOf(province) !== 0) continue
+
+    // 去掉省名
+    let rest = address.substr(province.length)
+    if (rest.startsWith('省') || rest.startsWith('市')) rest = rest.substr(1)
+    else if (rest.startsWith('自治区')) rest = rest.substr(3)
+    else if (rest.startsWith('壮族自治区') || rest.startsWith('回族自治区')) rest = rest.substr(5)
+    else if (rest.startsWith('维吾尔自治区')) rest = rest.substr(6)
+
+    // 匹配城市
+    for (const city in cities) {
+      const areas = cities[city]
+      if (rest.indexOf(city) !== 0) continue
+      rest = rest.substr(city.length)
+      // 去掉"市"后缀（有些地址写法带市有些不带）
+      if (rest.startsWith('市')) rest = rest.substr(1)
+      // 匹配区/县
+      for (const area of areas) {
+        if (rest.indexOf(area) === 0) {
+          rest = rest.substr(area.length)
+          return { province, city, area, other: rest }
+        }
+      }
+      return { province, city, area: '', other: rest }
+    }
+
+    // 没匹配到城市，尝试直接匹配区/县
+    for (const city in cities) {
+      const areas = cities[city]
+      for (const area of areas) {
+        if (rest.indexOf(area) === 0) {
+          rest = rest.substr(area.length)
+          return { province, city, area, other: rest }
+        }
+      }
+    }
+    return { province, city: '', area: '', other: rest }
+  }
+  return null
+}
+
+/**
+ * 1688地址管理页脚本 (wuliu.1688.com/foundation/receive_address_manager.htm)
+ * 参考dl系统：如果地址>=10条先删除，然后点击"新增收货地址"按钮
+ * 点击后1688会跳转到 air.1688.com 的地址编辑页面
+ */
+function build1688AddressManagerScript() {
+  return `
+(function() {
+  if (window.__addrManagerDone) return;
+  window.__addrManagerDone = true;
+  console.log('[AddressAutoFill] 1688 address manager page loaded');
+
+  if (document.body.innerHTML.indexOf('请重新登录') > 0) {
+    console.log('[AddressAutoFill] Need re-login');
+    window.__addrManagerResult = 'need_login';
+    return;
+  }
+
+  // 检查地址数量，>=10则先删除第一个
+  var addressList = document.querySelectorAll('.single-address');
+  console.log('[AddressAutoFill] Current address count: ' + addressList.length);
+
+  if (addressList.length >= 10) {
+    console.log('[AddressAutoFill] Addresses >= 10, deleting first one');
+    var delBtn = addressList[0].querySelector('.btn-del-address');
+    if (delBtn) {
+      delBtn.click();
+      // 等确认弹窗出现后点确认
+      setTimeout(function() {
+        var dialog = document.querySelector('.ui-dialog');
+        if (dialog) {
+          var okBtn = dialog.querySelector('.ok');
+          if (okBtn) okBtn.click();
+        }
+        // 删除后再点新增
+        setTimeout(function() {
+          var addBtn = document.querySelector('.btn-add-new-address');
+          if (addBtn) {
+            console.log('[AddressAutoFill] Clicking add new address after delete');
+            addBtn.click();
+          }
+        }, 1000);
+      }, 500);
+      return;
+    }
+  }
+
+  // 监听DOM变化，处理确认弹窗
+  document.body.addEventListener('DOMNodeInserted', function(event) {
+    var target = event.target;
+    if (target.classList && target.classList.contains('ui-dialog')) {
+      setTimeout(function() {
+        if (target.querySelector('.button-important')) {
+          target.querySelector('.button-important').click();
+        }
+      }, 0);
+    }
+  });
+
+  // 监听地址表格变化 = 添加成功
+  var tableAddr = document.querySelector('#table-address');
+  if (tableAddr) {
+    var tbody = tableAddr.querySelector('tbody');
+    if (tbody) {
+      tbody.addEventListener('DOMNodeInserted', function() {
+        console.log('[AddressAutoFill] Address added successfully!');
+        window.__addrManagerResult = 'success';
+      });
+    }
+  }
+
+  // 直接点击"新增收货地址"
+  var addBtn = document.querySelector('.btn-add-new-address');
+  if (addBtn) {
+    console.log('[AddressAutoFill] Clicking add new address button');
+    addBtn.click();
+  } else {
+    console.log('[AddressAutoFill] Add button not found, retrying...');
+    var retryCount = 0;
+    var retryTimer = setInterval(function() {
+      retryCount++;
+      var btn = document.querySelector('.btn-add-new-address');
+      if (btn) {
+        clearInterval(retryTimer);
+        console.log('[AddressAutoFill] Clicking add new address button (retry ' + retryCount + ')');
+        btn.click();
+      } else if (retryCount > 10) {
+        clearInterval(retryTimer);
+        console.log('[AddressAutoFill] Add button not found after retries');
+        window.__addrManagerResult = 'no_button';
+      }
+    }, 1000);
+  }
+})()
+`
+}
+
+/**
+ * 1688地址编辑弹窗页脚本 (air.1688.com/app/1688-global/address-manage/address-dialog.html)
+ * 参考dl系统：填写收货人/手机/地址，选择省市区级联，勾选默认，提交
+ */
+function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
+  const name = (receiverName || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const phone = (receiverPhone || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const province = (parsedAddr.province || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const city = (parsedAddr.city || parsedAddr.province || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const area = (parsedAddr.area || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const other = (parsedAddr.other || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+  return `
+(function() {
+  if (window.__addrDialogDone) return;
+  window.__addrDialogDone = true;
+  console.log('[AddressAutoFill] 1688 address dialog page loaded');
+
+  var targetName = '${name}';
+  var targetPhone = '${phone}';
+  var targetProvince = '${province}';
+  var targetCity = '${city}';
+  var targetArea = '${area}';
+  var targetOther = '${other}';
+
+  // React兼容的输入函数（参考dl系统的inputFunc）
+  function inputFunc(el, value) {
+    if (!el || !value) return;
+    var lastValue = el.value;
+    el.value = value;
+    var tracker = el._valueTracker;
+    if (tracker) tracker.setValue(lastValue);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  // 等待页面加载完成后填写
+  var waitCount = 0;
+  var waitTimer = setInterval(function() {
+    waitCount++;
+    var nameInput = document.querySelector('#recipient-name');
+    if (!nameInput && waitCount < 20) return;
+    clearInterval(waitTimer);
+
+    if (!nameInput) {
+      console.log('[AddressAutoFill] Address dialog form not found');
+      window.__addrDialogResult = 'no_form';
+      return;
+    }
+
+    console.log('[AddressAutoFill] Filling address form...');
+
+    // 填写收货人姓名
+    inputFunc(nameInput, targetName);
+    console.log('[AddressAutoFill] Filled recipient name: ' + targetName);
+
+    // 填写详细地址
+    var addrInput = document.querySelector('#detailed-address');
+    if (addrInput) {
+      inputFunc(addrInput, targetOther);
+      console.log('[AddressAutoFill] Filled detailed address: ' + targetOther);
+    }
+
+    // 填写手机号
+    var phoneInput = document.querySelector('input[name=phone-number]');
+    if (phoneInput) {
+      inputFunc(phoneInput, targetPhone);
+      console.log('[AddressAutoFill] Filled phone: ' + targetPhone);
+    }
+
+    // 点击区号选择器（参考dl系统）
+    var areaCodeInput = document.querySelector('input[name=phone-area-code]');
+    if (areaCodeInput) areaCodeInput.click();
+
+    var areaCodeTimer = setInterval(function() {
+      var popup = document.querySelector('.next-overlay-wrapper .phone-area-code-select-popup li');
+      if (!popup) return;
+      popup.click();
+      clearInterval(areaCodeTimer);
+
+      // 勾选默认地址
+      var checkbox = document.querySelector('.next-checkbox-input');
+      if (checkbox) {
+        checkbox.click();
+        console.log('[AddressAutoFill] Checked default address');
+      }
+
+      // 开始处理省市区级联选择
+      var step = 1;
+      document.body.addEventListener('DOMNodeInserted', function(event) {
+        if (event.target.classList && event.target.classList.contains('next-overlay-wrapper')) {
+          var target = event.target;
+          setTimeout(function() {
+            // 检测地址级联下拉框
+            if (target.querySelector('.address-cascader-dropdown')) {
+              console.log('[AddressAutoFill] Address cascader dropdown detected');
+              step = 1;
+
+              var tabContent = target.querySelector('.next-tabs-content .next-tabs-content');
+              if (tabContent) {
+                tabContent.addEventListener('DOMNodeInserted', function(evt) {
+                  if (evt.target.classList && evt.target.classList.contains('next-tabs-tabpane')) {
+                    var pane = evt.target;
+                    var times = 0;
+                    var selectTimer = setInterval(function() {
+                      times++;
+                      var nodes = pane.querySelectorAll('li.division-item-wrapper');
+                      if (step == 2) {
+                        if (nodes.length == 0) return;
+                        clearInterval(selectTimer);
+                        for (var node of nodes) {
+                          if (node.innerText.indexOf(targetCity) == 0) {
+                            step = 3;
+                            node.click();
+                            console.log('[AddressAutoFill] Selected city: ' + targetCity);
+                            break;
+                          }
+                        }
+                      } else if (step == 3) {
+                        if (nodes.length == 0) return;
+                        clearInterval(selectTimer);
+                        var isFind = false;
+                        for (var node of nodes) {
+                          if (node.innerText.indexOf(targetArea) == 0) {
+                            step = 4;
+                            node.click();
+                            console.log('[AddressAutoFill] Selected area: ' + targetArea);
+                            isFind = true;
+                            break;
+                          }
+                        }
+                        if (!isFind) {
+                          // 没找到区，直接确认
+                          var confirmBtn = pane.querySelector('.next-btn');
+                          if (confirmBtn && !confirmBtn.disabled) {
+                            confirmBtn.click();
+                            setTimeout(function() {
+                              var submitBtn = document.querySelector('.add-address-action-group .next-btn-primary');
+                              if (submitBtn) submitBtn.click();
+                            }, 500);
+                          }
+                        }
+                      } else if (step == 4) {
+                        if (nodes.length == 0 && times < 50) return;
+                        clearInterval(selectTimer);
+                        // 选完区后，可能还有街道级别，直接确认
+                        var confirmBtn = pane.querySelector('.next-btn');
+                        if (confirmBtn && !confirmBtn.disabled) {
+                          confirmBtn.click();
+                          setTimeout(function() {
+                            var submitBtn = document.querySelector('.add-address-action-group .next-btn-primary');
+                            if (submitBtn) {
+                              console.log('[AddressAutoFill] Clicking submit button');
+                              submitBtn.click();
+                              window.__addrDialogResult = 'submitted';
+                            }
+                          }, 500);
+                        }
+                      }
+                    }, 100);
+                  }
+                });
+              }
+
+              // 选择省份
+              var provinceNodes = target.querySelectorAll('.next-tabs-content .next-tabs-content .next-tabs-tabpane li.division-item-wrapper');
+              for (var node of provinceNodes) {
+                if (node.innerText.indexOf(targetProvince) == 0) {
+                  step = 2;
+                  node.click();
+                  console.log('[AddressAutoFill] Selected province: ' + targetProvince);
+                  break;
+                }
+              }
+            }
+          }, 0);
+        }
+      });
+
+      // 点击地址选择器触发级联
+      var addressBtn = document.querySelector('#address');
+      if (addressBtn) {
+        console.log('[AddressAutoFill] Clicking address cascader');
+        addressBtn.click();
+      }
+
+    }, 100);
+
+  }, 500);
+})()
+`
+}
 
 // 结算页面URL关键词（各平台）
 const CHECKOUT_URL_PATTERNS = {
@@ -214,10 +562,10 @@ function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress
   // ---- 阶段1: 平台特定选择器 ----
   function tryPlatformSpecific() {
     var filled = 0;
-    // 淘宝/天猫常用选择器
-    var tbNameSelectors = '#J_Name, #consignee-name, input[name="receiverName"], input[name="consigneeName"], input[data-meta="Field"][aria-label*="收货人"], input[aria-label*="收货人"]';
-    var tbPhoneSelectors = '#J_Phone, #J_Mobile, input[name="receiverMobile"], input[name="receiverPhone"], input[name="consigneeMobile"], input[data-meta="Field"][aria-label*="手机"], input[aria-label*="手机"]';
-    var tbAddrSelectors = '#J_DetailAddr, #J_Addr, textarea[name="receiverAddress"], textarea[name="detailAddress"], input[name="receiverAddress"], textarea[data-meta="Field"][aria-label*="地址"], textarea[aria-label*="地址"]';
+    // 淘宝/天猫 - 旧版ID选择器 + 新版弹窗placeholder选择器
+    var tbNameSelectors = '#J_Name, #consignee-name, input[name="receiverName"], input[name="consigneeName"], input[placeholder*="不超过25个字符"], input[aria-label*="收货人"]';
+    var tbPhoneSelectors = '#J_Phone, #J_Mobile, input[name="receiverMobile"], input[name="receiverPhone"], input[placeholder*="电话号码"], input[placeholder*="手机号码"], input[aria-label*="手机"]';
+    var tbAddrSelectors = '#J_DetailAddr, #J_Addr, textarea[name="receiverAddress"], textarea[name="detailAddress"], textarea[placeholder*="详细地址信息"], textarea[placeholder*="门牌号"], input[aria-label*="地址"]';
 
     if (targetName) {
       var nameEl = document.querySelector(tbNameSelectors);
@@ -323,34 +671,57 @@ function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress
 
   // ---- 失败时显示地址信息浮窗，方便用户手动复制 ----
   function showFallbackPanel() {
-    console.log('[AddressAutoFill] All attempts failed, showing fallback panel');
+    console.log('[AddressAutoFill] Showing address info panel');
     // 移除已有面板
     var old = document.getElementById('__addrFillPanel');
     if (old) old.parentNode.removeChild(old);
 
     var panel = document.createElement('div');
     panel.id = '__addrFillPanel';
-    panel.style.cssText = 'position:fixed;bottom:12px;left:12px;z-index:999999;background:#fff;border:2px solid #e6a23c;border-radius:10px;padding:14px 18px;box-shadow:0 4px 20px rgba(0,0,0,0.15);font-size:13px;line-height:1.8;max-width:340px;font-family:system-ui,sans-serif;';
-    var html = '<div style="font-weight:600;color:#e6a23c;margin-bottom:6px;">\\u26A0 地址未能自动填充，请手动填写：</div>';
-    if (targetName) html += '<div><b>收货人：</b><span data-af="name" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetName + '</span></div>';
-    if (targetPhone) html += '<div><b>手机号：</b><span data-af="phone" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetPhone + '</span></div>';
-    if (targetAddr) html += '<div><b>地　址：</b><span data-af="addr" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetAddr + '</span></div>';
-    html += '<div style="color:#909399;font-size:11px;margin-top:6px;">点击蓝色文字可复制</div>';
-    html += '<div style="text-align:right;margin-top:8px;"><span data-af="close" style="cursor:pointer;color:#909399;font-size:12px;padding:4px 8px;">关闭 X</span></div>';
+    panel.style.cssText = 'position:fixed;top:12px;right:12px;z-index:999999;background:#fff;border:2px solid #409eff;border-radius:10px;padding:14px 18px;box-shadow:0 4px 20px rgba(0,0,0,0.15);font-size:13px;line-height:1.8;max-width:360px;font-family:system-ui,sans-serif;';
+    var html = '<div style="font-weight:600;color:#409eff;margin-bottom:6px;font-size:14px;">\\ud83d\\udce6 \\u91c7\\u8d2d\\u6536\\u8d27\\u5730\\u5740</div>';
+    html += '<div style="color:#666;font-size:11px;margin-bottom:8px;">\\u8bf7\\u786e\\u4fdd\\u9009\\u62e9\\u4e86\\u6b63\\u786e\\u7684\\u6536\\u8d27\\u5730\\u5740\\uff0c\\u70b9\\u51fb\\u84dd\\u8272\\u6587\\u5b57\\u53ef\\u590d\\u5236</div>';
+    if (targetName) html += '<div><b>\\u6536\\u8d27\\u4eba\\uff1a</b><span data-af="name" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff;padding:0 2px;" title="\\u70b9\\u51fb\\u590d\\u5236">' + targetName + '</span></div>';
+    if (targetPhone) html += '<div><b>\\u624b\\u673a\\u53f7\\uff1a</b><span data-af="phone" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff;padding:0 2px;" title="\\u70b9\\u51fb\\u590d\\u5236">' + targetPhone + '</span></div>';
+    if (targetAddr) html += '<div><b>\\u5730\\u3000\\u5740\\uff1a</b><span data-af="addr" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff;padding:0 2px;" title="\\u70b9\\u51fb\\u590d\\u5236">' + targetAddr + '</span></div>';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px;border-top:1px solid #eee;padding-top:8px;">';
+    html += '<span data-af="copyall" style="cursor:pointer;color:#fff;background:#409eff;padding:4px 12px;border-radius:4px;font-size:12px;">\\u4e00\\u952e\\u590d\\u5236\\u5168\\u90e8</span>';
+    html += '<span data-af="close" style="cursor:pointer;color:#909399;font-size:12px;padding:4px 8px;">\\u6536\\u8d77 X</span>';
+    html += '</div>';
     panel.innerHTML = html;
     document.body.appendChild(panel);
 
-    // 关闭按钮 - 直接用 onclick 赋值（比 addEventListener 更可靠）
+    // 关闭/收起按钮
     var closeBtn = panel.querySelector('[data-af="close"]');
     if (closeBtn) {
       closeBtn.onclick = function(e) {
         e.preventDefault();
         e.stopPropagation();
-        if (panel.parentNode) panel.parentNode.removeChild(panel);
+        // 收起为小图标而不是完全移除
+        panel.style.maxWidth = 'auto';
+        panel.style.padding = '8px 12px';
+        panel.innerHTML = '<span data-af="expand" style="cursor:pointer;color:#409eff;font-size:13px;font-weight:500;">\\ud83d\\udce6 \\u663e\\u793a\\u5730\\u5740</span>';
+        panel.querySelector('[data-af="expand"]').onclick = function() { showFallbackPanel(); };
       };
     }
 
-    // 点击复制功能
+    // 一键复制全部
+    var copyAllBtn = panel.querySelector('[data-af="copyall"]');
+    if (copyAllBtn) {
+      copyAllBtn.onclick = function() {
+        var all = '';
+        if (targetName) all += '\\u6536\\u8d27\\u4eba: ' + targetName + '\\n';
+        if (targetPhone) all += '\\u624b\\u673a: ' + targetPhone + '\\n';
+        if (targetAddr) all += '\\u5730\\u5740: ' + targetAddr;
+        navigator.clipboard.writeText(all.trim()).then(function() {
+          copyAllBtn.textContent = '\\u2713 \\u5df2\\u590d\\u5236';
+          copyAllBtn.style.background = '#67c23a';
+          setTimeout(function() { copyAllBtn.textContent = '\\u4e00\\u952e\\u590d\\u5236\\u5168\\u90e8'; copyAllBtn.style.background = '#409eff'; }, 2000);
+        }).catch(function() {});
+      };
+    }
+
+    // 单项点击复制
     var copySpans = panel.querySelectorAll('[data-af="name"], [data-af="phone"], [data-af="addr"]');
     for (var ci = 0; ci < copySpans.length; ci++) {
       (function(span) {
@@ -366,10 +737,13 @@ function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress
     }
   }
 
-  // ---- 主流程：多阶段重试 ----
+  // ---- 主流程：先立即显示地址面板，同时尝试自动填充 ----
   var attempts = 0;
-  var maxAttempts = 15;
+  var maxAttempts = 5;
   var phase3Done = false;
+
+  // 淘宝结算页通常没有地址输入框（只有地址列表选择），所以立即显示地址面板
+  showFallbackPanel();
 
   function tryFill() {
     attempts++;
@@ -422,6 +796,42 @@ function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress
 
   // 首次延迟2秒等结算页面加载完成
   setTimeout(tryFill, 2000);
+
+  // ---- MutationObserver：持续监听DOM变化，检测新出现的输入框 ----
+  // 即使15次重试都失败，用户手动点击"使用新地址"打开弹窗时也能自动填充
+  var fillObserver = new MutationObserver(function(mutations) {
+    if (window.__addressAutoFillDone) { fillObserver.disconnect(); return; }
+    var hasNewInputs = false;
+    for (var m = 0; m < mutations.length; m++) {
+      var nodes = mutations[m].addedNodes;
+      for (var n = 0; n < nodes.length; n++) {
+        var nd = nodes[n];
+        if (nd.nodeType !== 1) continue;
+        if (nd.tagName === 'INPUT' || nd.tagName === 'TEXTAREA') { hasNewInputs = true; break; }
+        if (nd.querySelector && nd.querySelector('input, textarea')) { hasNewInputs = true; break; }
+      }
+      if (hasNewInputs) break;
+    }
+    if (!hasNewInputs) return;
+    console.log('[AddressAutoFill] Observer: new inputs detected in DOM');
+    // 等待弹窗完全渲染
+    setTimeout(function() {
+      if (window.__addressAutoFillDone) return;
+      var filled = tryPlatformSpecific();
+      if (filled === 0) filled = tryContextMatch();
+      if (filled > 0) {
+        window.__addressAutoFillDone = true;
+        window.__addressAutoFillResult = filled;
+        console.log('[AddressAutoFill] Observer: filled ' + filled + ' fields!');
+        showSuccessToast(filled);
+        // 移除回退面板
+        var oldPanel = document.getElementById('__addrFillPanel');
+        if (oldPanel && oldPanel.parentNode) oldPanel.parentNode.removeChild(oldPanel);
+        fillObserver.disconnect();
+      }
+    }, 800);
+  });
+  fillObserver.observe(document.body, { childList: true, subtree: true });
 })()
 `
 }
@@ -470,8 +880,8 @@ function pollAddressFillResult(win, mainWindow, purchaseNo) {
 // 平台配置：URL关键词 + 字段名 + 最小长度
 const PLATFORM_DETECTION = {
   taobao: {
-    urlKeywords: ['submitOrder', 'create_order', 'buy_now', 'confirmOrder', 'buyertrade', 'createOrder', 'placeOrder'],
-    fields: ['orderId', 'bizOrderId', 'tradeNo', 'orderIds'],
+    urlKeywords: ['submitOrder', 'create_order', 'buy_now', 'confirmOrder', 'buyertrade', 'createOrder', 'placeOrder', 'order', 'trade'],
+    fields: ['orderId', 'bizOrderId', 'tradeNo', 'orderIds', 'id', 'tradeID', 'biz_order_id', 'trade_no', 'out_trade_no'],
     minLength: 15
   },
   pinduoduo: {
@@ -484,6 +894,191 @@ const PLATFORM_DETECTION = {
     fields: ['orderId', 'orderNo', 'tradeId'],
     minLength: 10
   }
+}
+
+// ============ URL中的订单号检测 ============
+
+/**
+ * 从URL参数和路径中提取平台订单号
+ * 淘宝提交订单后跳转到支付宝，URL中包含订单号
+ */
+function extractOrderNoFromUrl(url, platform) {
+  if (!url) return null
+  try {
+    const urlObj = new URL(url)
+    const host = urlObj.hostname.toLowerCase()
+    const params = urlObj.searchParams
+
+    // 排除商品详情页、搜索页等非订单页面（避免把商品ID误判为订单号）
+    const NON_ORDER_HOSTS = ['item.taobao.com', 'detail.tmall.com', 'item.jd.com', 'detail.1688.com']
+    if (NON_ORDER_HOSTS.some(h => host === h || host.endsWith('.' + h))) {
+      return null
+    }
+    const NON_ORDER_PATHS = ['/item.htm', '/item/', '/detail/', '/search', '/list']
+    if (NON_ORDER_PATHS.some(p => urlObj.pathname.toLowerCase().includes(p))) {
+      return null
+    }
+
+    if (platform === 'taobao') {
+      // 支付宝付款URL: cashier.alipay.com?out_trade_no=xxx 或 trade_no=xxx
+      // 淘宝交易URL: trade.taobao.com?bizOrderId=xxx
+      // 注意：不使用泛化的 'id' 参数，因为商品页的 id 是商品ID，不是订单号
+      const orderParamNames = [
+        'bizOrderId', 'biz_order_id', 'orderId', 'order_id',
+        'trade_no', 'tradeNo', 'out_trade_no', 'outTradeNo',
+        'tradeID'
+      ]
+      for (const name of orderParamNames) {
+        const val = params.get(name)
+        if (val && /^\d{10,}$/.test(val)) {
+          console.log(`[PurchaseCapture] Order found in URL param: ${name}=${val}, url=${url.substring(0, 120)}`)
+          return val
+        }
+      }
+
+      // 检查URL路径中的数字串（仅在交易/订单相关域名下）
+      const orderHosts = ['trade.taobao.com', 'buyertrade.taobao.com', 'cashier.alipay.com', 'mclient.alipay.com']
+      if (orderHosts.some(h => host.includes(h))) {
+        const pathMatch = urlObj.pathname.match(/(\d{15,})/)
+        if (pathMatch) {
+          console.log(`[PurchaseCapture] Order found in URL path: ${pathMatch[1]}, url=${url.substring(0, 120)}`)
+          return pathMatch[1]
+        }
+      }
+    }
+
+    if (platform === 'pinduoduo') {
+      const pddParams = ['order_sn', 'orderSn', 'order_id', 'orderId']
+      for (const name of pddParams) {
+        const val = params.get(name)
+        if (val && /^\d{10,}$/.test(val)) return val
+      }
+    }
+
+    if (platform === '1688') {
+      const aliParams = ['orderId', 'orderNo', 'tradeId']
+      for (const name of aliParams) {
+        const val = params.get(name)
+        if (val && /^\d{10,}$/.test(val)) return val
+      }
+    }
+  } catch (e) {
+    // URL 解析失败，忽略
+  }
+  return null
+}
+
+/**
+ * 从页面内容中提取订单号的脚本（参考dl系统）
+ * 淘宝：从HTML源码提取 b2c_orid=xxx
+ * 拼多多：从URL参数提取 order_sn
+ * 通用：页面文本中的"订单号"后面的数字
+ */
+const EXTRACT_ORDER_FROM_PAGE = `
+(function() {
+  var html = document.querySelector('html') ? document.querySelector('html').innerHTML : '';
+  var url = window.location.href;
+  console.log('[PurchaseCapture] Extracting order from page: ' + url.substring(0, 120));
+
+  // === 淘宝/天猫: confirm_order.htm 页面中的 b2c_orid ===
+  if (url.indexOf('confirm_order') >= 0 || url.indexOf('buy.taobao.com') >= 0 || url.indexOf('buy.tmall.com') >= 0) {
+    // 方法1: 从HTML源码中提取 b2c_orid=xxx& (dl系统核心方案)
+    var startPos = html.indexOf('b2c_orid=');
+    if (startPos >= 0) {
+      startPos += 9;
+      var endPos = html.indexOf('&', startPos);
+      if (endPos < 0) endPos = html.indexOf('"', startPos);
+      if (endPos < 0) endPos = html.indexOf("'", startPos);
+      if (endPos > startPos) {
+        var orid = html.substring(startPos, endPos).trim();
+        if (/^\\d{10,}$/.test(orid)) {
+          console.log('[PurchaseCapture] Found b2c_orid=' + orid);
+          return orid;
+        }
+      }
+    }
+    // 方法2: 其他可能的嵌入字段
+    var patterns = [/tradeID[=:]["']?(\\d{15,})/, /bizOrderId[=:]["']?(\\d{15,})/, /orderId[=:]["']?(\\d{15,})/];
+    for (var p = 0; p < patterns.length; p++) {
+      var m = html.match(patterns[p]);
+      if (m) { console.log('[PurchaseCapture] Found in HTML: ' + m[1]); return m[1]; }
+    }
+  }
+
+  // === 拼多多: 微信支付回调页面 URL 参数 order_sn ===
+  if (url.indexOf('yangkeduo.com') >= 0 || url.indexOf('pinduoduo.com') >= 0) {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var sn = params.get('order_sn') || params.get('orderSn') || params.get('order_id');
+      if (sn && /^\\d{10,}$/.test(sn)) {
+        console.log('[PurchaseCapture] Found PDD order_sn=' + sn);
+        return sn;
+      }
+    } catch(e) {}
+  }
+
+  // === 1688: URL 参数 ===
+  if (url.indexOf('1688.com') >= 0) {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var oid = params.get('orderId') || params.get('orderNo') || params.get('tradeId');
+      if (oid && /^\\d{10,}$/.test(oid)) {
+        console.log('[PurchaseCapture] Found 1688 orderId=' + oid);
+        return oid;
+      }
+    } catch(e) {}
+  }
+
+  // === 通用: URL 参数检测 ===
+  try {
+    var params = new URLSearchParams(window.location.search);
+    var names = ['bizOrderId','biz_order_id','orderId','order_id','trade_no','tradeNo','out_trade_no','order_sn'];
+    for (var j = 0; j < names.length; j++) {
+      var v = params.get(names[j]);
+      if (v && /^\\d{10,}$/.test(v)) {
+        console.log('[PurchaseCapture] Found URL param ' + names[j] + '=' + v);
+        return v;
+      }
+    }
+  } catch(e) {}
+
+  // === 通用: 页面文本中的订单号 ===
+  var text = document.body ? (document.body.innerText || '') : '';
+  var textPatterns = [
+    /订单(?:号|编号)[：:\\s]*?(\\d{15,})/,
+    /交易(?:号|编号)[：:\\s]*?(\\d{15,})/
+  ];
+  for (var i = 0; i < textPatterns.length; i++) {
+    var m = text.match(textPatterns[i]);
+    if (m) { console.log('[PurchaseCapture] Found in text: ' + m[1]); return m[1]; }
+  }
+
+  return null;
+})()
+`
+
+// 订单确认/支付相关页面URL模式
+const ORDER_CONFIRM_PATTERNS = {
+  taobao: [
+    'buy.taobao.com/auction/confirm_order',   // 淘宝订单确认页（核心！b2c_orid在此页）
+    'buy.tmall.com/order/confirm_order',       // 天猫订单确认页
+    'buy.taobao.com/auction/order/confirm',    // 备用路径
+    'cashier.alipay.com',                      // 支付宝收银台
+    'mclient.alipay.com',                      // 手机支付宝
+    'trade.taobao.com',                        // 交易详情
+    'buyertrade.taobao.com'                    // 买家交易
+  ],
+  pinduoduo: [
+    'transac_wechat_wapcallback',              // 拼多多微信支付回调（核心！order_sn在此URL）
+    'transac_alipay_wapcallback',              // 支付宝回调
+    'pay_success',                             // 支付成功
+    'order_result'                             // 订单结果
+  ],
+  '1688': [
+    'trade.1688.com/order',                    // 1688交易
+    'cashier.alipay.com',                      // 支付宝
+    'order/confirm'                            // 订单确认
+  ]
 }
 
 /**
@@ -592,8 +1187,15 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             : json.data.cookie_data
           if (Array.isArray(cookies) && cookies.length > 0) {
             let injected = 0
+            let skipped = 0
+            const now = Date.now() / 1000
             for (const ck of cookies) {
               try {
+                // 跳过已过期的Cookie
+                if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
+                  skipped++
+                  continue
+                }
                 const cookieDetails = {
                   url: `https://${ck.domain ? ck.domain.replace(/^\./, '') : 'taobao.com'}${ck.path || '/'}`,
                   name: ck.name,
@@ -601,7 +1203,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                   domain: ck.domain,
                   path: ck.path || '/',
                   secure: ck.secure || false,
-                  httpOnly: ck.httpOnly || false
+                  httpOnly: ck.httpOnly || false,
+                  sameSite: ck.sameSite || 'no_restriction'
                 }
                 if (ck.expirationDate && ck.expirationDate > 0) {
                   cookieDetails.expirationDate = ck.expirationDate
@@ -610,7 +1213,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 injected++
               } catch (e) { /* skip invalid cookies */ }
             }
-            console.log(`[PurchaseCapture] Cookie restored: ${injected}/${cookies.length} from server`)
+            console.log(`[PurchaseCapture] Cookie restored: ${injected}/${cookies.length} from server (${skipped} expired, skipped)`)
           }
         }
       }
@@ -630,6 +1233,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
     })
 
+    // 转发采购窗口内的console.log到主进程（用于调试注入脚本）
+    win.webContents.on('console-message', (event, level, message) => {
+      if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]')) {
+        console.log(`[PurchaseWin] ${message}`)
+      }
+    })
+
     let resolved = false
     let pollTimer = null
     const windowState = { win, pollTimer, resolved }
@@ -641,11 +1251,32 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       activePurchaseWindows.delete(purchaseNo)
     }
 
+    // 保存采购窗口的Cookie到服务器（用户可能在窗口内登录了）
+    async function savePurchaseWindowCookies() {
+      try {
+        const ses = session.fromPartition(partitionName)
+        const cookies = await ses.cookies.get({})
+        if (cookies && cookies.length > 0) {
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookie`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
+          })
+          console.log(`[PurchaseCapture] Cookie saved on window close: ${cookies.length} cookies`)
+        }
+      } catch (e) {
+        console.error('[PurchaseCapture] Save cookies failed:', e.message)
+      }
+    }
+
     function onOrderCaptured(platformOrderNo) {
       if (resolved) return
       resolved = true
       windowState.resolved = true
       cleanup()
+
+      // 保存Cookie（用户在窗口内可能登录了，积累了新Cookie）
+      savePurchaseWindowCookies()
 
       // 自动调用服务端API创建采购单和绑定
       autoCreateAndBind(purchaseInfo, platformOrderNo, platform)
@@ -674,6 +1305,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     }
 
     function onWindowClosed() {
+      // 无论是否捕获到订单号，都保存Cookie（用户可能在窗口内登录了）
+      savePurchaseWindowCookies()
+
       if (resolved) return
       resolved = true
       windowState.resolved = true
@@ -689,51 +1323,171 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     }
 
     // 注入 API 拦截器 + 地址自动填充
+    // 1688地址设置状态追踪
+    let addrSetDone = false  // 地址是否已设置完成
+    const need1688AddrSetup = platform === '1688' && (purchaseInfo.shippingName || purchaseInfo.shippingPhone || purchaseInfo.shippingAddress)
+    const parsedAddr = need1688AddrSetup ? parseAddress(purchaseInfo.shippingAddress) : null
+
     win.webContents.on('dom-ready', () => {
       if (win.isDestroyed() || resolved) return
       win.webContents.executeJavaScript(PURCHASE_INTERCEPTOR).catch(() => {})
       console.log('[PurchaseCapture] Interceptor injected')
 
-      // 检测是否为结算页面，是则注入地址填充脚本
       const currentUrl = win.webContents.getURL()
+      console.log(`[PurchaseCapture] dom-ready: ${currentUrl.substring(0, 120)}`)
+
+      // === 1688地址处理（参考dl系统的3页流程） ===
+      if (need1688AddrSetup && !addrSetDone) {
+        const urlLower = currentUrl.toLowerCase()
+
+        // 页面1: 1688地址管理页 - 点击"新增收货地址"
+        if (urlLower.includes('wuliu.1688.com/foundation/receive_address_manager')) {
+          console.log('[PurchaseCapture] 1688 address manager page detected')
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) return
+            win.webContents.executeJavaScript(build1688AddressManagerScript()).catch(() => {})
+          }, 1500)
+          return
+        }
+
+        // 页面2: 1688地址编辑弹窗页 - 填写表单+省市区级联
+        if (urlLower.includes('air.1688.com/app/1688-global/address-manage/address-dialog')) {
+          console.log('[PurchaseCapture] 1688 address dialog page detected')
+          if (parsedAddr) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              const script = build1688AddressDialogScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
+              win.webContents.executeJavaScript(script).catch(() => {})
+            }, 1500)
+          } else {
+            console.warn('[PurchaseCapture] Address parse failed, cannot auto-fill')
+          }
+          return
+        }
+      }
+
+      // === 淘宝/通用：结算页地址面板（保留原有逻辑作为fallback） ===
       const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
-      if (shippingName || shippingPhone || shippingAddress) {
+      if (platform !== '1688' && (shippingName || shippingPhone || shippingAddress)) {
         if (isCheckoutPage(currentUrl, platform)) {
           const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
           win.webContents.executeJavaScript(fillScript).catch(() => {})
-          pollAddressFillResult(win, mainWindow, purchaseNo)
-          console.log(`[PurchaseCapture] Address auto-fill injected for checkout page: ${currentUrl.substring(0, 80)}`)
+          console.log(`[PurchaseCapture] Address auto-fill injected for checkout page`)
         }
       }
+
+      // 检测是否为订单确认/支付回调页面，尝试提取订单号
+      tryExtractOrderFromPage(currentUrl)
     })
 
-    // 页面导航后也检测（用户从商品页跳转到结算页）
-    win.webContents.on('did-navigate', (event, url) => {
+    // 从URL和页面内容中提取订单号的核心函数
+    function tryExtractOrderFromPage(url) {
       if (win.isDestroyed() || resolved) return
-      const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
-      if ((shippingName || shippingPhone || shippingAddress) && isCheckoutPage(url, platform)) {
-        // 等待 dom-ready 会自动注入，但 SPA 页面可能不触发 dom-ready，这里延迟补充注入
+
+      // 1. 先检查URL参数中是否有订单号
+      const urlOrderNo = extractOrderNoFromUrl(url, platform)
+      if (urlOrderNo) {
+        console.log(`[PurchaseCapture] Order found in URL: ${urlOrderNo}`)
+        onOrderCaptured(urlOrderNo)
+        return
+      }
+
+      // 2. 检查是否是订单确认/支付相关页面
+      const patterns = ORDER_CONFIRM_PATTERNS[platform] || []
+      const urlLower = url.toLowerCase()
+      const isOrderPage = patterns.some(p => urlLower.includes(p.toLowerCase()))
+      if (!isOrderPage) return
+
+      console.log(`[PurchaseCapture] Order-related page detected: ${url.substring(0, 120)}`)
+
+      // 3. 延迟后注入页面内容提取脚本（等页面渲染完成）
+      const extractWithDelay = (delay) => {
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
-          const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
-          win.webContents.executeJavaScript(fillScript).catch(() => {})
-          console.log(`[PurchaseCapture] Address auto-fill injected after navigation: ${url.substring(0, 80)}`)
-        }, 3000)
+          win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
+            .then(orderNo => {
+              if (orderNo && !resolved) {
+                console.log(`[PurchaseCapture] Order extracted from page: ${orderNo}`)
+                onOrderCaptured(orderNo)
+              }
+            })
+            .catch(() => {})
+        }, delay)
+      }
+
+      // 多次尝试（页面可能还在加载中）
+      extractWithDelay(1000)
+      extractWithDelay(3000)
+      extractWithDelay(6000)
+    }
+
+    // 页面导航后检测（核心：淘宝提交订单后会跳转到confirm_order.htm）
+    win.webContents.on('did-navigate', (event, url) => {
+      if (win.isDestroyed() || resolved) return
+      console.log(`[PurchaseCapture] did-navigate: ${url.substring(0, 120)}`)
+
+      // 尝试从新页面提取订单号
+      tryExtractOrderFromPage(url)
+
+      // === 1688地址流程：检测页面导航 ===
+      if (need1688AddrSetup && !addrSetDone) {
+        const urlLower = url.toLowerCase()
+
+        // 导航到地址管理页
+        if (urlLower.includes('wuliu.1688.com/foundation/receive_address_manager')) {
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) return
+            win.webContents.executeJavaScript(build1688AddressManagerScript()).catch(() => {})
+            console.log('[PurchaseCapture] 1688 address manager script injected after navigation')
+          }, 1500)
+          return
+        }
+
+        // 导航到地址编辑弹窗页
+        if (urlLower.includes('air.1688.com/app/1688-global/address-manage/address-dialog')) {
+          if (parsedAddr) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              const script = build1688AddressDialogScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
+              win.webContents.executeJavaScript(script).catch(() => {})
+              console.log('[PurchaseCapture] 1688 address dialog script injected after navigation')
+            }, 1500)
+          }
+          return
+        }
+      }
+
+      // === 淘宝/通用地址填充 ===
+      const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
+      if (platform !== '1688' && (shippingName || shippingPhone || shippingAddress)) {
+        if (isCheckoutPage(url, platform)) {
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) return
+            const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
+            win.webContents.executeJavaScript(fillScript).catch(() => {})
+            console.log(`[PurchaseCapture] Address auto-fill injected after navigation`)
+          }, 3000)
+        }
       }
     })
 
     // SPA内的hash/pushState导航
     win.webContents.on('did-navigate-in-page', (event, url) => {
       if (win.isDestroyed() || resolved) return
-      const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
-      if ((shippingName || shippingPhone || shippingAddress) && isCheckoutPage(url, platform)) {
-        setTimeout(() => {
-          if (win.isDestroyed() || resolved) return
-          const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
-          win.webContents.executeJavaScript(fillScript).catch(() => {})
-          pollAddressFillResult(win, mainWindow, purchaseNo)
-          console.log(`[PurchaseCapture] Address auto-fill injected after in-page navigation: ${url.substring(0, 80)}`)
-        }, 3000)
+      console.log(`[PurchaseCapture] did-navigate-in-page: ${url.substring(0, 120)}`)
+
+      // 尝试从新页面提取订单号
+      tryExtractOrderFromPage(url)
+    })
+
+    // 监听重定向（支付宝URL中可能包含订单号）
+    win.webContents.on('will-redirect', (event, url) => {
+      if (win.isDestroyed() || resolved) return
+      console.log(`[PurchaseCapture] will-redirect: ${url.substring(0, 120)}`)
+      const urlOrderNo = extractOrderNoFromUrl(url, platform)
+      if (urlOrderNo) {
+        console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
+        onOrderCaptured(urlOrderNo)
       }
     })
 
@@ -742,11 +1496,67 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       onWindowClosed()
     })
 
-    // 加载 URL
+    // 加载初始URL
+    // 对于1688：如果需要设置地址，先导航到地址管理页，成功后再跳转采购URL
+    // 对于其他平台：直接加载采购URL
+    const initialUrl = (need1688AddrSetup && parsedAddr)
+      ? ADDRESS_MANAGE_URLS['1688']
+      : purchaseUrl
+    console.log(`[PurchaseCapture] Loading initial URL: ${initialUrl.substring(0, 120)}`)
+
     try {
-      await win.loadURL(purchaseUrl)
+      await win.loadURL(initialUrl)
     } catch (e) {
       console.error('[PurchaseCapture] loadURL failed:', e.message)
+    }
+
+    // 1688地址设置结果轮询：检测地址是否添加成功，成功后跳转采购URL
+    if (need1688AddrSetup && parsedAddr) {
+      let addrCheckCount = 0
+      const addrCheckTimer = setInterval(() => {
+        addrCheckCount++
+        if (win.isDestroyed() || resolved || addrSetDone) {
+          clearInterval(addrCheckTimer)
+          return
+        }
+        // 最多等60秒
+        if (addrCheckCount > 30) {
+          clearInterval(addrCheckTimer)
+          console.log('[PurchaseCapture] 1688 address setup timeout, navigating to purchase URL anyway')
+          addrSetDone = true
+          win.loadURL(purchaseUrl).catch(() => {})
+          return
+        }
+
+        win.webContents.executeJavaScript('window.__addrManagerResult || window.__addrDialogResult || null')
+          .then(result => {
+            if (!result || addrSetDone) return
+            console.log(`[PurchaseCapture] 1688 address result: ${result}`)
+
+            if (result === 'success' || result === 'submitted') {
+              clearInterval(addrCheckTimer)
+              addrSetDone = true
+              // 地址设置成功，等一下让页面保存完毕，然后跳转到采购URL
+              console.log(`[PurchaseCapture] Address setup done! Navigating to purchase URL in 3s...`)
+              setTimeout(() => {
+                if (win.isDestroyed() || resolved) return
+                win.loadURL(purchaseUrl).catch(() => {})
+              }, 3000)
+            } else if (result === 'need_login') {
+              // 需要重新登录，不再等待，让用户手动处理
+              clearInterval(addrCheckTimer)
+              addrSetDone = true
+              console.log('[PurchaseCapture] 1688 needs re-login, skipping address setup')
+            } else if (result === 'no_button' || result === 'no_form') {
+              // 页面异常，直接跳转采购URL
+              clearInterval(addrCheckTimer)
+              addrSetDone = true
+              console.log(`[PurchaseCapture] 1688 address page issue: ${result}, navigating to purchase URL`)
+              win.loadURL(purchaseUrl).catch(() => {})
+            }
+          })
+          .catch(() => {})
+      }, 2000)
     }
 
     // 启动轮询检测订单号
@@ -819,19 +1629,6 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform) {
     })
   })
 
-  // 3. 保存 SKU 采购配置
-  if (skuId) {
-    await httpRequest(`${BUSINESS_SERVER}/api/sku-purchase-config`, {
-      method: 'POST',
-      body: JSON.stringify({
-        sku_id: skuId,
-        platform: platform,
-        purchase_link: sourceUrl,
-        purchase_price: purchasePrice,
-        remark: remark
-      })
-    })
-  }
 }
 
 module.exports = { registerPurchaseOrderCaptureIpc }
