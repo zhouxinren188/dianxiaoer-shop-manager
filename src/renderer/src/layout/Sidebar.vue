@@ -100,18 +100,6 @@
       </el-menu-item>
     </el-menu>
 
-    <!-- 底部用户信息 + 退出登录 -->
-    <div class="sidebar-footer">
-      <div class="user-info">
-        <el-icon :size="16"><User /></el-icon>
-        <span class="user-name">{{ currentUserName }}</span>
-      </div>
-      <div class="logout-btn" @click="handleLogout">
-        <el-icon :size="14"><SwitchButton /></el-icon>
-        <span>退出登录</span>
-      </div>
-    </div>
-
     <!-- 打开网址弹窗 -->
     <el-dialog
       v-model="openUrlDialogVisible"
@@ -142,7 +130,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -160,9 +148,7 @@ import {
   Link,
   Monitor,
   Setting,
-  TrendCharts,
-  User,
-  SwitchButton
+  TrendCharts
 } from '@element-plus/icons-vue'
 import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 
@@ -174,14 +160,6 @@ const activeMenu = computed(() => route.path)
 function navigate(path) {
   router.push(path)
 }
-
-// 挂载时同步 auth token 到主进程（覆盖已登录但未同步的场景）
-onMounted(() => {
-  const token = localStorage.getItem('accessToken')
-  if (token && window.electronAPI) {
-    window.electronAPI.invoke('set-auth-token', token).catch(() => {})
-  }
-})
 
 // --- 打开网址功能 ---
 const openUrlDialogVisible = ref(false)
@@ -246,29 +224,6 @@ async function handlePacketCapture() {
       ElMessage.error('停止抓包失败: ' + err.message)
     }
   }
-}
-
-// --- 当前用户 + 退出登录 ---
-const currentUserName = computed(() => {
-  try {
-    const info = JSON.parse(localStorage.getItem('userInfo') || '{}')
-    return info.realName || localStorage.getItem('currentUser') || '未登录'
-  } catch {
-    return localStorage.getItem('currentUser') || '未登录'
-  }
-})
-
-function handleLogout() {
-  localStorage.removeItem('accessToken')
-  localStorage.removeItem('currentUser')
-  localStorage.removeItem('userId')
-  localStorage.removeItem('userInfo')
-  window.electronAPI?.invoke('set-auth-token', '')
-  window.electronAPI?.invoke('window-set-login-size').then(() => {
-    router.replace('/login')
-  }).catch(() => {
-    router.replace('/login')
-  })
 }
 </script>
 
@@ -382,45 +337,5 @@ function handleLogout() {
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.4; transform: scale(0.8); }
-}
-
-/* 底部用户信息 + 退出登录 */
-.sidebar-footer {
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  padding: 12px 16px;
-  flex-shrink: 0;
-}
-
-.user-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: rgba(255, 255, 255, 0.65);
-  font-size: 13px;
-  margin-bottom: 8px;
-  padding: 0 4px;
-}
-
-.user-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.logout-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border-radius: 6px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.logout-btn:hover {
-  background: rgba(245, 108, 108, 0.15);
-  color: #f56c6c;
 }
 </style>

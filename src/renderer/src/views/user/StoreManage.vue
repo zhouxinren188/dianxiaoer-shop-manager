@@ -76,12 +76,12 @@
         <div class="card-info">
           <div class="info-grid">
             <div class="info-item">
-              <span class="info-label">登录账号</span>
-              <span class="info-value">{{ row.account || '-' }}</span>
+              <span class="info-label">店铺类型</span>
+              <span class="info-value">{{ storeTypeLabel(row.store_type) }}</span>
             </div>
             <div class="info-item">
-              <span class="info-label">密码</span>
-              <span class="info-value">{{ row.password ? '******' : '-' }}</span>
+              <span class="info-label">登录账号</span>
+              <span class="info-value">{{ row.account || '-' }}</span>
             </div>
             <div class="info-item">
               <span class="info-label">商家ID</span>
@@ -162,6 +162,15 @@ import { Search, Plus, Connection, Edit, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchStores, createStore, deleteStore, toggleStoreStatus } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
+
+const STORE_TYPE_MAP = {
+  pop: 'POP店铺',
+  supplier: '供应商店铺'
+}
+
+function storeTypeLabel(type) {
+  return STORE_TYPE_MAP[type] || '-'
+}
 
 const searchForm = reactive({
   name: '',

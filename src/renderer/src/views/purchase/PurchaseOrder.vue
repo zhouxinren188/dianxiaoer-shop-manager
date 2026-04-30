@@ -257,33 +257,21 @@
       align-center
       destroy-on-close
     >
-      <p style="margin-bottom: 16px; color: #606266">请选择采购平台，选择后将打开对应平台的登录页面：</p>
-      <div class="platform-select-grid">
-        <div
-          class="platform-card"
-          :class="{ active: addAccountForm.platform === 'taobao' }"
-          @click="addAccountForm.platform = 'taobao'"
-        >
-          <span class="platform-card-name">淘宝/天猫</span>
-          <span class="platform-card-desc">taobao.com</span>
-        </div>
-        <div
-          class="platform-card"
-          :class="{ active: addAccountForm.platform === 'pinduoduo' }"
-          @click="addAccountForm.platform = 'pinduoduo'"
-        >
-          <span class="platform-card-name">拼多多</span>
-          <span class="platform-card-desc">pinduoduo.com</span>
-        </div>
-        <div
-          class="platform-card"
-          :class="{ active: addAccountForm.platform === 'douyin' }"
-          @click="addAccountForm.platform = 'douyin'"
-        >
-          <span class="platform-card-name">抖音</span>
-          <span class="platform-card-desc">douyin.com</span>
-        </div>
-      </div>
+      <el-form label-width="80px">
+        <el-form-item label="采购平台">
+          <el-select v-model="addAccountForm.platform" placeholder="请选择平台" style="width: 100%">
+            <el-option label="淘宝/天猫" value="taobao" />
+            <el-option label="拼多多" value="pinduoduo" />
+            <el-option label="抖音" value="douyin" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="账号">
+          <el-input v-model="addAccountForm.account" placeholder="请输入登录账号" />
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input v-model="addAccountForm.password" placeholder="请输入登录密码" show-password />
+        </el-form-item>
+      </el-form>
       <template #footer>
         <el-button @click="addAccountVisible = false">取消</el-button>
         <el-button type="primary" :disabled="!addAccountForm.platform" @click="handleAddAccountSubmit">前往登录</el-button>
@@ -400,7 +388,7 @@ const selectedAccount = ref('')
 const accountManageVisible = ref(false)
 const addAccountVisible = ref(false)
 const editAccountVisible = ref(false)
-const addAccountForm = reactive({ platform: '' })
+const addAccountForm = reactive({ platform: '', account: '', password: '' })
 const editAccountForm = reactive({ id: '', platform: '', username: '', password: '' })
 
 const accountList = ref([])
@@ -431,6 +419,8 @@ function handleAccountManage() {
 
 function handleAddAccount() {
   addAccountForm.platform = ''
+  addAccountForm.account = ''
+  addAccountForm.password = ''
   addAccountVisible.value = true
 }
 
@@ -441,8 +431,12 @@ async function handleAddAccountSubmit() {
   }
 
   try {
-    // 先在服务器创建账号记录，获取ID
-    const result = await createPurchaseAccount({ platform: addAccountForm.platform })
+    // 先在服务器创建账号记录（包含账号密码），获取ID
+    const result = await createPurchaseAccount({
+      platform: addAccountForm.platform,
+      account: addAccountForm.account,
+      password: addAccountForm.password
+    })
     const accountId = result.id || result.insertId || Date.now().toString()
 
     // 通过 Electron 打开平台登录窗口
@@ -457,6 +451,8 @@ async function handleAddAccountSubmit() {
     }
 
     addAccountVisible.value = false
+    // 立即刷新列表，显示刚创建的账号（离线状态）
+    await loadAccounts()
   } catch (err) {
     ElMessage.error('创建账号失败: ' + err.message)
   }

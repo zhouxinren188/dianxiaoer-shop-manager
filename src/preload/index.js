@@ -44,7 +44,8 @@ const validOnChannels = [
   'purchase-account-login-success',
   'store-status-changed',
   'purchase-order-captured',
-  'purchase-window-closed'
+  'purchase-window-closed',
+  'purchase-address-filled'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

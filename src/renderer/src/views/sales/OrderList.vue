@@ -142,6 +142,8 @@
         <div class="ot-col ot-col-time">下单时间</div>
         <div class="ot-col ot-col-logistics">物流信息</div>
         <div class="ot-col ot-col-aftersale">售后信息</div>
+        <div class="ot-col ot-col-remark">商家备注</div>
+        <div class="ot-col ot-col-sysremark">系统备注</div>
         <div class="ot-col ot-col-action">操作</div>
       </div>
 
@@ -249,8 +251,23 @@
                 <el-tag v-if="order.issueEvent" type="warning" size="small">{{ order.issueEvent }}</el-tag>
                 <span v-else class="text-muted">--</span>
               </div>
+              <div class="ot-col ot-col-remark">
+                <span v-if="order.remark" class="remark-text">{{ order.remark }}</span>
+                <span v-else class="text-muted">--</span>
+                <el-button type="primary" link size="small" class="remark-edit-btn" @click.stop="handleEditRemark(order)">
+                  <el-icon><Edit /></el-icon>
+                </el-button>
+              </div>
+              <div class="ot-col ot-col-sysremark">
+                <span v-if="order.sysRemark" class="sysremark-text">{{ order.sysRemark }}</span>
+                <span v-else class="text-muted">--</span>
+              </div>
               <div class="ot-col ot-col-action">
                 <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
+                <el-button type="success" link size="small" @click="handleSmsNotify(order)">
+                  <el-icon><Message /></el-icon>
+                  <span>短信</span>
+                </el-button>
               </div>
             </div>
           </div>
@@ -616,8 +633,8 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete, Message } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
 import { fetchSalesOrders, saveSalesOrders } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo } from '@/api/purchaseOrder'
@@ -763,6 +780,8 @@ function mapServerOrder(row) {
     shopTag: '京东',
     items,
     issueEvent: null,
+    remark: row.remark || '',
+    sysRemark: row.sys_remark || '',
     timeoutStatus: 'normal'
   }
 }
@@ -888,8 +907,10 @@ async function handlePurchase(order, item, itemIdx) {
   if (purchaseAccounts.value.length === 0) {
     try {
       const res = await fetchPurchaseAccounts()
-      if (res.code === 0 && res.data && res.data.list) {
-        purchaseAccounts.value = res.data.list
+      if (res && res.list) {
+        purchaseAccounts.value = res.list
+      } else if (Array.isArray(res)) {
+        purchaseAccounts.value = res
       }
     } catch (e) {}
   }
@@ -898,8 +919,8 @@ async function handlePurchase(order, item, itemIdx) {
   if (warehouseList.value.length === 0) {
     try {
       const wRes = await fetchWarehouses()
-      if (wRes.code === 0 && wRes.data) {
-        warehouseList.value = wRes.data.list || wRes.data || []
+      if (wRes) {
+        warehouseList.value = wRes.list || (Array.isArray(wRes) ? wRes : [])
       }
     } catch (e) {}
   }
@@ -928,15 +949,15 @@ async function loadSkuSources(skuId) {
   if (!skuId) return
   try {
     const res = await fetchSkuPurchaseConfigList(skuId)
-    if (res.code === 0 && res.data) {
+    if (res) {
       let list = []
-      // 兼容旧后端：返回单条对象时包装为数组
-      if (res.data.list && Array.isArray(res.data.list)) {
-        list = res.data.list
-      } else if (res.data.purchase_link !== undefined) {
-        list = [res.data]
-      } else if (Array.isArray(res.data)) {
-        list = res.data
+      // 兼容多种后端返回格式
+      if (res.list && Array.isArray(res.list)) {
+        list = res.list
+      } else if (Array.isArray(res)) {
+        list = res
+      } else if (res.purchase_link !== undefined) {
+        list = [res]
       }
       skuSources.value = list
       // 默认选中第一条
@@ -1228,6 +1249,7 @@ function handleCancelOrder() {
 // IPC 事件监听
 let unsubOrderCaptured = null
 let unsubWindowClosed = null
+let unsubAddressFilled = null
 
 function setupPurchaseListeners() {
   if (!window.electronAPI) return
@@ -1247,11 +1269,22 @@ function setupPurchaseListeners() {
       }
     }
   })
+  unsubAddressFilled = window.electronAPI.onUpdate('purchase-address-filled', (data) => {
+    if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      const typeLabel = purchaseInfo.purchaseType === 'dropship' ? '买家收货地址' : '仓库发货地址'
+      ElMessage({
+        message: `${typeLabel}已自动填充（共${data.filledCount}个字段），请核对后提交订单`,
+        type: 'success',
+        duration: 5000
+      })
+    }
+  })
 }
 
 function cleanupPurchaseListeners() {
   if (unsubOrderCaptured) { unsubOrderCaptured(); unsubOrderCaptured = null }
   if (unsubWindowClosed) { unsubWindowClosed(); unsubWindowClosed = null }
+  if (unsubAddressFilled) { unsubAddressFilled(); unsubAddressFilled = null }
 }
 
 async function handlePurchaseSubmit() {
@@ -1374,6 +1407,24 @@ const currentOrder = ref(null)
 function handleView(row) {
   currentOrder.value = row
   drawerVisible.value = true
+}
+
+function handleSmsNotify(order) {
+  console.log('[短信通知] 订单:', order.orderNo, '客户电话:', order.customerPhone)
+  ElMessage.info(`短信通知功能开发中：${order.customerPhone || '无手机号'}`)
+}
+
+function handleEditRemark(order) {
+  ElMessageBox.prompt('请输入备注内容', '编辑商家备注', {
+    confirmButtonText: '保存',
+    cancelButtonText: '取消',
+    inputValue: order.remark || '',
+    inputType: 'textarea'
+  }).then(({ value }) => {
+    order.remark = (value || '').trim()
+    console.log('[备注] 订单:', order.orderNo, '备注:', order.remark)
+    ElMessage.success('备注已保存')
+  }).catch(() => {})
 }
 
 // ==================== 交互方法 ====================
@@ -1759,8 +1810,22 @@ onUnmounted(() => {
   padding: 0 4px;
 }
 
+.ot-col-remark {
+  width: 120px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-sysremark {
+  width: 120px;
+  flex-shrink: 0;
+  text-align: center;
+  padding: 0 4px;
+}
+
 .ot-col-action {
-  width: 90px;
+  width: 120px;
   flex-shrink: 0;
   text-align: center;
   padding: 0 4px;
@@ -1994,6 +2059,8 @@ onUnmounted(() => {
 .order-body-right .ot-col-time,
 .order-body-right .ot-col-logistics,
 .order-body-right .ot-col-aftersale,
+.order-body-right .ot-col-remark,
+.order-body-right .ot-col-sysremark,
 .order-body-right .ot-col-action {
   display: flex;
   flex-direction: column;
@@ -2045,6 +2112,34 @@ onUnmounted(() => {
 .text-muted {
   color: #d9d9d9;
   font-size: 13px;
+}
+
+.remark-text {
+  font-size: 12px;
+  color: #595959;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  text-align: center;
+}
+
+.remark-edit-btn {
+  padding: 2px 0;
+  font-size: 13px;
+}
+
+.sysremark-text {
+  font-size: 12px;
+  color: #8c8c8c;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  text-align: center;
+  font-style: italic;
 }
 
 /* 分页 */

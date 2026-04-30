@@ -108,14 +108,17 @@ const CHECKOUT_URL_PATTERNS = {
 }
 
 /**
- * 生成地址自动填充脚本（平台无关的通用策略 + 平台特定策略）
- * 策略：在结算页面查找收货地址区域的输入框，尝试填入目标地址
+ * 生成地址自动填充脚本（多阶段策略）
+ * 阶段1: 淘宝特定选择器（J_Name等）
+ * 阶段2: 宽泛的label/上下文文本匹配
+ * 阶段3: 点击"使用新地址"按钮触发表单显示
+ * 阶段4: 若全部失败，展示浮动提示帮助用户手动复制
  */
 function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform) {
-  // 将参数安全编码到脚本中
-  const name = (shippingName || '').replace(/'/g, "\\'").replace(/\\/g, '\\\\')
-  const phone = (shippingPhone || '').replace(/'/g, "\\'").replace(/\\/g, '\\\\')
-  const addr = (shippingAddress || '').replace(/'/g, "\\'").replace(/\\/g, '\\\\')
+  // 先转义反斜杠，再转义单引号（顺序很重要）
+  const name = (shippingName || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const phone = (shippingPhone || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  const addr = (shippingAddress || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")
 
   return `
 (function() {
@@ -125,86 +128,299 @@ function buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress
   var targetAddr = '${addr}';
   if (!targetName && !targetPhone && !targetAddr) return;
 
-  console.log('[AddressAutoFill] Attempting to fill address:', targetName, targetPhone, targetAddr);
+  console.log('[AddressAutoFill] Start. platform=${platform}, name=' + targetName + ', phone=' + targetPhone + ', addr=' + targetAddr.substring(0, 30));
 
-  // 通用辅助：模拟用户输入（触发框架的数据绑定）
-  function simulateInput(el, value) {
+  // ---- 辅助函数 ----
+
+  // 模拟输入（兼容React/Vue等框架的数据绑定）
+  function simulateType(el, value) {
     if (!el || !value) return false;
-    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    nativeInputValueSetter.call(el, value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));
-    return true;
-  }
-
-  // 通用辅助：模拟textarea输入
-  function simulateTextareaInput(el, value) {
-    if (!el || !value) return false;
-    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
-    nativeSetter.call(el, value);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));
-    return true;
-  }
-
-  // 通用策略：根据 placeholder/label 匹配输入框
-  function tryGenericFill() {
-    var inputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea');
-    var filled = 0;
-    for (var i = 0; i < inputs.length; i++) {
-      var el = inputs[i];
-      var ph = (el.placeholder || '').toLowerCase();
-      var ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-      var name = (el.name || '').toLowerCase();
-      var hint = ph + ' ' + ariaLabel + ' ' + name;
-
-      if (hint.match(/收货人|姓名|收件人|consignee|receiver|name/) && targetName) {
-        if (el.tagName === 'TEXTAREA') simulateTextareaInput(el, targetName);
-        else simulateInput(el, targetName);
-        filled++;
-      } else if (hint.match(/手机|电话|联系|phone|mobile|tel/) && targetPhone) {
-        if (el.tagName === 'TEXTAREA') simulateTextareaInput(el, targetPhone);
-        else simulateInput(el, targetPhone);
-        filled++;
-      } else if (hint.match(/详细地址|收货地址|街道|address|detail/) && targetAddr) {
-        if (el.tagName === 'TEXTAREA') simulateTextareaInput(el, targetAddr);
-        else simulateInput(el, targetAddr);
-        filled++;
+    try {
+      var proto = el.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (setter && setter.set) {
+        setter.set.call(el, value);
+      } else {
+        el.value = value;
       }
+    } catch(e) {
+      el.value = value;
+    }
+    el.focus();
+    el.dispatchEvent(new Event('focus', { bubbles: true }));
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    // React 16+ 需要额外的合成事件
+    try {
+      var nativeEvent = new Event('input', { bubbles: true });
+      Object.defineProperty(nativeEvent, 'target', { writable: false, value: el });
+      Object.defineProperty(nativeEvent, 'currentTarget', { writable: false, value: el });
+      el.dispatchEvent(nativeEvent);
+    } catch(e) {}
+    return true;
+  }
+
+  // 判断元素是否可见
+  function isVisible(el) {
+    if (!el) return false;
+    if (el.offsetParent === null && getComputedStyle(el).position !== 'fixed') return false;
+    var rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  // 获取输入框周围的上下文文本（用于匹配字段含义）
+  function getContextText(el) {
+    var texts = [];
+    // placeholder / aria-label / name / id
+    if (el.placeholder) texts.push(el.placeholder);
+    if (el.getAttribute('aria-label')) texts.push(el.getAttribute('aria-label'));
+    if (el.name) texts.push(el.name);
+    if (el.id) texts.push(el.id);
+    // 关联的 <label for="...">
+    if (el.id) {
+      var lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+      if (lbl) texts.push(lbl.textContent);
+    }
+    // 父级 <label> 包裹
+    var parentLabel = el.closest('label');
+    if (parentLabel) texts.push(parentLabel.textContent);
+    // 前面的兄弟元素文本
+    var prev = el.previousElementSibling;
+    if (prev) texts.push(prev.textContent);
+    // 父元素中排除输入框后的文本
+    var parent = el.parentElement;
+    if (parent) {
+      var clone = parent.cloneNode(true);
+      var kids = clone.querySelectorAll('input, textarea, select');
+      kids.forEach(function(k) { k.remove(); });
+      var pt = clone.textContent.trim();
+      if (pt.length < 50) texts.push(pt);
+    }
+    // 最近的表单项容器
+    var wrapper = el.closest('.form-item, .form-group, .field, .item, [class*="form-item"], [class*="field-item"], [class*="addr-item"], [class*="address-item"], .next-form-item');
+    if (wrapper) {
+      var wClone = wrapper.cloneNode(true);
+      var wKids = wClone.querySelectorAll('input, textarea, select');
+      wKids.forEach(function(k) { k.remove(); });
+      var wt = wClone.textContent.trim();
+      if (wt.length < 80) texts.push(wt);
+    }
+    return texts.join(' ');
+  }
+
+  // ---- 阶段1: 平台特定选择器 ----
+  function tryPlatformSpecific() {
+    var filled = 0;
+    // 淘宝/天猫常用选择器
+    var tbNameSelectors = '#J_Name, #consignee-name, input[name="receiverName"], input[name="consigneeName"], input[data-meta="Field"][aria-label*="收货人"], input[aria-label*="收货人"]';
+    var tbPhoneSelectors = '#J_Phone, #J_Mobile, input[name="receiverMobile"], input[name="receiverPhone"], input[name="consigneeMobile"], input[data-meta="Field"][aria-label*="手机"], input[aria-label*="手机"]';
+    var tbAddrSelectors = '#J_DetailAddr, #J_Addr, textarea[name="receiverAddress"], textarea[name="detailAddress"], input[name="receiverAddress"], textarea[data-meta="Field"][aria-label*="地址"], textarea[aria-label*="地址"]';
+
+    if (targetName) {
+      var nameEl = document.querySelector(tbNameSelectors);
+      if (nameEl && isVisible(nameEl)) { simulateType(nameEl, targetName); filled++; console.log('[AddressAutoFill] Phase1: filled name via platform selector'); }
+    }
+    if (targetPhone) {
+      var phoneEl = document.querySelector(tbPhoneSelectors);
+      if (phoneEl && isVisible(phoneEl)) { simulateType(phoneEl, targetPhone); filled++; console.log('[AddressAutoFill] Phase1: filled phone via platform selector'); }
+    }
+    if (targetAddr) {
+      var addrEl = document.querySelector(tbAddrSelectors);
+      if (addrEl && isVisible(addrEl)) { simulateType(addrEl, targetAddr); filled++; console.log('[AddressAutoFill] Phase1: filled address via platform selector'); }
     }
     return filled;
   }
 
-  // 延迟执行，等待页面渲染完成
-  var attempts = 0;
-  var maxAttempts = 10;
-  function tryFill() {
-    attempts++;
-    var filled = tryGenericFill();
-    if (filled > 0) {
-      window.__addressAutoFillDone = true;
-      window.__addressAutoFillResult = filled;
-      console.log('[AddressAutoFill] Success! Filled ' + filled + ' fields on attempt ' + attempts);
-      // 在页面中显示浮动提示
-      var toast = document.createElement('div');
-      toast.innerHTML = '\u2705 \u5730\u5740\u5df2\u81ea\u52a8\u586b\u5145\uff08\u5171' + filled + '\u4e2a\u5b57\u6bb5\uff09\uff0c\u8bf7\u6838\u5bf9\u540e\u63d0\u4ea4\u8ba2\u5355';
-      toast.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:999999;background:linear-gradient(135deg,#52c41a,#73d13d);color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:500;box-shadow:0 4px 16px rgba(82,196,26,0.4);pointer-events:none;animation:addrToastIn 0.4s ease;';
-      var style = document.createElement('style');
-      style.textContent = '@keyframes addrToastIn{from{opacity:0;transform:translateX(-50%) translateY(-20px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}';
-      document.head.appendChild(style);
-      document.body.appendChild(toast);
-      setTimeout(function(){ toast.style.transition='opacity 0.5s'; toast.style.opacity='0'; }, 5000);
-      setTimeout(function(){ if(toast.parentNode) toast.parentNode.removeChild(toast); }, 5500);
-    } else if (attempts < maxAttempts) {
-      setTimeout(tryFill, 1500);
-    } else {
-      console.log('[AddressAutoFill] Could not find address fields after ' + maxAttempts + ' attempts');
+  // ---- 阶段2: 上下文文本智能匹配 ----
+  function tryContextMatch() {
+    var allInputs = document.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="image"]):not([type="file"]):not([type="password"]), textarea');
+    var nameField = null, phoneField = null, addrField = null;
+    var filled = 0;
+
+    for (var i = 0; i < allInputs.length; i++) {
+      var el = allInputs[i];
+      if (!isVisible(el)) continue;
+      var ctx = getContextText(el);
+      console.log('[AddressAutoFill] Phase2: input[' + i + '] ctx="' + ctx.substring(0, 80).replace(/\\n/g, ' ') + '" tag=' + el.tagName);
+
+      if (!nameField && ctx.match(/收货人|姓名|收件人|联系人|consignee|receiver(?!Addr)/i) && targetName) {
+        nameField = el;
+      } else if (!phoneField && ctx.match(/手机|电话|联系电话|手机号|mobile|phone|tel/i) && targetPhone) {
+        phoneField = el;
+      } else if (!addrField && ctx.match(/详细地址|收货地址|街道|所在地址|地址信息|detailaddr|address/i) && targetAddr) {
+        addrField = el;
+      }
+    }
+
+    if (nameField) { simulateType(nameField, targetName); filled++; console.log('[AddressAutoFill] Phase2: filled name'); }
+    if (phoneField) { simulateType(phoneField, targetPhone); filled++; console.log('[AddressAutoFill] Phase2: filled phone'); }
+    if (addrField) { simulateType(addrField, targetAddr); filled++; console.log('[AddressAutoFill] Phase2: filled address'); }
+    return filled;
+  }
+
+  // ---- 阶段3: 点击"使用新地址"按钮 ----
+  var expandedAddrList = false;
+  function tryClickNewAddress() {
+    // 第一步：先尝试展开地址列表（淘宝默认折叠，"使用新地址"可能在折叠区内）
+    if (!expandedAddrList) {
+      var expandPatterns = ['显示全部地址', '展开全部', '更多地址', '全部地址'];
+      var allEls = document.querySelectorAll('a, span, div, em, p');
+      for (var e = 0; e < allEls.length; e++) {
+        var txt = (allEls[e].textContent || '').trim();
+        if (txt.length > 20) continue;
+        for (var ep = 0; ep < expandPatterns.length; ep++) {
+          if (txt.indexOf(expandPatterns[ep]) !== -1) {
+            console.log('[AddressAutoFill] Phase3: expanding addr list, clicking "' + txt + '"');
+            allEls[e].click();
+            expandedAddrList = true;
+            return 'expanded';
+          }
+        }
+      }
+    }
+    // 第二步：查找"使用新地址"按钮
+    var triggerPatterns = ['使用新地址', '新增收货地址', '添加新地址', '添加地址', '新增地址', '换个地址', '管理收货地址'];
+    var candidates = document.querySelectorAll('a, button, span, div, em, i, p, li');
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var text = (el.textContent || '').trim();
+      if (text.length > 20) continue;
+      for (var j = 0; j < triggerPatterns.length; j++) {
+        if (text.indexOf(triggerPatterns[j]) !== -1) {
+          console.log('[AddressAutoFill] Phase3: clicking "' + text + '"');
+          el.click();
+          return 'clicked';
+        }
+      }
+    }
+    var classPatterns = ['.addr-add', '.add-address', '.add-addr', '[data-action="add"]', '.new-addr-btn', '.J_AddNewAddr'];
+    for (var k = 0; k < classPatterns.length; k++) {
+      var btn = document.querySelector(classPatterns[k]);
+      if (btn && isVisible(btn)) {
+        console.log('[AddressAutoFill] Phase3: clicking class=' + classPatterns[k]);
+        btn.click();
+        return 'clicked';
+      }
+    }
+    return false;
+  }
+
+  // ---- 成功提示 ----
+  function showSuccessToast(filled) {
+    var toast = document.createElement('div');
+    toast.innerHTML = '\\u2705 地址已自动填充（共' + filled + '个字段），请核对后提交订单';
+    toast.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:999999;background:linear-gradient(135deg,#52c41a,#73d13d);color:#fff;padding:12px 24px;border-radius:8px;font-size:14px;font-weight:500;box-shadow:0 4px 16px rgba(82,196,26,0.4);pointer-events:none;animation:addrToastIn 0.4s ease;';
+    var style = document.createElement('style');
+    style.textContent = '@keyframes addrToastIn{from{opacity:0;transform:translateX(-50%) translateY(-20px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}';
+    document.head.appendChild(style);
+    document.body.appendChild(toast);
+    setTimeout(function(){ toast.style.transition='opacity 0.5s'; toast.style.opacity='0'; }, 5000);
+    setTimeout(function(){ if(toast.parentNode) toast.parentNode.removeChild(toast); }, 5500);
+  }
+
+  // ---- 失败时显示地址信息浮窗，方便用户手动复制 ----
+  function showFallbackPanel() {
+    console.log('[AddressAutoFill] All attempts failed, showing fallback panel');
+    // 移除已有面板
+    var old = document.getElementById('__addrFillPanel');
+    if (old) old.parentNode.removeChild(old);
+
+    var panel = document.createElement('div');
+    panel.id = '__addrFillPanel';
+    panel.style.cssText = 'position:fixed;bottom:12px;left:12px;z-index:999999;background:#fff;border:2px solid #e6a23c;border-radius:10px;padding:14px 18px;box-shadow:0 4px 20px rgba(0,0,0,0.15);font-size:13px;line-height:1.8;max-width:340px;font-family:system-ui,sans-serif;';
+    var html = '<div style="font-weight:600;color:#e6a23c;margin-bottom:6px;">\\u26A0 地址未能自动填充，请手动填写：</div>';
+    if (targetName) html += '<div><b>收货人：</b><span data-af="name" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetName + '</span></div>';
+    if (targetPhone) html += '<div><b>手机号：</b><span data-af="phone" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetPhone + '</span></div>';
+    if (targetAddr) html += '<div><b>地　址：</b><span data-af="addr" style="cursor:pointer;color:#409eff;border-bottom:1px dashed #409eff" title="点击复制">' + targetAddr + '</span></div>';
+    html += '<div style="color:#909399;font-size:11px;margin-top:6px;">点击蓝色文字可复制</div>';
+    html += '<div style="text-align:right;margin-top:8px;"><span data-af="close" style="cursor:pointer;color:#909399;font-size:12px;padding:4px 8px;">关闭 X</span></div>';
+    panel.innerHTML = html;
+    document.body.appendChild(panel);
+
+    // 关闭按钮 - 直接用 onclick 赋值（比 addEventListener 更可靠）
+    var closeBtn = panel.querySelector('[data-af="close"]');
+    if (closeBtn) {
+      closeBtn.onclick = function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+      };
+    }
+
+    // 点击复制功能
+    var copySpans = panel.querySelectorAll('[data-af="name"], [data-af="phone"], [data-af="addr"]');
+    for (var ci = 0; ci < copySpans.length; ci++) {
+      (function(span) {
+        span.onclick = function() {
+          var txt = span.textContent.replace(' \\u2713\\u5df2\\u590d\\u5236', '');
+          navigator.clipboard.writeText(txt).then(function() {
+            span.style.color = '#67c23a';
+            span.textContent = txt + ' \\u2713\\u5df2\\u590d\\u5236';
+            setTimeout(function() { span.style.color = '#409eff'; span.textContent = txt; }, 1500);
+          }).catch(function() {});
+        };
+      })(copySpans[ci]);
     }
   }
 
-  // 首次延迟2秒等结算页面加载
+  // ---- 主流程：多阶段重试 ----
+  var attempts = 0;
+  var maxAttempts = 15;
+  var phase3Done = false;
+
+  function tryFill() {
+    attempts++;
+    console.log('[AddressAutoFill] Attempt ' + attempts + '/' + maxAttempts);
+
+    // 阶段1: 平台特定选择器
+    var filled = tryPlatformSpecific();
+    if (filled > 0) {
+      window.__addressAutoFillDone = true;
+      window.__addressAutoFillResult = filled;
+      console.log('[AddressAutoFill] Success via Phase1! filled=' + filled);
+      showSuccessToast(filled);
+      return;
+    }
+
+    // 阶段2: 上下文文本匹配
+    filled = tryContextMatch();
+    if (filled > 0) {
+      window.__addressAutoFillDone = true;
+      window.__addressAutoFillResult = filled;
+      console.log('[AddressAutoFill] Success via Phase2! filled=' + filled);
+      showSuccessToast(filled);
+      return;
+    }
+
+    // 阶段3: 尝试展开地址列表 / 点击"使用新地址"（前5次尝试内）
+    if (!phase3Done && attempts <= 5) {
+      var result = tryClickNewAddress();
+      if (result === 'expanded') {
+        // 展开了地址列表，等一下再找"使用新地址"
+        setTimeout(tryFill, 2000);
+        return;
+      } else if (result === 'clicked') {
+        // 点击了"使用新地址"，等表单出现
+        phase3Done = true;
+        setTimeout(tryFill, 2500);
+        return;
+      }
+    }
+
+    // 继续重试
+    if (attempts < maxAttempts) {
+      setTimeout(tryFill, 2000);
+    } else {
+      // 全部失败，显示回退面板
+      window.__addressAutoFillResult = -1;
+      showFallbackPanel();
+    }
+  }
+
+  // 首次延迟2秒等结算页面加载完成
   setTimeout(tryFill, 2000);
 })()
 `
@@ -362,6 +578,46 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const partitionName = `persist:purchase-${accountId}`
     console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${purchaseUrl}`)
 
+    // 从服务器加载Cookie并注入到session
+    const ses = session.fromPartition(partitionName)
+    try {
+      const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookie`, {
+        method: 'GET'
+      })
+      if (cookieRes.statusCode === 200 && cookieRes.data) {
+        const json = JSON.parse(cookieRes.data)
+        if (json.code === 0 && json.data && json.data.cookie_data) {
+          const cookies = typeof json.data.cookie_data === 'string'
+            ? JSON.parse(json.data.cookie_data)
+            : json.data.cookie_data
+          if (Array.isArray(cookies) && cookies.length > 0) {
+            let injected = 0
+            for (const ck of cookies) {
+              try {
+                const cookieDetails = {
+                  url: `https://${ck.domain ? ck.domain.replace(/^\./, '') : 'taobao.com'}${ck.path || '/'}`,
+                  name: ck.name,
+                  value: ck.value,
+                  domain: ck.domain,
+                  path: ck.path || '/',
+                  secure: ck.secure || false,
+                  httpOnly: ck.httpOnly || false
+                }
+                if (ck.expirationDate && ck.expirationDate > 0) {
+                  cookieDetails.expirationDate = ck.expirationDate
+                }
+                await ses.cookies.set(cookieDetails)
+                injected++
+              } catch (e) { /* skip invalid cookies */ }
+            }
+            console.log(`[PurchaseCapture] Cookie restored: ${injected}/${cookies.length} from server`)
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[PurchaseCapture] Cookie restore failed:', e.message)
+    }
+
     const win = new BrowserWindow({
       width: 1280,
       height: 860,
@@ -445,6 +701,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         if (isCheckoutPage(currentUrl, platform)) {
           const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
           win.webContents.executeJavaScript(fillScript).catch(() => {})
+          pollAddressFillResult(win, mainWindow, purchaseNo)
           console.log(`[PurchaseCapture] Address auto-fill injected for checkout page: ${currentUrl.substring(0, 80)}`)
         }
       }
@@ -460,7 +717,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           if (win.isDestroyed() || resolved) return
           const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
           win.webContents.executeJavaScript(fillScript).catch(() => {})
-          pollAddressFillResult(win, mainWindow, purchaseNo)
           console.log(`[PurchaseCapture] Address auto-fill injected after navigation: ${url.substring(0, 80)}`)
         }, 3000)
       }
@@ -475,6 +731,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           if (win.isDestroyed() || resolved) return
           const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
           win.webContents.executeJavaScript(fillScript).catch(() => {})
+          pollAddressFillResult(win, mainWindow, purchaseNo)
           console.log(`[PurchaseCapture] Address auto-fill injected after in-page navigation: ${url.substring(0, 80)}`)
         }, 3000)
       }
@@ -577,5 +834,4 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform) {
   }
 }
 
-module.exports = { registerPurchaseOrderCaptureIpc }
 module.exports = { registerPurchaseOrderCaptureIpc }

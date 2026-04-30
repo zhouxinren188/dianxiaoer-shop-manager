@@ -58,6 +58,7 @@ async function initDB() {
         id INT PRIMARY KEY AUTO_INCREMENT,
         name VARCHAR(100) NOT NULL,
         platform VARCHAR(20) DEFAULT '',
+        store_type VARCHAR(20) DEFAULT '',
         account VARCHAR(100) DEFAULT '',
         password VARCHAR(200) DEFAULT '',
         merchant_id VARCHAR(50) DEFAULT '',
@@ -71,6 +72,10 @@ async function initDB() {
     // 兼容已存在的 stores 表：添加 password 字段
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN password VARCHAR(200) DEFAULT '' AFTER account`)
+    } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 stores 表：添加 store_type 字段
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN store_type VARCHAR(20) DEFAULT '' AFTER platform`)
     } catch (e) { /* 字段已存在 */ }
 
     // 仓库表

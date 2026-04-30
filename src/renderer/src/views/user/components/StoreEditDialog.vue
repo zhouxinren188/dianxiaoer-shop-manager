@@ -19,6 +19,12 @@
           <el-option label="抖音小店" value="douyin" />
         </el-select>
       </el-form-item>
+      <el-form-item label="店铺类型" prop="store_type">
+        <el-select v-model="form.store_type" placeholder="请选择店铺类型" style="width: 100%">
+          <el-option label="POP店铺" value="pop" />
+          <el-option label="供应商店铺" value="supplier" />
+        </el-select>
+      </el-form-item>
       <el-form-item label="登录账号">
         <el-input v-model="form.account" placeholder="请输入登录账号" />
       </el-form-item>
@@ -75,6 +81,7 @@ const formRef = ref(null)
 const form = reactive({
   name: '',
   platform: '',
+  store_type: '',
   account: '',
   password: '',
   merchant_id: '',
@@ -95,6 +102,7 @@ watch(() => props.visible, (val) => {
       Object.assign(form, {
         name: props.storeData.name || '',
         platform: props.storeData.platform || '',
+        store_type: props.storeData.store_type || '',
         account: props.storeData.account || '',
         password: props.storeData.password || '',
         merchant_id: props.storeData.merchant_id || '',
@@ -105,7 +113,7 @@ watch(() => props.visible, (val) => {
     } else {
       isEdit.value = false
       Object.assign(form, {
-        name: '', platform: '', account: '', password: '',
+        name: '', platform: '', store_type: '', account: '', password: '',
         merchant_id: '', shop_id: '', tags: [], status: 'enabled'
       })
     }

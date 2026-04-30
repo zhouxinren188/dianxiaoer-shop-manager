@@ -542,7 +542,7 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
 // 查询店铺列表（按权限过滤）
 app.get('/api/stores', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, name, platform, store_type, status, online } = req.query
+    const { page = 1, pageSize = 10, name, platform, status, online } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
@@ -555,7 +555,6 @@ app.get('/api/stores', async (req, res) => {
 
     if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`) }
     if (platform) { sql += ' AND platform = ?'; params.push(platform) }
-    if (store_type) { sql += ' AND store_type = ?'; params.push(store_type) }
     if (status) { sql += ' AND status = ?'; params.push(status) }
     if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
 
@@ -594,11 +593,11 @@ app.get('/api/stores/:id', async (req, res) => {
 app.post('/api/stores', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { name, platform, store_type, account, password, merchant_id, shop_id, tags, status } = req.body
+    const { name, platform, account, password, merchant_id, shop_id, tags, status } = req.body
     const [result] = await pool.execute(
-      `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [name || '', platform || '', store_type || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled', ownerId]
+      `INSERT INTO stores (name, platform, account, password, merchant_id, shop_id, tags, status, owner_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [name || '', platform || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled', ownerId]
     )
     res.json(ok({ id: result.insertId, ...req.body }))
   } catch (err) {
@@ -615,7 +614,7 @@ app.put('/api/stores/:id', async (req, res) => {
       return res.status(403).json(fail('无权修改此店铺'))
     }
 
-    const allowed = ['name', 'platform', 'store_type', 'account', 'password', 'merchant_id', 'shop_id', 'tags', 'status']
+    const allowed = ['name', 'platform', 'account', 'password', 'merchant_id', 'shop_id', 'tags', 'status']
     const fields = []
     const values = []
     for (const [key, val] of Object.entries(req.body)) {
@@ -1110,6 +1109,212 @@ app.get('/api/sales-orders/:orderId', async (req, res) => {
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
+})
+
+
+
+// ============ SKU 采购配置 ============
+
+app.get('/api/sku-purchase-config', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { sku_id } = req.query
+    let sql = 'SELECT * FROM sku_purchase_config WHERE owner_id = ?'
+    const params = [ownerId]
+    if (sku_id) { sql += ' AND sku_id = ?'; params.push(sku_id) }
+    sql += ' ORDER BY id DESC'
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok({ list: rows, total: rows.length }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/sku-purchase-config', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { id, sku_id, platform, purchase_link, purchase_price, remark } = req.body
+    if (!sku_id) return res.json(fail('sku_id 不能为空'))
+    if (id) {
+      await pool.execute(
+        'UPDATE sku_purchase_config SET platform=?, purchase_link=?, purchase_price=?, remark=? WHERE id=? AND owner_id=?',
+        [platform||'', purchase_link||'', purchase_price||0, remark||'', id, ownerId]
+      )
+      res.json(ok({ id }))
+    } else {
+      const [result] = await pool.execute(
+        'INSERT INTO sku_purchase_config (sku_id, platform, purchase_link, purchase_price, remark, owner_id) VALUES (?,?,?,?,?,?)',
+        [sku_id, platform||'', purchase_link||'', purchase_price||0, remark||'', ownerId]
+      )
+      res.json(ok({ id: result.insertId }))
+    }
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.delete('/api/sku-purchase-config/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    await pool.execute('DELETE FROM sku_purchase_config WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+
+// ============ 采购账号管理 ============
+
+app.get('/api/purchase-accounts', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [rows] = await pool.execute(
+      'SELECT id, account, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
+      [ownerId]
+    )
+    res.json(ok({ list: rows, total: rows.length }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/purchase-accounts', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account, password, platform } = req.body
+    if (!platform) return res.json(fail('platform 不能为空'))
+    const [result] = await pool.execute(
+      'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
+      [account||'', password||'', platform, ownerId]
+    )
+    res.json(ok({ id: result.insertId }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-accounts/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account, password, platform } = req.body
+    const fields = []; const values = []
+    if (account !== undefined) { fields.push('account=?'); values.push(account) }
+    if (password !== undefined) { fields.push('password=?'); values.push(password) }
+    if (platform !== undefined) { fields.push('platform=?'); values.push(platform) }
+    if (!fields.length) return res.json(fail('没有要修改的字段'))
+    values.push(req.params.id, ownerId)
+    await pool.execute('UPDATE purchase_accounts SET ' + fields.join(',') + ' WHERE id=? AND owner_id=?', values)
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.delete('/api/purchase-accounts/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    await pool.execute('DELETE FROM purchase_cookies WHERE account_id=?', [req.params.id])
+    await pool.execute('DELETE FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const accountId = req.params.id
+    const { cookie_data, platform } = req.body
+    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [accountId, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
+    await pool.execute(
+      'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
+      [accountId, typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data||[]), platform||'']
+    )
+    await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.get('/api/purchase-accounts/:id/cookies', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
+    const [rows] = await pool.execute('SELECT * FROM purchase_cookies WHERE account_id=?', [req.params.id])
+    res.json(ok(rows.length ? rows[0] : null))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-accounts/:id/status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { online } = req.body
+    await pool.execute('UPDATE purchase_accounts SET online=? WHERE id=? AND owner_id=?', [online?1:0, req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+
+// ============ 采购订单 ============
+
+app.post('/api/purchase-orders', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { purchase_no, sales_order_id, sales_order_no, goods_name, sku, quantity,
+            source_url, platform, purchase_price, remark,
+            purchase_type, shipping_name, shipping_phone, shipping_address } = req.body
+    if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
+    await pool.execute(
+      `INSERT INTO purchase_orders
+        (purchase_no, sales_order_id, sales_order_no, goods_name, sku, quantity,
+         source_url, platform, purchase_price, remark,
+         purchase_type, shipping_name, shipping_phone, shipping_address,
+         status, owner_id)
+       VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?)
+       ON DUPLICATE KEY UPDATE
+         sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
+         goods_name=VALUES(goods_name), sku=VALUES(sku), quantity=VALUES(quantity),
+         source_url=VALUES(source_url), platform=VALUES(platform),
+         purchase_price=VALUES(purchase_price), remark=VALUES(remark),
+         purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
+         shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
+         updated_at=NOW()`,
+      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', sku||'', quantity||0,
+       source_url||'', platform||'', purchase_price||0, remark||'',
+       purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'',
+       ownerId]
+    )
+    res.json(ok({ purchase_no }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { platform_order_no } = req.body
+    if (!platform_order_no) return res.json(fail('platform_order_no 不能为空'))
+    await pool.execute(
+      'UPDATE purchase_orders SET platform_order_no=?, status=? WHERE purchase_no=? AND owner_id=?',
+      [platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
+    )
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.get('/api/purchase-orders', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { page=1, pageSize=20, status, platform } = req.query
+    let sql = 'SELECT * FROM purchase_orders WHERE owner_id=?'
+    const params = [ownerId]
+    if (status) { sql += ' AND status=?'; params.push(status) }
+    if (platform) { sql += ' AND platform=?'; params.push(platform) }
+    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
+    const [[{ total }]] = await pool.execute(countSql, params)
+    const limit = Math.max(1, parseInt(pageSize,10)||20)
+    const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
+    sql += ' ORDER BY id DESC LIMIT ' + limit + ' OFFSET ' + offset
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok({ list: rows, total }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-orders/:id/status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { status } = req.body
+    await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 // ============ 健康检查 ============
