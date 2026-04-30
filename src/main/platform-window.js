@@ -42,7 +42,8 @@ function httpRequest(url, options = {}) {
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
       headers: options.headers || {},
-      timeout: 10000
+      timeout: 10000,
+      rejectUnauthorized: false
     }
 
     const req = mod.request(reqOptions, (res) => {

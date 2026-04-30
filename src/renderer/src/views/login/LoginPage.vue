@@ -243,14 +243,17 @@ async function handleLogin() {
         })
       })
       const res = await response.json()
-      if (res && res.code === 0 && res.data && res.data.accessToken) {
-        const user = res.data.user
-        localStorage.setItem('accessToken', res.data.accessToken)
+      const isOldFormat = res && res.code === 0 && res.data && res.data.accessToken
+      const isNewFormat = res && res.success === true && res.accessToken
+      if (isOldFormat || isNewFormat) {
+        const token = isOldFormat ? res.data.accessToken : res.accessToken
+        const user = isOldFormat ? res.data.user : res.user
+        localStorage.setItem('accessToken', token)
         localStorage.setItem('currentUser', user.username)
         localStorage.setItem('userInfo', JSON.stringify({
-          userType: user.userType,
-          role: user.role,
-          realName: user.realName
+          userType: user.userType || '',
+          role: user.role || '',
+          realName: user.realName || ''
         }))
         if (loginForm.remember) {
           localStorage.setItem('rememberedUser', loginForm.username)

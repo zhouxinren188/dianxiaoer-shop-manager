@@ -130,6 +130,91 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 供店订单表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS supply_orders (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        order_id VARCHAR(50) NOT NULL,
+        b_order_id VARCHAR(50) DEFAULT '',
+        order_date VARCHAR(30) DEFAULT '',
+        finish_time VARCHAR(30) DEFAULT '',
+        stock_time VARCHAR(30) DEFAULT '',
+        total_amount DECIMAL(12,2) DEFAULT 0,
+        goods_amount DECIMAL(12,2) DEFAULT 0,
+        freight_price DECIMAL(12,2) DEFAULT 0,
+        order_state INT DEFAULT 0,
+        status_text VARCHAR(30) DEFAULT '',
+        jd_order_state_desc VARCHAR(30) DEFAULT '',
+        paid TINYINT DEFAULT 0,
+        wait_pay TINYINT DEFAULT 0,
+        lock_flag TINYINT DEFAULT 0,
+        dealer_code VARCHAR(50) DEFAULT '',
+        dealer_name VARCHAR(100) DEFAULT '',
+        supplier_name VARCHAR(100) DEFAULT '',
+        receiver_name VARCHAR(50) DEFAULT '',
+        receiver_phone VARCHAR(30) DEFAULT '',
+        receiver_address VARCHAR(500) DEFAULT '',
+        receiver_full_address VARCHAR(500) DEFAULT '',
+        shipment_num VARCHAR(50) DEFAULT '',
+        shipment_company_name VARCHAR(50) DEFAULT '',
+        sku_id VARCHAR(50) DEFAULT '',
+        product_name VARCHAR(300) DEFAULT '',
+        product_image VARCHAR(500) DEFAULT '',
+        unit_price DECIMAL(12,2) DEFAULT 0,
+        jd_price DECIMAL(12,2) DEFAULT 0,
+        quantity INT DEFAULT 0,
+        outer_sku_id VARCHAR(50) DEFAULT '',
+        sku_count INT DEFAULT 1,
+        all_skus JSON,
+        order_source_desc VARCHAR(50) DEFAULT '',
+        source_type VARCHAR(30) DEFAULT '',
+        raw_data LONGTEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_order (store_id, order_id),
+        KEY idx_store_status (store_id, status_text),
+        KEY idx_order_date (order_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 销售订单表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS sales_orders (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        order_id VARCHAR(50) NOT NULL,
+        order_state INT DEFAULT 0,
+        status_text VARCHAR(30) DEFAULT '',
+        order_time VARCHAR(30) DEFAULT '',
+        payment_time VARCHAR(30) DEFAULT '',
+        ship_time VARCHAR(30) DEFAULT '',
+        finish_time VARCHAR(30) DEFAULT '',
+        total_amount DECIMAL(12,2) DEFAULT 0,
+        goods_amount DECIMAL(12,2) DEFAULT 0,
+        shipping_fee DECIMAL(12,2) DEFAULT 0,
+        payment_method VARCHAR(30) DEFAULT '',
+        buyer_name VARCHAR(50) DEFAULT '',
+        buyer_phone VARCHAR(30) DEFAULT '',
+        buyer_address VARCHAR(500) DEFAULT '',
+        logistics_company VARCHAR(50) DEFAULT '',
+        logistics_no VARCHAR(100) DEFAULT '',
+        sku_id VARCHAR(50) DEFAULT '',
+        product_name VARCHAR(300) DEFAULT '',
+        product_image VARCHAR(500) DEFAULT '',
+        unit_price DECIMAL(12,2) DEFAULT 0,
+        quantity INT DEFAULT 0,
+        item_count INT DEFAULT 1,
+        all_items JSON,
+        raw_data LONGTEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_order (store_id, order_id),
+        KEY idx_store_status (store_id, status_text),
+        KEY idx_order_time (order_time)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
     if (rows[0].count === 0) {

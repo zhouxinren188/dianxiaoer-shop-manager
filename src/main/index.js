@@ -5,6 +5,7 @@ const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = r
 const { registerPlatformWindowIpc } = require('./platform-window')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
+const { registerSalesOrderIpc } = require('./sales-order-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 
@@ -44,10 +45,21 @@ function createWindow() {
         event.preventDefault()
       }
     })
-    mainWindow.webContents.on('context-menu', (event) => {
-      event.preventDefault()
-    })
   }
+
+  // 右键菜单（剪切/复制/粘贴/全选/刷新）
+  mainWindow.webContents.on('context-menu', (event, params) => {
+    const menu = Menu.buildFromTemplate([
+      { label: '剪切', role: 'cut', enabled: params.editFlags.canCut },
+      { label: '复制', role: 'copy', enabled: params.editFlags.canCopy },
+      { label: '粘贴', role: 'paste', enabled: params.editFlags.canPaste },
+      { type: 'separator' },
+      { label: '全选', role: 'selectAll' },
+      { type: 'separator' },
+      { label: '刷新页面', role: 'reload' }
+    ])
+    menu.popup()
+  })
 
   // 加载页面
   if (app.isPackaged) {
@@ -144,6 +156,9 @@ registerPacketCaptureIpc()
 
 // 注册供销订单获取 IPC
 registerSupplyOrderIpc()
+
+// 注册销售订单获取 IPC
+registerSalesOrderIpc()
 
 app.whenReady().then(async () => {
   // 启动本地后端服务

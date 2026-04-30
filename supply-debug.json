@@ -1,0 +1,970 @@
+{
+  "timestamp": "2026-04-30T14:16:26.514Z",
+  "storeId": 4,
+  "phase": "success",
+  "ordersCount": 100,
+  "totalCount": 801,
+  "apiUrl": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558584497",
+  "sampleOrders": [
+    {
+      "orderId": "3484486016089668",
+      "bOrderId": "330479166515",
+      "orderDate": "2026-04-30 21:36:09",
+      "finishTime": "",
+      "stockTime": "",
+      "totalAmount": 26.65,
+      "goodsAmount": 26.65,
+      "freightPrice": 0,
+      "orderState": 2,
+      "statusText": "已取消",
+      "jdOrderStateDesc": "已取消",
+      "paid": false,
+      "waitPay": true,
+      "lock": 1,
+      "dealerCode": "234416935",
+      "dealerName": "盈趣屋百货店",
+      "supplierName": "金榜单丨集运仓店",
+      "receiverName": "陆***",
+      "receiverPhone": "1*******500",
+      "receiverAddress": "江苏无锡市锡山区***",
+      "receiverFullAddress": "美的云开东方15栋36单元402室",
+      "shipmentNum": "",
+      "shipmentCompanyName": "",
+      "skuId": "10217676540997",
+      "productName": "老人头（lotory）液态玻璃泥非牛顿流体解压计划史莱姆儿童胶彩泥 变色龙【蓝色+紫色】2盒",
+      "unitPrice": 26.65,
+      "jdPrice": 26.82,
+      "quantity": 1,
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/420641/31/4975/106958/69dfeb44F08a69b49/0083320320bd8816.jpg",
+      "outerSkuId": "10216076218109",
+      "orderSourceDesc": "官方",
+      "sourceType": "POP_301"
+    },
+    {
+      "orderId": "3484448019032312",
+      "bOrderId": "349144221602",
+      "orderDate": "2026-04-30 19:22:56",
+      "finishTime": "",
+      "stockTime": "",
+      "totalAmount": 0.2,
+      "goodsAmount": 0.2,
+      "freightPrice": 0,
+      "orderState": 0,
+      "statusText": "待出库",
+      "jdOrderStateDesc": "待发货",
+      "paid": false,
+      "waitPay": true,
+      "lock": 0,
+      "dealerCode": "157816689",
+      "dealerName": "兔乐兔店",
+      "supplierName": "金榜单丨集运仓店",
+      "receiverName": "傅***",
+      "receiverPhone": "1*******670",
+      "receiverAddress": "甘肃酒泉市东风场区***",
+      "receiverFullAddress": "肃州区东风场区十号基地通北0408楼",
+      "shipmentNum": "",
+      "shipmentCompanyName": "",
+      "skuId": "10215511034805",
+      "productName": "公牛（BULL）插座插板带线拖线板超长家用多功能4/6/7/8/ 604八位超载保护/全长10米",
+      "unitPrice": 0.1,
+      "jdPrice": 77.5,
+      "quantity": 2,
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/412198/38/6352/92602/69cb807dFbc327bcf/008332032005c4ff.jpg",
+      "outerSkuId": "10212044977897",
+      "orderSourceDesc": "官方",
+      "sourceType": "POP_301"
+    },
+    {
+      "orderId": "3484450010375069",
+      "bOrderId": "330994014903",
+      "orderDate": "2026-04-30 19:19:59",
+      "finishTime": "",
+      "stockTime": "",
+      "totalAmount": 52.8,
+      "goodsAmount": 52.8,
+      "freightPrice": 0,
+      "orderState": 0,
+      "statusText": "待出库",
+      "jdOrderStateDesc": "待发货",
+      "paid": false,
+      "waitPay": true,
+      "lock": 0,
+      "dealerCode": "157816689",
+      "dealerName": "兔乐兔店",
+      "supplierName": "金榜单丨集运仓店",
+      "receiverName": "曾***",
+      "receiverPhone": "1*******695",
+      "receiverAddress": "广东广州市花都区***",
+      "receiverFullAddress": "狮岭镇振兴村泗合中街东六巷12号",
+      "shipmentNum": "",
+      "shipmentCompanyName": "",
+      "skuId": "10215497565288",
+      "productName": "缝纫机专用激光红外线定位灯5MW裁床十字一字线100MW激光器红外线 钉扣机定位 圆点100MW 中功率",
+      "unitPrice": 52.8,
+      "jdPrice": 52.8,
+      "quantity": 1,
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/413284/29/975/43112/69cb6a2eF37549651/0083320320fbda9e.jpg",
+      "outerSkuId": "10212571346290",
+      "orderSourceDesc": "官方",
+      "sourceType": "POP_301"
+    }
+  ],
+  "allCapturedAPIs": [
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-e96e9bea.0ad9a8020f78667e9f5d.css",
+      "status": 200,
+      "bodyLen": 126933,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 84,
+      "reqBody": "{\"request\":{\"bizRequest\":\"pop_new\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 85,
+      "reqBody": "{\"request\":{\"bizRequest\":\"pageframe_menu_2\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-a978ba51.eeb3df5a248c99bcecc1.css",
+      "status": 200,
+      "bodyLen": 60081,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//unpkg.shop.jd.com/react@16.13.1/umd/react.production.min.js",
+      "status": 200,
+      "bodyLen": 12463,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-64c6a0aa.ffaf87a709eb67a98ffe.css",
+      "status": 200,
+      "bodyLen": 105475,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-0be36067.851f4be7adf2f8f3ba7f.css",
+      "status": 200,
+      "bodyLen": 100575,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-aca99c4b.3481e4fa3015881a74ea.css",
+      "status": 200,
+      "bodyLen": 149019,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//unpkg.shop.jd.com/react-dom@16.13.1/umd/react-dom.production.min.js",
+      "status": 200,
+      "bodyLen": 118656,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-1f9d8bdd.6af40300519401cb4414.css",
+      "status": 200,
+      "bodyLen": 911389,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//unpkg.shop.jd.com/react-router@5.2.0/umd/react-router.min.js",
+      "status": 200,
+      "bodyLen": 22158,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/runtime-main.782d6b15.js",
+      "status": 200,
+      "bodyLen": 6733,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-3c57ac15.d5f090e6.js",
+      "status": 200,
+      "bodyLen": 19122,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-85c5727d.0041f30d.js",
+      "status": 200,
+      "bodyLen": 22785,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-b3972265.211ceeea.js",
+      "status": 200,
+      "bodyLen": 95419,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-a1402b98.7d4090dd.js",
+      "status": 200,
+      "bodyLen": 41015,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-415c4831.c6f72166.js",
+      "status": 200,
+      "bodyLen": 11916,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-672fc356.11954482.js",
+      "status": 200,
+      "bodyLen": 36411,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-03fc87a1.f90c205e.js",
+      "status": 200,
+      "bodyLen": 75829,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-f093e535.522bc9b5.js",
+      "status": 200,
+      "bodyLen": 72467,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-2d7590b1.f9aafcf8.js",
+      "status": 200,
+      "bodyLen": 90836,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-46763799.a7aa2705.js",
+      "status": 200,
+      "bodyLen": 44466,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-2e519326.3cf09230.js",
+      "status": 200,
+      "bodyLen": 42699,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-3b2c1c78.27497528.js",
+      "status": 200,
+      "bodyLen": 26762,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-1f419e04.4bda05d4.js",
+      "status": 200,
+      "bodyLen": 33076,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-46c63715.c948c360.js",
+      "status": 200,
+      "bodyLen": 69724,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-3a0e81ff.27e7e876.js",
+      "status": 200,
+      "bodyLen": 11850,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-ca11bd4a.d954f7bf.js",
+      "status": 200,
+      "bodyLen": 53643,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-d380b8b7.30ccfc8f.js",
+      "status": 200,
+      "bodyLen": 71512,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-a93dd573.a0a24525.js",
+      "status": 200,
+      "bodyLen": 60097,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jdicons.b1dcdafb.js",
+      "status": 200,
+      "bodyLen": 15553,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-e96e9bea.9e52af79.js",
+      "status": 200,
+      "bodyLen": 26739,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-64c6a0aa.e6a634b4.js",
+      "status": 200,
+      "bodyLen": 39511,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-aca99c4b.a2518c33.js",
+      "status": 200,
+      "bodyLen": 52053,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-0be36067.1336d7b8.js",
+      "status": 200,
+      "bodyLen": 34901,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/styles-a978ba51.812292f0.js",
+      "status": 200,
+      "bodyLen": 24283,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-cdd60c62.938a33b4.js",
+      "status": 200,
+      "bodyLen": 25430,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-ea6fe73f.f10f7394.js",
+      "status": 200,
+      "bodyLen": 39198,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-059be3de.1aeab4c9.js",
+      "status": 200,
+      "bodyLen": 119331,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-b63e7516.2e75d693.js",
+      "status": 200,
+      "bodyLen": 54670,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-f2168953.da9ace48.js",
+      "status": 200,
+      "bodyLen": 141519,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-0ac0411d.12e922c9.js",
+      "status": 200,
+      "bodyLen": 12274,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-3e3507c7.3bbaa66d.js",
+      "status": 200,
+      "bodyLen": 61312,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-utils-2b1726bc.211bad5c.js",
+      "status": 200,
+      "bodyLen": 13483,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-react.b4a89e3f.js",
+      "status": 200,
+      "bodyLen": 82439,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/3107.8cfdb75d.js",
+      "status": 200,
+      "bodyLen": 39000,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/580.c26a3125.js",
+      "status": 200,
+      "bodyLen": 92627,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/7482.a2d24b5e.js",
+      "status": 200,
+      "bodyLen": 22386,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/7444.96b54b01.js",
+      "status": 200,
+      "bodyLen": 78820,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/3397.b12c34b4.js",
+      "status": 200,
+      "bodyLen": 18278,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/main-aec23333.6ed1b042.js",
+      "status": 200,
+      "bodyLen": 26872,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/main-0a037d97.764a8e93.js",
+      "status": 200,
+      "bodyLen": 127434,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.bubble.commonBubbleFacade.getBubble",
+      "status": 200,
+      "bodyLen": 72,
+      "reqBody": "{\"param\":{\"belongParam\":{\"businessFieldCode\":\"01\"},\"bizRequest\":{\"sceneCode\":\"MENU_MINI\",\"ids\":[1]}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.menu.MenuFacade.findFoldStatus",
+      "status": 200,
+      "bodyLen": 84,
+      "reqBody": "{\"param\":{\"belongParam\":{\"belongType\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.menu.toolMenuFacade.findList",
+      "status": 200,
+      "bodyLen": 72,
+      "reqBody": "{\"request\":{\"bizRequest\":{\"bizCode\":\"pop\"}}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/integration-static/jssdk/osw-client-1.0.8.js",
+      "status": 200,
+      "bodyLen": 17134,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/global.js",
+      "status": 200,
+      "bodyLen": 563,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.layout.layoutFacade.find",
+      "status": 200,
+      "bodyLen": 2295,
+      "reqBody": "{\"request\":{\"ext\":{},\"belongParam\":{\"siteCode\":\"110\",\"businessFieldCode\":\"01\"},\"bizRequest\":{\"url\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\"}}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gias.jd.com/js/pc-tk.js",
+      "status": 200,
+      "bodyLen": 50241,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//storage.360buyimg.com/webcontainer/js_security_v3_0.1.4.js",
+      "status": 200,
+      "bodyLen": 234181,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 85,
+      "reqBody": "{\"request\":{\"bizRequest\":\"lite_menu\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.pageframe.navigation.navigationFacade.findJDMDownInfo",
+      "status": 200,
+      "bodyLen": 1718,
+      "reqBody": "{\"request\":{\"belongParam\":{\"systemId\":110}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 84,
+      "reqBody": "{\"request\":{\"bizRequest\":\"ai_help_web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 85,
+      "reqBody": "{\"request\":{\"bizRequest\":\"msg_box_revision\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.topMenu.topMenuFacade.findTopOverviewNew",
+      "status": 200,
+      "bodyLen": 10204,
+      "reqBody": "{\"param1\":{\"ext\":{\"url\":\"https%3A%2F%2Fshop.jd.com%2Fjdm%2Fgongxiao%2FshopEmbed%2Fvender%2FpurchaseManage\"},\"belongParam\":{\"client\":\"web\",\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.menu.menuFacade.findCommon",
+      "status": 200,
+      "bodyLen": 443,
+      "reqBody": "{\"param1\":{\"ext\":{\"systemId\":110,\"disableInit\":true},\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.seller.menu.QueryPinMenusBySystemIdAndMenuTypeFacade.queryPinMenuTree",
+      "status": 200,
+      "bodyLen": 341611,
+      "reqBody": "{\"param\":{\"platformId\":\"1\",\"callerParam\":{\"buid\":301,\"tenantId\":1024},\"menuType\":1,\"systemId\":110}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.ai.search.original.findHisAndHot",
+      "status": 200,
+      "bodyLen": 8536,
+      "reqBody": "{\"query\":{\"platform\":\"web\",\"platformVersion\":\"0.0.0\",\"belongBizId\":\"16305460\",\"belongType\":\"01\",\"conversationId\":\"a291323f-74fd-4d2b-b574-5bc68bbd8a61\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.navigation.NavigationFacade.findShopInfo",
+      "status": 200,
+      "bodyLen": 292,
+      "reqBody": "{\"param\":{\"belongParam\":{\"client\":\"web\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmweb.user.MyShopInfoProvider.getShopCardInfo",
+      "status": 200,
+      "bodyLen": 2815,
+      "reqBody": "{\"shopInfoReq\":{\"belongType\":\"01\",\"pin\":\"虾仁从不眨眼\",\"belongBizId\":\"16305460\",\"clientType\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
+      "status": 200,
+      "bodyLen": 131,
+      "reqBody": "{\"searchTaskReq\":{\"userType\":0,\"businessSide\":\"JM-WEB\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.pop.jm.msg.center.jsf.message.MessageListProxy.getMsgSetting",
+      "status": 200,
+      "bodyLen": 10475,
+      "reqBody": "{\"param\":{\"belongType\":\"01\",\"requestType\":0,\"catVersion\":0,\"appId\":\"shop\",\"platform\":\"pc\"}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//storage.360buyimg.com/jsresource/risk/handler.js",
+      "status": 200,
+      "bodyLen": 44612,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com",
+      "status": 200,
+      "bodyLen": 124,
+      "reqBody": "appid=risk_h5_info&functionId=getCustomCtrl&t=1777558581710&body={\"scenes\":[\"disposalGray\"]}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api",
+      "status": 200,
+      "bodyLen": 89,
+      "reqBody": "appid=risk_h5_info&functionId=reportInvokeLog&body={\"sdkClient\":\"handler\",\"sdkVersion\":\"1.1.0\",\"url\":\"aHR0cHM6Ly9zaG9wLmpkLmNvbS9qZG0vZ29uZ3hpYW8vc2hvcEVtYmVkL3ZlbmRlci9wdXJjaGFzZU1hbmFnZQ\",\"timestamp\":1777558581713}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://cactus.jd.com/behavior_report",
+      "status": 200,
+      "bodyLen": 4260,
+      "reqBody": "data=~'nhF'%3F%5EX)'nhHA'%3F%5EX)'nhHH'%3F%5EX)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'')'nhHFC'%3F'')'lklqQv'%3F422200%3D0%3D4542)'w%60Qv'%3F422200%3D0%3D754%3D)'nhQ%40F'%3F5)'nhL%40F'%3F5)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B5%2B4%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F17)'gp1'%3F5)'gp0'%3F5)'gp3'%3F1)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'42220541223%3D14%3D%3D4%3C7241')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F641)'vfwluqqdbkph'%3F45)'rlkn%60%7C'%3F'vuhIjb)ZZoahZh%60kpZ4223%3C6%3C%3C2%3C01%3DZ6207516%3C53f41c2%3Cdg6f%60%3C%3Cgfd4ca47cZc%60qfmBwd%7CG%7CIlq%60H%60kpZilq%60Zh%60kp)ZZfduqpw%60aW%60vujkv%60v)v%60qLkq%60wsdi)w%60ujwqIjb)qjjigdw)vqju)kdslbdqjw)jpq%60wM%60lbmq)%60%7Dq%60wkdi)vuhV%7Cvq%60h)ijfdqljkgdw)ZZHLFWJZDUUZGDV%40ZDUUILFDQLJKZZ)oaqWlvnPqli)fijv%60a)w%60tp%60vqDklhdqljkCwdh%60)h%60kpgdw)fdfm%60v)vfwjii%5D)Z5%7D62c0')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735165%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'T1WRJKHMASRPUDG0ABDURDH1INRO%406R%40N0L16KSDW%5D_%5CWJHC776U0K0AACVK_KNDA0TNVTDLSGM3GWH%5CV2%40R6KS76H')'ovQjn%60k'%3F'oaa56T1WRJKHMASRPUDG0ABDURDH1INRO%406R%40N0L16KSDW%5D_%5CWJHC776U0K0AACVK_KNDA0TNVTDLSGM3GWH%5CV2%40R6KS76HDDDDH0672V1S%5CDDDDDABUU70NL%5C%5DPL61%5D')'kph'%3F5)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F422200%3D030243)'%60'%3F6355x)~'q'%3F422200%3D030243)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'K1MgoGku%406Gg'x"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jm.msg.AllocateLineupJsfService.existsLineup",
+      "status": 200,
+      "bodyLen": 248,
+      "reqBody": "{\"clientInfo\":{\"platform\":\"web\",\"belongType\":\"200\"}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.base.service.ducc.query&appendix=/namespace/ai_extension/config/extension_config/profiles/release?longPolling=10000",
+      "status": 200,
+      "bodyLen": 2678,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558582790",
+      "status": 200,
+      "bodyLen": 693,
+      "reqBody": "body=%7B%22authKeys%22%3A%5B%22jmVender%22%2C%22jmSeller%22%2C%22dxGlobalSpecialVender%22%2C%22dxGlobalVender%22%2C%22jmSellerMan%22%2C%22longTimeColors%22%5D%2C%22ext%22%3A%7B%22currentpage%22%3A%22%2Fvender%2FpurchaseManage%22%7D%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558582790",
+      "status": 200,
+      "bodyLen": 292,
+      "reqBody": "body=%7B%22authKeys%22%3A%5B%22productNameLockGray%22%5D%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//ms.jr.jd.com/gw/generic/bt/h5/m/queryByVarName",
+      "status": 200,
+      "bodyLen": 172,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "GET",
+      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FSUBSYSTEMS%2Fprofiles%2Fprod%3FlongPolling%3D10000",
+      "status": 200,
+      "bodyLen": 42468,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserInfo&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558582790",
+      "status": 200,
+      "bodyLen": 1329,
+      "reqBody": "ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getToJmDegradation&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558582951",
+      "status": 200,
+      "bodyLen": 177,
+      "reqBody": "x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/3623.ae630844.js",
+      "status": 200,
+      "bodyLen": 19485,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/128.56648860.js",
+      "status": 200,
+      "bodyLen": 27051,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/6023.d70ba54a.js",
+      "status": 200,
+      "bodyLen": 27600,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/8487.bb3793ee.js",
+      "status": 200,
+      "bodyLen": 32189,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/9605.863920c5.js",
+      "status": 200,
+      "bodyLen": 53707,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/6529.9222e04c.js",
+      "status": 200,
+      "bodyLen": 1654,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/settle-protocol-modal.7bde4a6f.js",
+      "status": 200,
+      "bodyLen": 1222,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.dialog.LoginFacadeService.getLoginInfoByDomain",
+      "status": 200,
+      "bodyLen": 338,
+      "reqBody": "{\"param\":{\"domainUrl\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"platform\":\"windows\",\"client\":\"WEB\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/8037.1e447434.js",
+      "status": 200,
+      "bodyLen": 3271,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/4576.aa70ceed.js",
+      "status": 200,
+      "bodyLen": 10032,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/8236.450a2f60.js",
+      "status": 200,
+      "bodyLen": 3991,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/255.a96872fe.js",
+      "status": 200,
+      "bodyLen": 1105,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getGuidance",
+      "status": 200,
+      "bodyLen": 135,
+      "reqBody": "{\"guidanceRequest\":{\"extendsMap\":{\"currentIdentity\":\"01\",\"ownerIdentity\":\"01\"},\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//ms.jr.jd.com/gw/generic/bt/h5/m/queryByVarName",
+      "status": 200,
+      "bodyLen": 172,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getBubbleClickConfig",
+      "status": 200,
+      "bodyLen": 131,
+      "reqBody": "{\"bubbleClickRequest\":{\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_config_options&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558583259",
+      "status": 200,
+      "bodyLen": 978,
+      "reqBody": "body=%7B%22configKey%22%3A%22orderWarnQueryConfig%22%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
+      "status": 200,
+      "bodyLen": 98,
+      "reqBody": "{\"request\":{\"belongParam\":{\"platform\":\"windows\",\"client\":\"WEB\"},\"bizRequest\":{\"currentIdentity\":\"01\",\"compositeIdentity\":\"01\",\"url\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"accessSystem\":\"2\",\"menuId\":null,\"pid\":\"2\"}},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "GET",
+      "url": "https://api.m.jd.com/api?functionId=api_basic_getArea&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558583259&body=%7B%22parentId%22:-1%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22:%22color%22,%22curRole%22:%221%22,%22requestClientType%22:%22jmPc%22%7D",
+      "status": 200,
+      "bodyLen": 2952,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558583259",
+      "status": 200,
+      "bodyLen": 284,
+      "reqBody": "body=%7B%22states%22%3A%5B0%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22ASC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A20%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D&h5st=20260430221628264%3Bbe25jbezii5bbib8%3Be8352%3Btk03wbac81c6a18nmSme3yzPBBcKt5bSOhrJps4779z9rXKOe1YvkM_pK5tSmYJ0TQK7rz5yLnAhJmmFMVWmqu4XX6HI%3B581c6bf719e24de6707d64e3756d0aaf%3B5.3%3B1777558583264%3Bq3EpJLITCiFT2HVRxWFTBWIfGiFjLDIj7SFjLrJp-j4fLDIj9e1TJrpjh7JjFiYTIaod6nld2bVe2Tlf4TIT4fFfJiYT2XYe4TlfJWFjLDIj7SnQEiVS0ipjLDrgJnFe3XFf7PYd0nIe4jYT1r4T7XodKmFS0XIS5nVd2j1fJrJdJfUT1yVTIipjLDrgJnYgJrJdJbYOJipjLDrgJfIg4zZe1uWS-GFSMWoRJrJdJTEjLrJp-j5XHe1PZC2fVuXdWipjxjZQ8aFQKiEjLrJp-jJf4zVRUipjxjJS7ipjLDrguqpjhjpOl6Zfeipjxj5f6XETJrpjLrJp-fojxjZf6XETJrpjLrJp-bYfLDIj7nYOJipjLrpjh7pd_rJdJjYf2iFjLrpjLDrgJLYd3i1QBilO4rUQAaEjLDIj_ulS9mFPJrpjLrJp-rojxjpd2iFjLrpjLDrg7rJdJPYOJipjLrpjh75f6rJdJTYOJipjLrpjh7pfLDIj2XETJrpjLrJp-rojxjpe2iFjLrpjLDrg0bojxj5f2iFjLrpjLDrgJbIg6zpfJrJdJnYOJipjLrpjh7pfLDIjAOEjLrpjLDrg2rJdJfkQJrpjLrJp-rojxjpQJrpjLrJp-rojxjpS0ipjLrpjh-kjxjpS9WlOzWFjLrJp-3kjLDLjv5yyD5yyeJgyd9gyq9gytFixJrJdJjoPJrpjLrJpwqJdJrkPJrpjh7Jj3ToNL-oe1zVRUq5d7zpf6rpWdq5P0ulS9G1WJrJdJnVO4ipjLD7N%3B1f294ec6e59e04c22cc8d38509fe9075%3Bof7r36pSiy1QCa0T9WES-bEQGGlQI6ZNHuFT-bVR7qUT"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://cactus.jd.com/behavior_report",
+      "status": 200,
+      "bodyLen": 4260,
+      "reqBody": "data=~'nhF'%3F%5E'GJA%5C)76%3C0)5)5)k')'GJA%5C)76%3C0)5)5)k'X)'nhHA'%3F%5EX)'nhHH'%3F%5EX)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'')'nhHFC'%3F'')'lklqQv'%3F422200%3D0%3D4542)'w%60Qv'%3F422200%3D0%3D1566)'nhQ%40F'%3F7)'nhL%40F'%3F5)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B5%2B4%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F12)'gp1'%3F5)'gp0'%3F5)'gp3'%3F46)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'42220541223%3D14%3D%3D4%3C7241')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F64%3C)'vfwluqqdbkph'%3F42)'rlkn%60%7C'%3F'QA%40ksFjii%60fqjw)OAH%40%7Dq%60kvljk)Z5%7D4a26)ijfdiVqjwdb%60)fduqpw%60%40s%60kqv)ijfdqljkgdw)w%60ujwq%40wwjw)tp%60w%7CIjfdiCjkqv)lkk%60wRlaqm)OAHZU%40A%40VQDIZHLFWJZDUUZQDBZKDH%40)jpq%60wM%60lbmq)OAHZU%40A%40VQDIZOJ%5CD)ju%60k)ijfdqljk)udb%60%5DJccv%60q)b%60qOa%40la)OHDL)ZZsp%60pv%60ZvvwZmdkai%60wvZZ)tp%60p%60Hlfwjqdvn)vuhUS')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735165%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'T1WRJKHMASRPUDG0ABDURDH1INRO%406R%40N0L16KSDW%5D_%5CWJHC776U0K0AACVK_KNDA0TNVTDLSGM3GWH%5CV2%40R6KS76H')'ovQjn%60k'%3F'oaa56T1WRJKHMASRPUDG0ABDURDH1INRO%406R%40N0L16KSDW%5D_%5CWJHC776U0K0AACVK_KNDA0TNVTDLSGM3GWH%5CV2%40R6KS76HDDDDH0672V1S%5CDDDDDABUU70NL%5C%5DPL61%5D')'kph'%3F4)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F422200%3D03%3D25%3C)'%60'%3F6355x)~'q'%3F422200%3D03%3D245)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'K1MgoGku%406Gg'x"
+    },
+    {
+      "type": "xhr",
+      "method": "GET",
+      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FPORTAL%2Fprofiles%2Fprod%3FlongPolling%3D10000",
+      "status": 200,
+      "bodyLen": 399,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "//ms.jr.jd.com/gw/generic/bt/h5/m/queryByVarName",
+      "status": 200,
+      "bodyLen": 334,
+      "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777558584497",
+      "status": 200,
+      "bodyLen": 321017,
+      "reqBody": "body=%7B%22states%22%3A%5B%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22DESC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A100%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03Q4RWONMHDVWUPAB5DGAPWAM4LKWJE3WEK5I43NVARXZYROMF223P5N5DDFSNZNKAD5QKSQAIVBH6BRMYS7EW3NV23MAAAAM5327S4VYAAAAADGPP25KIYXUI34X&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    }
+  ]
+}

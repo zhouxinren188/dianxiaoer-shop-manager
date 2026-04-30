@@ -518,6 +518,209 @@ app.delete('/api/cookies/:storeId', async (req, res) => {
   }
 })
 
+// ============ 供店订单 ============
+
+// 批量保存/更新供店订单（upsert）
+app.post('/api/supply-orders/batch', async (req, res) => {
+  try {
+    const { store_id, orders } = req.body
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+    if (!Array.isArray(orders) || orders.length === 0) return res.json(fail('orders 不能为空'))
+
+    let saved = 0
+    for (const o of orders) {
+      if (!o.orderId) continue
+      await pool.execute(
+        `INSERT INTO supply_orders
+          (store_id, order_id, b_order_id, order_date, finish_time, stock_time,
+           total_amount, goods_amount, freight_price, order_state, status_text,
+           jd_order_state_desc, paid, wait_pay, lock_flag,
+           dealer_code, dealer_name, supplier_name,
+           receiver_name, receiver_phone, receiver_address, receiver_full_address,
+           shipment_num, shipment_company_name,
+           sku_id, product_name, product_image, unit_price, jd_price, quantity,
+           outer_sku_id, sku_count, all_skus, order_source_desc, source_type, raw_data)
+         VALUES (?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?, ?,?,?,?,?,?, ?,?,?,?,?,?)
+         ON DUPLICATE KEY UPDATE
+           b_order_id=VALUES(b_order_id), order_date=VALUES(order_date),
+           finish_time=VALUES(finish_time), stock_time=VALUES(stock_time),
+           total_amount=VALUES(total_amount), goods_amount=VALUES(goods_amount),
+           freight_price=VALUES(freight_price), order_state=VALUES(order_state),
+           status_text=VALUES(status_text), jd_order_state_desc=VALUES(jd_order_state_desc),
+           paid=VALUES(paid), wait_pay=VALUES(wait_pay), lock_flag=VALUES(lock_flag),
+           dealer_code=VALUES(dealer_code), dealer_name=VALUES(dealer_name),
+           supplier_name=VALUES(supplier_name),
+           receiver_name=VALUES(receiver_name), receiver_phone=VALUES(receiver_phone),
+           receiver_address=VALUES(receiver_address), receiver_full_address=VALUES(receiver_full_address),
+           shipment_num=VALUES(shipment_num), shipment_company_name=VALUES(shipment_company_name),
+           sku_id=VALUES(sku_id), product_name=VALUES(product_name), product_image=VALUES(product_image),
+           unit_price=VALUES(unit_price), jd_price=VALUES(jd_price), quantity=VALUES(quantity),
+           outer_sku_id=VALUES(outer_sku_id), sku_count=VALUES(sku_count), all_skus=VALUES(all_skus),
+           order_source_desc=VALUES(order_source_desc), source_type=VALUES(source_type),
+           raw_data=VALUES(raw_data), updated_at=NOW()`,
+        [
+          store_id, o.orderId, o.bOrderId || '', o.orderDate || '', o.finishTime || '', o.stockTime || '',
+          o.totalAmount || 0, o.goodsAmount || 0, o.freightPrice || 0, o.orderState || 0, o.statusText || '',
+          o.jdOrderStateDesc || '', o.paid ? 1 : 0, o.waitPay ? 1 : 0, o.lock || 0,
+          o.dealerCode || '', o.dealerName || '', o.supplierName || '',
+          o.receiverName || '', o.receiverPhone || '', o.receiverAddress || '', o.receiverFullAddress || '',
+          o.shipmentNum || '', o.shipmentCompanyName || '',
+          o.skuId || '', o.productName || '', o.productImage || '', o.unitPrice || 0, o.jdPrice || 0, o.quantity || 0,
+          o.outerSkuId || '', o.skuCount || 1, JSON.stringify(o.allSkus || null),
+          o.orderSourceDesc || '', o.sourceType || '', JSON.stringify(o)
+        ]
+      )
+      saved++
+    }
+    res.json(ok({ saved }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 分页查询供店订单
+app.get('/api/supply-orders', async (req, res) => {
+  try {
+    const { store_id, status, page = 1, pageSize = 20 } = req.query
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+
+    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(pageSize)
+    const limit = parseInt(pageSize)
+
+    let where = 'WHERE store_id = ?'
+    const params = [store_id]
+    if (status) {
+      where += ' AND status_text = ?'
+      params.push(status)
+    }
+
+    const [[{ total }]] = await pool.execute(
+      `SELECT COUNT(*) as total FROM supply_orders ${where}`, params
+    )
+    const [rows] = await pool.execute(
+      `SELECT * FROM supply_orders ${where} ORDER BY order_date DESC LIMIT ${limit} OFFSET ${offset}`, params
+    )
+    res.json(ok({ list: rows, total }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取单个供店订单
+app.get('/api/supply-orders/:orderId', async (req, res) => {
+  try {
+    const { store_id } = req.query
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+    const [rows] = await pool.execute(
+      'SELECT * FROM supply_orders WHERE store_id = ? AND order_id = ?',
+      [store_id, req.params.orderId]
+    )
+    if (!rows.length) return res.status(404).json(fail('订单不存在'))
+    res.json(ok(rows[0]))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 销售订单 ============
+
+// 批量保存/更新销售订单（upsert）
+app.post('/api/sales-orders/batch', async (req, res) => {
+  try {
+    const { store_id, orders } = req.body
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+    if (!Array.isArray(orders) || orders.length === 0) return res.json(fail('orders 不能为空'))
+
+    let saved = 0
+    for (const o of orders) {
+      if (!o.orderId) continue
+      await pool.execute(
+        `INSERT INTO sales_orders
+          (store_id, order_id, order_state, status_text,
+           order_time, payment_time, ship_time, finish_time,
+           total_amount, goods_amount, shipping_fee, payment_method,
+           buyer_name, buyer_phone, buyer_address,
+           logistics_company, logistics_no,
+           sku_id, product_name, product_image, unit_price, quantity,
+           item_count, all_items, raw_data)
+         VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?, ?,?,?,?,?, ?,?,?)
+         ON DUPLICATE KEY UPDATE
+           order_state=VALUES(order_state), status_text=VALUES(status_text),
+           order_time=VALUES(order_time), payment_time=VALUES(payment_time),
+           ship_time=VALUES(ship_time), finish_time=VALUES(finish_time),
+           total_amount=VALUES(total_amount), goods_amount=VALUES(goods_amount),
+           shipping_fee=VALUES(shipping_fee), payment_method=VALUES(payment_method),
+           buyer_name=VALUES(buyer_name), buyer_phone=VALUES(buyer_phone),
+           buyer_address=VALUES(buyer_address),
+           logistics_company=VALUES(logistics_company), logistics_no=VALUES(logistics_no),
+           sku_id=VALUES(sku_id), product_name=VALUES(product_name),
+           product_image=VALUES(product_image), unit_price=VALUES(unit_price),
+           quantity=VALUES(quantity), item_count=VALUES(item_count),
+           all_items=VALUES(all_items), raw_data=VALUES(raw_data),
+           updated_at=NOW()`,
+        [
+          store_id, o.orderId, o.orderState || 0, o.statusText || '',
+          o.orderTime || '', o.paymentTime || '', o.shipTime || '', o.finishTime || '',
+          o.totalAmount || 0, o.goodsAmount || 0, o.shippingFee || 0, o.paymentMethod || '',
+          o.buyerName || '', o.buyerPhone || '', o.buyerAddress || '',
+          o.logisticsCompany || '', o.logisticsNo || '',
+          o.skuId || '', o.productName || '', o.productImage || '',
+          o.unitPrice || 0, o.quantity || 0,
+          o.itemCount || 1, JSON.stringify(o.allItems || null), JSON.stringify(o)
+        ]
+      )
+      saved++
+    }
+    res.json(ok({ saved }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 分页查询销售订单
+app.get('/api/sales-orders', async (req, res) => {
+  try {
+    const { store_id, status, page = 1, pageSize = 20 } = req.query
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+
+    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(pageSize)
+    const limit = parseInt(pageSize)
+
+    let where = 'WHERE store_id = ?'
+    const params = [store_id]
+    if (status) {
+      where += ' AND status_text = ?'
+      params.push(status)
+    }
+
+    const [[{ total }]] = await pool.execute(
+      `SELECT COUNT(*) as total FROM sales_orders ${where}`, params
+    )
+    const [rows] = await pool.execute(
+      `SELECT * FROM sales_orders ${where} ORDER BY order_time DESC LIMIT ${limit} OFFSET ${offset}`, params
+    )
+    res.json(ok({ list: rows, total }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取单个销售订单
+app.get('/api/sales-orders/:orderId', async (req, res) => {
+  try {
+    const { store_id } = req.query
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+    const [rows] = await pool.execute(
+      'SELECT * FROM sales_orders WHERE store_id = ? AND order_id = ?',
+      [store_id, req.params.orderId]
+    )
+    if (!rows.length) return res.status(404).json(fail('订单不存在'))
+    res.json(ok(rows[0]))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // ============ 健康检查 ============
 
 app.get('/health', async (req, res) => {

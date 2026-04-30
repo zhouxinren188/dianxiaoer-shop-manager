@@ -25,7 +25,8 @@ function httpGet(url, headers = {}) {
       path: urlObj.pathname + urlObj.search,
       method: 'GET',
       headers,
-      timeout: REQUEST_TIMEOUT
+      timeout: REQUEST_TIMEOUT,
+      rejectUnauthorized: false
     }
 
     const req = mod.request(options, (res) => {
@@ -49,7 +50,8 @@ function httpRequest(url, options = {}) {
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
       headers: options.headers || {},
-      timeout: REQUEST_TIMEOUT
+      timeout: REQUEST_TIMEOUT,
+      rejectUnauthorized: false
     }
 
     const req = mod.request(reqOptions, (res) => {

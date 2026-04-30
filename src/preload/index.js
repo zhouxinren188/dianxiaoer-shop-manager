@@ -23,7 +23,8 @@ const validInvokeChannels = [
   'packet-capture-stop',
   'packet-capture-status',
   'open-external-url',
-  'fetch-supply-orders'
+  'fetch-supply-orders',
+  'fetch-sales-orders'
 ]
 
 const validOnChannels = [

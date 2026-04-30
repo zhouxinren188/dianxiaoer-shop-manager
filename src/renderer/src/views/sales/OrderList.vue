@@ -5,15 +5,14 @@
       <div class="filter-main">
         <div class="filter-grid">
           <div class="filter-item">
-            <label class="filter-label">店铺标签</label>
-            <el-select v-model="searchForm.shopTag" multiple collapse-tags collapse-tags-tooltip placeholder="请选择" clearable>
-              <el-option v-for="t in shopTagOptions" :key="t" :label="t" :value="t" />
-            </el-select>
-          </div>
-          <div class="filter-item">
-            <label class="filter-label">店铺选择</label>
-            <el-select v-model="searchForm.shopName" filterable placeholder="全部" clearable>
-              <el-option v-for="s in shopOptions" :key="s" :label="s" :value="s" />
+            <label class="filter-label">选择店铺</label>
+            <el-select v-model="searchForm.storeId" filterable placeholder="请选择京东店铺">
+              <el-option v-for="s in storeOptions" :key="s.id" :label="s.name" :value="s.id">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <span>{{ s.name }}</span>
+                  <el-tag v-if="s.online" type="success" size="small">在线</el-tag>
+                </div>
+              </el-option>
             </el-select>
           </div>
           <div class="filter-item">
@@ -141,7 +140,7 @@
     </div>
 
     <!-- 4. 卡片式订单列表 -->
-    <div class="table-card">
+    <div class="table-card" v-loading="loading" element-loading-text="正在从京麦后台获取订单数据...">
       <!-- 表头 -->
       <div class="order-table-header">
         <div class="ot-col ot-col-check">
@@ -173,11 +172,16 @@
               <span class="order-header-divider">|</span>
               <span class="order-header-shop">{{ order.shopName }}</span>
               <el-tag size="small" :type="shopTagColorType(order.shopTag)" effect="plain" class="order-header-platform">{{ order.shopTag }}</el-tag>
+              <span class="order-header-divider">|</span>
+              <span v-if="order.buyerAccount" class="order-header-account">{{ order.buyerAccount }}</span>
+              <el-icon v-if="order.buyerAccount" class="order-header-chat-icon" title="打开京麦咚咚聊天" @click.stop="handleOpenChat(order)"><ChatDotRound /></el-icon>
+              <span class="order-header-buyer">{{ order.customerName }}</span>
+              <span v-if="order.customerPhone" class="order-header-phone">{{ order.customerPhone }}</span>
               <span class="order-header-address">{{ order.address }}</span>
             </div>
             <div class="order-header-right">
               <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
-              <el-tag :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
+              <el-tag v-if="order.purchaseStatus" :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
             </div>
           </div>
 
@@ -197,7 +201,16 @@
                 </div>
                 <div class="ot-col ot-col-goods">
                   <div class="goods-cell">
-                    <div class="goods-img" :style="{ background: item.imageColor }">
+                    <el-image
+                      v-if="item.image"
+                      class="goods-img"
+                      :src="item.image"
+                      :preview-src-list="[getOriginalImg(item.image)]"
+                      fit="cover"
+                      preview-teleported
+                      hide-on-click-modal
+                    />
+                    <div v-else class="goods-img goods-img-placeholder" :style="{ background: item.imageColor }">
                       <span class="goods-img-text">{{ item.name.charAt(0) }}</span>
                     </div>
                     <div class="goods-info">
@@ -279,6 +292,7 @@
             <div class="detail-row"><span class="detail-label">店铺名称</span><span class="detail-value">{{ currentOrder.shopName }}</span></div>
             <div class="detail-row"><span class="detail-label">支付方式</span><span class="detail-value">{{ currentOrder.paymentMethod }}</span></div>
             <div class="detail-row"><span class="detail-label">客户名称</span><span class="detail-value">{{ currentOrder.customerName }}</span></div>
+            <div class="detail-row"><span class="detail-label">买家账号</span><span class="detail-value">{{ currentOrder.buyerAccount || '--' }}</span></div>
           </div>
         </div>
 
@@ -350,29 +364,33 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
-import { Search, Refresh, Goods, Van } from '@element-plus/icons-vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ElMessage } from 'element-plus'
+import { Search, Refresh, Goods, Van, ChatDotRound } from '@element-plus/icons-vue'
+import { fetchStores } from '@/api/store'
+import { fetchSalesOrders, saveSalesOrders } from '@/api/salesOrder'
 
 // ==================== 筛选项配置 ====================
 
-const shopTagOptions = ['京东', '天猫', '拼多多', '抖音']
-const shopOptions = ['京东自营店', '天猫旗舰店', '拼多多专营店', '抖音小店']
 const orderStatusOptions = ['待付款', '待发货', '已发货', '已完成', '已取消']
-const purchaseStatusOptions = ['待采购', '采购中', '已采购', '采购失败']
 const issueEventOptions = ['超时未发货', '库存不足', '物流异常', '客户拒收']
 
-// ==================== 搜索表单 ====================
+const AVATAR_COLORS = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
+
+// ==================== 状态 ====================
+
+const storeOptions = ref([])
+const tableData = ref([])
+const loading = ref(false)
 
 const searchForm = reactive({
-  shopTag: [],
-  shopName: '',
+  storeId: '',
   orderNo: '',
   goodsName: '',
   outboundNo: '',
   customerName: '',
   customerPhone: '',
   orderStatus: '',
-  purchaseStatus: '',
   issueEvent: ''
 })
 
@@ -399,141 +417,189 @@ function onFuncBtnClick(action) {
   console.log(`[功能区按钮] ${action}`)
 }
 
+// ==================== 数据加载 ====================
+
+async function loadStores() {
+  try {
+    const data = await fetchStores({ platform: 'jd', status: 'enabled', pageSize: 100 })
+    storeOptions.value = data.list || []
+    const onlineStore = storeOptions.value.find(s => s.online === 1)
+    if (onlineStore) {
+      searchForm.storeId = onlineStore.id
+    } else if (storeOptions.value.length > 0) {
+      searchForm.storeId = storeOptions.value[0].id
+    }
+  } catch (err) {
+    console.error('加载店铺列表失败:', err.message)
+  }
+}
+
+function getSelectedStoreName() {
+  const store = storeOptions.value.find(s => s.id === searchForm.storeId)
+  return store ? store.name : ''
+}
+
+function getItemColor(name) {
+  if (!name) return AVATAR_COLORS[0]
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
+}
+
+function getOriginalImg(url) {
+  if (!url) return ''
+  return url.replace(/\/n\d\//, '/n0/')
+}
+
+function mapServerOrder(row) {
+  let items = []
+  try {
+    const parsed = typeof row.all_items === 'string' ? JSON.parse(row.all_items || 'null') : row.all_items
+    if (Array.isArray(parsed)) {
+      items = parsed.map(item => ({
+        name: item.name || '',
+        sku: item.skuId ? `SKU: ${item.skuId}` : '',
+        price: parseFloat(item.price) || 0,
+        quantity: item.quantity || 0,
+        image: item.image || '',
+        imageColor: getItemColor(item.name)
+      }))
+    }
+  } catch {}
+
+  if (items.length === 0 && row.product_name) {
+    items = [{
+      name: row.product_name,
+      sku: row.sku_id ? `SKU: ${row.sku_id}` : '',
+      price: parseFloat(row.unit_price) || 0,
+      quantity: row.quantity || 0,
+      image: row.product_image || '',
+      imageColor: getItemColor(row.product_name)
+    }]
+  }
+
+  let buyerAccount = ''
+  try {
+    const raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data || 'null') : row.raw_data
+    if (raw) buyerAccount = raw.buyerAccount || ''
+  } catch {}
+
+  return {
+    id: row.id,
+    selected: false,
+    orderNo: row.order_id,
+    orderStatus: row.status_text || '',
+    purchaseStatus: '',
+    orderTime: row.order_time || '',
+    amount: parseFloat(row.goods_amount) || 0,
+    shippingFee: parseFloat(row.shipping_fee) || 0,
+    actualAmount: parseFloat(row.total_amount) || 0,
+    paymentMethod: row.payment_method || '',
+    customerName: row.buyer_name || '',
+    receiver: row.buyer_name || '',
+    customerPhone: row.buyer_phone || '',
+    buyerAccount,
+    address: row.buyer_address || '',
+    logisticsCompany: row.logistics_company || '',
+    logisticsNo: row.logistics_no || '',
+    outboundNo: row.logistics_no || '',
+    shopName: getSelectedStoreName(),
+    shopTag: '京东',
+    items,
+    issueEvent: null,
+    timeoutStatus: 'normal'
+  }
+}
+
+async function loadOrdersFromServer() {
+  if (!searchForm.storeId) return
+  try {
+    const data = await fetchSalesOrders({ store_id: searchForm.storeId, pageSize: 500 })
+    const list = (data.list || []).map(mapServerOrder)
+    tableData.value = list
+  } catch (err) {
+    console.warn('从服务器加载订单失败:', err.message)
+  }
+}
+
 // ==================== 操作栏 ====================
 
 function handleQueryOrders() {
-  console.log('[操作栏] 查询订单')
+  currentPage.value = 1
+  loadOrdersFromServer()
 }
 
-function handleSyncOrders() {
-  console.log('[操作栏] 同步订单')
+async function handleSyncOrders() {
+  if (!searchForm.storeId) {
+    ElMessage.warning('请先选择一个京东店铺')
+    return
+  }
+
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+
+  loading.value = true
+  activeStatus.value = ''
+  try {
+    const result = await window.electronAPI.invoke('fetch-sales-orders', {
+      storeId: searchForm.storeId
+    })
+
+    if (result.success) {
+      const orders = result.data.list || []
+      if (orders.length === 0) {
+        ElMessage.info('未获取到订单数据')
+      } else {
+        ElMessage.success(`成功获取 ${orders.length} 条订单，正在保存...`)
+        try {
+          await saveSalesOrders(searchForm.storeId, orders)
+        } catch (saveErr) {
+          console.warn('保存订单到服务器失败:', saveErr.message)
+        }
+        await loadOrdersFromServer()
+      }
+    } else {
+      ElMessage.error(result.message || '获取订单失败')
+    }
+  } catch (err) {
+    ElMessage.error('获取订单失败: ' + err.message)
+  } finally {
+    loading.value = false
+  }
 }
 
 function handleTrackShip() {
   console.log('[操作栏] 轨迹发货, 账号:', selectedAccount.value)
 }
 
-// ==================== Mock 数据 ====================
-
-const mockOrders = ref(generateMockOrders())
-
-function generateMockOrders() {
-  const shops = [
-    { name: '京东自营店', tag: '京东' },
-    { name: '天猫旗舰店', tag: '天猫' },
-    { name: '拼多多专营店', tag: '拼多多' },
-    { name: '抖音小店', tag: '抖音' }
-  ]
-  const statuses = ['待付款', '待发货', '已发货', '已完成', '已取消']
-  const purchaseStatuses = ['待采购', '采购中', '已采购', '采购失败']
-  const payments = ['微信支付', '支付宝', '银行卡', '货到付款']
-  const issues = [null, null, null, null, null, null, null, '超时未发货', '库存不足', '物流异常']
-  const surnames = ['张', '李', '王', '刘', '陈', '杨', '赵', '黄', '周', '吴']
-  const names = ['伟', '芳', '娜', '秀英', '敏', '静', '丽', '强', '磊', '洋']
-  const cities = ['北京市朝阳区', '上海市浦东新区', '广州市天河区', '深圳市南山区', '杭州市西湖区', '成都市武侯区', '武汉市洪山区', '南京市鼓楼区']
-  const goodsList = [
-    ['无线蓝牙耳机', '手机保护壳'],
-    ['智能手表', '充电器'],
-    ['笔记本电脑支架'],
-    ['机械键盘', '鼠标垫'],
-    ['空气净化器'],
-    ['运动跑鞋'],
-    ['保温杯', '茶包礼盒'],
-    ['投影仪', 'HDMI线'],
-    ['收纳箱'],
-    ['电动牙刷']
-  ]
-  const skuOptions = [
-    '颜色: 白色 | 规格: 标准版',
-    '颜色: 黑色 | 规格: Pro版',
-    '颜色: 银色 | 容量: 256GB',
-    '材质: 硅胶 | 适配: iPhone 15',
-    '尺寸: 42mm | 颜色: 黑色',
-    '功率: 65W | 接口: Type-C',
-    '材质: 铝合金 | 颜色: 银色',
-    '轴体: 红轴 | 背光: RGB',
-    '尺寸: 900x400mm | 厚度: 4mm',
-    '功率: 50W | 面积: 30m2',
-    '尺码: 42 | 颜色: 黑白',
-    '容量: 500ml | 颜色: 白色',
-    '分辨率: 1080P | 亮度: 800流明',
-    '长度: 2m | 版本: 2.1',
-    '容量: 50L | 颜色: 灰色',
-    '类型: 声波 | 颜色: 白色'
-  ]
-  const imageColors = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
-  const logisticsCompanies = ['中通快递', '顺丰速运', '韵达快递', '圆通速递', '京东物流', '申通快递']
-
-  const orders = []
-  for (let i = 1; i <= 28; i++) {
-    const shop = shops[Math.floor(Math.random() * shops.length)]
-    const status = statuses[Math.floor(Math.random() * statuses.length)]
-    const pStatus = purchaseStatuses[Math.floor(Math.random() * purchaseStatuses.length)]
-    const issue = issues[Math.floor(Math.random() * issues.length)]
-    const surname = surnames[Math.floor(Math.random() * surnames.length)]
-    const name = names[Math.floor(Math.random() * names.length)]
-    const city = cities[Math.floor(Math.random() * cities.length)]
-    const goods = goodsList[Math.floor(Math.random() * goodsList.length)]
-    const day = String(Math.floor(Math.random() * 28) + 1).padStart(2, '0')
-    const hour = String(Math.floor(Math.random() * 24)).padStart(2, '0')
-    const min = String(Math.floor(Math.random() * 60)).padStart(2, '0')
-    const hasOutbound = ['已发货', '已完成'].includes(status) || (status === '待发货' && Math.random() > 0.5)
-    const hasLogistics = ['已发货', '已完成'].includes(status)
-    const shippingFee = parseFloat((Math.random() > 0.7 ? 0 : (Math.random() * 15 + 5)).toFixed(2))
-    const items = goods.map((g, idx) => ({
-      name: g,
-      quantity: idx === 0 ? Math.floor(Math.random() * 3) + 1 : 1,
-      price: parseFloat((Math.random() * 500 + 29.9).toFixed(2)),
-      sku: skuOptions[Math.floor(Math.random() * skuOptions.length)],
-      imageColor: imageColors[Math.floor(Math.random() * imageColors.length)]
-    }))
-    const goodsTotal = items.reduce((sum, it) => sum + it.price * it.quantity, 0)
-    const amount = parseFloat(goodsTotal.toFixed(2))
-    const actualAmount = parseFloat((amount + shippingFee).toFixed(2))
-
-    orders.push({
-      id: i,
-      selected: false,
-      orderNo: `DD202604${day}${String(i).padStart(4, '0')}`,
-      outboundNo: hasOutbound ? `CK202604${day}${String(i).padStart(4, '0')}` : '',
-      shopName: shop.name,
-      shopTag: shop.tag,
-      customerName: surname + name,
-      customerPhone: `1${3 + Math.floor(Math.random() * 6)}${String(Math.floor(Math.random() * 100000000)).padStart(8, '0').slice(0, 4)}****${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
-      goodsName: goods[0],
-      amount,
-      shippingFee,
-      actualAmount,
-      paymentMethod: payments[Math.floor(Math.random() * payments.length)],
-      orderStatus: status,
-      purchaseStatus: pStatus,
-      issueEvent: issue,
-      orderTime: `2026-04-${day} ${hour}:${min}:${String(Math.floor(Math.random() * 60)).padStart(2, '0')}`,
-      receiver: surname + name,
-      address: city + 'xx街道xx号',
-      items,
-      logisticsCompany: hasLogistics ? logisticsCompanies[Math.floor(Math.random() * logisticsCompanies.length)] : '',
-      logisticsNo: hasLogistics ? `SF${Date.now()}${String(i).padStart(4, '0')}` : '',
-      timeoutStatus: issue === '超时未发货' ? 'timeout' : (Math.random() > 0.85 ? 'nearTimeout' : 'normal')
-    })
+function handleOpenChat(order) {
+  if (!order.buyerAccount) return
+  const pin = encodeURIComponent(order.buyerAccount)
+  const url = `https://im.jd.com/index?customerPin=${pin}`
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-external-url', { url })
+  } else {
+    window.open(url, '_blank')
   }
-  return orders
 }
 
 // ==================== 计算属性 ====================
 
 const filteredOrders = computed(() => {
-  return mockOrders.value.filter((order) => {
-    if (searchForm.shopTag.length && !searchForm.shopTag.includes(order.shopTag)) return false
-    if (searchForm.shopName && order.shopName !== searchForm.shopName) return false
+  return tableData.value.filter((order) => {
     if (searchForm.orderNo && !order.orderNo.includes(searchForm.orderNo)) return false
-    if (searchForm.goodsName && !order.goodsName.includes(searchForm.goodsName)) return false
+    if (searchForm.goodsName) {
+      const hasGoods = order.items.some(item => item.name.includes(searchForm.goodsName))
+      if (!hasGoods) return false
+    }
     if (searchForm.outboundNo && !order.outboundNo.includes(searchForm.outboundNo)) return false
     if (searchForm.customerName && !order.customerName.includes(searchForm.customerName)) return false
     if (searchForm.customerPhone && !order.customerPhone.includes(searchForm.customerPhone)) return false
     if (searchForm.orderStatus && order.orderStatus !== searchForm.orderStatus) return false
-    if (searchForm.purchaseStatus && order.purchaseStatus !== searchForm.purchaseStatus) return false
-    if (searchForm.issueEvent && order.issueEvent !== searchForm.issueEvent) return false
     if (activeStatus.value && order.orderStatus !== activeStatus.value) return false
     return true
   })
@@ -547,10 +613,12 @@ const pagedOrders = computed(() => {
 })
 
 const statusTabs = computed(() => {
-  const all = mockOrders.value.length
+  const all = tableData.value.length
   const counts = {}
-  for (const o of mockOrders.value) {
-    counts[o.orderStatus] = (counts[o.orderStatus] || 0) + 1
+  for (const o of tableData.value) {
+    if (o.orderStatus) {
+      counts[o.orderStatus] = (counts[o.orderStatus] || 0) + 1
+    }
   }
   return [
     { label: '全部', value: '', count: all },
@@ -558,8 +626,8 @@ const statusTabs = computed(() => {
   ]
 })
 
-const nearTimeoutCount = computed(() => mockOrders.value.filter((o) => o.timeoutStatus === 'nearTimeout').length)
-const timeoutCount = computed(() => mockOrders.value.filter((o) => o.timeoutStatus === 'timeout').length)
+const nearTimeoutCount = computed(() => tableData.value.filter((o) => o.timeoutStatus === 'nearTimeout').length)
+const timeoutCount = computed(() => tableData.value.filter((o) => o.timeoutStatus === 'timeout').length)
 
 // ==================== 选择功能 ====================
 
@@ -585,21 +653,14 @@ function handleView(row) {
 
 // ==================== 交互方法 ====================
 
-function handleSearch() {
-  currentPage.value = 1
-}
-
 function handleReset() {
   Object.assign(searchForm, {
-    shopTag: [],
-    shopName: '',
     orderNo: '',
     goodsName: '',
     outboundNo: '',
     customerName: '',
     customerPhone: '',
     orderStatus: '',
-    purchaseStatus: '',
     issueEvent: ''
   })
   activeStatus.value = ''
@@ -608,7 +669,6 @@ function handleReset() {
 
 function handleStatusClick(status) {
   activeStatus.value = status
-  searchForm.orderStatus = status
   currentPage.value = 1
 }
 
@@ -638,6 +698,22 @@ function shopTagColorType(tag) {
   const map = { '京东': 'danger', '天猫': '', '拼多多': 'warning', '抖音': 'success' }
   return map[tag] || ''
 }
+
+// ==================== 生命周期 ====================
+
+watch(() => searchForm.storeId, (newId) => {
+  if (newId) {
+    activeStatus.value = ''
+    currentPage.value = 1
+    loadOrdersFromServer()
+  } else {
+    tableData.value = []
+  }
+})
+
+onMounted(async () => {
+  await loadStores()
+})
 </script>
 
 <style scoped>
@@ -1013,6 +1089,35 @@ function shopTagColorType(tag) {
   flex-shrink: 0;
 }
 
+.order-header-chat-icon {
+  font-size: 15px;
+  color: #2b5aed;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.2s;
+}
+
+.order-header-chat-icon:hover {
+  color: #1a3fc7;
+}
+
+.order-header-account {
+  color: #2b5aed;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.order-header-buyer {
+  color: #1f2937;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.order-header-phone {
+  color: #595959;
+  flex-shrink: 0;
+}
+
 .order-header-address {
   color: #8c8c8c;
   font-size: 12px;
@@ -1068,10 +1173,19 @@ function shopTagColorType(tag) {
   width: 52px;
   height: 52px;
   border-radius: 6px;
+  flex-shrink: 0;
+  object-fit: cover;
+  cursor: pointer;
+}
+
+:deep(.goods-img .el-image__inner) {
+  border-radius: 6px;
+}
+
+.goods-img-placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
 }
 
 .goods-img-text {
