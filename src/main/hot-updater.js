@@ -115,7 +115,7 @@ function registerHotUpdateIpc(mainWindow) {
     try {
       await downloadAndApplyUpdate((percent) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('hot-update-progress', { percent })
+          mainWindow.webContents.send('update-progress', { percent })
         }
       })
       return { success: true, message: '更新已下载，重启后生效' }
@@ -140,7 +140,7 @@ async function autoCheckHotUpdate(mainWindow) {
     const result = await checkForHotUpdate()
     if (result.needUpdate && mainWindow && !mainWindow.isDestroyed()) {
       console.log('[HotUpdater] 发现新版本:', result.version)
-      mainWindow.webContents.send('hot-update-available', {
+      mainWindow.webContents.send('update-available', {
         version: result.version,
         size: result.size,
         changelog: result.changelog

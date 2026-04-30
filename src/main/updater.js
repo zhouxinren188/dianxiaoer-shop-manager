@@ -77,13 +77,10 @@ function initUpdater(win) {
   }, 30 * 60 * 1000)
 }
 
-// 检查更新
+// 检查更新（已禁用 electron-updater 全量更新，改用热更新方案）
 function checkForUpdates() {
   if (!require('electron').app.isPackaged) return
-  console.log('[Updater] 正在检查更新...')
-  autoUpdater.checkForUpdates().catch((err) => {
-    console.error('[Updater] 检查更新失败:', err.message)
-  })
+  console.log('[Updater] 全量更新已禁用，请使用热更新')
 }
 
 // 开始下载更新

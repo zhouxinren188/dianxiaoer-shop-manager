@@ -136,7 +136,14 @@ function handleUpdateDownloaded(info) {
 async function handleDownload() {
   isDownloading.value = true
   try {
-    await window.electronAPI.invoke('start-download-update')
+    const result = await window.electronAPI.invoke('hot-update-download')
+    if (result.success) {
+      isDownloaded.value = true
+      ElMessage.success(result.message)
+    } else {
+      ElMessage.error(result.error || '下载失败')
+      isDownloading.value = false
+    }
   } catch (err) {
     ElMessage.error('启动下载失败')
     isDownloading.value = false
@@ -144,7 +151,7 @@ async function handleDownload() {
 }
 
 async function handleInstall() {
-  await window.electronAPI.invoke('quit-and-install')
+  await window.electronAPI.invoke('hot-update-restart')
 }
 
 onMounted(() => {
