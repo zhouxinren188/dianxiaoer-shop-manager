@@ -20,6 +20,39 @@ function fail(message) {
 
 // ============ 用户管理接口 ============
 
+// 注册（客户端注册页面调用）
+app.post('/api/register', async (req, res) => {
+  try {
+    const { username, password, phone } = req.body
+    if (!username || !password || !phone) {
+      return res.status(400).json({ success: false, message: '参数不完整' })
+    }
+    if (username.length < 2 || username.length > 20) {
+      return res.status(400).json({ success: false, message: '账号长度为2-20个字符' })
+    }
+    if (password.length < 6 || password.length > 20) {
+      return res.status(400).json({ success: false, message: '密码长度为6-20个字符' })
+    }
+
+    const [exists] = await pool.execute('SELECT id FROM users WHERE username = ?', [username])
+    if (exists.length) {
+      return res.status(409).json({ success: false, message: '该账号已存在' })
+    }
+
+    await pool.execute(
+      `INSERT INTO users (username, real_name, phone, password_hash, user_type, role, status)
+       VALUES (?, ?, ?, ?, 'master', 'admin', 'enabled')`,
+      [username, username, phone, password]
+    )
+
+    console.log(`[Server] 新用户注册: ${username}`)
+    res.json({ success: true, message: '注册成功' })
+  } catch (err) {
+    console.error('[Server] 注册失败:', err.message)
+    res.status(500).json({ success: false, message: '注册失败，请稍后重试' })
+  }
+})
+
 // 查询用户列表
 app.get('/api/users', async (req, res) => {
   try {

@@ -227,7 +227,7 @@ onMounted(() => {
   window.electronAPI?.invoke('window-set-login-size')
 })
 
-const API_BASE = 'http://150.158.54.108:3002'
+const API_BASE = 'http://150.158.54.108:3001'
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
