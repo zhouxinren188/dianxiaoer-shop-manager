@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -64,6 +64,7 @@
     "electron-updater": "^6.8.3",
     "element-plus": "^2.13.7",
     "express": "^5.2.1",
+    "multer": "^2.1.1",
     "ssh2": "^1.17.0",
     "vue": "^3.5.33",
     "vue-router": "^5.0.6"
