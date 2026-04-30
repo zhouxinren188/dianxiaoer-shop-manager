@@ -1,10 +1,14 @@
 const express = require('express')
 const cors = require('cors')
+const path = require('path')
 const { pool, initDB } = require('./db')
 
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// 完整更新文件静态服务（latest.yml + 安装包）
+app.use('/updates', express.static(path.join(__dirname, 'updates')))
 
 function ok(data) {
   return { code: 0, data }
