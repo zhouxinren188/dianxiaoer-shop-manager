@@ -22,7 +22,8 @@ const UPDATE_SERVER = 'http://150.158.54.108:3001'
 const ADMIN_PASSWORD = 'dianxiaoer2026'
 
 // 从命令行参数或 package.json 读取版本
-let version = process.argv[2]
+const args = process.argv.slice(2).filter(arg => !arg.startsWith('--'))
+let version = args[0]
 if (!version) {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'))
   version = pkg.version

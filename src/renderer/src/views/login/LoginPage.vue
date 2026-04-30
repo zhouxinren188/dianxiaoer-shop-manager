@@ -227,7 +227,7 @@ onMounted(() => {
   window.electronAPI?.invoke('window-set-login-size')
 })
 
-const API_BASE = 'http://150.158.54.108:3001'
+const API_BASE = 'http://150.158.54.108:3002'
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
@@ -260,6 +260,8 @@ async function handleLogin() {
         } else {
           localStorage.removeItem('rememberedUser')
         }
+        // 同步 auth token 到主进程（供 platform-window / cookie-heartbeat 等使用）
+        window.electronAPI?.invoke('set-auth-token', token).catch(() => {})
         window.electronAPI?.invoke('window-set-main-size').then(() => {
           ElMessage.success('登录成功')
           router.replace('/')

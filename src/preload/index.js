@@ -19,12 +19,17 @@ const validInvokeChannels = [
   'open-platform-window',
   'confirm-platform-login',
   'close-platform-window',
+  'open-purchase-login-window',
+  'close-purchase-login-window',
   'packet-capture-start',
   'packet-capture-stop',
   'packet-capture-status',
   'open-external-url',
   'fetch-supply-orders',
-  'fetch-sales-orders'
+  'fetch-sales-orders',
+  'set-auth-token',
+  'open-purchase-order-window',
+  'close-purchase-order-window'
 ]
 
 const validOnChannels = [
@@ -36,7 +41,10 @@ const validOnChannels = [
   'hot-update-available',
   'hot-update-progress',
   'platform-login-success',
-  'store-status-changed'
+  'purchase-account-login-success',
+  'store-status-changed',
+  'purchase-order-captured',
+  'purchase-window-closed'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

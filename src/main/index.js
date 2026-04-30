@@ -2,12 +2,14 @@ const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 const { initUpdater, registerIpc } = require('./updater')
 const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
-const { registerPlatformWindowIpc } = require('./platform-window')
+const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
+const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc } = require('./sales-order-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
+const { setAuthToken } = require('./auth-store')
 
 // 允许自签名证书（仅用于连接内部服务器API）
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -151,6 +153,12 @@ ipcMain.handle('window-set-main-size', (event) => {
 // 注册更新 IPC 通道
 registerIpc()
 
+// 注册 auth token 同步（渲染进程登录后将 token 传递给主进程）
+ipcMain.handle('set-auth-token', (event, token) => {
+  setAuthToken(token || null)
+  console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')
+})
+
 // 注册抓包 IPC（使用 ipcMain.handle，需在 app.whenReady 前注册）
 registerPacketCaptureIpc()
 
@@ -193,6 +201,12 @@ app.whenReady().then(async () => {
 
   // 注册平台窗口 IPC（需要 mainWindow 引用）
   registerPlatformWindowIpc(mainWindow)
+
+  // 注册采购账号登录窗口 IPC
+  registerPurchaseAccountIpc(mainWindow)
+
+  // 注册采购下单捕获 IPC
+  registerPurchaseOrderCaptureIpc(mainWindow)
 
   // 启动心跳检测
   startHeartbeat(mainWindow)

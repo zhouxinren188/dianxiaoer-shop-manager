@@ -2,6 +2,7 @@ const { BrowserWindow, ipcMain, session } = require('electron')
 const path = require('path')
 const http = require('http')
 const https = require('https')
+const { getAuthToken } = require('./auth-store')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 
@@ -36,12 +37,22 @@ function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http
     const urlObj = new URL(url)
+
+    // 自动附带 auth token
+    const headers = { ...options.headers }
+    const token = getAuthToken()
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    } else {
+      console.warn('[PlatformWindow] httpRequest: 主进程没有 auth token! 请求可能被 401 拒绝. URL:', url)
+    }
+
     const reqOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port,
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
-      headers: options.headers || {},
+      headers,
       timeout: 10000,
       rejectUnauthorized: false
     }
@@ -61,6 +72,188 @@ function httpRequest(url, options = {}) {
 function registerPlatformWindowIpc(mainWindow) {
   const preloadPath = path.join(__dirname, '../../resources/platform-login-preload.js')
   console.log('[PlatformWindow] preload path:', preloadPath)
+
+  // 判断是否为后台 URL（排除登录页）
+  function isBackendUrl(url) {
+    return (url.includes('shop.jd.com') || url.includes('sz.jd.com') ||
+      url.includes('jd.com/index')) &&
+      !url.includes('passport') && !url.includes('login')
+  }
+
+  // 页面商家信息提取脚本
+  const extractionScript = `
+    (function() {
+      var info = {};
+      var debugLog = [];
+      try {
+        // === 店铺名提取 ===
+        if (document.title) {
+          var parts = document.title.split(/[-_|\\u2013\\u2014]/).map(function(s){ return s.trim(); });
+          for (var i = 0; i < parts.length; i++) {
+            var p = parts[i];
+            if (p && p.length > 1 && p.length < 30 &&
+                ['首页','京麦','京东','后台','JD','商家后台','shop','loading','index'].indexOf(p.toLowerCase()) === -1) {
+              info.storeName = p;
+              break;
+            }
+          }
+        }
+        var nameSelectors = ['.shop-name','.store-name','.shopName','.J_shopName',
+          '[class*="shopName"]','[class*="shop-name"]','.header .name'];
+        for (var j = 0; j < nameSelectors.length; j++) {
+          try {
+            var el = document.querySelector(nameSelectors[j]);
+            if (el && el.textContent && el.textContent.trim().length > 1) {
+              info.storeName = el.textContent.trim();
+              break;
+            }
+          } catch(e2) {}
+        }
+
+        // === venderId / shopId 提取（配对优先） ===
+        var scripts = document.querySelectorAll('script:not([src])');
+        for (var s = 0; s < scripts.length; s++) {
+          var txt = scripts[s].textContent || '';
+          if (txt.length < 20 || txt.length > 500000) continue;
+          var vm = txt.match(/venderId['"\\s:=]+(\\d{5,})/);
+          var sm = txt.match(/shopId['"\\s:=]+(\\d{5,})/);
+          if (vm && sm) {
+            info.venderId = vm[1];
+            info.shopId = sm[1];
+            debugLog.push('paired from script block: venderId=' + vm[1] + ' shopId=' + sm[1]);
+            break;
+          }
+        }
+
+        if (!info.venderId || !info.shopId) {
+          var globalKeys = ['pageConfig','__INITIAL_STATE__','__NEXT_DATA__','GLOBAL_CONFIG',
+            'shopConfig','storeConfig','merchantConfig','jdConfig'];
+          for (var k = 0; k < globalKeys.length; k++) {
+            try {
+              var obj = window[globalKeys[k]];
+              if (obj && typeof obj === 'object') {
+                var jsonStr = JSON.stringify(obj);
+                var gvm = jsonStr.match(/"venderId"\\s*:\\s*"?(\\d+)"?/);
+                var gsm = jsonStr.match(/"shopId"\\s*:\\s*"?(\\d+)"?/);
+                if (gvm && gsm) {
+                  info.venderId = gvm[1];
+                  info.shopId = gsm[1];
+                  debugLog.push('paired from ' + globalKeys[k]);
+                  break;
+                }
+                if (!info.venderId && gvm) { info.venderId = gvm[1]; debugLog.push('venderId from ' + globalKeys[k]); }
+                if (!info.shopId && gsm) { info.shopId = gsm[1]; debugLog.push('shopId from ' + globalKeys[k]); }
+                if (!info.storeName && obj.shopName) info.storeName = obj.shopName;
+              }
+            } catch(e3) {}
+          }
+        }
+
+        if (!info.venderId && window.venderId) { info.venderId = String(window.venderId); debugLog.push('venderId from window'); }
+        if (!info.shopId && window.shopId) { info.shopId = String(window.shopId); debugLog.push('shopId from window'); }
+
+        if (!info.venderId || !info.shopId) {
+          for (var s2 = 0; s2 < scripts.length; s2++) {
+            var txt2 = scripts[s2].textContent || '';
+            if (txt2.length < 20 || txt2.length > 500000) continue;
+            if (!info.venderId) {
+              var vm3 = txt2.match(/venderId['"\\s:=]+(\\d{5,})/);
+              if (vm3) { info.venderId = vm3[1]; debugLog.push('venderId fallback script#' + s2); }
+            }
+            if (!info.shopId) {
+              var sm3 = txt2.match(/shopId['"\\s:=]+(\\d{5,})/);
+              if (sm3) { info.shopId = sm3[1]; debugLog.push('shopId fallback script#' + s2); }
+            }
+            if (info.venderId && info.shopId) break;
+          }
+        }
+
+        if (!info.venderId || !info.shopId) {
+          var urlParams = new URLSearchParams(window.location.search);
+          if (!info.venderId) {
+            var uv = urlParams.get('venderId') || urlParams.get('venderid') || urlParams.get('vender_id');
+            if (uv) { info.venderId = uv; debugLog.push('venderId from URL'); }
+          }
+          if (!info.shopId) {
+            var us = urlParams.get('shopId') || urlParams.get('shopid') || urlParams.get('shop_id');
+            if (us) { info.shopId = us; debugLog.push('shopId from URL'); }
+          }
+        }
+
+        if (!info.venderId || !info.shopId) {
+          try {
+            var storages = [localStorage, sessionStorage];
+            for (var si = 0; si < storages.length; si++) {
+              var storage = storages[si];
+              for (var ki2 = 0; ki2 < storage.length; ki2++) {
+                var sval = storage.getItem(storage.key(ki2)) || '';
+                if (sval.length < 10 || sval.length > 50000) continue;
+                var lvm = sval.match(/venderId['"\\s:=]+(\\d{5,})/);
+                var lsm = sval.match(/shopId['"\\s:=]+(\\d{5,})/);
+                if (lvm && lsm) {
+                  if (!info.venderId) info.venderId = lvm[1];
+                  if (!info.shopId) info.shopId = lsm[1];
+                  debugLog.push('paired from storage');
+                  break;
+                }
+              }
+              if (info.venderId && info.shopId) break;
+            }
+          } catch(e4) {}
+        }
+
+        info._debug = debugLog.join(' | ');
+      } catch(e) { info._debug = 'error: ' + e.message; }
+      return info;
+    })()
+  `
+
+  // 重试提取机制：在检测到后台页面后多次尝试提取，提取成功后自动保存
+  function startExtractionRetry(win, sid, mw, plat) {
+    let retryCount = 0
+    const maxRetries = 4
+    const delays = [3000, 5000, 8000, 12000] // 3s, 5s, 8s, 12s
+
+    function tryExtract() {
+      if (win.isDestroyed() || retryCount >= maxRetries) return
+      const delay = delays[retryCount] || 3000
+      retryCount++
+
+      setTimeout(() => {
+        if (win.isDestroyed()) return
+        win.webContents.executeJavaScript(extractionScript).then(info => {
+          if (!info) return
+          console.log(`[PlatformWindow] 提取尝试 #${retryCount} debug:`, info._debug || 'none')
+          delete info._debug
+
+          if (Object.keys(info).length > 0) {
+            const prev = storeExtractedInfo.get(sid) || {}
+            storeExtractedInfo.set(sid, { ...prev, ...info })
+            console.log('[PlatformWindow] 页面提取到商家信息:', info)
+          }
+
+          // 如果已经拿到 venderId 或 shopId，立即执行一次预保存
+          const extracted = storeExtractedInfo.get(sid) || {}
+          if (extracted.venderId || extracted.shopId) {
+            console.log('[PlatformWindow] 提取成功，执行预保存')
+            const cred = storeCredentials.get(sid) || {}
+            saveStoreInfo(mw, sid, plat, cred.account, cred.password).catch(err => {
+              console.error('[PlatformWindow] 预保存失败:', err.message)
+            })
+          } else if (retryCount < maxRetries) {
+            // 还没拿到关键数据，继续重试
+            console.log(`[PlatformWindow] 未提取到关键数据，将重试 (${retryCount}/${maxRetries})`)
+            tryExtract()
+          }
+        }).catch(err => {
+          console.log('[PlatformWindow] executeJS 失败:', err.message)
+          if (retryCount < maxRetries) tryExtract()
+        })
+      }, delay)
+    }
+
+    tryExtract()
+  }
 
   // 打开平台登录窗口
   ipcMain.handle('open-platform-window', async (event, { storeId, platform, keepCookie, account, password }) => {
@@ -132,180 +325,52 @@ function registerPlatformWindowIpc(mainWindow) {
       }
 
       // 2. 在后台页面提取商家信息（排除登录页）
-      const isBackend = (currentUrl.includes('shop.jd.com') || currentUrl.includes('sz.jd.com') ||
-        currentUrl.includes('jd.com/index')) &&
-        !currentUrl.includes('passport') && !currentUrl.includes('login')
+      const isBackend = isBackendUrl(currentUrl)
 
       if (isBackend) {
-        setTimeout(() => {
-          if (win.isDestroyed()) return
-          win.webContents.executeJavaScript(`
-            (function() {
-              var info = {};
-              var debugLog = [];
-              try {
-                // === 店铺名提取 ===
-                // 1. 从 document.title 提取
-                if (document.title) {
-                  var parts = document.title.split(/[-_|\\u2013\\u2014]/).map(function(s){ return s.trim(); });
-                  for (var i = 0; i < parts.length; i++) {
-                    var p = parts[i];
-                    if (p && p.length > 1 && p.length < 30 &&
-                        ['首页','京麦','京东','后台','JD','商家后台','shop','loading','index'].indexOf(p.toLowerCase()) === -1) {
-                      info.storeName = p;
-                      break;
-                    }
-                  }
-                }
-                // 2. 从 DOM 提取店铺名
-                var nameSelectors = ['.shop-name','.store-name','.shopName','.J_shopName',
-                  '[class*="shopName"]','[class*="shop-name"]','.header .name'];
-                for (var j = 0; j < nameSelectors.length; j++) {
-                  try {
-                    var el = document.querySelector(nameSelectors[j]);
-                    if (el && el.textContent && el.textContent.trim().length > 1) {
-                      info.storeName = el.textContent.trim();
-                      break;
-                    }
-                  } catch(e2) {}
-                }
-
-                // === venderId / shopId 提取（配对优先） ===
-                // 策略：从同一数据源同时找到 venderId+shopId 才采用，避免错配
-
-                // 3. 扫描内嵌 <script>，找包含 BOTH venderId 和 shopId 的块（最可靠）
-                var scripts = document.querySelectorAll('script:not([src])');
-                for (var s = 0; s < scripts.length; s++) {
-                  var txt = scripts[s].textContent || '';
-                  if (txt.length < 20 || txt.length > 500000) continue;
-                  var vm = txt.match(/venderId['"\\s:=]+(\\d{5,})/);
-                  var sm = txt.match(/shopId['"\\s:=]+(\\d{5,})/);
-                  if (vm && sm) {
-                    info.venderId = vm[1];
-                    info.shopId = sm[1];
-                    debugLog.push('paired from script block: venderId=' + vm[1] + ' shopId=' + sm[1]);
-                    break;
-                  }
-                }
-
-                // 4. 从全局变量找配对数据
-                if (!info.venderId || !info.shopId) {
-                  var globalKeys = ['pageConfig','__INITIAL_STATE__','__NEXT_DATA__','GLOBAL_CONFIG',
-                    'shopConfig','storeConfig','merchantConfig','jdConfig'];
-                  for (var k = 0; k < globalKeys.length; k++) {
-                    try {
-                      var obj = window[globalKeys[k]];
-                      if (obj && typeof obj === 'object') {
-                        var jsonStr = JSON.stringify(obj);
-                        var gvm = jsonStr.match(/"venderId"\\s*:\\s*"?(\\d+)"?/);
-                        var gsm = jsonStr.match(/"shopId"\\s*:\\s*"?(\\d+)"?/);
-                        // 同一对象中同时找到两个值，优先采用
-                        if (gvm && gsm) {
-                          info.venderId = gvm[1];
-                          info.shopId = gsm[1];
-                          debugLog.push('paired from ' + globalKeys[k] + ': venderId=' + gvm[1] + ' shopId=' + gsm[1]);
-                          break;
-                        }
-                        // 只找到一个，补充缺失的
-                        if (!info.venderId && gvm) { info.venderId = gvm[1]; debugLog.push('venderId from ' + globalKeys[k]); }
-                        if (!info.shopId && gsm) { info.shopId = gsm[1]; debugLog.push('shopId from ' + globalKeys[k]); }
-                        if (!info.storeName && obj.shopName) info.storeName = obj.shopName;
-                      }
-                    } catch(e3) {}
-                  }
-                }
-
-                // 5. 直接 window 属性
-                if (!info.venderId && window.venderId) { info.venderId = String(window.venderId); debugLog.push('venderId from window.venderId'); }
-                if (!info.shopId && window.shopId) { info.shopId = String(window.shopId); debugLog.push('shopId from window.shopId'); }
-
-                // 6. 如果仍缺少，从内嵌 script 单独提取（降级方案）
-                if (!info.venderId || !info.shopId) {
-                  for (var s2 = 0; s2 < scripts.length; s2++) {
-                    var txt2 = scripts[s2].textContent || '';
-                    if (txt2.length < 20 || txt2.length > 500000) continue;
-                    if (!info.venderId) {
-                      var vm3 = txt2.match(/venderId['"\\s:=]+(\\d{5,})/);
-                      if (vm3) { info.venderId = vm3[1]; debugLog.push('venderId fallback from script#' + s2); }
-                    }
-                    if (!info.shopId) {
-                      var sm3 = txt2.match(/shopId['"\\s:=]+(\\d{5,})/);
-                      if (sm3) { info.shopId = sm3[1]; debugLog.push('shopId fallback from script#' + s2); }
-                    }
-                    if (info.venderId && info.shopId) break;
-                  }
-                }
-
-                // 7. URL 参数
-                if (!info.venderId || !info.shopId) {
-                  var urlParams = new URLSearchParams(window.location.search);
-                  if (!info.venderId) {
-                    var uv = urlParams.get('venderId') || urlParams.get('venderid') || urlParams.get('vender_id');
-                    if (uv) { info.venderId = uv; debugLog.push('venderId from URL param'); }
-                  }
-                  if (!info.shopId) {
-                    var us = urlParams.get('shopId') || urlParams.get('shopid') || urlParams.get('shop_id');
-                    if (us) { info.shopId = us; debugLog.push('shopId from URL param'); }
-                  }
-                }
-
-                // 8. localStorage / sessionStorage（找配对）
-                if (!info.venderId || !info.shopId) {
-                  try {
-                    var storages = [localStorage, sessionStorage];
-                    for (var si = 0; si < storages.length; si++) {
-                      var storage = storages[si];
-                      for (var ki2 = 0; ki2 < storage.length; ki2++) {
-                        var sval = storage.getItem(storage.key(ki2)) || '';
-                        if (sval.length < 10 || sval.length > 50000) continue;
-                        var lvm = sval.match(/venderId['"\\s:=]+(\\d{5,})/);
-                        var lsm = sval.match(/shopId['"\\s:=]+(\\d{5,})/);
-                        if (lvm && lsm) {
-                          if (!info.venderId) info.venderId = lvm[1];
-                          if (!info.shopId) info.shopId = lsm[1];
-                          debugLog.push('paired from storage');
-                          break;
-                        }
-                      }
-                      if (info.venderId && info.shopId) break;
-                    }
-                  } catch(e4) {}
-                }
-
-                info._debug = debugLog.join(' | ');
-              } catch(e) { info._debug = 'error: ' + e.message; }
-              return info;
-            })()
-          `).then(info => {
-            if (info) {
-              console.log('[PlatformWindow] 页面提取 debug:', info._debug || 'none')
-              delete info._debug
-              if (Object.keys(info).length > 0) {
-                const prev = storeExtractedInfo.get(storeId) || {}
-                storeExtractedInfo.set(storeId, { ...prev, ...info })
-                console.log('[PlatformWindow] 页面提取到商家信息:', info)
-              }
-            }
-          }).catch((err) => { console.log('[PlatformWindow] executeJS 失败:', err.message) })
-        }, 3000)
+        console.log('[PlatformWindow] 检测到后台页面:', currentUrl)
+        // 启动重试提取机制（3s, 6s, 9s, 12s）
+        startExtractionRetry(win, storeId, mainWindow, platform)
       }
     })
 
-    // 窗口关闭时自动保存 Cookie 和店铺信息
-    win.on('closed', async () => {
+    // 窗口关闭前保存 Cookie 和店铺信息
+    // 使用 e.preventDefault() 阻止窗口在异步保存完成前被销毁
+    win.on('close', (e) => {
+      // 只执行一次
+      if (win._saveDone) return
+      win._saveDone = true
+
+      e.preventDefault() // 阻止窗口立即关闭
+
       const plat = storePlatforms.get(storeId)
       const cred = storeCredentials.get(storeId) || {}
 
       console.log('[PlatformWindow] 窗口关闭，保存信息 storeId=', storeId, 'account=', cred.account)
 
-      if (plat) {
-        await saveStoreInfo(mainWindow, storeId, plat, cred.account, cred.password)
+      const doSaveAndDestroy = async () => {
+        if (plat) {
+          try {
+            await saveStoreInfo(mainWindow, storeId, plat, cred.account, cred.password)
+          } catch (err) {
+            console.error('[PlatformWindow] 保存失败:', err.message)
+            // 即使保存失败也通知界面刷新
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('platform-login-success', { storeId, account: cred.account })
+            }
+          }
+        }
+
+        platformWindows.delete(storeId)
+        storePlatforms.delete(storeId)
+        storeCredentials.delete(storeId)
+        storeExtractedInfo.delete(storeId)
+
+        // 保存完成后真正销毁窗口
+        win.destroy()
       }
 
-      platformWindows.delete(storeId)
-      storePlatforms.delete(storeId)
-      storeCredentials.delete(storeId)
-      storeExtractedInfo.delete(storeId)
+      doSaveAndDestroy()
     })
 
     return { success: true }
@@ -367,21 +432,32 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
 
   try {
     // 1. 提取 Cookie（获取 session 中所有 cookie，不限定域名）
-    const partitionName = `persist:platform-${storeId}`
-    const ses = session.fromPartition(partitionName)
-    const cookies = await ses.cookies.get({})
-
-    console.log('[PlatformWindow] 获取到 cookie 数量:', cookies ? cookies.length : 0)
+    let cookies = []
+    try {
+      const partitionName = `persist:platform-${storeId}`
+      const ses = session.fromPartition(partitionName)
+      cookies = await ses.cookies.get({})
+      console.log('[PlatformWindow] 获取到 cookie 数量:', cookies ? cookies.length : 0)
+    } catch (e) {
+      console.error('[PlatformWindow] 获取 Cookie 失败:', e.message)
+    }
 
     if (cookies && cookies.length > 0) {
-      const cookieData = JSON.stringify(cookies)
-
-      await httpRequest(`${BUSINESS_SERVER}/api/cookies`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ store_id: storeId, cookie_data: cookieData, domain: platform })
-      })
-      console.log('[PlatformWindow] Cookie 已保存，共', cookies.length, '条')
+      try {
+        const cookieData = JSON.stringify(cookies)
+        const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/cookies`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ store_id: storeId, cookie_data: cookieData, domain: platform })
+        })
+        if (cookieRes.statusCode >= 400) {
+          console.error('[PlatformWindow] 保存 Cookie 服务端拒绝:', cookieRes.statusCode, cookieRes.data)
+        } else {
+          console.log('[PlatformWindow] Cookie 已保存，共', cookies.length, '条')
+        }
+      } catch (e) {
+        console.error('[PlatformWindow] 保存 Cookie 失败:', e.message)
+      }
     }
 
     // 2. 从 Cookie 中提取商家信息（仅精确匹配 cookie 名称）
@@ -437,22 +513,39 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
     if (!account && pinName) updateBody.account = pinName
 
     if (Object.keys(updateBody).length > 0) {
-      await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updateBody)
-      })
-      console.log('[PlatformWindow] 已更新店铺信息:', updateBody)
+      try {
+        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updateBody)
+        })
+        if (updateRes.statusCode >= 400) {
+          console.error('[PlatformWindow] 更新店铺信息服务端拒绝:', updateRes.statusCode, updateRes.data)
+        } else {
+          console.log('[PlatformWindow] 已更新店铺信息:', updateBody)
+        }
+      } catch (e) {
+        console.error('[PlatformWindow] 更新店铺信息失败:', e.message)
+      }
+    } else {
+      console.log('[PlatformWindow] 无可更新的店铺信息字段 (updateBody 为空)')
     }
 
     // 5. 更新在线状态
-    await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ online: true })
-    })
+    try {
+      const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ online: true })
+      })
+      if (statusRes.statusCode >= 400) {
+        console.error('[PlatformWindow] 更新在线状态服务端拒绝:', statusRes.statusCode, statusRes.data)
+      }
+    } catch (e) {
+      console.error('[PlatformWindow] 更新在线状态失败:', e.message)
+    }
 
-    // 6. 通知主窗口刷新列表
+    // 6. 通知主窗口刷新列表（无论前面是否出错，都要通知刷新）
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('platform-login-success', { storeId, account })
     }
@@ -460,7 +553,176 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
     console.log('[PlatformWindow] 保存完成 storeId=', storeId)
   } catch (err) {
     console.error('[PlatformWindow] 保存失败:', err.message)
+    // 即使保存失败，也通知界面刷新
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('platform-login-success', { storeId, account })
+    }
   }
 }
 
-module.exports = { registerPlatformWindowIpc, platformWindows }
+// ==================== 采购账号登录窗口 ====================
+
+// 采购平台登录 URL
+const PURCHASE_LOGIN_URLS = {
+  taobao: 'https://login.taobao.com/member/login.jhtml',
+  pinduoduo: 'https://mobile.pinduoduo.com/login.html',
+  douyin: 'https://www.douyin.com/login'
+}
+
+// 采购平台后台 URL（用于登录成功检测）
+const PURCHASE_BACKEND_URLS = {
+  taobao: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
+  pinduoduo: 'https://mobile.pinduoduo.com/personal.html',
+  douyin: 'https://www.douyin.com/'
+}
+
+// 已打开的采购账号窗口 Map<accountId, BrowserWindow>
+const purchaseWindows = new Map()
+
+function registerPurchaseAccountIpc(mainWindow) {
+  const preloadPath = path.join(__dirname, '../../resources/platform-login-preload.js')
+
+  // 打开采购账号登录窗口
+  ipcMain.handle('open-purchase-login-window', async (event, { accountId, platform, account, password }) => {
+    if (purchaseWindows.has(accountId)) {
+      const existWin = purchaseWindows.get(accountId)
+      if (!existWin.isDestroyed()) {
+        existWin.focus()
+        return { success: true, message: '窗口已打开' }
+      }
+      purchaseWindows.delete(accountId)
+    }
+
+    const loginUrl = PURCHASE_LOGIN_URLS[platform]
+    if (!loginUrl) {
+      return { success: false, message: `不支持的采购平台: ${platform}` }
+    }
+
+    const partitionName = `persist:purchase-${accountId}`
+
+    // 新账号清除旧 cookie
+    if (!account) {
+      const ses = session.fromPartition(partitionName)
+      await ses.clearStorageData({ storages: ['cookies'] })
+    }
+
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 750,
+      title: `采购账号登录 - ${platform}`,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: partitionName,
+        preload: preloadPath
+      }
+    })
+
+    win.loadURL(loginUrl)
+
+    win.once('ready-to-show', () => { win.focus() })
+    setTimeout(() => { if (!win.isDestroyed()) win.focus() }, 500)
+
+    purchaseWindows.set(accountId, win)
+
+    // 登录成功检测：延迟确认策略
+    let loginDetected = false
+    win.webContents.on('did-navigate', (e, url) => {
+      if (loginDetected) return
+      const backendUrl = PURCHASE_BACKEND_URLS[platform] || ''
+      // 如果导航到了非登录页面（后台页面），视为登录成功
+      const isLoginPage = url.includes('login') || url.includes('passport') || url.includes('sign')
+      if (!isLoginPage && backendUrl) {
+        loginDetected = true
+        console.log('[PurchaseWindow] 检测到登录成功:', url)
+      }
+    })
+
+    // 监听凭证输入
+    let capturedAccount = account || ''
+    let capturedPassword = password || ''
+    const credHandler = (event, { account: acc, password: pwd }) => {
+      if (win.isDestroyed()) return
+      if (win.webContents === event.sender) {
+        if (acc) capturedAccount = acc
+        if (pwd) capturedPassword = pwd
+      }
+    }
+    ipcMain.on('platform-login-credentials', credHandler)
+
+    // 窗口关闭时保存采购账号 Cookie
+    win.on('close', async () => {
+      if (win._purchaseSaveDone) return
+      win._purchaseSaveDone = true
+
+      ipcMain.removeListener('platform-login-credentials', credHandler)
+
+      console.log('[PurchaseWindow] 窗口关闭，保存采购账号 accountId=', accountId)
+
+      // 1. 提取 Cookie
+      let cookies = []
+      try {
+        const ses = session.fromPartition(partitionName)
+        cookies = await ses.cookies.get({})
+        console.log('[PurchaseWindow] 获取到 cookie 数量:', cookies.length)
+      } catch (e) {
+        console.error('[PurchaseWindow] 获取 Cookie 失败:', e.message)
+      }
+
+      // 2. 保存 Cookie 到服务器
+      if (cookies && cookies.length > 0) {
+        try {
+          const cookieData = JSON.stringify(cookies)
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookie`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie_data: cookieData, platform })
+          })
+          console.log('[PurchaseWindow] Cookie 已保存，共', cookies.length, '条')
+        } catch (e) {
+          console.error('[PurchaseWindow] 保存 Cookie 失败:', e.message)
+        }
+      }
+
+      // 3. 更新账号信息
+      const updateBody = { platform }
+      if (capturedAccount) updateBody.account = capturedAccount
+      if (capturedPassword) updateBody.password = capturedPassword
+      if (loginDetected || (cookies && cookies.length > 0)) {
+        updateBody.online = true
+      }
+
+      try {
+        await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updateBody)
+        })
+        console.log('[PurchaseWindow] 已更新采购账号:', updateBody)
+      } catch (e) {
+        console.error('[PurchaseWindow] 更新采购账号失败:', e.message)
+      }
+
+      // 4. 通知前端刷新
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('purchase-account-login-success', { accountId, account: capturedAccount, platform })
+      }
+
+      purchaseWindows.delete(accountId)
+    })
+
+    return { success: true }
+  })
+
+  // 关闭采购账号窗口
+  ipcMain.handle('close-purchase-login-window', async (event, { accountId }) => {
+    const win = purchaseWindows.get(accountId)
+    if (win && !win.isDestroyed()) {
+      win.close()
+    }
+    return { success: true }
+  })
+}
+
+module.exports = { registerPlatformWindowIpc, registerPurchaseAccountIpc, platformWindows }

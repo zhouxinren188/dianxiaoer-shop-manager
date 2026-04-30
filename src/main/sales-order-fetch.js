@@ -31,7 +31,7 @@ function isLoginPage(url) {
 /**
  * API 拦截器 —— 在 dom-ready 时注入
  * 覆盖 fetch / XMLHttpRequest，捕获 SPA 发出的所有 API 请求和响应
- * 只做数据捕获（读取），不修改任何请求/响应，不触发风控
+ * 同时将分页参数 pageSize 调整为 50，以获取更多订单数据
  */
 const API_INTERCEPTOR = `
 (function() {
@@ -39,12 +39,40 @@ const API_INTERCEPTOR = `
   window.__apiInterceptorInstalled = true;
   window.__capturedResponses = [];
 
+  var ORDER_PAGE_SIZE = 50;
+
+  function patchUrlPageSize(url) {
+    if (!url || typeof url !== 'string') return url;
+    return url.replace(/([?&])(pageSize|page_size)=\\d+/g, '$1$2=' + ORDER_PAGE_SIZE);
+  }
+
+  function patchBodyPageSize(body) {
+    if (!body || typeof body !== 'string') return body;
+    try {
+      if (body.charAt(0) === '{') {
+        var obj = JSON.parse(body);
+        var changed = false;
+        if ('pageSize' in obj) { obj.pageSize = ORDER_PAGE_SIZE; changed = true; }
+        if ('page_size' in obj) { obj.page_size = ORDER_PAGE_SIZE; changed = true; }
+        if (changed) return JSON.stringify(obj);
+      }
+    } catch(e) {}
+    return body.replace(/(pageSize|page_size)=\\d+/g, '$1=' + ORDER_PAGE_SIZE);
+  }
+
   // 拦截 fetch
   var origFetch = window.fetch;
-  window.fetch = function() {
-    var url = arguments[0];
-    var urlStr = typeof url === 'string' ? url : (url && url.url ? url.url : '');
-    return origFetch.apply(this, arguments).then(function(response) {
+  window.fetch = function(input, init) {
+    var urlStr = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+    // 修改 URL 中的 pageSize
+    if (typeof input === 'string') {
+      input = patchUrlPageSize(input);
+    }
+    // 修改 body 中的 pageSize
+    if (init && init.body && typeof init.body === 'string') {
+      init = Object.assign({}, init, { body: patchBodyPageSize(init.body) });
+    }
+    return origFetch.call(this, input, init).then(function(response) {
       try {
         var cloned = response.clone();
         cloned.text().then(function(body) {
@@ -71,28 +99,36 @@ const API_INTERCEPTOR = `
   XMLHttpRequest.prototype.open = function(method, url) {
     this.__captureUrl = (url || '').toString().substring(0, 1000);
     this.__captureMethod = method;
+    // 修改 URL 中的 pageSize
+    if (typeof url === 'string') {
+      arguments[1] = patchUrlPageSize(url);
+    }
     return origOpen.apply(this, arguments);
   };
 
-  XMLHttpRequest.prototype.send = function() {
+  XMLHttpRequest.prototype.send = function(body) {
     var xhr = this;
+    // 修改 body 中的 pageSize
+    if (body && typeof body === 'string') {
+      body = patchBodyPageSize(body);
+    }
     xhr.addEventListener('load', function() {
       try {
-        var body = xhr.responseText || '';
-        if (body.length > 50) {
+        var respBody = xhr.responseText || '';
+        if (respBody.length > 50) {
           window.__capturedResponses.push({
             type: 'xhr',
             method: xhr.__captureMethod,
             url: xhr.__captureUrl,
             status: xhr.status,
-            bodyLen: body.length,
-            body: body.substring(0, 200000),
+            bodyLen: respBody.length,
+            body: respBody.substring(0, 200000),
             time: Date.now()
           });
         }
       } catch(e) {}
     });
-    return origSend.apply(this, arguments);
+    return origSend.call(this, body);
   };
 })()
 `

@@ -6,7 +6,7 @@
         <div class="filter-grid">
           <div class="filter-item">
             <label class="filter-label">选择店铺</label>
-            <el-select v-model="searchForm.storeId" filterable placeholder="请选择京东店铺">
+            <el-select v-model="searchForm.storeId" filterable clearable placeholder="全部店铺">
               <el-option v-for="s in storeOptions" :key="s.id" :label="s.name" :value="s.id">
                 <div style="display:flex;align-items:center;justify-content:space-between">
                   <span>{{ s.name }}</span>
@@ -86,13 +86,6 @@
             <p class="func-item-desc">(每60分钟，同步1次采购订单状态及物流)</p>
           </div>
         </div>
-        <div class="func-group">
-          <div class="func-group-title">拍单账号</div>
-          <div class="func-btn-group">
-            <el-button type="danger" size="small" @click="onFuncBtnClick('accountManage')">账号管理</el-button>
-            <el-button size="small" @click="onFuncBtnClick('importAccount')">导入账号</el-button>
-          </div>
-        </div>
       </div>
     </div>
 
@@ -113,12 +106,6 @@
         <span class="action-stat">超时未出库订单数：<em class="stat-num">{{ timeoutCount }}</em></span>
       </div>
       <div class="action-right">
-        <span class="action-right-label">拍单账号</span>
-        <el-select v-model="selectedAccount" placeholder="请选择" size="small" style="width: 140px;">
-          <el-option label="默认账号" value="default" />
-          <el-option label="账号1" value="account1" />
-          <el-option label="账号2" value="account2" />
-        </el-select>
         <el-button class="action-btn action-btn-green" @click="handleTrackShip">
           <el-icon><Van /></el-icon>
           <span>轨迹发货</span>
@@ -149,6 +136,8 @@
         <div class="ot-col ot-col-index">序号</div>
         <div class="ot-col ot-col-goods">商品信息</div>
         <div class="ot-col ot-col-price">单价/数量</div>
+        <div class="ot-col ot-col-purchase">采购</div>
+        <div class="ot-col ot-col-warehouse">绑定仓库</div>
         <div class="ot-col ot-col-amount">订单金额</div>
         <div class="ot-col ot-col-time">下单时间</div>
         <div class="ot-col ot-col-logistics">物流信息</div>
@@ -224,6 +213,18 @@
                     <span class="price-value">¥{{ item.price.toFixed(2) }}</span>
                     <span class="price-qty">x {{ item.quantity }}</span>
                   </div>
+                </div>
+                <div class="ot-col ot-col-purchase">
+                  <el-button type="warning" size="small" plain @click.stop="handlePurchase(order, item, itemIdx)">
+                    <el-icon><ShoppingCart /></el-icon>
+                    <span>采购</span>
+                  </el-button>
+                </div>
+                <div class="ot-col ot-col-warehouse">
+                  <el-button size="small" plain @click.stop="handleBindWarehouse(order, item, itemIdx)">
+                    <el-icon><OfficeBuilding /></el-icon>
+                    <span>绑定仓库</span>
+                  </el-button>
                 </div>
               </div>
             </div>
@@ -360,15 +361,269 @@
         </div>
       </template>
     </el-drawer>
+
+    <!-- 6. 采购弹窗 -->
+    <el-dialog
+      v-model="purchaseDialogVisible"
+      title="采购下单"
+      width="560px"
+      align-center
+      destroy-on-close
+      :close-on-click-modal="false"
+    >
+      <!-- Step 1: idle 状态 - 信息+选账号 -->
+      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
+        <div class="purchase-goods-preview" style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #ebeef5;">
+          <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" style="width:64px;height:64px;border-radius:8px;flex-shrink:0;" fit="cover" />
+          <div v-else style="width:64px;height:64px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
+            <span style="color:#fff;font-size:20px;font-weight:700;">{{ purchaseInfo.goodsName.charAt(0) }}</span>
+          </div>
+          <div style="min-width:0;">
+            <p style="margin:0 0 4px;font-size:14px;font-weight:600;color:#1f2937;line-height:1.4;">{{ purchaseInfo.goodsName }}</p>
+            <p v-if="purchaseInfo.sku" style="margin:0;font-size:12px;color:#9ca3af;">{{ purchaseInfo.sku }}</p>
+            <p style="margin:4px 0 0;font-size:12px;color:#606266;">采购数量：{{ purchaseInfo.quantity }}</p>
+          </div>
+        </div>
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="销售订单号">{{ purchaseInfo.salesOrderNo }}</el-descriptions-item>
+          <el-descriptions-item label="采购编号">
+            <span style="color: #e6a23c; font-weight: 600">{{ purchaseInfo.purchaseNo }}</span>
+          </el-descriptions-item>
+        </el-descriptions>
+        <el-alert
+          type="info"
+          :closable="false"
+          style="margin-top: 16px"
+          title="操作提示"
+          description="填写货源链接并选择采购账号后点击「去下单」，系统将自动获取订单号并绑定。"
+        />
+        <div style="margin-top: 16px">
+          <el-form label-width="90px">
+            <el-form-item label="货源链接">
+              <div v-if="skuSources.length > 0" style="margin-bottom:8px;max-height:160px;overflow-y:auto;">
+                <div v-for="(src, idx) in skuSources" :key="idx"
+                  style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:all 0.2s;"
+                  :style="selectedSourceIndex === idx ? 'background:#ecf5ff;border:1px solid #409eff;' : 'background:#f5f7fa;border:1px solid transparent;'"
+                  @click="applySourceToPurchase(idx)">
+                  <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
+                  <el-link :href="src.purchase_link" target="_blank" style="flex:1;min-width:0;" :underline="false" @click.stop>
+                    <span style="font-size:12px;">{{ src.purchase_link }}</span>
+                  </el-link>
+                  <span v-if="src.purchase_price" style="font-size:12px;color:#f56c6c;flex-shrink:0;">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
+                </div>
+              </div>
+              <div v-else style="color:#909399;font-size:13px;margin-bottom:8px;">暂无货源链接，请先添加</div>
+              <el-button type="primary" size="small" plain @click="openAddSourceForm">
+                <el-icon><Plus /></el-icon>
+                <span style="margin-left:4px;">新增货源</span>
+              </el-button>
+            </el-form-item>
+            <el-form-item label="采购平台">
+              <el-radio-group v-model="purchaseInfo.platform">
+                <el-radio value="taobao">淘宝/天猫</el-radio>
+                <el-radio value="pinduoduo">拼多多</el-radio>
+                <el-radio value="1688">1688</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="采购账号">
+              <el-select v-model="purchaseInfo.selectedAccountId" placeholder="请选择采购账号" filterable style="width: 100%">
+                <el-option v-for="acc in filteredPurchaseAccounts" :key="acc.id" :label="acc.account || '未命名'" :value="acc.id">
+                  <div style="display:flex;align-items:center;justify-content:space-between">
+                    <span>{{ acc.account || '未命名' }}</span>
+                    <el-tag :type="acc.online ? 'success' : 'info'" size="small">{{ acc.online ? '在线' : '离线' }}</el-tag>
+                  </div>
+                </el-option>
+              </el-select>
+              <div v-if="filteredPurchaseAccounts.length === 0" style="color:#e6a23c;font-size:12px;margin-top:4px">
+                该平台暂无采购账号，请先在「采购订单」页面添加并登录
+              </div>
+            </el-form-item>
+            <el-form-item label="采购类型">
+              <el-radio-group v-model="purchaseInfo.purchaseType">
+                <el-radio value="dropship">三方代发</el-radio>
+                <el-radio value="warehouse">仓库发货</el-radio>
+              </el-radio-group>
+            </el-form-item>
+            <!-- 仓库发货时选择仓库 -->
+            <el-form-item v-if="purchaseInfo.purchaseType === 'warehouse'" label="选择仓库">
+              <el-select v-model="purchaseInfo.warehouseId" placeholder="请选择发货仓库" style="width: 100%" @change="onWarehouseChange">
+                <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
+              </el-select>
+              <div v-if="warehouseList.length === 0" style="color:#e6a23c;font-size:12px;margin-top:4px">
+                暂无仓库，请先在「仓库管理」页面添加
+              </div>
+            </el-form-item>
+            <!-- 收货地址预览 -->
+            <el-form-item label="收货地址">
+              <div style="background:#f5f7fa;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.8;color:#303133;width:100%">
+                <div v-if="purchaseInfo.shippingName || purchaseInfo.shippingPhone">
+                  <span style="font-weight:600">{{ purchaseInfo.shippingName }}</span>
+                  <span v-if="purchaseInfo.shippingPhone" style="margin-left:12px;color:#606266">{{ purchaseInfo.shippingPhone }}</span>
+                </div>
+                <div v-if="purchaseInfo.shippingAddress" style="color:#606266">{{ purchaseInfo.shippingAddress }}</div>
+                <div v-if="!purchaseInfo.shippingName && !purchaseInfo.shippingAddress" style="color:#c0c4cc">
+                  {{ purchaseInfo.purchaseType === 'dropship' ? '暂无买家地址信息' : '请选择发货仓库' }}
+                </div>
+                <div style="margin-top:4px">
+                  <el-tag size="small" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="plain">
+                    {{ purchaseInfo.purchaseType === 'dropship' ? '买家地址（三方代发）' : '仓库地址（仓库发货）' }}
+                  </el-tag>
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item label="采购价">
+              <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" style="width: 180px" />
+            </el-form-item>
+            <el-form-item label="备注">
+              <el-input v-model="purchaseInfo.remark" type="textarea" :rows="2" placeholder="选填，方便下次采购时快速识别" />
+            </el-form-item>
+          </el-form>
+        </div>
+      </div>
+
+      <!-- Step 1: ordering 状态 - 等待下单 -->
+      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'ordering'" style="text-align:center;padding:40px 20px">
+        <el-icon :size="48" style="color:#409eff;margin-bottom:16px" class="is-loading"><Loading /></el-icon>
+        <h3 style="margin:0 0 12px">正在等待下单完成...</h3>
+        <p style="color:#909399;font-size:13px">请在弹出的窗口中完成下单操作，系统将自动获取订单号</p>
+      </div>
+
+      <!-- Step 1: captured 状态 - 成功 -->
+      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'captured'" style="text-align:center;padding:40px 20px">
+        <el-icon :size="48" style="color:#67c23a;margin-bottom:16px"><CircleCheck /></el-icon>
+        <h3 style="margin:0 0 12px;color:#67c23a">采购订单已自动创建并绑定</h3>
+        <p style="color:#606266;font-size:14px">平台订单号：<strong>{{ purchaseInfo.capturedOrderNo }}</strong></p>
+      </div>
+
+      <!-- Step 2: 手动输入回退 -->
+      <div v-if="purchaseInfo.step === 2">
+        <el-alert type="warning" :closable="false" style="margin-bottom:16px"
+          title="未能自动获取订单号" description="请手动输入在采购平台购买后的订单号完成绑定。" />
+        <div class="purchase-goods-preview" style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #ebeef5;">
+          <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" style="width:64px;height:64px;border-radius:8px;flex-shrink:0;" fit="cover" />
+          <div v-else style="width:64px;height:64px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
+            <span style="color:#fff;font-size:20px;font-weight:700;">{{ purchaseInfo.goodsName.charAt(0) }}</span>
+          </div>
+          <div style="min-width:0;">
+            <p style="margin:0 0 4px;font-size:14px;font-weight:600;color:#1f2937;line-height:1.4;">{{ purchaseInfo.goodsName }}</p>
+            <p v-if="purchaseInfo.sku" style="margin:0;font-size:12px;color:#9ca3af;">{{ purchaseInfo.sku }}</p>
+            <p style="margin:4px 0 0;font-size:12px;color:#606266;">采购数量：{{ purchaseInfo.quantity }}</p>
+          </div>
+        </div>
+        <el-descriptions :column="1" border size="small">
+          <el-descriptions-item label="采购编号">
+            <span style="color: #e6a23c; font-weight: 600">{{ purchaseInfo.purchaseNo }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="采购平台">{{ platformLabel(purchaseInfo.platform) }}</el-descriptions-item>
+        </el-descriptions>
+        <el-form style="margin-top: 16px" label-width="110px">
+          <el-form-item label="平台订单号" required>
+            <el-input v-model="purchaseInfo.platformOrderNo" placeholder="请输入在淘宝/拼多多购买后的订单号" clearable />
+          </el-form-item>
+          <el-form-item label="实际采购单价">
+            <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" style="width: 180px" />
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="purchaseInfo.remark" type="textarea" :rows="2" placeholder="选填" />
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <template #footer>
+        <!-- idle: 去下单 -->
+        <template v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
+          <el-button @click="purchaseDialogVisible = false">取消</el-button>
+          <el-button type="primary" :disabled="!purchaseInfo.sourceUrl.trim() || !purchaseInfo.selectedAccountId" @click="handleGoOrder">去下单</el-button>
+        </template>
+        <!-- ordering: 等待中 -->
+        <template v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'ordering'">
+          <el-button @click="handleCancelOrder">取消下单</el-button>
+          <el-button type="warning" plain @click="purchaseInfo.step = 2">手动输入订单号</el-button>
+        </template>
+        <!-- captured: 完成 -->
+        <template v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'captured'">
+          <el-button type="primary" @click="purchaseDialogVisible = false">完成</el-button>
+        </template>
+        <!-- Step 2: 手动输入 -->
+        <template v-if="purchaseInfo.step === 2">
+          <el-button @click="purchaseInfo.step = 1; purchaseInfo.captureStatus = 'idle'">上一步</el-button>
+          <el-button type="primary" :loading="purchaseInfo.submitting" :disabled="!purchaseInfo.platformOrderNo.trim()" @click="handlePurchaseSubmit">确认绑定</el-button>
+        </template>
+      </template>
+    </el-dialog>
+
+    <!-- 货源管理弹窗 -->
+    <el-dialog
+      v-model="sourceManageVisible"
+      :title="`管理货源 - ${purchaseInfo.goodsName}`"
+      width="580px"
+      align-center
+      destroy-on-close
+    >
+      <el-table :data="skuSources" stripe border size="small" style="margin-bottom:12px;" :header-cell-style="{ background: '#f5f7fa', fontWeight: 600 }">
+        <el-table-column label="平台" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" :type="platformTagType(row.platform)">{{ platformLabel(row.platform) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="链接" min-width="180">
+          <template #default="{ row }">
+            <el-link :href="row.purchase_link" target="_blank" style="font-size:12px;">{{ row.purchase_link }}</el-link>
+          </template>
+        </el-table-column>
+        <el-table-column label="采购价" width="90" align="right">
+          <template #default="{ row }">
+            <span v-if="row.purchase_price" style="color:#f56c6c;">¥{{ Number(row.purchase_price).toFixed(2) }}</span>
+            <span v-else style="color:#c0c4cc;">--</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="备注" prop="remark" min-width="100" show-overflow-tooltip />
+        <el-table-column label="操作" width="160" align="center" fixed="right">
+          <template #default="{ row, $index }">
+            <el-button link type="primary" size="small" @click="applySourceToPurchase($index); sourceManageVisible = false;">选择</el-button>
+            <el-button link type="warning" size="small" @click="openEditSourceForm(row, $index)">编辑</el-button>
+            <el-button link type="danger" size="small" @click="handleDeleteSource(row, $index)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-button type="primary" size="small" @click="openAddSourceForm">
+        <el-icon><Plus /></el-icon>
+        <span style="margin-left:4px;">新增货源</span>
+      </el-button>
+    </el-dialog>
+
+    <!-- 货源新增/编辑弹窗 -->
+    <el-dialog
+      v-model="sourceFormVisible"
+      :title="sourceFormMode === 'add' ? '新增货源' : '编辑货源'"
+      width="420px"
+      align-center
+      destroy-on-close
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="0">
+        <el-form-item>
+          <el-input v-model="sourceForm.purchase_link" placeholder="粘贴货源商品链接，系统自动识别平台" clearable size="large" @change="onSourceUrlChange" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="sourceFormVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="!sourceForm.purchase_link.trim()" @click="handleSaveSource">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Refresh, Goods, Van, ChatDotRound } from '@element-plus/icons-vue'
+import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
 import { fetchSalesOrders, saveSalesOrders } from '@/api/salesOrder'
+import { createPurchaseOrder, bindPlatformOrderNo } from '@/api/purchaseOrder'
+import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
+import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
+import { fetchWarehouses } from '@/api/warehouse'
 
 // ==================== 筛选项配置 ====================
 
@@ -398,7 +653,6 @@ const activeStatus = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
 const selectAll = ref(false)
-const selectedAccount = ref('default')
 
 // ==================== 功能区 ====================
 
@@ -514,9 +768,10 @@ function mapServerOrder(row) {
 }
 
 async function loadOrdersFromServer() {
-  if (!searchForm.storeId) return
   try {
-    const data = await fetchSalesOrders({ store_id: searchForm.storeId, pageSize: 500 })
+    const params = { pageSize: 500 }
+    if (searchForm.storeId) params.store_id = searchForm.storeId
+    const data = await fetchSalesOrders(params)
     const list = (data.list || []).map(mapServerOrder)
     tableData.value = list
   } catch (err) {
@@ -573,7 +828,7 @@ async function handleSyncOrders() {
 }
 
 function handleTrackShip() {
-  console.log('[操作栏] 轨迹发货, 账号:', selectedAccount.value)
+  console.log('[操作栏] 轨迹发货')
 }
 
 function handleOpenChat(order) {
@@ -585,6 +840,476 @@ function handleOpenChat(order) {
   } else {
     window.open(url, '_blank')
   }
+}
+
+async function handlePurchase(order, item, itemIdx) {
+  const timestamp = Date.now().toString(36).toUpperCase()
+  const random = Math.random().toString(36).substring(2, 6).toUpperCase()
+  const purchaseNo = `CG${timestamp}${random}`
+
+  purchaseInfo.step = 1
+  purchaseInfo.purchaseNo = purchaseNo
+  purchaseInfo.salesOrderNo = order.orderNo
+  purchaseInfo.salesOrderId = order.id
+  purchaseInfo.goodsName = item.name
+  purchaseInfo.sku = item.sku || ''
+  purchaseInfo.skuId = item.skuId || item.sku_id || item.sku || ''
+  purchaseInfo.quantity = item.quantity
+  purchaseInfo.image = item.image || ''
+  purchaseInfo.sourceUrl = ''
+  purchaseInfo.platform = 'taobao'
+  purchaseInfo.platformOrderNo = ''
+  purchaseInfo.purchasePrice = 0
+  purchaseInfo.remark = ''
+  purchaseInfo.selectedAccountId = null
+  purchaseInfo.captureStatus = 'idle'
+  purchaseInfo.capturedOrderNo = ''
+  purchaseInfo.submitting = false
+  // 采购类型 & 地址
+  purchaseInfo.purchaseType = 'dropship'
+  purchaseInfo.buyerName = order.customerName || ''
+  purchaseInfo.buyerPhone = order.customerPhone || ''
+  purchaseInfo.buyerAddress = order.address || ''
+  purchaseInfo.warehouseId = null
+  purchaseInfo.warehouseName = ''
+  purchaseInfo.warehouseContact = ''
+  purchaseInfo.warehousePhone = ''
+  purchaseInfo.warehouseAddress = ''
+  // 默认使用买家地址（三方代发）
+  purchaseInfo.shippingName = order.customerName || ''
+  purchaseInfo.shippingPhone = order.customerPhone || ''
+  purchaseInfo.shippingAddress = order.address || ''
+  purchaseDialogVisible.value = true
+
+  // 注册 IPC 事件监听
+  setupPurchaseListeners()
+
+  // 加载采购账号列表
+  if (purchaseAccounts.value.length === 0) {
+    try {
+      const res = await fetchPurchaseAccounts()
+      if (res.code === 0 && res.data && res.data.list) {
+        purchaseAccounts.value = res.data.list
+      }
+    } catch (e) {}
+  }
+
+  // 加载仓库列表（用于仓库发货类型）
+  if (warehouseList.value.length === 0) {
+    try {
+      const wRes = await fetchWarehouses()
+      if (wRes.code === 0 && wRes.data) {
+        warehouseList.value = wRes.data.list || wRes.data || []
+      }
+    } catch (e) {}
+  }
+  // 如果只有一个仓库，自动选中
+  if (warehouseList.value.length === 1) {
+    applyWarehouseAddress(warehouseList.value[0])
+  }
+
+  // 加载该SKU的货源列表
+  await loadSkuSources(purchaseInfo.skuId)
+
+  // 根据平台自动选择上次使用的账号
+  const lastId = localStorage.getItem('lastPurchaseAccount_' + purchaseInfo.platform)
+  if (lastId) {
+    const match = filteredPurchaseAccounts.value.find(a => String(a.id) === lastId)
+    if (match) purchaseInfo.selectedAccountId = match.id
+  } else if (filteredPurchaseAccounts.value.length > 0) {
+    purchaseInfo.selectedAccountId = filteredPurchaseAccounts.value[0].id
+  }
+}
+
+// 加载SKU货源列表
+async function loadSkuSources(skuId) {
+  skuSources.value = []
+  selectedSourceIndex.value = -1
+  if (!skuId) return
+  try {
+    const res = await fetchSkuPurchaseConfigList(skuId)
+    if (res.code === 0 && res.data) {
+      let list = []
+      // 兼容旧后端：返回单条对象时包装为数组
+      if (res.data.list && Array.isArray(res.data.list)) {
+        list = res.data.list
+      } else if (res.data.purchase_link !== undefined) {
+        list = [res.data]
+      } else if (Array.isArray(res.data)) {
+        list = res.data
+      }
+      skuSources.value = list
+      // 默认选中第一条
+      if (list.length > 0) {
+        selectedSourceIndex.value = 0
+        applySourceToPurchase(0)
+      }
+    }
+  } catch (e) {}
+}
+
+// 将选中的货源填充到采购信息
+function applySourceToPurchase(index) {
+  const source = skuSources.value[index]
+  if (!source) return
+  selectedSourceIndex.value = index
+  purchaseInfo.sourceUrl = source.purchase_link || ''
+  purchaseInfo.platform = source.platform || detectPlatformFromUrl(source.purchase_link) || 'taobao'
+  purchaseInfo.purchasePrice = source.purchase_price || 0
+  purchaseInfo.remark = source.remark || ''
+}
+
+// 打开货源管理弹窗
+function openSourceManage() {
+  sourceManageVisible.value = true
+}
+
+// 打开新增货源表单
+function openAddSourceForm() {
+  sourceFormMode.value = 'add'
+  sourceForm.id = null
+  sourceForm.sku_id = purchaseInfo.skuId
+  sourceForm.purchase_link = ''
+  sourceForm.platform = ''
+  sourceForm.purchase_price = 0
+  sourceForm.remark = ''
+  sourceFormVisible.value = true
+}
+
+// 打开编辑货源表单
+function openEditSourceForm(row, index) {
+  sourceFormMode.value = 'edit'
+  sourceForm.id = row.id || null
+  sourceForm.sku_id = purchaseInfo.skuId
+  sourceForm.purchase_link = row.purchase_link || ''
+  sourceForm.platform = row.platform || ''
+  sourceForm.purchase_price = row.purchase_price || 0
+  sourceForm.remark = row.remark || ''
+  sourceFormVisible.value = true
+}
+
+// 货源链接变化时自动识别平台
+function onSourceUrlChange(url) {
+  const detected = detectPlatformFromUrl(url)
+  if (detected && !sourceForm.platform) {
+    sourceForm.platform = detected
+  }
+}
+
+// 保存货源
+async function handleSaveSource() {
+  const url = sourceForm.purchase_link.trim()
+  if (!url) {
+    ElMessage.warning('请输入货源链接')
+    return
+  }
+  const platform = detectPlatformFromUrl(url) || 'taobao'
+  try {
+    await saveSkuPurchaseConfig({
+      id: sourceForm.id || undefined,
+      sku_id: sourceForm.sku_id,
+      platform,
+      purchase_link: url,
+      purchase_price: sourceForm.purchase_price || 0,
+      remark: sourceForm.remark
+    })
+    ElMessage.success(sourceForm.id ? '货源已更新' : '货源已添加')
+    sourceFormVisible.value = false
+    await loadSkuSources(purchaseInfo.skuId)
+  } catch (err) {
+    ElMessage.error('保存失败: ' + (err.message || ''))
+  }
+}
+
+// 删除货源
+async function handleDeleteSource(row, index) {
+  try {
+    if (row.id) {
+      await deleteSkuPurchaseConfig(row.id)
+    }
+    ElMessage.success('已删除')
+    await loadSkuSources(purchaseInfo.skuId)
+  } catch (err) {
+    ElMessage.error('删除失败: ' + (err.message || ''))
+  }
+}
+
+// 采购弹窗相关
+const purchaseDialogVisible = ref(false)
+const purchaseAccounts = ref([])
+const purchaseInfo = reactive({
+  step: 1,
+  purchaseNo: '',
+  salesOrderNo: '',
+  salesOrderId: '',
+  goodsName: '',
+  sku: '',
+  skuId: '',
+  quantity: 0,
+  image: '',
+  sourceUrl: '',
+  platform: 'taobao',
+  platformOrderNo: '',
+  purchasePrice: 0,
+  remark: '',
+  selectedAccountId: null,
+  captureStatus: 'idle', // idle | ordering | captured
+  capturedOrderNo: '',
+  submitting: false,
+  purchaseType: 'dropship', // dropship(三方代发) | warehouse(仓库发货)
+  shippingName: '',
+  shippingPhone: '',
+  shippingAddress: '',
+  buyerName: '',
+  buyerPhone: '',
+  buyerAddress: '',
+  warehouseId: null,
+  warehouseName: '',
+  warehouseContact: '',
+  warehousePhone: '',
+  warehouseAddress: ''
+})
+
+// 货源管理
+const skuSources = ref([])
+const selectedSourceIndex = ref(-1)
+const sourceManageVisible = ref(false)
+const sourceFormVisible = ref(false)
+const sourceFormMode = ref('add')
+const warehouseList = ref([])
+const sourceForm = reactive({
+  id: null,
+  sku_id: '',
+  purchase_link: '',
+  platform: '',
+  purchase_price: 0,
+  remark: ''
+})
+
+// 按平台过滤采购账号
+const filteredPurchaseAccounts = computed(() => {
+  return purchaseAccounts.value.filter(acc => acc.platform === purchaseInfo.platform)
+})
+
+// 应用仓库地址到采购信息
+function applyWarehouseAddress(wh) {
+  if (!wh) return
+  purchaseInfo.warehouseId = wh.id
+  purchaseInfo.warehouseName = wh.name || ''
+  purchaseInfo.warehouseContact = wh.contact || ''
+  purchaseInfo.warehousePhone = wh.phone || ''
+  purchaseInfo.warehouseAddress = wh.location || wh.address || ''
+}
+
+// 仓库下拉切换时更新地址
+function onWarehouseChange(whId) {
+  const wh = warehouseList.value.find(w => w.id === whId)
+  if (wh) {
+    applyWarehouseAddress(wh)
+    // 如果当前是仓库发货，同步更新收货地址
+    if (purchaseInfo.purchaseType === 'warehouse') {
+      purchaseInfo.shippingName = wh.contact || wh.name || ''
+      purchaseInfo.shippingPhone = wh.phone || ''
+      purchaseInfo.shippingAddress = wh.location || wh.address || ''
+    }
+  }
+}
+
+// 采购类型切换时自动更新收货地址
+watch(() => purchaseInfo.purchaseType, (type) => {
+  if (type === 'dropship') {
+    purchaseInfo.shippingName = purchaseInfo.buyerName
+    purchaseInfo.shippingPhone = purchaseInfo.buyerPhone
+    purchaseInfo.shippingAddress = purchaseInfo.buyerAddress
+  } else if (type === 'warehouse') {
+    purchaseInfo.shippingName = purchaseInfo.warehouseContact || purchaseInfo.warehouseName
+    purchaseInfo.shippingPhone = purchaseInfo.warehousePhone
+    purchaseInfo.shippingAddress = purchaseInfo.warehouseAddress
+  }
+})
+
+// URL 自动检测平台
+watch(() => purchaseInfo.sourceUrl, (url) => {
+  if (!url) return
+  const lower = url.toLowerCase()
+  if (lower.includes('taobao.com') || lower.includes('tmall.com') || lower.includes('tb.cn')) {
+    purchaseInfo.platform = 'taobao'
+  } else if (lower.includes('pinduoduo.com') || lower.includes('yangkeduo.com') || lower.includes('pdd.com')) {
+    purchaseInfo.platform = 'pinduoduo'
+  } else if (lower.includes('1688.com')) {
+    purchaseInfo.platform = '1688'
+  }
+})
+
+// 平台切换时自动选择上次使用的账号
+watch(() => purchaseInfo.platform, (platform) => {
+  const lastId = localStorage.getItem('lastPurchaseAccount_' + platform)
+  if (lastId) {
+    const match = filteredPurchaseAccounts.value.find(a => String(a.id) === lastId)
+    if (match) {
+      purchaseInfo.selectedAccountId = match.id
+      return
+    }
+  }
+  // 如果没有记住的，选第一个
+  if (filteredPurchaseAccounts.value.length > 0) {
+    purchaseInfo.selectedAccountId = filteredPurchaseAccounts.value[0].id
+  } else {
+    purchaseInfo.selectedAccountId = null
+  }
+})
+
+function platformLabel(val) {
+  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '1688' }
+  return map[val] || val
+}
+
+function platformTagType(val) {
+  const map = { taobao: 'danger', pinduoduo: 'warning', '1688': '', douyin: 'success' }
+  return map[val] || 'info'
+}
+
+// 去下单：打开内嵌BrowserWindow
+function handleGoOrder() {
+  const url = purchaseInfo.sourceUrl.trim()
+  if (!url) {
+    ElMessage.warning('请输入货源链接')
+    return
+  }
+  if (!purchaseInfo.selectedAccountId) {
+    ElMessage.warning('请选择采购账号')
+    return
+  }
+
+  let finalUrl = url
+  if (!/^https?:\/\//i.test(finalUrl)) {
+    finalUrl = 'https://' + finalUrl
+  }
+
+  // 记住使用的账号
+  localStorage.setItem('lastPurchaseAccount_' + purchaseInfo.platform, String(purchaseInfo.selectedAccountId))
+
+  // 调用主进程打开采购窗口
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-purchase-order-window', {
+      accountId: purchaseInfo.selectedAccountId,
+      purchaseUrl: finalUrl,
+      platform: purchaseInfo.platform,
+      purchaseInfo: {
+        purchaseNo: purchaseInfo.purchaseNo,
+        salesOrderId: purchaseInfo.salesOrderId,
+        salesOrderNo: purchaseInfo.salesOrderNo,
+        goodsName: purchaseInfo.goodsName,
+        sku: purchaseInfo.sku,
+        skuId: purchaseInfo.skuId,
+        quantity: purchaseInfo.quantity,
+        purchasePrice: purchaseInfo.purchasePrice,
+        remark: purchaseInfo.remark,
+        sourceUrl: finalUrl,
+        purchaseType: purchaseInfo.purchaseType,
+        shippingName: purchaseInfo.shippingName,
+        shippingPhone: purchaseInfo.shippingPhone,
+        shippingAddress: purchaseInfo.shippingAddress
+      }
+    })
+  }
+
+  purchaseInfo.captureStatus = 'ordering'
+}
+
+// 取消下单：关闭采购窗口
+function handleCancelOrder() {
+  if (window.electronAPI) {
+    window.electronAPI.invoke('close-purchase-order-window', { purchaseNo: purchaseInfo.purchaseNo })
+  }
+  purchaseInfo.captureStatus = 'idle'
+}
+
+// IPC 事件监听
+let unsubOrderCaptured = null
+let unsubWindowClosed = null
+
+function setupPurchaseListeners() {
+  if (!window.electronAPI) return
+  unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
+    if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      purchaseInfo.captureStatus = 'captured'
+      purchaseInfo.capturedOrderNo = data.platformOrderNo
+      ElMessage.success('采购订单已自动创建并绑定')
+    }
+  })
+  unsubWindowClosed = window.electronAPI.onUpdate('purchase-window-closed', (data) => {
+    if (data.purchaseNo === purchaseInfo.purchaseNo && !data.captured) {
+      if (purchaseInfo.captureStatus === 'ordering') {
+        purchaseInfo.step = 2
+        purchaseInfo.captureStatus = 'idle'
+        ElMessage.info('未检测到订单号，请手动输入')
+      }
+    }
+  })
+}
+
+function cleanupPurchaseListeners() {
+  if (unsubOrderCaptured) { unsubOrderCaptured(); unsubOrderCaptured = null }
+  if (unsubWindowClosed) { unsubWindowClosed(); unsubWindowClosed = null }
+}
+
+async function handlePurchaseSubmit() {
+  if (!purchaseInfo.platformOrderNo.trim()) {
+    ElMessage.warning('请输入平台订单号')
+    return
+  }
+
+  purchaseInfo.submitting = true
+  try {
+    // 1. 创建采购单
+    await createPurchaseOrder({
+      purchase_no: purchaseInfo.purchaseNo,
+      sales_order_id: purchaseInfo.salesOrderId,
+      sales_order_no: purchaseInfo.salesOrderNo,
+      goods_name: purchaseInfo.goodsName,
+      sku: purchaseInfo.sku,
+      quantity: purchaseInfo.quantity,
+      source_url: purchaseInfo.sourceUrl,
+      platform: purchaseInfo.platform,
+      purchase_price: purchaseInfo.purchasePrice,
+      remark: purchaseInfo.remark,
+      purchase_type: purchaseInfo.purchaseType,
+      shipping_name: purchaseInfo.shippingName,
+      shipping_phone: purchaseInfo.shippingPhone,
+      shipping_address: purchaseInfo.shippingAddress
+    })
+
+    // 2. 绑定平台订单号
+    await bindPlatformOrderNo(purchaseInfo.purchaseNo, {
+      platform_order_no: purchaseInfo.platformOrderNo.trim()
+    })
+
+    // 3. 保存SKU采购配置到服务器（供下次自动加载）
+    if (purchaseInfo.skuId) {
+      const sourceId = selectedSourceIndex.value >= 0 ? skuSources.value[selectedSourceIndex.value]?.id : null
+      saveSkuPurchaseConfig({
+        id: sourceId || undefined,
+        sku_id: purchaseInfo.skuId,
+        platform: purchaseInfo.platform,
+        purchase_link: purchaseInfo.sourceUrl,
+        purchase_price: purchaseInfo.purchasePrice,
+        remark: purchaseInfo.remark
+      }).catch(() => {})
+    }
+
+    ElMessage.success('采购单创建并绑定成功')
+    purchaseDialogVisible.value = false
+  } catch (err) {
+    ElMessage.error('采购操作失败: ' + err.message)
+  } finally {
+    purchaseInfo.submitting = false
+  }
+}
+
+function handleBindWarehouse(order, item, itemIdx) {
+  console.log('[绑定仓库] 订单:', order.orderNo, '商品:', item.name, '索引:', itemIdx)
+  ElMessage.info(`绑定仓库功能开发中：${item.name}`)
 }
 
 // ==================== 计算属性 ====================
@@ -701,18 +1426,19 @@ function shopTagColorType(tag) {
 
 // ==================== 生命周期 ====================
 
-watch(() => searchForm.storeId, (newId) => {
-  if (newId) {
-    activeStatus.value = ''
-    currentPage.value = 1
-    loadOrdersFromServer()
-  } else {
-    tableData.value = []
-  }
+watch(() => searchForm.storeId, () => {
+  activeStatus.value = ''
+  currentPage.value = 1
+  loadOrdersFromServer()
 })
 
 onMounted(async () => {
   await loadStores()
+  loadOrdersFromServer()
+})
+
+onUnmounted(() => {
+  cleanupPurchaseListeners()
 })
 </script>
 
@@ -984,6 +1710,24 @@ onMounted(async () => {
   width: 110px;
   flex-shrink: 0;
   text-align: center;
+  padding: 0 4px;
+}
+
+.ot-col-purchase {
+  width: 80px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.ot-col-warehouse {
+  width: 100px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 0 4px;
 }
 

@@ -1,5 +1,6 @@
 const http = require('http')
 const https = require('https')
+const { getAuthToken } = require('./auth-store')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const HEARTBEAT_INTERVAL = 5 * 60 * 1000 // 5 分钟
@@ -44,12 +45,20 @@ function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http
     const urlObj = new URL(url)
+
+    // 自动附带 auth token
+    const headers = { ...options.headers }
+    const token = getAuthToken()
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`
+    }
+
     const reqOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port,
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
-      headers: options.headers || {},
+      headers,
       timeout: REQUEST_TIMEOUT,
       rejectUnauthorized: false
     }

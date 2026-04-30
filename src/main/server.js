@@ -399,6 +399,107 @@ app.delete('/api/warehouses/:id', (req, res) => {
   res.json(ok(true))
 })
 
+// ============ 采购账号接口 ============
+
+const PURCHASE_ACCOUNT_FILE = 'purchase-accounts.json'
+const purchaseAccounts = loadJson(PURCHASE_ACCOUNT_FILE, [])
+let purchaseAccountIdCounter = purchaseAccounts.length > 0 ? Math.max(...purchaseAccounts.map(a => a.id)) + 1 : 1
+
+function savePurchaseAccounts() {
+  saveJson(PURCHASE_ACCOUNT_FILE, purchaseAccounts)
+}
+
+// 采购账号 Cookie 存储
+const PURCHASE_COOKIE_FILE = 'purchase-cookies.json'
+const purchaseCookieStore = loadJson(PURCHASE_COOKIE_FILE, {})
+
+function savePurchaseCookies() {
+  saveJson(PURCHASE_COOKIE_FILE, purchaseCookieStore)
+}
+
+// 获取采购账号列表
+app.get('/api/purchase-accounts', (req, res) => {
+  const list = purchaseAccounts.map(a => ({
+    ...a,
+    password: a.password || ''
+  }))
+  res.json(ok({ list, total: list.length }))
+})
+
+// 获取单个采购账号
+app.get('/api/purchase-accounts/:id', (req, res) => {
+  const acc = purchaseAccounts.find(a => a.id === +req.params.id)
+  if (!acc) return res.status(404).json(fail('采购账号不存在'))
+  res.json(ok(acc))
+})
+
+// 创建采购账号
+app.post('/api/purchase-accounts', (req, res) => {
+  const newAcc = {
+    id: purchaseAccountIdCounter++,
+    account: req.body.account || '',
+    password: req.body.password || '',
+    platform: req.body.platform || '',
+    online: false,
+    createdAt: now()
+  }
+  purchaseAccounts.push(newAcc)
+  savePurchaseAccounts()
+  res.json(ok(newAcc))
+})
+
+// 更新采购账号
+app.put('/api/purchase-accounts/:id', (req, res) => {
+  const acc = purchaseAccounts.find(a => a.id === +req.params.id)
+  if (!acc) return res.status(404).json(fail('采购账号不存在'))
+  if (req.body.account !== undefined) acc.account = req.body.account
+  if (req.body.password !== undefined) acc.password = req.body.password
+  if (req.body.platform !== undefined) acc.platform = req.body.platform
+  if (req.body.online !== undefined) acc.online = !!req.body.online
+  savePurchaseAccounts()
+  res.json(ok(acc))
+})
+
+// 删除采购账号
+app.delete('/api/purchase-accounts/:id', (req, res) => {
+  const idx = purchaseAccounts.findIndex(a => a.id === +req.params.id)
+  if (idx === -1) return res.status(404).json(fail('采购账号不存在'))
+  purchaseAccounts.splice(idx, 1)
+  delete purchaseCookieStore[+req.params.id]
+  savePurchaseAccounts()
+  savePurchaseCookies()
+  res.json(ok(true))
+})
+
+// 更新采购账号在线状态
+app.put('/api/purchase-accounts/:id/status', (req, res) => {
+  const acc = purchaseAccounts.find(a => a.id === +req.params.id)
+  if (!acc) return res.status(404).json(fail('采购账号不存在'))
+  acc.online = !!req.body.online
+  savePurchaseAccounts()
+  res.json(ok(acc))
+})
+
+// 获取采购账号 Cookie
+app.get('/api/purchase-accounts/:id/cookie', (req, res) => {
+  const cookie = purchaseCookieStore[+req.params.id]
+  res.json(ok(cookie || null))
+})
+
+// 保存采购账号 Cookie
+app.post('/api/purchase-accounts/:id/cookie', (req, res) => {
+  const { cookie_data, platform } = req.body
+  if (!cookie_data) return res.json(fail('cookie_data 为必填项'))
+  purchaseCookieStore[+req.params.id] = {
+    account_id: +req.params.id,
+    cookie_data: typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data),
+    platform: platform || '',
+    saved_at: now()
+  }
+  savePurchaseCookies()
+  res.json(ok(true))
+})
+
 // ============ 启动 ============
 
 function startServer(port = 3002) {

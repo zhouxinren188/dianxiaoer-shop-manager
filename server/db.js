@@ -118,6 +118,33 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 用户令牌表（登录 token 存储）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS user_tokens (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        token VARCHAR(200) NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_token (token),
+        KEY idx_user_id (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 兼容已存在的 users 表：添加 parent_id 字段（主账号为 NULL，子账号指向主账号 id）
+    try {
+      await connection.execute(`ALTER TABLE users ADD COLUMN parent_id INT DEFAULT NULL AFTER role`)
+    } catch (e) { /* 字段已存在 */ }
+
+    // 兼容已存在的 stores 表：添加 owner_id 字段（归属主账号）
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN owner_id INT DEFAULT NULL`)
+    } catch (e) { /* 字段已存在 */ }
+
+    // 兼容已存在的 warehouses 表：添加 owner_id 字段（归属主账号）
+    try {
+      await connection.execute(`ALTER TABLE warehouses ADD COLUMN owner_id INT DEFAULT NULL`)
+    } catch (e) { /* 字段已存在 */ }
+
     // Cookie 表
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cookies (
@@ -253,6 +280,13 @@ async function initDB() {
     await connection.execute(`
       INSERT IGNORE INTO user_warehouses (user_id, warehouse_id) VALUES (2, 1)
     `)
+
+    // 数据迁移：为已有数据设置归属关系
+    // 子账号默认挂载到 id=1 的主账号下
+    await connection.execute(`UPDATE users SET parent_id = 1 WHERE user_type = 'sub' AND parent_id IS NULL`)
+    // 已有店铺和仓库默认归属 id=1 的主账号
+    await connection.execute(`UPDATE stores SET owner_id = 1 WHERE owner_id IS NULL`)
+    await connection.execute(`UPDATE warehouses SET owner_id = 1 WHERE owner_id IS NULL`)
 
     console.log('[DB] 数据库初始化完成')
   } finally {
