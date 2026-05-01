@@ -940,37 +940,45 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.shippingAddress = order.address || ''
   purchaseDialogVisible.value = true
 
-  // 注册 IPC 事件监听
-  setupPurchaseListeners()
-
-  // 加载采购账号列表
-  if (purchaseAccounts.value.length === 0) {
-    try {
-      const res = await fetchPurchaseAccounts()
-      console.log('[采购下单] 采购账号API返回:', JSON.stringify(res))
-      if (res && res.list) {
-        purchaseAccounts.value = res.list
-      } else if (Array.isArray(res)) {
-        purchaseAccounts.value = res
-      }
-    } catch (e) {
-      console.warn('[采购下单] 加载采购账号失败:', e.message)
-      ElMessage.warning('加载采购账号失败: ' + e.message)
-    }
+  // 注册 IPC 事件监听（用 try-catch 保护，避免阻断后续 API 加载）
+  try {
+    setupPurchaseListeners()
+  } catch (e) {
+    console.warn('[采购下单] IPC监听注册失败:', e.message)
   }
 
-  // 加载仓库列表（用于仓库发货类型）
-  if (warehouseList.value.length === 0) {
-    try {
-      const wRes = await fetchWarehouses()
-      console.log('[采购下单] 仓库API返回:', JSON.stringify(wRes))
-      if (wRes) {
-        warehouseList.value = wRes.list || (Array.isArray(wRes) ? wRes : [])
-      }
-    } catch (e) {
-      console.warn('[采购下单] 加载仓库失败:', e.message)
-      ElMessage.warning('加载仓库失败: ' + e.message)
+  // 加载采购账号列表（每次打开都重新加载，确保数据最新）
+  try {
+    const res = await fetchPurchaseAccounts()
+    console.log('[采购下单] 采购账号API返回:', JSON.stringify(res))
+    if (res && res.list) {
+      purchaseAccounts.value = res.list
+    } else if (Array.isArray(res)) {
+      purchaseAccounts.value = res
+    } else {
+      purchaseAccounts.value = []
+      console.warn('[采购下单] 采购账号API返回格式异常:', res)
     }
+  } catch (e) {
+    console.warn('[采购下单] 加载采购账号失败:', e.message)
+    ElMessage.warning('加载采购账号失败: ' + e.message)
+  }
+
+  // 加载仓库列表（每次打开都重新加载）
+  try {
+    const wRes = await fetchWarehouses()
+    console.log('[采购下单] 仓库API返回:', JSON.stringify(wRes))
+    if (wRes && wRes.list) {
+      warehouseList.value = wRes.list
+    } else if (Array.isArray(wRes)) {
+      warehouseList.value = wRes
+    } else {
+      warehouseList.value = []
+      console.warn('[采购下单] 仓库API返回格式异常:', wRes)
+    }
+  } catch (e) {
+    console.warn('[采购下单] 加载仓库失败:', e.message)
+    ElMessage.warning('加载仓库失败: ' + e.message)
   }
   // 如果只有一个仓库，自动选中
   if (warehouseList.value.length === 1) {

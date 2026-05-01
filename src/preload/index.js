@@ -2,9 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 // 允许的 IPC 通道白名单
 const validInvokeChannels = [
-  'check-for-updates',
-  'start-download-update',
-  'quit-and-install',
+  'um-check',
+  'um-download',
+  'um-install',
   'window-minimize',
   'window-maximize',
   'window-close',
@@ -13,9 +13,6 @@ const validInvokeChannels = [
   'user-get-all',
   'user-register',
   'user-login',
-  'hot-update-check',
-  'hot-update-download',
-  'hot-update-restart',
   'open-platform-window',
   'confirm-platform-login',
   'close-platform-window',
@@ -33,19 +30,18 @@ const validInvokeChannels = [
 ]
 
 const validOnChannels = [
-  'update-available',
-  'update-not-available',
-  'update-error',
-  'update-progress',
-  'update-downloaded',
-  'hot-update-available',
-  'hot-update-progress',
+  'um-update-available',
+  'um-no-update',
+  'um-update-progress',
+  'um-update-ready',
+  'um-update-error',
   'platform-login-success',
   'purchase-account-login-success',
   'store-status-changed',
   'purchase-order-captured',
   'purchase-window-closed',
   'purchase-address-filled',
+  'purchase-address-setup-done',
   'packet-capture-auto-stopped'
 ]
 

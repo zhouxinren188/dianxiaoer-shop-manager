@@ -691,7 +691,7 @@ function registerSalesOrderIpc() {
 const AUTO_SYNC_INTERVAL = 10 * 60 * 1000 // 10 分钟
 const AUTO_SYNC_FIRST_DELAY = 60 * 1000   // 启动后 60 秒开始第一次
 const LOCAL_SERVER = 'http://localhost:3002'
-const REMOTE_SERVER = 'http://150.158.54.108:3002'
+const REMOTE_SERVER = 'http://150.158.54.108:3001'
 
 let autoSyncTimer = null
 let autoSyncRunning = false

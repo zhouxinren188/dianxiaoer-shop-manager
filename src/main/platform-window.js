@@ -4,7 +4,7 @@ const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
 
-const BUSINESS_SERVER = 'http://150.158.54.108:3002'
+const BUSINESS_SERVER = 'http://150.158.54.108:3001'
 
 // 平台后台 URL 映射
 const PLATFORM_URLS = {

@@ -3,7 +3,7 @@ const http = require('http')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 
-const BUSINESS_SERVER = 'http://150.158.54.108:3002'
+const BUSINESS_SERVER = 'http://150.158.54.108:3001'
 
 // 活跃的采购下单窗口 Map<purchaseNo, { win, pollTimer, resolved }>
 const activePurchaseWindows = new Map()

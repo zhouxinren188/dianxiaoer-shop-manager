@@ -9,8 +9,8 @@ process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err)
 })
 
-const { initUpdater, registerIpc } = require('./updater')
-const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
+const { getHotUpdateRendererPath } = require('./hot-updater')
+const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
 const { registerPacketCaptureIpc } = require('./packet-capture')
@@ -56,6 +56,11 @@ function createWindow() {
         event.preventDefault()
       }
     })
+  }
+
+  // 开发模式自动打开 DevTools
+  if (!app.isPackaged) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' })
   }
 
   // 右键菜单（剪切/复制/粘贴/全选/刷新）
@@ -159,8 +164,7 @@ ipcMain.handle('window-set-main-size', (event) => {
   win.maximize()
 })
 
-// 注册更新 IPC 通道
-registerIpc()
+// 更新 IPC 通道由 update-manager 统一注册
 
 // 注册 auth token 同步（渲染进程登录后将 token 传递给主进程）
 ipcMain.handle('set-auth-token', (event, token) => {
@@ -199,14 +203,8 @@ app.whenReady().then(async () => {
 
   const mainWindow = createWindow()
 
-  // 初始化自动更新（electron-updater，GitHub Release 全量更新）
-  initUpdater(mainWindow)
-
-  // 注册热更新 IPC 通道
-  registerHotUpdateIpc(mainWindow)
-
-  // 热更新自动检查已禁用，改用全量更新
-  // setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
+  // 初始化统一更新管理器（协调全量更新 + 热更新）
+  initUpdateManager(mainWindow)
 
   // 注册平台窗口 IPC（需要 mainWindow 引用）
   registerPlatformWindowIpc(mainWindow)

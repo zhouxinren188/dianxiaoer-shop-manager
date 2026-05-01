@@ -1,5 +1,5 @@
 // 后端服务地址（远程服务器）
-const BASE_URL = 'http://150.158.54.108:3002'
+const BASE_URL = 'http://150.158.54.108:3001'
 
 async function request(url, options = {}) {
   const { method = 'GET', data, params, timeout = 10000 } = options

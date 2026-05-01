@@ -12,6 +12,7 @@
 const { execSync } = require('child_process')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')
 const AdmZip = require('adm-zip')
 
 const ROOT = path.join(__dirname, '..')
@@ -64,13 +65,15 @@ const zipPath = path.join(DIST_DIR, zipFilename)
 zip.writeZip(zipPath)
 
 const zipSize = fs.statSync(zipPath).size
+const zipSha256 = crypto.createHash('sha256').update(fs.readFileSync(zipPath)).digest('hex')
 console.log(`打包完成: ${zipPath} (${(zipSize / 1024).toFixed(1)} KB)`)
+console.log(`SHA256: ${zipSha256}`)
 
 // 4. 上传到服务器
 const shouldUpload = process.argv.includes('--upload')
 if (shouldUpload) {
   console.log('\n[3/4] 上传到更新服务器...')
-  uploadToServer(zipPath, version)
+  uploadToServer(zipPath, version, zipSha256)
 } else {
   console.log('\n[3/4] 跳过上传（添加 --upload 参数自动上传）')
   console.log('\n[4/4] 完成！')
@@ -82,7 +85,7 @@ if (shouldUpload) {
   console.log(`    -F "changelog=热更新 v${version}"`)
 }
 
-function uploadToServer(filePath, ver) {
+function uploadToServer(filePath, ver, sha256) {
   const http = require('http')
   const url = new URL(`${UPDATE_SERVER}/api/update/upload`)
 
@@ -95,6 +98,8 @@ function uploadToServer(filePath, ver) {
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="version"\r\n\r\n${ver}`)
   // changelog 字段
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="changelog"\r\n\r\n热更新 v${ver}`)
+  // sha256 字段
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="sha256"\r\n\r\n${sha256}`)
   // file 字段
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/zip\r\n\r\n`)
 

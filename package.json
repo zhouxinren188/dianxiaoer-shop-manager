@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -11,7 +11,9 @@
     "dist:dir": "electron-vite build && electron-builder --win --dir",
     "publish": "electron-vite build && electron-builder --win --publish always",
     "hot-update": "node scripts/build-hot-update.js",
-    "hot-update:publish": "node scripts/build-hot-update.js --upload"
+    "hot-update:publish": "node scripts/build-hot-update.js --upload",
+    "publish:hot": "node scripts/build-hot-update.js --upload",
+    "publish:full": "node scripts/publish-full.js"
   },
   "build": {
     "appId": "com.dianxiaoer.shop-manager",

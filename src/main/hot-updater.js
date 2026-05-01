@@ -1,13 +1,13 @@
-const { app, ipcMain } = require('electron')
+const { app } = require('electron')
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 
-const UPDATE_SERVER = 'http://150.158.54.108:3001'
 const HOT_UPDATE_DIR = path.join(app.getPath('userData'), 'hot-update')
 const VERSION_FILE = path.join(HOT_UPDATE_DIR, 'version.json')
 
-// 获取当前版本（优先使用热更新版本）
+// 获取当前热更新版本（优先使用热更新版本，否则返回 app 内置版本）
 function getCurrentVersion() {
   try {
     if (fs.existsSync(VERSION_FILE)) {
@@ -27,40 +27,33 @@ function getHotUpdateRendererPath() {
   return null
 }
 
-// 检查服务器是否有新版本
-function checkForHotUpdate() {
-  const currentVersion = getCurrentVersion()
-  return new Promise((resolve, reject) => {
-    const url = `${UPDATE_SERVER}/api/update/check?version=${currentVersion}`
-    http.get(url, { timeout: 8000 }, (res) => {
-      let data = ''
-      res.on('data', chunk => (data += chunk))
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data))
-        } catch (e) {
-          reject(new Error('JSON parse error'))
-        }
-      })
-    }).on('error', reject)
-      .on('timeout', function () { this.destroy(); reject(new Error('timeout')) })
-  })
+// 清除热更新目录（全量更新安装后首次启动时调用）
+function clearHotUpdate() {
+  try {
+    if (fs.existsSync(HOT_UPDATE_DIR)) {
+      fs.rmSync(HOT_UPDATE_DIR, { recursive: true, force: true })
+      console.log('[HotUpdater] 已清除热更新目录')
+    }
+  } catch (e) {
+    console.error('[HotUpdater] 清除热更新目录失败:', e.message)
+  }
 }
 
 // 下载并应用热更新
-function downloadAndApplyUpdate(onProgress) {
+// url: 下载地址
+// expectedSha256: 期望的 SHA256 哈希值（为空则跳过校验）
+// onProgress: 进度回调 (percent)
+function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
   return new Promise((resolve, reject) => {
-    const url = `${UPDATE_SERVER}/api/update/download`
     http.get(url, { timeout: 60000 }, (res) => {
       if (res.statusCode !== 200) {
-        return reject(new Error('Download failed: HTTP ' + res.statusCode))
+        return reject(new Error('下载失败: HTTP ' + res.statusCode))
       }
       const totalSize = parseInt(res.headers['content-length'] || '0', 10)
       const tmpFile = path.join(app.getPath('temp'), 'dianxiaoer-update.zip')
       const ws = fs.createWriteStream(tmpFile)
       let downloaded = 0
 
-      // 监听进度
       res.on('data', (chunk) => {
         downloaded += chunk.length
         if (onProgress && totalSize > 0) {
@@ -68,11 +61,21 @@ function downloadAndApplyUpdate(onProgress) {
         }
       })
 
-      // 用 pipe 自动处理背压，避免数据丢失导致 ZIP 损坏
       res.pipe(ws)
 
       ws.on('finish', () => {
         try {
+          // SHA256 校验
+          if (expectedSha256) {
+            const hash = crypto.createHash('sha256')
+            hash.update(fs.readFileSync(tmpFile))
+            const actualSha256 = hash.digest('hex')
+            if (actualSha256 !== expectedSha256) {
+              try { fs.unlinkSync(tmpFile) } catch (e) {}
+              return reject(new Error('SHA256 校验失败，文件可能已损坏'))
+            }
+          }
+
           const AdmZip = require('adm-zip')
           const zip = new AdmZip(tmpFile)
 
@@ -91,6 +94,7 @@ function downloadAndApplyUpdate(onProgress) {
           console.log('[HotUpdater] 热更新已应用到:', HOT_UPDATE_DIR)
           resolve(true)
         } catch (e) {
+          try { fs.unlinkSync(tmpFile) } catch (e2) {}
           reject(e)
         }
       })
@@ -98,64 +102,13 @@ function downloadAndApplyUpdate(onProgress) {
       ws.on('error', reject)
       res.on('error', reject)
     }).on('error', reject)
-      .on('timeout', function () { this.destroy(); reject(new Error('download timeout')) })
+      .on('timeout', function () { this.destroy(); reject(new Error('下载超时')) })
   })
-}
-
-// 注册 IPC 通道
-function registerHotUpdateIpc(mainWindow) {
-  ipcMain.handle('hot-update-check', async () => {
-    try {
-      const result = await checkForHotUpdate()
-      return result
-    } catch (e) {
-      return { needUpdate: false, error: e.message }
-    }
-  })
-
-  ipcMain.handle('hot-update-download', async () => {
-    try {
-      await downloadAndApplyUpdate((percent) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('update-progress', { percent })
-        }
-      })
-      return { success: true, message: '更新已下载，重启后生效' }
-    } catch (e) {
-      return { success: false, error: e.message }
-    }
-  })
-
-  ipcMain.handle('hot-update-restart', () => {
-    app.relaunch()
-    app.exit(0)
-  })
-}
-
-// 自动检查热更新（后台静默）
-async function autoCheckHotUpdate(mainWindow) {
-  if (!app.isPackaged) {
-    console.log('[HotUpdater] 开发模式，跳过热更新检查')
-    return
-  }
-  try {
-    const result = await checkForHotUpdate()
-    if (result.needUpdate && mainWindow && !mainWindow.isDestroyed()) {
-      console.log('[HotUpdater] 发现新版本:', result.version)
-      mainWindow.webContents.send('update-available', {
-        version: result.version,
-        size: result.size,
-        changelog: result.changelog
-      })
-    }
-  } catch (e) {
-    console.log('[HotUpdater] 检查更新失败:', e.message)
-  }
 }
 
 module.exports = {
   getCurrentVersion,
   getHotUpdateRendererPath,
-  registerHotUpdateIpc,
-  autoCheckHotUpdate
+  clearHotUpdate,
+  downloadAndApplyUpdate
 }
