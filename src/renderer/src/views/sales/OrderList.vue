@@ -141,7 +141,6 @@
         <div class="ot-col ot-col-goods">商品信息</div>
         <div class="ot-col ot-col-price">单价/数量</div>
         <div class="ot-col ot-col-purchase">采购</div>
-        <div class="ot-col ot-col-warehouse">绑定仓库</div>
         <div class="ot-col ot-col-amount">订单金额</div>
         <div class="ot-col ot-col-time">下单时间</div>
         <div class="ot-col ot-col-logistics">物流信息</div>
@@ -259,7 +258,7 @@
                 <div class="ot-col ot-col-warehouse">
                   <el-button size="small" plain @click.stop="handleBindWarehouse(order, item, itemIdx)">
                     <el-icon><OfficeBuilding /></el-icon>
-                    <span>绑定仓库</span>
+                    <span>绑定仓库商品</span>
                   </el-button>
                 </div>
               </div>
@@ -1398,8 +1397,8 @@ async function handlePurchaseSubmit() {
 }
 
 function handleBindWarehouse(order, item, itemIdx) {
-  console.log('[绑定仓库] 订单:', order.orderNo, '商品:', item.name, '索引:', itemIdx)
-  ElMessage.info(`绑定仓库功能开发中：${item.name}`)
+  console.log('[绑定仓库商品] 订单:', order.orderNo, '商品:', item.name, '索引:', itemIdx)
+  ElMessage.info(`绑定仓库商品功能开发中：${item.name}`)
 }
 
 function handleSearchTitle(item, platform) {
