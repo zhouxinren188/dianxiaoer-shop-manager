@@ -60,40 +60,42 @@ function downloadAndApplyUpdate(onProgress) {
       const ws = fs.createWriteStream(tmpFile)
       let downloaded = 0
 
+      // 监听进度
       res.on('data', (chunk) => {
         downloaded += chunk.length
-        ws.write(chunk)
         if (onProgress && totalSize > 0) {
           onProgress(Math.round((downloaded / totalSize) * 100))
         }
       })
 
-      res.on('end', () => {
-        ws.end(() => {
-          try {
-            const AdmZip = require('adm-zip')
-            const zip = new AdmZip(tmpFile)
+      // 用 pipe 自动处理背压，避免数据丢失导致 ZIP 损坏
+      res.pipe(ws)
 
-            // 清除旧的热更新目录
-            if (fs.existsSync(HOT_UPDATE_DIR)) {
-              fs.rmSync(HOT_UPDATE_DIR, { recursive: true, force: true })
-            }
-            fs.mkdirSync(HOT_UPDATE_DIR, { recursive: true })
+      ws.on('finish', () => {
+        try {
+          const AdmZip = require('adm-zip')
+          const zip = new AdmZip(tmpFile)
 
-            // 解压到热更新目录
-            zip.extractAllTo(HOT_UPDATE_DIR, true)
-
-            // 删除临时文件
-            try { fs.unlinkSync(tmpFile) } catch (e) {}
-
-            console.log('[HotUpdater] 热更新已应用到:', HOT_UPDATE_DIR)
-            resolve(true)
-          } catch (e) {
-            reject(e)
+          // 清除旧的热更新目录
+          if (fs.existsSync(HOT_UPDATE_DIR)) {
+            fs.rmSync(HOT_UPDATE_DIR, { recursive: true, force: true })
           }
-        })
+          fs.mkdirSync(HOT_UPDATE_DIR, { recursive: true })
+
+          // 解压到热更新目录
+          zip.extractAllTo(HOT_UPDATE_DIR, true)
+
+          // 删除临时文件
+          try { fs.unlinkSync(tmpFile) } catch (e) {}
+
+          console.log('[HotUpdater] 热更新已应用到:', HOT_UPDATE_DIR)
+          resolve(true)
+        } catch (e) {
+          reject(e)
+        }
       })
 
+      ws.on('error', reject)
       res.on('error', reject)
     }).on('error', reject)
       .on('timeout', function () { this.destroy(); reject(new Error('download timeout')) })
