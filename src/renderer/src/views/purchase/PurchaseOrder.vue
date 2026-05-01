@@ -18,7 +18,10 @@
             <el-option v-for="acc in accountList" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id">
               <div style="display:flex;align-items:center;justify-content:space-between">
                 <span>{{ acc.username || '未命名' }}</span>
-                <el-tag :type="acc.status === 'online' ? 'success' : 'info'" size="small">{{ acc.status === 'online' ? '在线' : '离线' }}</el-tag>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <el-tag :type="platformTagType(acc.platform)" size="small">{{ platformLabel(acc.platform) }}</el-tag>
+                  <el-tag :type="acc.cookie_valid ? 'success' : 'danger'" size="small">{{ acc.cookie_valid ? '有效' : '失效' }}</el-tag>
+                </div>
               </div>
             </el-option>
           </el-select>
@@ -55,6 +58,19 @@
         <el-form-item label="采购状态">
           <el-select v-model="filterForm.status" placeholder="全部" clearable style="width: 130px">
             <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="采购账号">
+          <el-select v-model="filterForm.accountId" placeholder="全部" clearable style="width: 180px">
+            <el-option v-for="acc in accountList" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id">
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <span>{{ acc.username || '未命名' }}</span>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <el-tag :type="platformTagType(acc.platform)" size="small">{{ platformLabel(acc.platform) }}</el-tag>
+                  <el-tag :type="acc.cookie_valid ? 'success' : 'danger'" size="small">{{ acc.cookie_valid ? '有效' : '失效' }}</el-tag>
+                </div>
+              </div>
+            </el-option>
           </el-select>
         </el-form-item>
         <el-form-item>
@@ -149,13 +165,16 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="200" align="center" fixed="right">
+        <el-table-column label="操作" width="260" align="center" fixed="right">
           <template #default="{ row }">
             <el-button v-if="row.status === 'shipped'" link type="primary" size="small" @click="handleConfirmReceive(row)">
               确认签收
             </el-button>
             <el-button v-if="row.status === 'received'" link type="success" size="small" @click="handleConfirmStock(row)">
               确认入库
+            </el-button>
+            <el-button v-if="row.status === 'stocked'" link type="warning" size="small" @click="handleOutbound(row)">
+              出库
             </el-button>
             <el-button link type="primary" size="small" @click="handleViewDetail(row)">
               详情
@@ -520,7 +539,8 @@ const filterForm = reactive({
   platformOrderNo: '',
   salesOrderNo: '',
   platform: '',
-  status: ''
+  status: '',
+  accountId: ''
 })
 
 const pageInfo = reactive({
@@ -598,6 +618,9 @@ const filteredData = computed(() => {
   }
   if (filterForm.status) {
     data = data.filter(r => r.status === filterForm.status)
+  }
+  if (filterForm.accountId) {
+    data = data.filter(r => r.account_id === filterForm.accountId)
   }
 
   pageInfo.total = data.length
@@ -679,6 +702,10 @@ async function handleConfirmStock(row) {
       ElMessage.error('操作失败: ' + (err.message || ''))
     }
   }
+}
+
+function handleOutbound(row) {
+  ElMessage.info('出库功能开发中')
 }
 
 // ==================== 同步功能 ====================

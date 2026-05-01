@@ -227,7 +227,7 @@ onMounted(() => {
   window.electronAPI?.invoke('window-set-login-size')
 })
 
-const API_BASE = 'http://150.158.54.108:3002'
+const API_BASE = 'http://150.158.54.108:3001'
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
@@ -257,8 +257,10 @@ async function handleLogin() {
         }))
         if (loginForm.remember) {
           localStorage.setItem('rememberedUser', loginForm.username)
+          localStorage.setItem('rememberedPassword', btoa(loginForm.password))
         } else {
           localStorage.removeItem('rememberedUser')
+          localStorage.removeItem('rememberedPassword')
         }
         // 同步 auth token 到主进程（供 platform-window / cookie-heartbeat 等使用）
         window.electronAPI?.invoke('set-auth-token', token).catch(() => {})
@@ -312,11 +314,19 @@ async function handleRegister() {
   })
 }
 
-// 读取记住的用户名
+// 读取记住的账号和密码
 const rememberedUser = localStorage.getItem('rememberedUser')
+const rememberedPassword = localStorage.getItem('rememberedPassword')
 if (rememberedUser) {
   loginForm.username = rememberedUser
   loginForm.remember = true
+}
+if (rememberedPassword) {
+  try {
+    loginForm.password = atob(rememberedPassword)
+  } catch {
+    localStorage.removeItem('rememberedPassword')
+  }
 }
 </script>
 
@@ -448,7 +458,7 @@ if (rememberedUser) {
   top: 0;
   right: 0;
   display: flex;
-  z-index: 10;
+  z-index: 101;
   -webkit-app-region: no-drag;
 }
 .ctrl-btn {

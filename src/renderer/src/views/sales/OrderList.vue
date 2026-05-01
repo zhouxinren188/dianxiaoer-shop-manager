@@ -159,7 +159,11 @@
           :key="order.id"
         >
           <!-- 订单卡片头部条 -->
-          <div class="order-card-header">
+          <div class="order-card-header"
+               :style="{
+                 borderLeftColor: statusBorderColor(order.orderStatus),
+                 background: statusBgColor(order.orderStatus)
+               }">
             <div class="order-header-left">
               <el-checkbox v-model="order.selected" @change="handleOrderSelect" />
               <span class="order-header-label">订单编号:</span>
@@ -1292,9 +1296,14 @@ function setupPurchaseListeners() {
   if (!window.electronAPI) return
   unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
-      purchaseInfo.captureStatus = 'captured'
       purchaseInfo.capturedOrderNo = data.platformOrderNo
-      ElMessage.success('采购订单已自动创建并绑定')
+      if (data.success === false) {
+        purchaseInfo.captureStatus = 'captured'
+        ElMessage.warning(`订单号已捕获(${data.platformOrderNo})，但自动绑定失败: ${data.error || '未知错误'}，请手动绑定`)
+      } else {
+        purchaseInfo.captureStatus = 'captured'
+        ElMessage.success('采购订单已自动创建并绑定')
+      }
     }
   })
   unsubWindowClosed = window.electronAPI.onUpdate('purchase-window-closed', (data) => {
@@ -1507,6 +1516,28 @@ function purchaseStatusTagType(status) {
 function shopTagColorType(tag) {
   const map = { '京东': 'danger', '天猫': '', '拼多多': 'warning', '抖音': 'success' }
   return map[tag] || ''
+}
+
+function statusBorderColor(status) {
+  const map = {
+    '待付款': '#e6a23c',
+    '待发货': '#f56c6c',
+    '已发货': '#409eff',
+    '已完成': '#52c41a',
+    '已取消': '#909399'
+  }
+  return map[status] || '#dcdfe6'
+}
+
+function statusBgColor(status) {
+  const map = {
+    '待付款': 'linear-gradient(135deg, #fffcf5 0%, #fff8eb 100%)',
+    '待发货': 'linear-gradient(135deg, #fff5f5 0%, #fff0f0 100%)',
+    '已发货': 'linear-gradient(135deg, #f0f7ff 0%, #e8f4ff 100%)',
+    '已完成': 'linear-gradient(135deg, #f0faf0 0%, #e8f8e8 100%)',
+    '已取消': 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)'
+  }
+  return map[status] || 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)'
 }
 
 // ==================== 生命周期 ====================
@@ -1785,9 +1816,9 @@ onUnmounted(() => {
 
 .table-card {
   background: #fff;
-  border-radius: 8px;
-  border: 1px solid #f0f0f0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
   padding: 0;
   overflow: hidden;
 }
@@ -1796,12 +1827,13 @@ onUnmounted(() => {
 .order-table-header {
   display: flex;
   align-items: center;
-  background: #fafafa;
-  border-bottom: 1px solid #ebeef5;
-  padding: 10px 12px;
+  background: linear-gradient(180deg, #f8f9fb 0%, #f3f4f6 100%);
+  border-bottom: 1px solid #e5e7eb;
+  padding: 11px 14px;
   font-size: 13px;
   font-weight: 600;
-  color: #303133;
+  color: #374151;
+  letter-spacing: 0.2px;
 }
 
 /* 列宽定义 */
@@ -1901,22 +1933,25 @@ onUnmounted(() => {
 
 /* 订单列表 */
 .order-list {
-  padding: 8px 12px 12px;
+  padding: 10px 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 /* 订单卡片 */
 .order-card {
   border: 1px solid #e8e8e8;
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
-  transition: box-shadow 0.2s;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  background: #fff;
 }
 
 .order-card:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  transform: translateY(-1px);
+  border-color: #d0d5dd;
 }
 
 /* 订单卡片头部 */
@@ -1924,11 +1959,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #f0f7f0;
-  border-bottom: 1px solid #e8e8e8;
-  padding: 7px 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+  padding: 12px 16px;
   font-size: 12px;
-  border-left: 3px solid #52c41a;
+  border-left: 4px solid #52c41a;
+  transition: all 0.2s;
 }
 
 .order-header-left {
@@ -1941,24 +1976,26 @@ onUnmounted(() => {
 }
 
 .order-header-label {
-  color: #8c8c8c;
+  color: #6b7280;
   flex-shrink: 0;
+  font-weight: 500;
 }
 
 .order-header-no {
-  font-weight: 600;
-  color: #1f2937;
+  font-weight: 700;
+  color: #111827;
   flex-shrink: 0;
+  letter-spacing: 0.3px;
 }
 
 .order-header-divider {
-  color: #d9d9d9;
+  color: #e5e7eb;
   flex-shrink: 0;
 }
 
 .order-header-shop {
-  color: #595959;
-  font-weight: 500;
+  color: #374151;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
@@ -1971,32 +2008,33 @@ onUnmounted(() => {
   color: #2b5aed;
   cursor: pointer;
   flex-shrink: 0;
-  transition: color 0.2s;
+  transition: all 0.2s;
 }
 
 .order-header-chat-icon:hover {
   color: #1a3fc7;
+  transform: scale(1.15);
 }
 
 .order-header-account {
   color: #2b5aed;
-  font-weight: 500;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .order-header-buyer {
-  color: #1f2937;
-  font-weight: 500;
+  color: #111827;
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .order-header-phone {
-  color: #595959;
+  color: #6b7280;
   flex-shrink: 0;
 }
 
 .order-header-address {
-  color: #8c8c8c;
+  color: #9ca3af;
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2025,17 +2063,22 @@ onUnmounted(() => {
 .product-row {
   display: flex;
   align-items: center;
-  padding: 10px 0;
-  min-height: 68px;
+  padding: 16px 0;
+  min-height: 88px;
+  transition: background 0.15s;
+}
+
+.product-row:hover {
+  background: #f9fafb;
 }
 
 .product-row-border {
-  border-bottom: 1px dashed #f0f0f0;
+  border-bottom: 1px dashed #e5e7eb;
 }
 
 .index-num {
   font-size: 13px;
-  color: #8c8c8c;
+  color: #6b7280;
   font-weight: 500;
 }
 
@@ -2043,32 +2086,40 @@ onUnmounted(() => {
 .goods-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .goods-img {
-  width: 52px;
-  height: 52px;
-  border-radius: 6px;
+  width: 58px;
+  height: 58px;
+  border-radius: 8px;
   flex-shrink: 0;
   object-fit: cover;
   cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  transition: transform 0.2s;
+}
+
+.goods-img:hover {
+  transform: scale(1.05);
 }
 
 :deep(.goods-img .el-image__inner) {
-  border-radius: 6px;
+  border-radius: 8px;
 }
 
 .goods-img-placeholder {
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: none;
 }
 
 .goods-img-text {
   color: #fff;
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
 .goods-info {
@@ -2077,10 +2128,10 @@ onUnmounted(() => {
 
 .goods-name {
   font-size: 13px;
-  font-weight: 500;
-  color: #1f2937;
+  font-weight: 600;
+  color: #111827;
   margin: 0 0 3px;
-  line-height: 1.4;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -2166,6 +2217,7 @@ onUnmounted(() => {
   align-items: center;
   flex-shrink: 0;
   border-left: 1px solid #f0f0f0;
+  background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);
 }
 
 .order-body-right .ot-col-amount,
@@ -2179,25 +2231,41 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 10px 4px;
+  padding: 16px 6px;
+  position: relative;
+}
+
+.order-body-right .ot-col-amount::after,
+.order-body-right .ot-col-time::after,
+.order-body-right .ot-col-logistics::after,
+.order-body-right .ot-col-aftersale::after,
+.order-body-right .ot-col-remark::after,
+.order-body-right .ot-col-sysremark::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 20%;
+  height: 60%;
+  width: 1px;
+  background: #f0f0f0;
 }
 
 .amount-main {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: #f5222d;
-  font-family: 'Inter', monospace;
+  font-family: 'DIN Alternate', 'Roboto Mono', monospace;
 }
 
 .amount-sub {
   font-size: 11px;
   color: #9ca3af;
-  margin: 3px 0 0;
+  margin: 4px 0 0;
 }
 
 .time-text {
   font-size: 12px;
-  color: #595959;
+  color: #4b5563;
   text-align: center;
   line-height: 1.5;
   word-break: break-all;
@@ -2205,31 +2273,37 @@ onUnmounted(() => {
 
 .logistics-company {
   font-size: 12px;
-  color: #1f2937;
+  color: #374151;
   margin: 0;
   text-align: center;
+  font-weight: 500;
 }
 
 .logistics-no {
   font-size: 11px;
   color: #2b5aed;
-  margin: 2px 0 0;
+  margin: 3px 0 0;
   text-align: center;
   word-break: break-all;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.logistics-no:hover {
+  text-decoration: underline;
 }
 
 .text-muted {
-  color: #d9d9d9;
+  color: #d1d5db;
   font-size: 13px;
 }
 
 .remark-text {
   font-size: 12px;
-  color: #595959;
+  color: #4b5563;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;

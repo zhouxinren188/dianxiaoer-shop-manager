@@ -1,5 +1,14 @@
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
+
+// 防止 EPIPE broken pipe 错误弹窗（stdout/stderr 管道断开时忽略）
+process.stdout?.on?.('error', () => {})
+process.stderr?.on?.('error', () => {})
+process.on('uncaughtException', (err) => {
+  if (err.code === 'EPIPE' || err.message?.includes('EPIPE')) return
+  console.error('[UncaughtException]', err)
+})
+
 const { initUpdater, registerIpc } = require('./updater')
 const { getHotUpdateRendererPath, registerHotUpdateIpc, autoCheckHotUpdate } = require('./hot-updater')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')

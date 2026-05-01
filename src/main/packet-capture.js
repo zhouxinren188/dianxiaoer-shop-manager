@@ -1,4 +1,4 @@
-const { ipcMain, session } = require('electron')
+const { ipcMain, session, BrowserWindow } = require('electron')
 
 let capturing = false
 let capturedRequests = []
@@ -6,6 +6,8 @@ let activeListeners = [] // 记录已注册监听的 session，用于清理
 let captureCallback = null // 抓包回调函数（onCompleted）
 let beforeRequestCallback = null // onBeforeRequest 回调（用于捕获 POST body）
 let requestBodyMap = new Map() // 临时存储请求体，key 为 url+timestamp 近似匹配
+let captureTimeout = null // 抓包超时定时器
+const CAPTURE_MAX_DURATION_MS = 5 * 60 * 1000 // 5分钟自动停止
 
 function isCapturing() {
   return capturing
@@ -114,6 +116,22 @@ function registerPacketCaptureIpc() {
       // platform-window 模块未加载时忽略
     }
 
+    // 5分钟自动停止
+    captureTimeout = setTimeout(() => {
+      if (capturing) {
+        console.log('[PacketCapture] 抓包已超时，自动停止')
+        stopCaptureInternal()
+        // 通知所有渲染进程
+        BrowserWindow.getAllWindows().forEach(win => {
+          try {
+            win.webContents.send('packet-capture-auto-stopped', { reason: 'timeout', duration: CAPTURE_MAX_DURATION_MS })
+          } catch {
+            // 忽略通知失败
+          }
+        })
+      }
+    }, CAPTURE_MAX_DURATION_MS)
+
     return { success: true, message: '抓包已开始' }
   })
 
@@ -121,6 +139,15 @@ function registerPacketCaptureIpc() {
   ipcMain.handle('packet-capture-stop', async () => {
     if (!capturing) {
       return { success: false, message: '未在抓包中', data: [] }
+    }
+    return stopCaptureInternal()
+  })
+
+  function stopCaptureInternal() {
+    // 清除超时定时器
+    if (captureTimeout) {
+      clearTimeout(captureTimeout)
+      captureTimeout = null
     }
 
     // 移除所有监听
@@ -141,7 +168,7 @@ function registerPacketCaptureIpc() {
     activeListeners = []
 
     return { success: true, data: result }
-  })
+  }
 
   // 查询抓包状态
   ipcMain.handle('packet-capture-status', async () => {

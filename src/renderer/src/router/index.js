@@ -100,12 +100,14 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
+// 应用启动时清除上次的 token，强制每次重新登录
+// （确保主进程通过登录流程同步获得 token）
+localStorage.removeItem('accessToken')
+
+router.beforeEach((to, from) => {
   const token = localStorage.getItem('accessToken')
-  if (to.path === '/login') {
-    token ? next('/') : next()
-  } else {
-    token ? next() : next('/login')
+  if (to.path !== '/login' && !token) {
+    return '/login'
   }
 })
 

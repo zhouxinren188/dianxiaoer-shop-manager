@@ -13,16 +13,17 @@
       active-text-color="#ffffff"
       :unique-opened="true"
       class="sidebar-menu"
+      @select="onMenuSelect"
     >
       <!-- 首页 -->
-      <el-menu-item index="/home" @click="navigate('/home')">
+      <el-menu-item index="/home">
         <el-icon><HomeFilled /></el-icon>
         <span>首页</span>
       </el-menu-item>
 
       <!-- 销售管理 分组 -->
       <div class="menu-group-title">销售管理</div>
-      <el-menu-item index="/sales/orders" @click="navigate('/sales/orders')">
+      <el-menu-item index="/sales/orders">
         <el-icon><List /></el-icon>
         <span>订单列表</span>
       </el-menu-item>
@@ -31,7 +32,7 @@
           <el-icon><Service /></el-icon>
           <span>售后管理</span>
         </template>
-        <el-menu-item index="/aftersale/returns" @click="navigate('/aftersale/returns')">
+        <el-menu-item index="/aftersale/returns">
           <el-icon><RefreshLeft /></el-icon>
           <span>退换货管理</span>
         </el-menu-item>
@@ -39,50 +40,50 @@
 
       <!-- 采购管理 分组 -->
       <div class="menu-group-title">采购管理</div>
-      <el-menu-item index="/purchase/orders" @click="navigate('/purchase/orders')">
+      <el-menu-item index="/purchase/orders">
         <el-icon><Document /></el-icon>
         <span>采购订单</span>
       </el-menu-item>
 
       <!-- 仓库管理 分组 -->
       <div class="menu-group-title">仓库管理</div>
-      <el-menu-item index="/warehouse/goods" @click="navigate('/warehouse/goods')">
+      <el-menu-item index="/warehouse/goods">
         <el-icon><Goods /></el-icon>
         <span>商品管理</span>
       </el-menu-item>
-      <el-menu-item index="/warehouse/setting" @click="navigate('/warehouse/setting')">
+      <el-menu-item index="/warehouse/setting">
         <el-icon><Setting /></el-icon>
         <span>设置仓库</span>
       </el-menu-item>
 
       <!-- 供货商管理 分组 -->
       <div class="menu-group-title">供货商管理</div>
-      <el-menu-item index="/supplier/store-shipment" @click="navigate('/supplier/store-shipment')">
+      <el-menu-item index="/supplier/store-shipment">
         <el-icon><Van /></el-icon>
         <span>供店发货</span>
       </el-menu-item>
 
       <!-- 报表 分组 -->
       <div class="menu-group-title">报表</div>
-      <el-menu-item index="/supplier/store-sales-stats" @click="navigate('/supplier/store-sales-stats')">
+      <el-menu-item index="/supplier/store-sales-stats">
         <el-icon><TrendCharts /></el-icon>
         <span>店铺销售统计</span>
       </el-menu-item>
 
       <!-- 任务中心 分组 -->
       <div class="menu-group-title">任务中心</div>
-      <el-menu-item index="/tasks/todo" @click="navigate('/tasks/todo')">
+      <el-menu-item index="/tasks/todo">
         <el-icon><Ticket /></el-icon>
         <span>代办任务</span>
       </el-menu-item>
 
       <!-- 用户中心 分组 -->
       <div class="menu-group-title">用户中心</div>
-      <el-menu-item index="/user/manage" @click="navigate('/user/manage')">
+      <el-menu-item index="/user/manage">
         <el-icon><UserFilled /></el-icon>
         <span>用户管理</span>
       </el-menu-item>
-      <el-menu-item index="/user/store-manage" @click="navigate('/user/store-manage')">
+      <el-menu-item index="/user/store-manage">
         <el-icon><OfficeBuilding /></el-icon>
         <span>店铺管理</span>
       </el-menu-item>
@@ -121,6 +122,28 @@
       </template>
     </el-dialog>
 
+    <!-- 抓包风险提示弹窗 -->
+    <el-dialog
+      v-model="riskDialogVisible"
+      title="风险提示"
+      width="480px"
+      :show-close="false"
+      :close-on-click-modal="false"
+      :append-to-body="true"
+    >
+      <div style="color: #f56c6c; font-size: 14px; line-height: 1.8;">
+        <p style="font-weight: bold; margin-bottom: 8px;">抓包工具使用须知</p>
+        <p>1. 抓包功能仅用于调试分析，请勿用于非法用途。</p>
+        <p>2. 京麦等电商平台风控严格，高频或异常请求可能导致账号受限。</p>
+        <p>3. 抓取的接口数据请谨慎使用，避免触发平台安全机制。</p>
+        <p>4. 单次抓包最长 5 分钟，超时将自动停止。</p>
+      </div>
+      <template #footer>
+        <el-button @click="riskDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmStartCapture">我已了解风险，开始抓包</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 抓包结果弹窗 -->
     <PacketResultDialog
       v-model:visible="packetDialogVisible"
@@ -130,7 +153,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -157,8 +180,12 @@ const router = useRouter()
 
 const activeMenu = computed(() => route.path)
 
-function navigate(path) {
-  router.push(path)
+function onMenuSelect(index) {
+  if (index === 'open-url' || index === 'packet-capture') return
+  if (route.path === index) return
+  router.push(index).catch(err => {
+    console.error('[Navigate] 路由跳转失败:', err)
+  })
 }
 
 // --- 打开网址功能 ---
@@ -195,6 +222,7 @@ async function confirmOpenUrl() {
 const isCapturing = ref(false)
 const packetDialogVisible = ref(false)
 const packetData = ref([])
+const riskDialogVisible = ref(false)
 
 async function handlePacketCapture() {
   if (!window.electronAPI) {
@@ -203,13 +231,7 @@ async function handlePacketCapture() {
   }
 
   if (!isCapturing.value) {
-    try {
-      await window.electronAPI.invoke('packet-capture-start')
-      isCapturing.value = true
-      ElMessage.success('抓包已开始')
-    } catch (err) {
-      ElMessage.error('启动抓包失败: ' + err.message)
-    }
+    riskDialogVisible.value = true
   } else {
     try {
       const result = await window.electronAPI.invoke('packet-capture-stop')
@@ -225,6 +247,27 @@ async function handlePacketCapture() {
     }
   }
 }
+
+async function confirmStartCapture() {
+  riskDialogVisible.value = false
+  try {
+    await window.electronAPI.invoke('packet-capture-start')
+    isCapturing.value = true
+    ElMessage.success('抓包已开始，最长持续 5 分钟')
+  } catch (err) {
+    ElMessage.error('启动抓包失败: ' + err.message)
+  }
+}
+
+// 监听主进程超时自动停止事件
+onMounted(() => {
+  if (window.electronAPI?.onUpdate) {
+    window.electronAPI.onUpdate('packet-capture-auto-stopped', () => {
+      isCapturing.value = false
+      ElMessage.warning('抓包已超时自动停止')
+    })
+  }
+})
 </script>
 
 <style scoped>

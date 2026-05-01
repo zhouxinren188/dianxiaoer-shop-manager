@@ -585,7 +585,7 @@ async function handleFetchOrders() {
 
 async function loadStores() {
   try {
-    const data = await fetchStores({ platform: 'jd', status: 'enabled', pageSize: 100 })
+    const data = await fetchStores({ platform: 'jd', store_type: 'supplier', status: 'enabled', pageSize: 100 })
     applyStoreData(data)
   } catch (err) {
     console.error('加载店铺列表失败:', err.message)

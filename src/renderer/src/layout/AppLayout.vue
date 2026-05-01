@@ -51,7 +51,7 @@
         </div>
       </div>
       <el-main class="app-main">
-        <router-view />
+        <router-view :key="route.fullPath" />
       </el-main>
     </el-container>
   </el-container>
