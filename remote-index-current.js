@@ -1157,6 +1157,35 @@ app.delete('/api/sku-purchase-config/:id', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// 采购完成后自动更新货源采购价
+app.put('/api/sku-purchase-config/update-price', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { sku_id, purchase_link, purchase_price, platform } = req.body
+    if (!sku_id || !purchase_link || !purchase_price) {
+      return res.json(fail('sku_id, purchase_link, purchase_price 不能为空'))
+    }
+    // 查找是否已有匹配记录
+    const [rows] = await pool.execute(
+      'SELECT id FROM sku_purchase_config WHERE sku_id=? AND purchase_link=? AND owner_id=?',
+      [sku_id, purchase_link, ownerId]
+    )
+    if (rows.length > 0) {
+      await pool.execute(
+        'UPDATE sku_purchase_config SET purchase_price=?, updated_at=NOW() WHERE id=?',
+        [purchase_price, rows[0].id]
+      )
+      res.json(ok({ id: rows[0].id, action: 'updated' }))
+    } else {
+      const [result] = await pool.execute(
+        'INSERT INTO sku_purchase_config (sku_id, platform, purchase_link, purchase_price, owner_id) VALUES (?,?,?,?,?)',
+        [sku_id, platform || '', purchase_link, purchase_price, ownerId]
+      )
+      res.json(ok({ id: result.insertId, action: 'created' }))
+    }
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 
 // ============ 采购账号管理 ============
 
@@ -1249,26 +1278,26 @@ app.put('/api/purchase-accounts/:id/status', async (req, res) => {
 app.post('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { purchase_no, sales_order_id, sales_order_no, goods_name, sku, quantity,
+    const { purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
             source_url, platform, purchase_price, remark,
             purchase_type, shipping_name, shipping_phone, shipping_address } = req.body
     if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
     await pool.execute(
       `INSERT INTO purchase_orders
-        (purchase_no, sales_order_id, sales_order_no, goods_name, sku, quantity,
+        (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
          source_url, platform, purchase_price, remark,
          purchase_type, shipping_name, shipping_phone, shipping_address,
          status, owner_id)
-       VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?)
+       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?)
        ON DUPLICATE KEY UPDATE
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
-         goods_name=VALUES(goods_name), sku=VALUES(sku), quantity=VALUES(quantity),
+         goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), quantity=VALUES(quantity),
          source_url=VALUES(source_url), platform=VALUES(platform),
          purchase_price=VALUES(purchase_price), remark=VALUES(remark),
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
          shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
          updated_at=NOW()`,
-      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', sku||'', quantity||0,
+      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'',
        ownerId]

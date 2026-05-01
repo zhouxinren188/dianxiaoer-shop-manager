@@ -123,13 +123,25 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="goods_name" label="商品名称" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="goods_name" label="商品信息" min-width="260">
+          <template #default="{ row }">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <el-image v-if="row.goods_image" :src="row.goods_image"
+                style="width:50px;height:50px;border-radius:6px;flex-shrink:0;"
+                fit="cover" :preview-src-list="[row.goods_image]" preview-teleported />
+              <div v-else style="width:50px;height:50px;border-radius:6px;flex-shrink:0;background:#f5f7fa;display:flex;align-items:center;justify-content:center;">
+                <span style="color:#c0c4cc;font-size:11px;">无图</span>
+              </div>
+              <span style="overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">{{ row.goods_name }}</span>
+            </div>
+          </template>
+        </el-table-column>
 
         <el-table-column prop="quantity" label="数量" width="70" align="center" />
 
         <el-table-column prop="purchase_price" label="采购单价" width="100" align="right">
           <template #default="{ row }">
-            <span v-if="row.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ row.purchase_price.toFixed(2) }}</span>
+            <span v-if="row.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ Number(row.purchase_price).toFixed(2) }}</span>
             <span v-else class="text-muted">--</span>
           </template>
         </el-table-column>
@@ -209,11 +221,11 @@
           <el-descriptions-item label="规格">{{ currentRow.sku || '--' }}</el-descriptions-item>
           <el-descriptions-item label="采购数量">{{ currentRow.quantity }}</el-descriptions-item>
           <el-descriptions-item label="采购单价">
-            <span v-if="currentRow.purchase_price">¥{{ currentRow.purchase_price.toFixed(2) }}</span>
+            <span v-if="currentRow.purchase_price">¥{{ Number(currentRow.purchase_price).toFixed(2) }}</span>
             <span v-else>--</span>
           </el-descriptions-item>
           <el-descriptions-item label="采购总额">
-            <span v-if="currentRow.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ (currentRow.purchase_price * currentRow.quantity).toFixed(2) }}</span>
+            <span v-if="currentRow.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ (Number(currentRow.purchase_price) * currentRow.quantity).toFixed(2) }}</span>
             <span v-else>--</span>
           </el-descriptions-item>
           <el-descriptions-item label="关联销售单号">{{ currentRow.sales_order_no }}</el-descriptions-item>
@@ -374,7 +386,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Document,
@@ -623,9 +635,13 @@ const filteredData = computed(() => {
     data = data.filter(r => r.account_id === filterForm.accountId)
   }
 
-  pageInfo.total = data.length
   return data
 })
+
+// 通过 watch 更新分页总数，避免在 computed 内产生响应式副作用（会导致 Vue 调度器递归更新，UI冻结）
+watch(filteredData, (data) => {
+  pageInfo.total = data.length
+}, { immediate: true })
 
 const pagedData = computed(() => {
   const start = (pageInfo.page - 1) * pageInfo.pageSize

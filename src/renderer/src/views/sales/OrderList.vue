@@ -419,8 +419,8 @@
       title="采购下单"
       width="560px"
       align-center
-      destroy-on-close
       :close-on-click-modal="false"
+      @closed="onPurchaseDialogClosed"
     >
       <!-- Step 1: idle 状态 - 信息+选账号 -->
       <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
@@ -1262,6 +1262,7 @@ function handleGoOrder() {
         salesOrderId: purchaseInfo.salesOrderId,
         salesOrderNo: purchaseInfo.salesOrderNo,
         goodsName: purchaseInfo.goodsName,
+        image: purchaseInfo.image,
         sku: purchaseInfo.sku,
         skuId: purchaseInfo.skuId,
         quantity: purchaseInfo.quantity,
@@ -1291,9 +1292,14 @@ function handleCancelOrder() {
 let unsubOrderCaptured = null
 let unsubWindowClosed = null
 let unsubAddressFilled = null
+let unsubAddressSetupDone = null
+let unsubAutoSyncStart = null
+let unsubAutoSyncResult = null
 
 function setupPurchaseListeners() {
   if (!window.electronAPI) return
+  // 先清理旧监听器，防止重复注册导致泄漏
+  cleanupPurchaseListeners()
   unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
       purchaseInfo.capturedOrderNo = data.platformOrderNo
@@ -1303,6 +1309,8 @@ function setupPurchaseListeners() {
       } else {
         purchaseInfo.captureStatus = 'captured'
         ElMessage.success('采购订单已自动创建并绑定')
+        // 成功后自动关闭对话框（释放遮罩层，恢复侧边栏可点击）
+        setTimeout(() => { purchaseDialogVisible.value = false }, 1500)
       }
     }
   })
@@ -1325,12 +1333,28 @@ function setupPurchaseListeners() {
       })
     }
   })
+  unsubAddressSetupDone = window.electronAPI.onUpdate('purchase-address-setup-done', (data) => {
+    if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      ElMessage({
+        message: '温馨提示：地址已修改成功，请您继续采购！',
+        type: 'success',
+        duration: 5000,
+        showClose: true
+      })
+    }
+  })
 }
 
 function cleanupPurchaseListeners() {
   if (unsubOrderCaptured) { unsubOrderCaptured(); unsubOrderCaptured = null }
   if (unsubWindowClosed) { unsubWindowClosed(); unsubWindowClosed = null }
   if (unsubAddressFilled) { unsubAddressFilled(); unsubAddressFilled = null }
+  if (unsubAddressSetupDone) { unsubAddressSetupDone(); unsubAddressSetupDone = null }
+}
+
+function onPurchaseDialogClosed() {
+  // 对话框关闭回调，清理状态由 Element Plus 自身处理
+  // 侧边栏已通过 z-index: 2100 保证始终在 el-overlay 之上
 }
 
 async function handlePurchaseSubmit() {
@@ -1554,10 +1578,10 @@ onMounted(async () => {
 
   // 监听自动同步事件
   if (window.electronAPI) {
-    window.electronAPI.onUpdate('auto-sync-start', (data) => {
+    unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
       autoSyncStatus.value = data.storeName || '店铺'
     })
-    window.electronAPI.onUpdate('auto-sync-result', (data) => {
+    unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', (data) => {
       autoSyncStatus.value = ''
       // 同步成功后自动刷新订单列表
       if (data.success && data.storeId === searchForm.storeId) {
@@ -1568,7 +1592,13 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  // 确保对话框关闭（防止 el-overlay 遮罩层残留）
+  purchaseDialogVisible.value = false
+  // 清理采购相关 IPC 监听器
   cleanupPurchaseListeners()
+  // 清理自动同步 IPC 监听器
+  if (unsubAutoSyncStart) { unsubAutoSyncStart(); unsubAutoSyncStart = null }
+  if (unsubAutoSyncResult) { unsubAutoSyncResult(); unsubAutoSyncResult = null }
   autoSyncStatus.value = ''
 })
 </script>

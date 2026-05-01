@@ -262,7 +262,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import {
   Goods,
   Search,
@@ -397,8 +397,8 @@ function isWarning(row) {
   return row.currentStock <= row.stockWarning
 }
 
-// 筛选后的数据
-const filteredData = computed(() => {
+// 筛选后的全部数据（不含分页截取）
+const allFilteredData = computed(() => {
   let data = tableData.value
 
   if (filterForm.warehouse) {
@@ -417,9 +417,18 @@ const filteredData = computed(() => {
     data = data.filter(item => isWarning(item))
   }
 
+  return data
+})
+
+// 通过 watch 更新分页总数，避免在 computed 内产生响应式副作用
+watch(allFilteredData, (data) => {
   pageInfo.total = data.length
+}, { immediate: true })
+
+// 分页后的数据
+const filteredData = computed(() => {
   const start = (pageInfo.page - 1) * pageInfo.pageSize
-  return data.slice(start, start + pageInfo.pageSize)
+  return allFilteredData.value.slice(start, start + pageInfo.pageSize)
 })
 
 function handleSearch() {

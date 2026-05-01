@@ -183,7 +183,12 @@ const activeMenu = computed(() => route.path)
 function onMenuSelect(index) {
   if (index === 'open-url' || index === 'packet-capture') return
   if (route.path === index) return
-  router.push(index).catch(err => {
+
+  router.push(index).then(failure => {
+    if (failure) {
+      console.warn('[Navigate] 导航未完成:', failure.type, failure.message)
+    }
+  }).catch(err => {
     console.error('[Navigate] 路由跳转失败:', err)
   })
 }
@@ -260,13 +265,18 @@ async function confirmStartCapture() {
 }
 
 // 监听主进程超时自动停止事件
+let unsubPacketCapture = null
 onMounted(() => {
   if (window.electronAPI?.onUpdate) {
-    window.electronAPI.onUpdate('packet-capture-auto-stopped', () => {
+    unsubPacketCapture = window.electronAPI.onUpdate('packet-capture-auto-stopped', () => {
       isCapturing.value = false
       ElMessage.warning('抓包已超时自动停止')
     })
   }
+})
+
+onUnmounted(() => {
+  if (unsubPacketCapture) { unsubPacketCapture(); unsubPacketCapture = null }
 })
 </script>
 

@@ -1580,6 +1580,107 @@ const EXTRACT_ORDER_FROM_PAGE = `
 })()
 `
 
+// 从页面中提取实际支付金额的注入脚本
+const EXTRACT_PAYMENT_AMOUNT = `
+(function() {
+  var url = window.location.href;
+  var html = document.querySelector('html') ? document.querySelector('html').innerHTML : '';
+  var text = document.body ? (document.body.innerText || '') : '';
+
+  console.log('[PurchaseCapture] Extracting payment amount from: ' + url.substring(0, 120));
+
+  // 辅助：将匹配到的金额字符串转为浮点数
+  function parseAmount(str) {
+    if (!str) return 0;
+    var n = parseFloat(str.replace(/[,，]/g, ''));
+    return (n > 0 && n < 1000000) ? n : 0;
+  }
+
+  // === 1. 从已拦截的API响应中提取（最可靠） ===
+  if (window.__capturedPurchaseResponses) {
+    for (var i = window.__capturedPurchaseResponses.length - 1; i >= 0; i--) {
+      var resp = window.__capturedPurchaseResponses[i];
+      try {
+        var json = JSON.parse(resp.body);
+        // 淘宝/天猫常见字段
+        var fields = ['totalActualPay','actualPayFee','actualTotalFee','realPay','totalPayFee','payAmount','totalAmount','orderAmount'];
+        for (var f = 0; f < fields.length; f++) {
+          var val = json[fields[f]] || (json.data && json.data[fields[f]]);
+          if (val) {
+            var amt = parseAmount(String(val));
+            if (amt > 0) {
+              console.log('[PurchaseCapture] Amount from API (' + fields[f] + '): ' + amt);
+              return amt;
+            }
+          }
+        }
+      } catch(e) {}
+    }
+  }
+
+  // === 2. 从HTML中提取JSON字段 ===
+  var htmlPatterns = [
+    /totalActualPay["']?\\s*[:=]\\s*["']?([\\d,.]+)/,
+    /actualPayFee["']?\\s*[:=]\\s*["']?([\\d,.]+)/,
+    /actualTotalFee["']?\\s*[:=]\\s*["']?([\\d,.]+)/,
+    /realPay["']?\\s*[:=]\\s*["']?([\\d,.]+)/,
+    /totalPayFee["']?\\s*[:=]\\s*["']?([\\d,.]+)/,
+    /payAmount["']?\\s*[:=]\\s*["']?([\\d,.]+)/
+  ];
+  for (var h = 0; h < htmlPatterns.length; h++) {
+    var m = html.match(htmlPatterns[h]);
+    if (m) {
+      var amt = parseAmount(m[1]);
+      if (amt > 0) {
+        console.log('[PurchaseCapture] Amount from HTML (' + htmlPatterns[h].source.substring(0, 20) + '): ' + amt);
+        return amt;
+      }
+    }
+  }
+
+  // === 3. 从页面可见文本中提取 ===
+  var textPatterns = [
+    /实付[款金额]*[：:\\s]*[¥￥]?\\s*([\\d,.]+)/,
+    /应付[总金额]*[：:\\s]*[¥￥]?\\s*([\\d,.]+)/,
+    /合\\s*计[：:\\s]*[¥￥]?\\s*([\\d,.]+)/,
+    /总\\s*价[：:\\s]*[¥￥]?\\s*([\\d,.]+)/,
+    /需付款[：:\\s]*[¥￥]?\\s*([\\d,.]+)/,
+    /订单金额[：:\\s]*[¥￥]?\\s*([\\d,.]+)/
+  ];
+  for (var t = 0; t < textPatterns.length; t++) {
+    var m = text.match(textPatterns[t]);
+    if (m) {
+      var amt = parseAmount(m[1]);
+      if (amt > 0) {
+        console.log('[PurchaseCapture] Amount from text (' + textPatterns[t].source.substring(0, 20) + '): ' + amt);
+        return amt;
+      }
+    }
+  }
+
+  // === 4. 从DOM元素中提取（金额通常在特定class的元素中） ===
+  var selectors = [
+    '.pay-amount', '.total-amount', '.real-pay', '.actual-pay',
+    '.price-total', '[class*="totalPay"]', '[class*="actualPay"]',
+    '.price-highlight', '.pay-price'
+  ];
+  for (var s = 0; s < selectors.length; s++) {
+    var el = document.querySelector(selectors[s]);
+    if (el) {
+      var elText = (el.innerText || '').replace(/[¥￥元]/g, '').trim();
+      var amt = parseAmount(elText);
+      if (amt > 0) {
+        console.log('[PurchaseCapture] Amount from DOM (' + selectors[s] + '): ' + amt);
+        return amt;
+      }
+    }
+  }
+
+  console.log('[PurchaseCapture] No payment amount found');
+  return null;
+})()
+`
+
 // 订单确认/支付相关页面URL模式
 const ORDER_CONFIRM_PATTERNS = {
   taobao: [
@@ -1744,9 +1845,15 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       console.warn('[PurchaseCapture] Cookie restore failed:', e.message)
     }
 
+    // 提前计算地址设置需求（用于决定窗口是否隐藏）
+    const hasShippingInfo = purchaseInfo.shippingName || purchaseInfo.shippingPhone || purchaseInfo.shippingAddress
+    const needAddrSetup = hasShippingInfo && (platform === '1688' || platform === 'taobao')
+    const parsedAddr = needAddrSetup ? parseAddress(purchaseInfo.shippingAddress) : null
+
     const win = new BrowserWindow({
       width: 1280,
       height: 860,
+      show: !needAddrSetup,
       title: `采购下单 - ${platform}`,
       webPreferences: {
         partition: partitionName,
@@ -1801,33 +1908,54 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       // 保存Cookie（用户在窗口内可能登录了，积累了新Cookie）
       savePurchaseWindowCookies()
 
-      // 自动调用服务端API创建采购单和绑定，完成后再通知前端
-      autoCreateAndBind(purchaseInfo, platformOrderNo, platform)
-        .then(() => {
-          console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
-          // 绑定成功后通知前端
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('purchase-order-captured', {
-              purchaseNo,
-              platformOrderNo,
-              platform,
-              success: true
-            })
-          }
-        })
-        .catch(err => {
-          console.error(`[PurchaseCapture] Auto-bind 失败:`, err.message)
-          // 绑定失败也通知前端（附带错误信息，前端可提示用户手动绑定）
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('purchase-order-captured', {
-              purchaseNo,
-              platformOrderNo,
-              platform,
-              success: false,
-              error: err.message
-            })
-          }
-        })
+      // 先提取实际支付金额，再执行绑定
+      let capturedAmount = null
+      const doBindAndNotify = () => {
+        autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
+          .then(() => {
+            console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('purchase-order-captured', {
+                purchaseNo,
+                platformOrderNo,
+                platform,
+                success: true
+              })
+            }
+          })
+          .catch(err => {
+            console.error(`[PurchaseCapture] Auto-bind 失败:`, err.message)
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('purchase-order-captured', {
+                purchaseNo,
+                platformOrderNo,
+                platform,
+                success: false,
+                error: err.message
+              })
+            }
+          })
+      }
+
+      // 从当前页面提取实际支付金额
+      if (win && !win.isDestroyed()) {
+        win.webContents.executeJavaScript(EXTRACT_PAYMENT_AMOUNT)
+          .then(amount => {
+            if (amount && amount > 0) {
+              capturedAmount = amount
+              console.log(`[PurchaseCapture] Payment amount captured: ¥${amount}`)
+            } else {
+              console.log('[PurchaseCapture] No payment amount captured')
+            }
+            doBindAndNotify()
+          })
+          .catch(() => {
+            console.log('[PurchaseCapture] Payment amount extraction failed')
+            doBindAndNotify()
+          })
+      } else {
+        doBindAndNotify()
+      }
 
       // 5秒后关闭窗口（留足时间给API调用）
       setTimeout(() => {
@@ -1858,9 +1986,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 注入 API 拦截器 + 地址自动填充
     // 地址设置状态追踪（淘宝和1688都走"先设地址再采购"流程）
     let addrSetDone = false  // 地址是否已设置完成
-    const hasShippingInfo = purchaseInfo.shippingName || purchaseInfo.shippingPhone || purchaseInfo.shippingAddress
-    const needAddrSetup = hasShippingInfo && (platform === '1688' || platform === 'taobao')
-    const parsedAddr = needAddrSetup ? parseAddress(purchaseInfo.shippingAddress) : null
 
     console.log(`[PurchaseCapture] Address check: platform=${platform}, hasShippingInfo=${!!hasShippingInfo}, needAddrSetup=${needAddrSetup}`)
     console.log(`[PurchaseCapture] Shipping: name="${purchaseInfo.shippingName}", phone="${purchaseInfo.shippingPhone}", addr="${(purchaseInfo.shippingAddress || '').substring(0, 50)}"`)
@@ -2091,7 +2216,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           clearInterval(addrCheckTimer)
           console.log('[PurchaseCapture] Address setup timeout, navigating to purchase URL anyway')
           addrSetDone = true
-          win.loadURL(purchaseUrl).catch(() => {})
+          win.loadURL(purchaseUrl).then(() => {
+            if (!win.isDestroyed()) win.show()
+          }).catch(() => {})
           return
         }
 
@@ -2105,22 +2232,30 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             if (result === 'success' || result === 'submitted') {
               clearInterval(addrCheckTimer)
               addrSetDone = true
-              // 地址设置成功，等一下让页面保存完毕，然后跳转到采购URL
+              // 地址设置成功，通知主窗口显示提示
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
+              }
+              // 等页面保存完毕，然后跳转到采购URL并显示窗口
               console.log(`[PurchaseCapture] Address setup done! Navigating to purchase URL in 3s...`)
               setTimeout(() => {
                 if (win.isDestroyed() || resolved) return
-                win.loadURL(purchaseUrl).catch(() => {})
+                win.loadURL(purchaseUrl).then(() => {
+                  if (!win.isDestroyed()) win.show()
+                }).catch(() => {})
               }, 3000)
             } else if (result === 'need_login' || result === 'need_verify') {
-              // 需要登录或验证 — 不设置addrSetDone，用户完成后页面会重新导航
-              // did-navigate 会再次检测并注入脚本
-              console.log(`[PurchaseCapture] Address setup issue: ${result}, waiting for user to complete...`)
+              // 需要登录或验证 — 显示窗口让用户手动操作
+              if (!win.isDestroyed() && !win.isVisible()) win.show()
+              console.log(`[PurchaseCapture] Address setup issue: ${result}, showing window for user...`)
             } else if (result === 'no_button' || result === 'no_form') {
               // 页面异常，直接跳转采购URL
               clearInterval(addrCheckTimer)
               addrSetDone = true
               console.log(`[PurchaseCapture] Address page issue: ${result}, navigating to purchase URL`)
-              win.loadURL(purchaseUrl).catch(() => {})
+              win.loadURL(purchaseUrl).then(() => {
+                if (!win.isDestroyed()) win.show()
+              }).catch(() => {})
             }
           })
           .catch(() => {})
@@ -2187,8 +2322,8 @@ function checkApiResponse(res, label) {
 /**
  * 自动调用服务端 API 创建采购单并绑定
  */
-async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform) {
-  const { purchaseNo, salesOrderId, salesOrderNo, goodsName, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress } = purchaseInfo
+async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount) {
+  const { purchaseNo, salesOrderId, salesOrderNo, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress } = purchaseInfo
 
   console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}, token=${getAuthToken() ? '有效' : '无'}`)
 
@@ -2200,6 +2335,7 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform) {
       sales_order_id: salesOrderId,
       sales_order_no: salesOrderNo,
       goods_name: goodsName,
+      goods_image: image || '',
       sku: sku,
       quantity: quantity,
       source_url: sourceUrl,
@@ -2224,6 +2360,28 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform) {
   })
   console.log(`[PurchaseCapture] 绑定订单号响应: HTTP ${bindRes.statusCode}, body=${bindRes.data.substring(0, 500)}`)
   checkApiResponse(bindRes, '绑定订单号')
+
+  // 3. 更新货源采购价（如果抓取到了实际支付金额）
+  if (capturedAmount && capturedAmount > 0 && skuId && sourceUrl) {
+    try {
+      const priceRes = await httpRequest(`${BUSINESS_SERVER}/api/sku-purchase-config/update-price`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          sku_id: skuId,
+          purchase_link: sourceUrl,
+          purchase_price: capturedAmount,
+          platform: platform
+        })
+      })
+      console.log(`[PurchaseCapture] 更新货源采购价响应: HTTP ${priceRes.statusCode}, body=${priceRes.data.substring(0, 500)}`)
+      checkApiResponse(priceRes, '更新货源采购价')
+    } catch (e) {
+      // 更新采购价失败不影响主流程
+      console.warn(`[PurchaseCapture] 更新货源采购价失败(非关键): ${e.message}`)
+    }
+  } else {
+    console.log(`[PurchaseCapture] 跳过更新货源采购价: amount=${capturedAmount}, skuId=${skuId}, sourceUrl=${sourceUrl ? '有' : '无'}`)
+  }
 }
 
 module.exports = { registerPurchaseOrderCaptureIpc }
