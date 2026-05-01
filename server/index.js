@@ -1,5 +1,8 @@
 const express = require('express')
 const cors = require('cors')
+const path = require('path')
+const fs = require('fs')
+const multer = require('multer')
 const { pool, initDB } = require('./db')
 
 const app = express()
@@ -1120,6 +1123,100 @@ app.get('/health', async (req, res) => {
     res.json({ status: 'ok', time: new Date().toISOString() })
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message })
+  }
+})
+
+// ============ 热更新接口 ============
+
+const UPDATE_DIR = path.join(__dirname, 'updates')
+const VERSION_FILE = path.join(UPDATE_DIR, 'version.json')
+const ADMIN_PASSWORD = 'dianxiaoer2026'
+
+if (!fs.existsSync(UPDATE_DIR)) {
+  fs.mkdirSync(UPDATE_DIR, { recursive: true })
+}
+
+const uploadStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPDATE_DIR),
+  filename: (req, file, cb) => {
+    const ver = req.body.version || Date.now()
+    cb(null, `update-${ver}.zip`)
+  }
+})
+
+const uploadMiddleware = multer({
+  storage: uploadStorage,
+  limits: { fileSize: 100 * 1024 * 1024 }
+}).single('file')
+
+app.post('/api/update/upload', (req, res) => {
+  const password = req.headers['x-admin-password']
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(403).json({ code: 1, message: '未授权' })
+  }
+  uploadMiddleware(req, res, (err) => {
+    if (err) {
+      console.error('[Update] 上传失败:', err.message)
+      return res.status(500).json({ code: 1, message: '上传失败: ' + err.message })
+    }
+    const version = req.body.version
+    const changelog = req.body.changelog || ''
+    if (!version) {
+      return res.status(400).json({ code: 1, message: 'version 不能为空' })
+    }
+    const filePath = path.join(UPDATE_DIR, `update-${version}.zip`)
+    const stat = fs.statSync(filePath)
+    fs.writeFileSync(VERSION_FILE, JSON.stringify({
+      version, changelog, size: stat.size,
+      updatedAt: new Date().toISOString()
+    }, null, 2))
+    console.log(`[Update] 热更新包已上传: v${version} (${(stat.size / 1024).toFixed(1)} KB)`)
+    res.json({ code: 0, message: '上传成功', version, size: stat.size })
+  })
+})
+
+app.get('/api/update/check', (req, res) => {
+  try {
+    if (!fs.existsSync(VERSION_FILE)) {
+      return res.json({ needUpdate: false, message: '暂无更新包' })
+    }
+    const latest = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'))
+    const currentVersion = req.query.version || '0.0.0'
+    const parse = (v) => v.split('.').map(Number)
+    const [ma, mi, pa] = parse(latest.version)
+    const [ca, ci, cp] = parse(currentVersion)
+    const latestNum = ma * 10000 + mi * 100 + pa
+    const currentNum = ca * 10000 + ci * 100 + cp
+    res.json({
+      needUpdate: latestNum > currentNum,
+      version: latest.version,
+      changelog: latest.changelog,
+      size: latest.size,
+      updatedAt: latest.updatedAt
+    })
+  } catch (err) {
+    console.error('[Update] 检查失败:', err.message)
+    res.status(500).json({ needUpdate: false, error: err.message })
+  }
+})
+
+app.get('/api/update/download', (req, res) => {
+  try {
+    if (!fs.existsSync(VERSION_FILE)) {
+      return res.status(404).json({ code: 1, message: '暂无更新包' })
+    }
+    const latest = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'))
+    const filePath = path.join(UPDATE_DIR, `update-${latest.version}.zip`)
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ code: 1, message: '更新包文件不存在' })
+    }
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename=update-${latest.version}.zip`)
+    res.setHeader('Content-Length', fs.statSync(filePath).size)
+    fs.createReadStream(filePath).pipe(res)
+  } catch (err) {
+    console.error('[Update] 下载失败:', err.message)
+    res.status(500).json({ code: 1, message: err.message })
   }
 })
 
