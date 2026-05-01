@@ -1136,6 +1136,9 @@ if (!fs.existsSync(UPDATE_DIR)) {
   fs.mkdirSync(UPDATE_DIR, { recursive: true })
 }
 
+// 静态文件服务：提供更新包和 latest.yml（供 electron-updater 全量更新使用）
+app.use('/updates', express.static(UPDATE_DIR))
+
 const uploadStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPDATE_DIR),
   filename: (req, file, cb) => {

@@ -947,22 +947,30 @@ async function handlePurchase(order, item, itemIdx) {
   if (purchaseAccounts.value.length === 0) {
     try {
       const res = await fetchPurchaseAccounts()
+      console.log('[采购下单] 采购账号API返回:', JSON.stringify(res))
       if (res && res.list) {
         purchaseAccounts.value = res.list
       } else if (Array.isArray(res)) {
         purchaseAccounts.value = res
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[采购下单] 加载采购账号失败:', e.message)
+      ElMessage.warning('加载采购账号失败: ' + e.message)
+    }
   }
 
   // 加载仓库列表（用于仓库发货类型）
   if (warehouseList.value.length === 0) {
     try {
       const wRes = await fetchWarehouses()
+      console.log('[采购下单] 仓库API返回:', JSON.stringify(wRes))
       if (wRes) {
         warehouseList.value = wRes.list || (Array.isArray(wRes) ? wRes : [])
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[采购下单] 加载仓库失败:', e.message)
+      ElMessage.warning('加载仓库失败: ' + e.message)
+    }
   }
   // 如果只有一个仓库，自动选中
   if (warehouseList.value.length === 1) {

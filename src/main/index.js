@@ -205,8 +205,8 @@ app.whenReady().then(async () => {
   // 注册热更新 IPC 通道
   registerHotUpdateIpc(mainWindow)
 
-  // 启动后延迟检查热更新
-  setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
+  // 热更新自动检查已禁用，改用全量更新
+  // setTimeout(() => autoCheckHotUpdate(mainWindow), 6000)
 
   // 注册平台窗口 IPC（需要 mainWindow 引用）
   registerPlatformWindowIpc(mainWindow)
