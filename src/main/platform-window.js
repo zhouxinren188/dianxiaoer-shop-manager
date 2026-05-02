@@ -32,6 +32,8 @@ const storePlatforms = new Map()
 const storeCredentials = new Map()
 // 暂存提取的商家信息 Map<storeId, {storeName, venderId, shopId}>
 const storeExtractedInfo = new Map()
+// 暂存是否为重新登录（keepCookie） Map<storeId, boolean>
+const storeKeepCookie = new Map()
 
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
