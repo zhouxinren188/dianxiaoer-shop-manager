@@ -237,16 +237,16 @@ function registerPlatformWindowIpc(mainWindow) {
           // 如果已经拿到 venderId 或 shopId，立即执行保存
           const extracted = storeExtractedInfo.get(sid) || {}
           if (extracted.venderId || extracted.shopId) {
-            console.log('[PlatformWindow] 提取成功，执行保存并3秒后自动关闭窗口')
+            console.log('[PlatformWindow] 提取成功，执行保存')
             const cred = storeCredentials.get(sid) || {}
             
             // 保存店铺信息
             saveStoreInfo(mw, sid, plat, cred.account, cred.password).then(() => {
-              // 保存成功后，3秒后自动关闭窗口
+              // 3秒后自动关闭平台窗口
               setTimeout(() => {
                 if (!win.isDestroyed()) {
-                  console.log('[PlatformWindow] 信息已保存，3秒后自动关闭窗口')
-                  win._saveDone = true // 标记已保存，避免close事件再次保存
+                  console.log('[PlatformWindow] 3秒后自动关闭平台窗口')
+                  win._saveDone = true
                   win.close()
                 }
               }, 3000)
@@ -545,10 +545,38 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
     // 如果没有从输入框捕获到账号但 cookie 有 pin，用 pin 作为账号
     if (!account && pinName) updateBody.account = pinName
 
+    // 提升到外层作用域，以便 catch 块也能访问
+    let targetStoreId = storeId
+
     if (Object.keys(updateBody).length > 0) {
       try {
-        // 直接更新当前店铺信息（不再检查重复）
-        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+        // 检查是否有 merchant_id 重复，如果有则更新已有店铺并删除新店铺
+        let shouldDeleteNewStore = false
+
+        if (merchantId) {
+          try {
+            const checkRes = await httpRequest(`${BUSINESS_SERVER}/api/stores?merchant_id=${encodeURIComponent(merchantId)}`, {
+              method: 'GET'
+            })
+            if (checkRes.statusCode === 200) {
+              const checkResult = JSON.parse(checkRes.data)
+              if (checkResult.code === 0 && checkResult.data && checkResult.data.list && checkResult.data.list.length > 0) {
+                const existingStore = checkResult.data.list[0]
+                if (String(existingStore.id) !== String(storeId)) {
+                  // 发现重复的 merchant_id，使用已存在的店铺
+                  console.log(`[PlatformWindow] 发现重复 merchant_id=${merchantId}，已存在店铺 id=${existingStore.id}，将更新该店铺并删除新店铺 id=${storeId}`)
+                  targetStoreId = existingStore.id
+                  shouldDeleteNewStore = true
+                }
+              }
+            }
+          } catch (checkErr) {
+            console.error('[PlatformWindow] 检查 merchant_id 重复失败:', checkErr.message)
+          }
+        }
+
+        // 更新目标店铺（可能是已存在的，也可能是当前的）
+        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updateBody)
@@ -556,12 +584,26 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
         if (updateRes.statusCode >= 400) {
           console.error('[PlatformWindow] 更新店铺信息服务端拒绝:', updateRes.statusCode, updateRes.data)
         } else {
-          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${storeId}):`, updateBody)
+          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${targetStoreId}):`, updateBody)
+        }
+
+        // 如果是重复店铺，删除新创建的空白店铺
+        if (shouldDeleteNewStore) {
+          try {
+            const deleteRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+              method: 'DELETE'
+            })
+            if (deleteRes.statusCode === 200) {
+              console.log(`[PlatformWindow] 已删除重复的新店铺 id=${storeId}`)
+            }
+          } catch (deleteErr) {
+            console.error('[PlatformWindow] 删除重复店铺失败:', deleteErr.message)
+          }
         }
 
         // 5. 更新在线状态
         try {
-          const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
+          const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}/status`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ online: true })
@@ -575,7 +617,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
 
         // 6. 通知前端刷新列表
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('platform-login-success', { storeId, account })
+          mainWindow.webContents.send('platform-login-success', { storeId: targetStoreId, account })
         }
       } catch (e) {
         console.error('[PlatformWindow] 更新店铺信息失败:', e.message)
@@ -587,7 +629,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
     console.error('[PlatformWindow] 保存失败:', err.message)
     // 即使保存失败，也通知界面刷新
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('platform-login-success', { storeId, account })
+      mainWindow.webContents.send('platform-login-success', { storeId: targetStoreId, account })
     }
   }
 }

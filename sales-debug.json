@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-05-02T17:05:28.539Z",
-  "storeId": 31,
+  "timestamp": "2026-05-02T21:04:40.550Z",
+  "storeId": 41,
   "phase": "success",
   "ordersCount": 50,
   "totalCount": 50,
@@ -13,7 +13,7 @@
         "promiseShipDate": 1777662000000,
         "orderWarningDesc": "发货超时，需尽快发货",
         "orderWarningDate": 1777662000000,
-        "orderWarningTimeStamp": 79491944,
+        "orderWarningTimeStamp": 93843071,
         "orderWarningType": 9,
         "orderWarningFormat": "已逾期 %s"
       },
@@ -23,10 +23,10 @@
       "orderItems": [
         {
           "skuName": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
-          "imgUrl": "//img13.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
+          "imgUrl": "//img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
           "itemId": "截25/11.12128352",
           "skuUuid": "1012_F2a1m4B1606362484100927488",
-          "skuUrl": "//item.jd.com/10198582176948.html?sdx=ehi-lLxFuZiE6JnJaItZhMQhtzaYDAMrsmpJt65NZt6JPe_RLJpb4XjkoUHiXmOU",
+          "skuUrl": "//item.jd.com/10198582176948.html?sdx=ehi-lLxFuZiE6JnJaItZhMQhtzaYDAMrsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
           "customSkuFlagMap": {},
           "num": 1,
           "jdPrice": 518,
@@ -163,10 +163,10 @@
       "orderItems": [
         {
           "skuName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "imgUrl": "//img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+          "imgUrl": "//img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
           "itemId": "截25/8.5123",
           "skuUuid": "1012_f3K4O3B1601415738509111296",
-          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XjkoUHiXmOU",
+          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
           "customSkuFlagMap": {},
           "num": 2,
           "jdPrice": 598,
@@ -281,10 +281,10 @@
       "orderItems": [
         {
           "skuName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "imgUrl": "//img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+          "imgUrl": "//img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
           "itemId": "截25/8.5123",
           "skuUuid": "1012_F2C1j2U1601415481234599936",
-          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XjkoUHiXmOU",
+          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
           "customSkuFlagMap": {},
           "num": 5,
           "jdPrice": 598,
@@ -412,7 +412,7 @@
       "productName": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
       "unitPrice": 518,
       "quantity": 1,
-      "productImage": "https://img13.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
       "itemCount": 1,
       "allItems": [
         {
@@ -420,7 +420,7 @@
           "name": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
           "price": 518,
           "quantity": 1,
-          "image": "https://img13.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg"
+          "image": "https://img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg"
         }
       ]
     },
@@ -446,7 +446,7 @@
       "productName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
       "unitPrice": 598,
       "quantity": 2,
-      "productImage": "https://img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+      "productImage": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
       "itemCount": 1,
       "allItems": [
         {
@@ -454,7 +454,7 @@
           "name": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
           "price": 598,
           "quantity": 2,
-          "image": "https://img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
+          "image": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
         }
       ]
     },
@@ -480,7 +480,7 @@
       "productName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
       "unitPrice": 598,
       "quantity": 5,
-      "productImage": "https://img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+      "productImage": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
       "itemCount": 1,
       "allItems": [
         {
@@ -488,19 +488,12 @@
           "name": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
           "price": 598,
           "quantity": 5,
-          "image": "https://img20.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
+          "image": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
         }
       ]
     }
   ],
   "allCapturedAPIs": [
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-index.mjs.add15034.js",
-      "status": 200,
-      "bodyLen": 308319
-    },
     {
       "type": "fetch",
       "method": "GET",
@@ -511,23 +504,9 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-runtime-core.esm-bundler.js.66a91c15.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-contract-floor.mjs.51bd92dc.js",
       "status": 200,
-      "bodyLen": 59083
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-06245e47.9506a6cc.js",
-      "status": 200,
-      "bodyLen": 414024
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-08fdc020.3efcf08c.js",
-      "status": 200,
-      "bodyLen": 325333
+      "bodyLen": 109338
     },
     {
       "type": "fetch",
@@ -539,6 +518,20 @@
     {
       "type": "fetch",
       "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-runtime-core.esm-bundler.js.66a91c15.js",
+      "status": 200,
+      "bodyLen": 59083
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-index.mjs.add15034.js",
+      "status": 200,
+      "bodyLen": 308319
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vue.b55285a1.js",
       "status": 200,
       "bodyLen": 94217
@@ -546,9 +539,23 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-b51a3ae1.20747f81.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-08fdc020.3efcf08c.js",
       "status": 200,
-      "bodyLen": 348362
+      "bodyLen": 325333
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-06245e47.9506a6cc.js",
+      "status": 200,
+      "bodyLen": 414024
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-e14817b4.43fce0a0.js",
+      "status": 200,
+      "bodyLen": 82671
     },
     {
       "type": "fetch",
@@ -574,9 +581,23 @@
     {
       "type": "fetch",
       "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-b51a3ae1.20747f81.js",
+      "status": 200,
+      "bodyLen": 348362
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-9d47dc46.6993c166.js",
       "status": 200,
       "bodyLen": 145862
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-06245e47.39b45aba.js",
+      "status": 200,
+      "bodyLen": 311798
     },
     {
       "type": "fetch",
@@ -590,28 +611,21 @@
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 84
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-06245e47.39b45aba.js",
-      "status": 200,
-      "bodyLen": 311798
+      "bodyLen": 85
     },
     {
       "type": "xhr",
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 85
+      "bodyLen": 84
     },
     {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-contract-floor.mjs.51bd92dc.js",
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.bubble.commonBubbleFacade.getBubble",
       "status": 200,
-      "bodyLen": 109338
+      "bodyLen": 72
     },
     {
       "type": "xhr",
@@ -630,23 +644,16 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.bubble.commonBubbleFacade.getBubble",
-      "status": 200,
-      "bodyLen": 72
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.layout.layoutFacade.find",
       "status": 200,
       "bodyLen": 2352
     },
     {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-e14817b4.43fce0a0.js",
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 82671
+      "bodyLen": 85
     },
     {
       "type": "xhr",
@@ -658,23 +665,23 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 84
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 85
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.navigation.NavigationFacade.getCrumbOperationInfo",
       "status": 200,
       "bodyLen": 72
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
-      "bodyLen": 85
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
-      "bodyLen": 85
     },
     {
       "type": "xhr",
@@ -693,13 +700,6 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
-      "bodyLen": 84
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.seller.menu.QueryPinMenusBySystemIdAndMenuTypeFacade.queryPinMenuTree",
       "status": 200,
       "bodyLen": 345443
@@ -714,16 +714,16 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmweb.user.MyShopInfoProvider.getShopCardInfo",
       "status": 200,
-      "bodyLen": 131
+      "bodyLen": 2824
     },
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmweb.user.MyShopInfoProvider.getShopCardInfo",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
       "status": 200,
-      "bodyLen": 2824
+      "bodyLen": 131
     },
     {
       "type": "xhr",
@@ -854,13 +854,6 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/5254.64c05e33.js",
-      "status": 200,
-      "bodyLen": 83196
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/8160.e87e188a.js",
       "status": 200,
       "bodyLen": 80724
@@ -875,16 +868,30 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-e4d91f62.8cb5b92a.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/dragable.0f7a072f.js",
       "status": 200,
-      "bodyLen": 63031
+      "bodyLen": 44872
     },
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/4096.ce079f67.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/11.3a3de2b0.js",
       "status": 200,
-      "bodyLen": 72484
+      "bodyLen": 150523
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-017397ff.afea802d.js",
+      "status": 200,
+      "bodyLen": 209359
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-e4d91f62.8cb5b92a.js",
+      "status": 200,
+      "bodyLen": 63031
     },
     {
       "type": "fetch",
@@ -896,16 +903,16 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-017397ff.afea802d.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/4096.ce079f67.js",
       "status": 200,
-      "bodyLen": 209359
+      "bodyLen": 72484
     },
     {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/5254.64c05e33.js",
       "status": 200,
-      "bodyLen": 98
+      "bodyLen": 83196
     },
     {
       "type": "xhr",
@@ -922,32 +929,11 @@
       "bodyLen": 163
     },
     {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/11.3a3de2b0.js",
-      "status": 200,
-      "bodyLen": 150523
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/dragable.0f7a072f.js",
-      "status": 200,
-      "bodyLen": 44872
-    },
-    {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.seller.acl.permission.QueryUserPermissionFacade.checkUserMultiplePermissions",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
       "status": 200,
-      "bodyLen": 290
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getDefaultTab",
-      "status": 200,
-      "bodyLen": 556
+      "bodyLen": 98
     },
     {
       "type": "xhr",
@@ -959,9 +945,16 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.queryNoviceGuidance",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.seller.acl.permission.QueryUserPermissionFacade.checkUserMultiplePermissions",
       "status": 200,
-      "bodyLen": 517
+      "bodyLen": 290
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getVenderPromptInfo",
+      "status": 200,
+      "bodyLen": 82
     },
     {
       "type": "xhr",
@@ -973,9 +966,44 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getVenderPromptInfo",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
       "status": 200,
-      "bodyLen": 82
+      "bodyLen": 87
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getDefaultTab",
+      "status": 200,
+      "bodyLen": 556
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
+      "status": 200,
+      "bodyLen": 87
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderTabs",
+      "status": 200,
+      "bodyLen": 396
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.queryNoviceGuidance",
+      "status": 200,
+      "bodyLen": 517
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.shop.vane.view.core.export.ohs.stars.service.VaneBasicFacade.queryVaneBasic",
+      "status": 200,
+      "bodyLen": 10002
     },
     {
       "type": "fetch",
@@ -990,34 +1018,6 @@
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/query-shipping-cost-dialog.99d87a5e.js",
       "status": 200,
       "bodyLen": 3860
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderTabs",
-      "status": 200,
-      "bodyLen": 396
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
-      "status": 200,
-      "bodyLen": 87
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.shop.vane.view.core.export.ohs.stars.service.VaneBasicFacade.queryVaneBasic",
-      "status": 200,
-      "bodyLen": 10002
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
-      "status": 200,
-      "bodyLen": 87
     },
     {
       "type": "fetch",
@@ -1043,16 +1043,9 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSearchInfo",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getCommonQueryCriteriaInfo",
       "status": 200,
-      "bodyLen": 3779
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getQueryCriteriaConfig",
-      "status": 200,
-      "bodyLen": 2213
+      "bodyLen": 72
     },
     {
       "type": "xhr",
@@ -1064,9 +1057,9 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getCommonQueryCriteriaInfo",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getQueryCriteriaConfig",
       "status": 200,
-      "bodyLen": 72
+      "bodyLen": 2213
     },
     {
       "type": "xhr",
@@ -1074,6 +1067,13 @@
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.manage.orderAutoOutShipService.getAutoServiceStatus",
       "status": 200,
       "bodyLen": 151
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSearchInfo",
+      "status": 200,
+      "bodyLen": 3779
     },
     {
       "type": "xhr",
@@ -1116,6 +1116,13 @@
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSkuComments",
       "status": 200,
       "bodyLen": 213
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.OrderOperateButtonControlBffService.checkOrderOperateSign",
+      "status": 200,
+      "bodyLen": 18115
     }
   ]
 }

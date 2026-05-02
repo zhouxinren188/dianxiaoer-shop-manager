@@ -5,7 +5,7 @@ const { getDb } = require('../db/init')
 // GET /api/stores - 店铺列表（分页+筛选）
 router.get('/', (req, res) => {
   const db = getDb()
-  const { name, platform, status, online, page = 1, pageSize = 10 } = req.query
+  const { name, platform, status, online, merchant_id, page = 1, pageSize = 10 } = req.query
   const conditions = []
   const params = []
 
@@ -25,12 +25,16 @@ router.get('/', (req, res) => {
     conditions.push('online = ?')
     params.push(Number(online))
   }
+  if (merchant_id) {
+    conditions.push('merchant_id = ?')
+    params.push(merchant_id)
+  }
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''
   const offset = (Number(page) - 1) * Number(pageSize)
 
   const total = db.prepare(`SELECT COUNT(*) as count FROM stores ${where}`).get(...params).count
-  const list = db.prepare(`SELECT * FROM stores ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, Number(pageSize), offset)
+  const list = db.prepare(`SELECT * FROM stores ${where} ORDER BY id ASC LIMIT ? OFFSET ?`).all(...params, Number(pageSize), offset)
 
   // 解析 tags JSON
   list.forEach(item => {

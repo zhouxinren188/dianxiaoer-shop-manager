@@ -25,12 +25,27 @@ export function updatePurchaseStatus(id, data) {
   return put(`/api/purchase-orders/${id}/status`, data)
 }
 
+// 更新采购订单信息
+export function updatePurchaseOrder(id, data) {
+  return put(`/api/purchase-orders/${id}`, data)
+}
+
 // 同步平台采购订单（通过cookie抓取并匹配）
 export function syncPlatformOrders(data) {
   return post('/api/purchase-orders/sync', data)
 }
 
+// 同步单个采购订单的状态和物流
+export function syncSinglePurchaseOrder(data) {
+  return post('/api/purchase-orders/sync-single', data)
+}
+
 // 获取下一个采购编号
 export function fetchNextPurchaseNo() {
   return get('/api/purchase-orders/next-no')
+}
+
+// 查询物流轨迹
+export function fetchLogisticsTracking(id) {
+  return get(`/api/purchase-orders/${id}/logistics`)
 }

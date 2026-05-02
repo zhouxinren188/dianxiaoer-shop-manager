@@ -82,6 +82,10 @@
             <el-icon><RefreshRight /></el-icon>
             重置
           </el-button>
+          <el-button type="success" @click="handleAddPurchase">
+            <el-icon><Plus /></el-icon>
+            手动添加采购单
+          </el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -164,9 +168,14 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="logistics_no" label="物流单号" width="150" align="center">
+        <el-table-column prop="logistics_no" label="物流单号" width="200" align="center">
           <template #default="{ row }">
-            <span v-if="row.logistics_no">{{ row.logistics_no }}</span>
+            <div v-if="row.logistics_no" style="display:flex;align-items:center;gap:6px;justify-content:center">
+              <span>{{ row.logistics_no }}</span>
+              <el-button link type="primary" size="small" @click="handleViewLogistics(row)">
+                查看轨迹
+              </el-button>
+            </div>
             <span v-else class="text-muted">--</span>
           </template>
         </el-table-column>
@@ -177,8 +186,14 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="260" align="center" fixed="right">
+        <el-table-column label="操作" width="300" align="center" fixed="right">
           <template #default="{ row }">
+            <el-button link type="success" size="small" @click="handleSyncSingle(row)">
+              同步
+            </el-button>
+            <el-button link type="warning" size="small" @click="handleEditPurchase(row)">
+              编辑
+            </el-button>
             <el-button v-if="row.status === 'shipped'" link type="primary" size="small" @click="handleConfirmReceive(row)">
               确认签收
             </el-button>
@@ -244,6 +259,42 @@
         </el-descriptions>
       </template>
     </el-drawer>
+
+    <!-- 物流轨迹弹窗 -->
+    <el-dialog
+      v-model="logisticsVisible"
+      title="物流轨迹"
+      width="600px"
+      align-center
+    >
+      <div v-if="logisticsData" class="logistics-container">
+        <el-descriptions :column="2" border size="small" style="margin-bottom: 20px">
+          <el-descriptions-item label="物流公司">{{ logisticsData.company || '--' }}</el-descriptions-item>
+          <el-descriptions-item label="物流单号">{{ logisticsData.tracking_no || '--' }}</el-descriptions-item>
+          <el-descriptions-item label="数据来源">
+            <el-tag size="small" :type="logisticsData.source === 'express100' ? 'success' : 'primary'">
+              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '1688' : logisticsData.source === 'pinduoduo' ? '拼多多' : '快递100' }}
+            </el-tag>
+          </el-descriptions-item>
+        </el-descriptions>
+
+        <el-timeline v-if="logisticsData.tracks && logisticsData.tracks.length > 0">
+          <el-timeline-item
+            v-for="(track, index) in logisticsData.tracks"
+            :key="index"
+            :timestamp="formatTime(track.time || track.timestamp)"
+            placement="top"
+            :color="index === 0 ? '#0bbd87' : '#e4e7ed'"
+          >
+            <el-card>
+              <p style="margin: 0; font-size: 14px">{{ track.context || track.desc || track.message }}</p>
+            </el-card>
+          </el-timeline-item>
+        </el-timeline>
+        <el-empty v-else description="暂无物流轨迹信息" />
+      </div>
+      <div v-else v-loading="logisticsLoading" style="min-height: 200px"></div>
+    </el-dialog>
 
     <!-- 同步采购订单弹窗 -->
     <el-dialog
@@ -382,6 +433,111 @@
         <el-button type="primary" @click="handleEditAccountSubmit">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 编辑采购单弹窗 -->
+    <el-dialog
+      v-model="editPurchaseVisible"
+      title="编辑采购单"
+      width="600px"
+      align-center
+      destroy-on-close
+    >
+      <el-form :model="editPurchaseForm" label-width="100px">
+        <el-form-item label="采购编号">
+          <el-input v-model="editPurchaseForm.purchaseNo" disabled />
+        </el-form-item>
+        <el-form-item label="关联销售单号">
+          <el-input v-model="editPurchaseForm.salesOrderNo" placeholder="请输入销售订单号" />
+        </el-form-item>
+        <el-form-item label="商品名称">
+          <el-input v-model="editPurchaseForm.goodsName" placeholder="请输入商品名称" />
+        </el-form-item>
+        <el-form-item label="SKU规格">
+          <el-input v-model="editPurchaseForm.sku" placeholder="请输入SKU规格（可选）" />
+        </el-form-item>
+        <el-form-item label="数量">
+          <el-input-number v-model="editPurchaseForm.quantity" :min="1" :max="9999" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="采购单价">
+          <el-input-number v-model="editPurchaseForm.purchasePrice" :min="0" :precision="2" :step="0.01" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="采购平台">
+          <el-select v-model="editPurchaseForm.platform" placeholder="请选择采购平台" style="width: 100%">
+            <el-option label="淘宝/天猫" value="taobao" />
+            <el-option label="拼多多" value="pinduoduo" />
+            <el-option label="1688" value="1688" />
+            <el-option label="抖音" value="douyin" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="平台订单号">
+          <el-input v-model="editPurchaseForm.platformOrderNo" placeholder="已发货后填入平台订单号（可选）" />
+        </el-form-item>
+        <el-form-item label="物流单号">
+          <el-input v-model="editPurchaseForm.logisticsNo" placeholder="已发货后填入物流单号（可选）" />
+        </el-form-item>
+        <el-form-item label="物流公司">
+          <el-input v-model="editPurchaseForm.logisticsCompany" placeholder="已发货后填入物流公司（可选）" />
+        </el-form-item>
+        <el-form-item label="货源链接">
+          <el-input v-model="editPurchaseForm.sourceUrl" placeholder="请输入商品采购链接（可选）" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="editPurchaseForm.remark" type="textarea" :rows="2" placeholder="请输入备注（可选）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editPurchaseVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleEditPurchaseSubmit">保存修改</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 手动添加采购单弹窗 -->
+    <el-dialog
+      v-model="addPurchaseVisible"
+      title="手动添加采购单"
+      width="600px"
+      align-center
+      destroy-on-close
+    >
+      <el-form :model="addPurchaseForm" label-width="100px">
+        <el-form-item label="关联销售单号" required>
+          <el-input v-model="addPurchaseForm.salesOrderNo" placeholder="请输入销售订单号" />
+        </el-form-item>
+        <el-form-item label="商品名称" required>
+          <el-input v-model="addPurchaseForm.goodsName" placeholder="请输入商品名称" />
+        </el-form-item>
+        <el-form-item label="SKU规格">
+          <el-input v-model="addPurchaseForm.sku" placeholder="请输入SKU规格（可选）" />
+        </el-form-item>
+        <el-form-item label="数量" required>
+          <el-input-number v-model="addPurchaseForm.quantity" :min="1" :max="9999" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="采购单价">
+          <el-input-number v-model="addPurchaseForm.purchasePrice" :min="0" :precision="2" :step="0.01" style="width: 100%" />
+        </el-form-item>
+        <el-form-item label="采购平台" required>
+          <el-select v-model="addPurchaseForm.platform" placeholder="请选择采购平台" style="width: 100%">
+            <el-option label="淘宝/天猫" value="taobao" />
+            <el-option label="拼多多" value="pinduoduo" />
+            <el-option label="1688" value="1688" />
+            <el-option label="抖音" value="douyin" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="平台订单号">
+          <el-input v-model="addPurchaseForm.platformOrderNo" placeholder="已发货后填入物流单号（可选）" />
+        </el-form-item>
+        <el-form-item label="货源链接">
+          <el-input v-model="addPurchaseForm.sourceUrl" placeholder="请输入商品采购链接（可选）" />
+        </el-form-item>
+        <el-form-item label="备注">
+          <el-input v-model="addPurchaseForm.remark" type="textarea" :rows="2" placeholder="请输入备注（可选）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addPurchaseVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleAddPurchaseSubmit">确认添加</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -392,9 +548,10 @@ import {
   Document,
   Search,
   Refresh,
-  RefreshRight
+  RefreshRight,
+  Plus
 } from '@element-plus/icons-vue'
-import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders } from '@/api/purchaseOrder'
+import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 
 // ==================== 常量配置 ====================
@@ -694,6 +851,27 @@ function handleViewDetail(row) {
   detailVisible.value = true
 }
 
+// ==================== 物流轨迹 ====================
+
+const logisticsVisible = ref(false)
+const logisticsData = ref(null)
+const logisticsLoading = ref(false)
+
+async function handleViewLogistics(row) {
+  logisticsVisible.value = true
+  logisticsLoading.value = true
+  logisticsData.value = null
+
+  try {
+    const data = await fetchLogisticsTracking(row.id)
+    logisticsData.value = data
+  } catch (err) {
+    ElMessage.error('查询物流轨迹失败: ' + err.message)
+  } finally {
+    logisticsLoading.value = false
+  }
+}
+
 async function handleConfirmReceive(row) {
   try {
     await ElMessageBox.confirm(`确认签收采购单 ${row.purchase_no}？`, '确认签收', { type: 'info' })
@@ -732,6 +910,154 @@ const syncForm = reactive({
   accountId: 'default'
 })
 
+// ==================== 手动添加采购单 ====================
+
+const addPurchaseVisible = ref(false)
+const addPurchaseForm = reactive({
+  salesOrderNo: '',
+  goodsName: '',
+  sku: '',
+  quantity: 1,
+  purchasePrice: 0,
+  platform: 'taobao',
+  platformOrderNo: '',
+  sourceUrl: '',
+  remark: ''
+})
+
+// ==================== 编辑采购单 ====================
+
+const editPurchaseVisible = ref(false)
+const editPurchaseForm = reactive({
+  id: '',
+  purchaseNo: '',
+  salesOrderNo: '',
+  goodsName: '',
+  sku: '',
+  quantity: 1,
+  purchasePrice: 0,
+  platform: 'taobao',
+  platformOrderNo: '',
+  logisticsNo: '',
+  logisticsCompany: '',
+  sourceUrl: '',
+  remark: ''
+})
+
+function handleEditPurchase(row) {
+  editPurchaseForm.id = row.id
+  editPurchaseForm.purchaseNo = row.purchase_no || ''
+  editPurchaseForm.salesOrderNo = row.sales_order_no || ''
+  editPurchaseForm.goodsName = row.goods_name || ''
+  editPurchaseForm.sku = row.sku || ''
+  editPurchaseForm.quantity = row.quantity || 1
+  editPurchaseForm.purchasePrice = row.purchase_price || 0
+  editPurchaseForm.platform = row.platform || 'taobao'
+  editPurchaseForm.platformOrderNo = row.platform_order_no || ''
+  editPurchaseForm.logisticsNo = row.logistics_no || ''
+  editPurchaseForm.logisticsCompany = row.logistics_company || ''
+  editPurchaseForm.sourceUrl = row.source_url || ''
+  editPurchaseForm.remark = row.remark || ''
+  editPurchaseVisible.value = true
+}
+
+async function handleEditPurchaseSubmit() {
+  if (!editPurchaseForm.goodsName) {
+    ElMessage.warning('请输入商品名称')
+    return
+  }
+  if (!editPurchaseForm.platform) {
+    ElMessage.warning('请选择采购平台')
+    return
+  }
+
+  try {
+    // 更新采购单基本信息
+    await updatePurchaseOrder(editPurchaseForm.id, {
+      sales_order_no: editPurchaseForm.salesOrderNo,
+      goods_name: editPurchaseForm.goodsName,
+      sku: editPurchaseForm.sku,
+      quantity: editPurchaseForm.quantity,
+      purchase_price: editPurchaseForm.purchasePrice,
+      platform: editPurchaseForm.platform,
+      source_url: editPurchaseForm.sourceUrl,
+      remark: editPurchaseForm.remark,
+      logistics_no: editPurchaseForm.logisticsNo,
+      logistics_company: editPurchaseForm.logisticsCompany
+    })
+
+    // 如果填了平台订单号且之前没有，则绑定
+    if (editPurchaseForm.platformOrderNo && editPurchaseForm.platformOrderNo !== editPurchaseForm.purchaseNo) {
+      await bindPlatformOrderNo(editPurchaseForm.purchaseNo, { platform_order_no: editPurchaseForm.platformOrderNo })
+    }
+
+    ElMessage.success('采购单已更新')
+    editPurchaseVisible.value = false
+    await loadData()
+  } catch (err) {
+    ElMessage.error('更新失败: ' + err.message)
+  }
+}
+
+function handleAddPurchase() {
+  addPurchaseForm.salesOrderNo = ''
+  addPurchaseForm.goodsName = ''
+  addPurchaseForm.sku = ''
+  addPurchaseForm.quantity = 1
+  addPurchaseForm.purchasePrice = 0
+  addPurchaseForm.platform = 'taobao'
+  addPurchaseForm.platformOrderNo = ''
+  addPurchaseForm.sourceUrl = ''
+  addPurchaseForm.remark = ''
+  addPurchaseVisible.value = true
+}
+
+async function handleAddPurchaseSubmit() {
+  // 表单验证
+  if (!addPurchaseForm.salesOrderNo) {
+    ElMessage.warning('请输入关联销售单号')
+    return
+  }
+  if (!addPurchaseForm.goodsName) {
+    ElMessage.warning('请输入商品名称')
+    return
+  }
+  if (!addPurchaseForm.platform) {
+    ElMessage.warning('请选择采购平台')
+    return
+  }
+
+  try {
+    // 先获取采购编号
+    const nextNoData = await fetchNextPurchaseNo()
+    const purchaseNo = nextNoData.purchase_no || String(Date.now()).slice(-6)
+
+    // 创建采购单
+    await createPurchaseOrder({
+      purchase_no: purchaseNo,
+      sales_order_no: addPurchaseForm.salesOrderNo,
+      goods_name: addPurchaseForm.goodsName,
+      sku: addPurchaseForm.sku,
+      quantity: addPurchaseForm.quantity,
+      purchase_price: addPurchaseForm.purchasePrice,
+      platform: addPurchaseForm.platform,
+      source_url: addPurchaseForm.sourceUrl,
+      remark: addPurchaseForm.remark
+    })
+
+    // 如果填了平台订单号，则绑定
+    if (addPurchaseForm.platformOrderNo) {
+      await bindPlatformOrderNo(purchaseNo, { platform_order_no: addPurchaseForm.platformOrderNo })
+    }
+
+    ElMessage.success('采购单添加成功')
+    addPurchaseVisible.value = false
+    await loadData()
+  } catch (err) {
+    ElMessage.error('添加失败: ' + err.message)
+  }
+}
+
 function handleSync() {
   syncDialogVisible.value = true
 }
@@ -755,6 +1081,69 @@ async function handleSyncSubmit() {
     ElMessage.error('同步失败: ' + err.message)
   } finally {
     syncing.value = false
+  }
+}
+
+// 单个订单同步
+async function handleSyncSingle(row) {
+  if (!row.platform || !row.platform_order_no) {
+    ElMessage.warning('该订单没有平台信息或平台订单号')
+    return
+  }
+  
+  try {
+    console.log('[Sync-Single] 订单信息:', {
+      platform: row.platform,
+      platform_order_no: row.platform_order_no,
+      purchase_no: row.purchase_no
+    })
+    console.log('[Sync-Single] 账号列表:', accountList.value)
+    
+    // 查找匹配的采购账号（platform匹配且cookie有效）
+    const account = accountList.value.find(acc => {
+      console.log(`[Sync-Single] 检查账号: id=${acc.id}, platform=${acc.platform}, cookie_valid=${acc.cookie_valid}`)
+      return acc.platform === row.platform && acc.cookie_valid
+    })
+    
+    if (!account) {
+      // 尝试查找任意该平台的账号（不管cookie_valid）
+      const anyAccount = accountList.value.find(acc => acc.platform === row.platform)
+      if (!anyAccount) {
+        ElMessage.warning(`系统中没有${platformLabel(row.platform)}采购账号，请先添加账号`)
+      } else {
+        ElMessage.warning(`${platformLabel(row.platform)}账号Cookie已失效，请重新登录`)
+      }
+      return
+    }
+    
+    console.log('[Sync-Single] 找到账号:', account)
+    
+    const loading = ElMessage({
+      message: `正在同步订单 ${row.platform_order_no}...`,
+      type: 'info',
+      duration: 0
+    })
+    
+    const result = await syncSinglePurchaseOrder({
+      platform: row.platform,
+      account_id: account.id,
+      platform_order_no: row.platform_order_no
+    })
+    
+    loading.close()
+    
+    if (result.success) {
+      const statusText = result.status ? `状态: ${result.status}` : ''
+      const logisticsText = result.logistics_no ? `物流: ${result.logistics_no}` : ''
+      const message = [statusText, logisticsText].filter(Boolean).join(', ')
+      ElMessage.success(`同步成功！${message || '无更新'}`)
+      await loadData()
+    } else {
+      ElMessage.warning(result.message || '同步失败')
+    }
+  } catch (err) {
+    console.error('[Sync-Single] 错误:', err)
+    ElMessage.error('同步失败: ' + err.message)
   }
 }
 
