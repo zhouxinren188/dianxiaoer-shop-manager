@@ -1,11 +1,79 @@
 {
-  "timestamp": "2026-05-02T10:57:10.130Z",
+  "timestamp": "2026-05-02T15:00:49.304Z",
   "storeId": 9,
   "phase": "success",
   "ordersCount": 100,
-  "totalCount": 867,
-  "apiUrl": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719428116",
+  "totalCount": 869,
+  "apiUrl": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734047292",
   "sampleOrders": [
+    {
+      "orderId": "3486476006472412",
+      "bOrderId": "330768320666",
+      "orderDate": "2026-05-02 22:53:43",
+      "finishTime": "",
+      "stockTime": "",
+      "totalAmount": 0.1,
+      "goodsAmount": 0.1,
+      "freightPrice": 0,
+      "orderState": 0,
+      "statusText": "待出库",
+      "jdOrderStateDesc": "待发货",
+      "paid": false,
+      "waitPay": true,
+      "lock": 0,
+      "dealerCode": "156339671",
+      "dealerName": "锦选社家居日用专营店",
+      "supplierName": "金榜单丨集运仓店",
+      "receiverName": "毛***",
+      "receiverPhone": "1*******556",
+      "receiverAddress": "江苏常州市天宁区***",
+      "receiverFullAddress": "郑陆镇卫生院",
+      "shipmentNum": "",
+      "shipmentCompanyName": "",
+      "skuId": "10217689705272",
+      "productName": "虞美人桃木梳整木天然木梳子实木按摩梳子女家用生日礼物实用礼品 韶华宽齿[蓝色礼盒]",
+      "unitPrice": 0.1,
+      "jdPrice": 106.8,
+      "quantity": 1,
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/420562/1/5256/256490/69e0206fFc80dc39e/0083320320a505cc.jpg",
+      "outerSkuId": "",
+      "orderSourceDesc": "官方",
+      "sourceType": "POP_301"
+    },
+    {
+      "orderId": "3486276018762847",
+      "bOrderId": "349392681385",
+      "orderDate": "2026-05-02 20:39:44",
+      "finishTime": "",
+      "stockTime": "",
+      "totalAmount": 0.1,
+      "goodsAmount": 0.1,
+      "freightPrice": 0,
+      "orderState": 0,
+      "statusText": "待出库",
+      "jdOrderStateDesc": "待发货",
+      "paid": false,
+      "waitPay": true,
+      "lock": 0,
+      "dealerCode": "234416935",
+      "dealerName": "盈趣屋百货店",
+      "supplierName": "金榜单丨集运仓店",
+      "receiverName": "何***",
+      "receiverPhone": "1*******330",
+      "receiverAddress": "四川广元市旺苍县***",
+      "receiverFullAddress": "战旗村6组",
+      "shipmentNum": "",
+      "shipmentCompanyName": "",
+      "skuId": "10216572071494",
+      "productName": "探路蜂头灯强光超长续航氙气灯LED充电户外夜钓鱼远射手电筒超亮头戴式 #白光+应急充手机+电量显示 特种兵豪华59亿9万K爆亮399时",
+      "unitPrice": 0.1,
+      "jdPrice": 140.8,
+      "quantity": 1,
+      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/412655/36/21319/104572/69d51cd3F48ff0d0d/00833203200289d9.jpg",
+      "outerSkuId": "10162714192244",
+      "orderSourceDesc": "官方",
+      "sourceType": "POP_301"
+    },
     {
       "orderId": "3486430019989971",
       "bOrderId": "349375960171",
@@ -39,74 +107,6 @@
       "outerSkuId": "10140015181425",
       "orderSourceDesc": "官方",
       "sourceType": "POP_301"
-    },
-    {
-      "orderId": "3486438019898276",
-      "bOrderId": "349390361480",
-      "orderDate": "2026-05-02 13:28:58",
-      "finishTime": "",
-      "stockTime": "",
-      "totalAmount": 0.4,
-      "goodsAmount": 0.4,
-      "freightPrice": 0,
-      "orderState": 0,
-      "statusText": "待出库",
-      "jdOrderStateDesc": "待发货",
-      "paid": false,
-      "waitPay": true,
-      "lock": 0,
-      "dealerCode": "130842835",
-      "dealerName": "兔乐兔耍流氓店",
-      "supplierName": "金榜单丨集运仓店",
-      "receiverName": "李***",
-      "receiverPhone": "1*******222",
-      "receiverAddress": "黑龙江哈尔滨市道里区***",
-      "receiverFullAddress": "胖子电器(买卖街店)",
-      "shipmentNum": "",
-      "shipmentCompanyName": "",
-      "skuId": "10215572844735",
-      "productName": "绿伞不锈钢抛光巾去污去渍清洁厨房厨具多功能去油速擦巾抹布 油污速擦巾32片/包 2包",
-      "unitPrice": 0.1,
-      "jdPrice": 27.3,
-      "quantity": 4,
-      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/412171/7/7654/110527/69cbfdf1Fc5a4196c/008332032005b89c.jpg",
-      "outerSkuId": "10211999836692",
-      "orderSourceDesc": "官方",
-      "sourceType": "POP_301"
-    },
-    {
-      "orderId": "3486220008164996",
-      "bOrderId": "330489712914",
-      "orderDate": "2026-05-02 08:34:26",
-      "finishTime": "",
-      "stockTime": "",
-      "totalAmount": 0.2,
-      "goodsAmount": 0.2,
-      "freightPrice": 0,
-      "orderState": 2,
-      "statusText": "已取消",
-      "jdOrderStateDesc": "已取消",
-      "paid": false,
-      "waitPay": true,
-      "lock": 1,
-      "dealerCode": "157816689",
-      "dealerName": "兔乐兔店",
-      "supplierName": "金榜单丨集运仓店",
-      "receiverName": "泉***",
-      "receiverPhone": "1*******321",
-      "receiverAddress": "福建莆田市荔城区***",
-      "receiverFullAddress": "九莲山南少林",
-      "shipmentNum": "",
-      "shipmentCompanyName": "",
-      "skuId": "10215506364970",
-      "productName": "摩根去油污剂干洗店去油清洁剂卫衣真丝香云纱纺织服装干洗剂 套餐一 420ml 420毫升",
-      "unitPrice": 0.1,
-      "jdPrice": 25,
-      "quantity": 2,
-      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/413327/13/1084/65562/69cb783fFaf0e2edd/0083320320d7b6dc.jpg",
-      "outerSkuId": "10212044562613",
-      "orderSourceDesc": "官方",
-      "sourceType": "POP_301"
     }
   ],
   "allCapturedAPIs": [
@@ -116,6 +116,14 @@
       "url": "https://gongxiao.jd.com/styles-e96e9bea.0ad9a8020f78667e9f5d.css",
       "status": 200,
       "bodyLen": 126933,
+      "reqBody": ""
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://gongxiao.jd.com/chunk-jddesign-1f9d8bdd.6af40300519401cb4414.css",
+      "status": 200,
+      "bodyLen": 911389,
       "reqBody": ""
     },
     {
@@ -164,14 +172,6 @@
       "url": "//unpkg.shop.jd.com/react-dom@16.13.1/umd/react-dom.production.min.js",
       "status": 200,
       "bodyLen": 118656,
-      "reqBody": ""
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://gongxiao.jd.com/chunk-jddesign-1f9d8bdd.6af40300519401cb4414.css",
-      "status": 200,
-      "bodyLen": 911389,
       "reqBody": ""
     },
     {
@@ -511,6 +511,22 @@
       "reqBody": ""
     },
     {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 84,
+      "reqBody": "{\"request\":{\"bizRequest\":\"pop_new\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
+      "status": 200,
+      "bodyLen": 85,
+      "reqBody": "{\"request\":{\"bizRequest\":\"pageframe_menu_2\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
+    },
+    {
       "type": "fetch",
       "method": "GET",
       "url": "https://storage.360buyimg.com/integration-static/jssdk/osw-client-1.0.8.js",
@@ -527,12 +543,36 @@
       "reqBody": ""
     },
     {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.menu.MenuFacade.findFoldStatus",
+      "status": 200,
+      "bodyLen": 84,
+      "reqBody": "{\"param\":{\"belongParam\":{\"belongType\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.bubble.commonBubbleFacade.getBubble",
+      "status": 200,
+      "bodyLen": 72,
+      "reqBody": "{\"param\":{\"belongParam\":{\"businessFieldCode\":\"01\"},\"bizRequest\":{\"sceneCode\":\"MENU_MINI\",\"ids\":[1]}}}"
+    },
+    {
       "type": "fetch",
       "method": "GET",
       "url": "https://gias.jd.com/js/pc-tk.js",
       "status": 200,
       "bodyLen": 50241,
       "reqBody": ""
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.menu.toolMenuFacade.findList",
+      "status": 200,
+      "bodyLen": 72,
+      "reqBody": "{\"request\":{\"bizRequest\":{\"bizCode\":\"pop\"}}}"
     },
     {
       "type": "fetch",
@@ -545,58 +585,10 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
-      "bodyLen": 85,
-      "reqBody": "{\"request\":{\"bizRequest\":\"pageframe_menu_2\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
-      "bodyLen": 84,
-      "reqBody": "{\"request\":{\"bizRequest\":\"pop_new\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.bubble.commonBubbleFacade.getBubble",
-      "status": 200,
-      "bodyLen": 72,
-      "reqBody": "{\"param\":{\"belongParam\":{\"businessFieldCode\":\"01\"},\"bizRequest\":{\"sceneCode\":\"MENU_MINI\",\"ids\":[1]}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.menu.MenuFacade.findFoldStatus",
-      "status": 200,
-      "bodyLen": 84,
-      "reqBody": "{\"param\":{\"belongParam\":{\"belongType\":\"01\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.menu.toolMenuFacade.findList",
-      "status": 200,
-      "bodyLen": 72,
-      "reqBody": "{\"request\":{\"bizRequest\":{\"bizCode\":\"pop\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.layout.layoutFacade.find",
       "status": 200,
       "bodyLen": 2295,
       "reqBody": "{\"request\":{\"ext\":{},\"belongParam\":{\"siteCode\":\"110\",\"businessFieldCode\":\"01\"},\"bizRequest\":{\"url\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\"}}}"
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "//storage.360buyimg.com/jsresource/risk/handler.js",
-      "status": 200,
-      "bodyLen": 44612,
-      "reqBody": ""
     },
     {
       "type": "xhr",
@@ -611,24 +603,8 @@
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 84,
-      "reqBody": "{\"request\":{\"bizRequest\":\"ai_help_web\"}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
-      "status": 200,
       "bodyLen": 85,
       "reqBody": "{\"request\":{\"bizRequest\":\"msg_box_revision\",\"belongParam\":{\"businessFieldCode\":\"01\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.topMenu.topMenuFacade.findTopOverviewNew",
-      "status": 200,
-      "bodyLen": 10204,
-      "reqBody": "{\"param1\":{\"ext\":{\"url\":\"https%3A%2F%2Fshop.jd.com%2Fjdm%2Fgongxiao%2FshopEmbed%2Fvender%2FpurchaseManage\"},\"belongParam\":{\"client\":\"web\",\"businessFieldCode\":\"01\"}}}"
     },
     {
       "type": "xhr",
@@ -641,10 +617,10 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.seller.menu.QueryPinMenusBySystemIdAndMenuTypeFacade.queryPinMenuTree",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 341611,
-      "reqBody": "{\"param\":{\"platformId\":\"1\",\"callerParam\":{\"buid\":301,\"tenantId\":1024},\"menuType\":1,\"systemId\":110}}"
+      "bodyLen": 84,
+      "reqBody": "{\"request\":{\"bizRequest\":\"ai_help_web\"}}"
     },
     {
       "type": "xhr",
@@ -657,26 +633,26 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.topMenu.topMenuFacade.findTopOverviewNew",
+      "status": 200,
+      "bodyLen": 10204,
+      "reqBody": "{\"param1\":{\"ext\":{\"url\":\"https%3A%2F%2Fshop.jd.com%2Fjdm%2Fgongxiao%2FshopEmbed%2Fvender%2FpurchaseManage\"},\"belongParam\":{\"client\":\"web\",\"businessFieldCode\":\"01\"}}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.seller.menu.QueryPinMenusBySystemIdAndMenuTypeFacade.queryPinMenuTree",
+      "status": 200,
+      "bodyLen": 341611,
+      "reqBody": "{\"param\":{\"platformId\":\"1\",\"callerParam\":{\"buid\":301,\"tenantId\":1024},\"menuType\":1,\"systemId\":110}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.navigation.NavigationFacade.findShopInfo",
       "status": 200,
       "bodyLen": 292,
       "reqBody": "{\"param\":{\"belongParam\":{\"client\":\"web\"}}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://api.m.jd.com",
-      "status": 200,
-      "bodyLen": 124,
-      "reqBody": "appid=risk_h5_info&functionId=getCustomCtrl&t=1777719425394&body={\"scenes\":[\"disposalGray\"]}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
-      "status": 200,
-      "bodyLen": 131,
-      "reqBody": "{\"searchTaskReq\":{\"userType\":0,\"businessSide\":\"JM-WEB\"}}"
     },
     {
       "type": "xhr",
@@ -689,18 +665,18 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com/api",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
       "status": 200,
-      "bodyLen": 89,
-      "reqBody": "appid=risk_h5_info&functionId=reportInvokeLog&body={\"sdkClient\":\"handler\",\"sdkVersion\":\"1.1.0\",\"url\":\"aHR0cHM6Ly9zaG9wLmpkLmNvbS9qZG0vZ29uZ3hpYW8vc2hvcEVtYmVkL3ZlbmRlci9wdXJjaGFzZU1hbmFnZQ\",\"timestamp\":1777719425397}"
+      "bodyLen": 131,
+      "reqBody": "{\"searchTaskReq\":{\"userType\":0,\"businessSide\":\"JM-WEB\"}}"
     },
     {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.ai.search.original.findHisAndHot",
+      "type": "fetch",
+      "method": "GET",
+      "url": "//storage.360buyimg.com/jsresource/risk/handler.js",
       "status": 200,
-      "bodyLen": 8536,
-      "reqBody": "{\"query\":{\"platform\":\"web\",\"platformVersion\":\"0.0.0\",\"belongBizId\":\"16305460\",\"belongType\":\"01\",\"conversationId\":\"e162689d-c141-4580-969d-8f879d8d8641\"}}"
+      "bodyLen": 44612,
+      "reqBody": ""
     },
     {
       "type": "xhr",
@@ -713,10 +689,34 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.ai.search.original.findHisAndHot",
+      "status": 200,
+      "bodyLen": 8536,
+      "reqBody": "{\"query\":{\"platform\":\"web\",\"platformVersion\":\"0.0.0\",\"belongBizId\":\"16305460\",\"belongType\":\"01\",\"conversationId\":\"1eadaed8-63a2-48ea-9f11-629ad4e8bfbb\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com",
+      "status": 200,
+      "bodyLen": 124,
+      "reqBody": "appid=risk_h5_info&functionId=getCustomCtrl&t=1777734044570&body={\"scenes\":[\"disposalGray\"]}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api",
+      "status": 200,
+      "bodyLen": 89,
+      "reqBody": "appid=risk_h5_info&functionId=reportInvokeLog&body={\"sdkClient\":\"handler\",\"sdkVersion\":\"1.1.0\",\"url\":\"aHR0cHM6Ly9zaG9wLmpkLmNvbS9qZG0vZ29uZ3hpYW8vc2hvcEVtYmVkL3ZlbmRlci9wdXJjaGFzZU1hbmFnZQ\",\"timestamp\":1777734044571}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://cactus.jd.com/behavior_report",
       "status": 200,
       "bodyLen": 4260,
-      "reqBody": "data=~'nhF'%3F%5EX)'nhHA'%3F%5EX)'nhHH'%3F%5EX)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'')'nhHFC'%3F'')'lklqQv'%3F422224%3C171%3D12)'w%60Qv'%3F422224%3C170%3D1%3D)'nhQ%40F'%3F5)'nhL%40F'%3F5)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B7%2B5%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F17)'gp1'%3F5)'gp0'%3F5)'gp3'%3F1)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'422203%3D1466643114%3C64%3C3')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F641)'vfwluqqdbkph'%3F45)'rlkn%60%7C'%3F'ZZVQW%40DHZQWDFNZLKVQDII%40AZZ)oaqIjfdiVqjwdb%60Hdkdb%60w)odt)uwjhuq)ju%60k)cjfpv)fw%60a%60kqldii%60vv)OAH%40%7Dq%60kvljk)fduqpw%60%40s%60kqv)fwjvvJwlblkLvjidq%60a)u%60wvjkdigdw)vfm%60api%60w)vfwjii)w%60vl%7F%60G%7C)fdfm%60v)ZZHLFWJZDUUZGDV%40ZKDH%40ZZ)ajfph%60kq)w%60i%60dv%60%40s%60kqv)%60%7DuIjbUjvq)slvpdiSl%60rujwq')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735057%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5C')'ovQjn%60k'%3F'oaa56%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5CDDDDH00GNW7TDDDDDDFF6CTFLVJ_DIGT%5D')'kph'%3F5)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F422224%3C6%3D%3D17%3D)'%60'%3F6355x)~'q'%3F422224%3C6%3D%3D17%3D)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'Q%7CJwOsI%40tHhs'x"
+      "reqBody": "data=~'nhF'%3F%5EX)'nhHA'%3F%5EX)'nhHH'%3F%5E'MQHI)4)21%3C)07)%7C')'LHB)23)2%3C5)%3D2)%7C')'LHB)%3D3)2%3C%3D)%3C0)%7C')'LHB)454)%3D53)456)%7C')'LHB)442)%3D4%3C)443)%7C')'LHB)415)%3D62)461)%7C')'LHB)40%3D)%3D03)404)%7C')'LHB)741)%3C70)751)%7C')'LHB)710)%3C25)740)%7C')'LHB)704)%3C2%3C)740)%7C')'LHB)656)%3C%3D6)75%3D)%7C')'LHB)146)%3C%3D6)752)%7C')'LHB)104)%3C%3D3)756)%7C')'LHB)12%3C)%3C%3C1)755)%7C')'LHB)1%3D1)%3C%3C3)755)%7C')'LHB)057)%3C%3C%3C)4%3C%3C)%7C')'LHB)04%3D)4555)4%3C%3D)%7C')'LHB)061)4554)4%3C2)%7C')'LHB)004)4554)4%3C3)%7C')'LHB)%3D35)4557)4%3C3)%7C')'LHB)%3C57)4556)4%3C3)%7C')'LHB)%3C4%3C)4556)4%3C2)%7C')'LHB)%3C3%3D)4551)4%3C2)%7C')'LHB)%3C%3D0)4551)4%3C%3D)%7C'X)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'ajf%3F72')'nhHFC'%3F'ajf%3F72')'lklqQv'%3F4222261511513)'w%60Qv'%3F422226151051%3D)'nhQ%40F'%3F71)'nhL%40F'%3F6)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B7%2B44%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F17)'gp1'%3F5)'gp0'%3F5)'gp3'%3F1)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'422203%3D1466643114%3C64%3C3')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F641)'vfwluqqdbkph'%3F45)'rlkn%60%7C'%3F'udb%60%5CJccv%60q)dqjg)clka)vq%7Ci%60H%60ald)guZgl%7Fla)ZZ_R%5DZFIVQDBZFILFNZZ)vfw%60%60k%5C)vqju)ijfdqljkgdw)vmjrAlw%60fqjw%7CUlfn%60w)clkb%60wuwlkq)u%60wvjkdigdw)gipw)cwdh%60v)ZZoahZh%60kpZ4223%3C6%3C%3C2%3C01%3DZ6207516%3C53f41c2%3Cdg6f%60%3C%3Cgfd4ca47cZc%60qfmBwd%7CG%7CK%60rUjuZujuZk%60r)fwdvmW%60ujwq)odt)ZZoahZujwqdiZ705665Z421642%3D3%3C4557Zuwjhlv%60ZdulZmjh%60S%60wvljk)vfwjiiG%7C)l')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735057%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5C')'ovQjn%60k'%3F'oaa56%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5CDDDDH00%407F3PTDDDDDFGHTH22WKGGDVD%5D')'kph'%3F5)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F4222261552033)'%60'%3F6355x)~'q'%3F4222261552033)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'dDIk%5CTIGJhU0'x"
     },
     {
       "type": "xhr",
@@ -736,19 +736,35 @@
     },
     {
       "type": "xhr",
-      "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426481",
+      "method": "GET",
+      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FSUBSYSTEMS%2Fprofiles%2Fprod%3FlongPolling%3D10000",
       "status": 200,
-      "bodyLen": 692,
-      "reqBody": "body=%7B%22authKeys%22%3A%5B%22jmVender%22%2C%22jmSeller%22%2C%22dxGlobalSpecialVender%22%2C%22dxGlobalVender%22%2C%22jmSellerMan%22%2C%22longTimeColors%22%5D%2C%22ext%22%3A%7B%22currentpage%22%3A%22%2Fvender%2FpurchaseManage%22%7D%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+      "bodyLen": 42468,
+      "reqBody": ""
     },
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426481",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.dialog.LoginFacadeService.getLoginInfoByDomain",
+      "status": 200,
+      "bodyLen": 338,
+      "reqBody": "{\"param\":{\"domainUrl\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"platform\":\"windows\",\"client\":\"WEB\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046023",
+      "status": 200,
+      "bodyLen": 692,
+      "reqBody": "body=%7B%22authKeys%22%3A%5B%22jmVender%22%2C%22jmSeller%22%2C%22dxGlobalSpecialVender%22%2C%22dxGlobalVender%22%2C%22jmSellerMan%22%2C%22longTimeColors%22%5D%2C%22ext%22%3A%7B%22currentpage%22%3A%22%2Fvender%2FpurchaseManage%22%7D%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserAuth&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046023",
       "status": 200,
       "bodyLen": 292,
-      "reqBody": "body=%7B%22authKeys%22%3A%5B%22productNameLockGray%22%5D%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+      "reqBody": "body=%7B%22authKeys%22%3A%5B%22productNameLockGray%22%5D%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
     },
     {
       "type": "fetch",
@@ -761,7 +777,15 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_user_getUserInfo&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426481",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getGuidance",
+      "status": 200,
+      "bodyLen": 135,
+      "reqBody": "{\"guidanceRequest\":{\"extendsMap\":{\"currentIdentity\":\"01\",\"ownerIdentity\":\"01\"},\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getUserInfo&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046023",
       "status": 200,
       "bodyLen": 1329,
       "reqBody": "ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
@@ -769,10 +793,18 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_user_getToJmDegradation&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426638",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getBubbleClickConfig",
+      "status": 200,
+      "bodyLen": 131,
+      "reqBody": "{\"bubbleClickRequest\":{\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://api.m.jd.com/api?functionId=api_user_getToJmDegradation&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046162",
       "status": 200,
       "bodyLen": 176,
-      "reqBody": "x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+      "reqBody": "x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
     },
     {
       "type": "fetch",
@@ -831,6 +863,14 @@
       "reqBody": ""
     },
     {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
+      "status": 200,
+      "bodyLen": 98,
+      "reqBody": "{\"request\":{\"belongParam\":{\"platform\":\"windows\",\"client\":\"WEB\"},\"bizRequest\":{\"currentIdentity\":\"01\",\"compositeIdentity\":\"01\",\"url\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"accessSystem\":\"2\",\"menuId\":null,\"pid\":\"2\"}},\"accessContext\":{\"source\":\"web\"}}"
+    },
+    {
       "type": "fetch",
       "method": "GET",
       "url": "https://gongxiao.jd.com/8037.1e447434.js",
@@ -863,14 +903,6 @@
       "reqBody": ""
     },
     {
-      "type": "xhr",
-      "method": "GET",
-      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FSUBSYSTEMS%2Fprofiles%2Fprod%3FlongPolling%3D10000",
-      "status": 200,
-      "bodyLen": 42468,
-      "reqBody": ""
-    },
-    {
       "type": "fetch",
       "method": "GET",
       "url": "//ms.jr.jd.com/gw/generic/bt/h5/m/queryByVarName",
@@ -881,55 +913,15 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://cactus.jd.com/request_algo",
-      "status": 200,
-      "bodyLen": 376,
-      "reqBody": "{\"version\":\"5.3\",\"fp\":\"ne2z2zjy1vi5jjy3\",\"appId\":\"e8352\",\"timestamp\":1777719426898,\"platform\":\"web\",\"expandParams\":\"q3Ep7rJdJ-1OJrpjh7Jj4HERBWYR1mYNBCEfxiYS9ipjxjpPFipjLDrgJjYe4LYSJrJdJHVTJrpjh7Jf4rJdJz1TIipjLDrgJTFfKeleznYTzXoS2XIS7fIeJe4T5jFfKWYe2fIS7jVSJrJdJrEa-OFTGOEjLrJp-jZT1bYS5r4eyPYf1fIfKSofIqYeznVTFOYeFiYTyXIT4jpjxjZf4mFO9m1TJrpjh7JjKSoeGiof0H4e6T4f5nFe7flf2LYTKS1e2TFfKGYeJeIjLDIj4mFO9m1TJrpjh7Jj7jpjxjpe2iFjLrJp-jZML3WSHu1TLXFOCaUT9_mjwqZhDPFQCikOYulOLz1QCa0T9WESH3kjOWlS8eljGSUR3mFQQq5NLHph0ulS9G1WLz1QCa0T9WESJrJdJfYOJipjLDrgJH5fzbYf0D4exfER9bIg6zpfMeIOMGkOCiUOIW1PMeER8jUS9GVT3y1QIiVS0uZQ8eFgE2VRyWET7T4f9X1SKi0Q3e0g8Lpj-mFOGqpOKqpjLrJjLDIj5XETJrpjh7Jj4z5f9XIOMWlQCS1U2LFjLDIj1ipjLDrgJjpjxjJPGiUSFWFPJrpjh7Jj1S4P2PlZ4LnOC_FjLDIj_ulS9mFPJrpjh7JjJrJdJXFPJrpjh7ZfLDIj5qEjLrJp-jJf4zVRUipjxjJS7ipjLDrgJ31QIypSBypP8K1P8vJd4qkO3KFjLDIjEuFjLrJp-jZSEmFQK2XS4mlRIiUO7uJPGaFQGS0gHWFT_WnP8K1P8vVTCK0S9u1S83lSBuZQ8eFgHCFg7ulR4u5gxfkP3akRJrJdJ7FP2ipjLDrg7rodLDIjDuFjLrJp-rof5nojxj5O8ipjLDrg7boe6rJdJLFjLrJp-rIe2jojxj5OJrpjh7JjJrJdJnYOJipjLDrgJjpjxjZf7qEjLrJp-3kjLDLj3Sng63HjLDIj4nYOJipjLrpjh75fLDIj6nYOJipjLrpjh7pe6rJdJrYf2iFjLrpjLDrgz3pjxjJf6XETJrpjLrJp-jJTW21W1v3W0eYVFaoeJrJdJ31QHyVT5ipjLrpjh7pfLDIjzXETJrpjLrJp-rojxj5e2iFjLrpjLDrg4nojxjJe2iFjLrpjLDrg7rJdJXYOJipjLrpjh7pfLDIj3XETJrpjLrJp-PoeLDIj4XETJrpjLrJp-jpe9nIg7jpjxjZf2iFjLrpjLDrg7rJdJ-1OJrpjLrJp-Xojxj5P-ipjLrpjh7pfLDIj-ipjLrpjh7pfLDIjHOEjLrpjLD7NLDIjHyVS3KUSJrpjh7ZMLrJpJ7gEEIhEE0j9Hwz9Hkz9HwQFDgpjxjJf7ipjLrpjh-kjxjpP7ipjLDrgJbIezq5d3TIQCOmjwrIg7nojXynj4O0QHyVRUipjxjZT2eEjLrJp-jJe4z5e4X4gCiUTFm1XLrIg4zZf3vJQ8ikOIWlQmqpdznIg7LIe0zpf9Toe6vZS_uFPDenj7zJf9n4g5W1SKyVT_2pP8K1P_jUS8mVRzyVTCaljCv1RIW1aLX1RC6lj-7XYXK3ZDrJe4z5e4X4g3G1ZJW1WG6lP7mnjCbIezq5d3TIQCOmjwrIg7nojXynj4O0QHyVRUKpj7zZe8nlQ-GFN82HjLDIjKWEjLrJp-jJe4z5e4X4gCiUTFm1XLrIg4zZf3vJQ8ikOIWlQmqpdznIg7LIe0zpf9Toe6vZS_uFPDenj7zJf9n4g5W1SKyVT_2pP8K1P_jUS8mVRzyVTCaljCv1RIW1aLX1RC6lj-7XYXK3ZDrJe4z5e4X4g3G1ZJW1WG6lP7mnjCbIezq5d3TIQCOmjwrIg7nojXynj4O0QHyVRUKpj7zZeJrJdJTUTJrpjh7ZeLDIj-qEjLrJp-jojxjpQ_ipjLDrgJz3b_fEQKKXgDCkgdeXgDCEjLDIj46FjLrJp-jJYo2pRxipjxjpQJrpjh7pfLDIjHOEjLrJp-rojxj5T0ipjLD7N\",\"fv\":\"h5_file_v5.3.3\",\"localTk\":\"tk06wa4a2c49041lfEL5NojAfEL4pj7fyCFR2HFO6HERxiIN5XFQrrbrOJNWshGW8O1Te_nd4TWPf2XS5jYd3XoSKeVd\"}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426861",
-      "status": 200,
-      "bodyLen": 284,
-      "reqBody": "body=%7B%22states%22%3A%5B0%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22ASC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A20%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D&h5st=20260502185711865%3Bne2z2zjy1vi5jjy3%3Be8352%3Btk06waca742bb41lfJ-4T1f4TIeBpj7fyCFR2HFO6HERxiIN5XFQrrbrOJNWslYQVGFY5aFZ4PodBOYS5X1e1TofJKIe%3Bde898d6071eef65400331c3c448fd4a1%3B5.3%3B1777719426865%3Bq3EpJfYNBCVeCSUfyCFN5DEfGyFjLDIj7SFjLrJp-j4fLDIj9e1TJrpjh7JjFiYTIaod6nld2bVe2Tlf4TIT4fFfJiYT2XYe4TlfJWFjLDIj7SnQEiVS0ipjLDrgJnFe3XFf7PYd0nIe4jYT1r4T7XodKmFS0XIS5nVd2j1fJrJdJfUT1yVTIipjLDrgJnYgJrJdJbYOJipjLDrgJfIg4zZe1uWS-GFSMWoRJrJdJTEjLrJp-jJXEOWOyD2fK_3eBipjxjZQ8aFQKiEjLrJp-jJf4zVRUipjxjJS7ipjLDrguqpjhjpOl6Zfeipjxj5f6XETJrpjLrJp-fojxjZf6XETJrpjLrJp-bYfLDIj7nYOJipjLrpjh7pd_rJdJjYf2iFjLrpjLDrgJLYZ5XmZ_eVf4XoZ76HjLDIj_ulS9mFPJrpjLrJp-rojxjpd2iFjLrpjLDrg7rJdJPYOJipjLrpjh75f6rJdJTYOJipjLrpjh7pfLDIj2XETJrpjLrJp-rojxjpe2iFjLrpjLDrg0bojxj5f2iFjLrpjLDrgJbIg6zpfJrJdJnYOJipjLrpjh7pfLDIjAOEjLrpjLDrg2rJdJfkQJrpjLrJp-rojxjpQJrpjLrJp-rojxjpS0ipjLrpjh-kjxjpS9WlOzWFjLrJp-3kjLDLjv5yyD5yyeJgyd9gyq9gytFixJrJdJjoPJrpjLrJpwqJdJrkPJrpjh7Jj3ToNL-oe1zVRUq5d7zpf6rpWdq5P0ulS9G1WJrJdJnVO4ipjLD7N%3Bcbb5d1eba9f509c28ca3f2c88916a58e%3Bof7r36pSiy1QCa0T9WES-bEQGGlQI6ZNHuFT-bVR7qUT"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.dialog.LoginFacadeService.getLoginInfoByDomain",
-      "status": 200,
-      "bodyLen": 338,
-      "reqBody": "{\"param\":{\"domainUrl\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"platform\":\"windows\",\"client\":\"WEB\"},\"accessContext\":{\"source\":\"web\"}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_config_options&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426861",
+      "url": "https://api.m.jd.com/api?functionId=api_config_options&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046377",
       "status": 200,
       "bodyLen": 979,
-      "reqBody": "body=%7B%22configKey%22%3A%22orderWarnQueryConfig%22%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getGuidance",
-      "status": 200,
-      "bodyLen": 135,
-      "reqBody": "{\"guidanceRequest\":{\"extendsMap\":{\"currentIdentity\":\"01\",\"ownerIdentity\":\"01\"},\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getBubbleClickConfig",
-      "status": 200,
-      "bodyLen": 131,
-      "reqBody": "{\"bubbleClickRequest\":{\"version\":\"\",\"platform\":\"windows\",\"client\":\"WEB\",\"accessType\":\"1\",\"roleId\":\"2\",\"interfaceVersion\":\"v4\",\"pid\":\"2\",\"accessPoint\":\"-1\",\"accessSystem\":\"2\"},\"accessContext\":{\"source\":\"web\"}}"
+      "reqBody": "body=%7B%22configKey%22%3A%22orderWarnQueryConfig%22%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
     },
     {
       "type": "xhr",
       "method": "GET",
-      "url": "https://api.m.jd.com/api?functionId=api_basic_getArea&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719426861&body=%7B%22parentId%22:-1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22:%22color%22,%22curRole%22:%221%22,%22requestClientType%22:%22jmPc%22%7D",
+      "url": "https://api.m.jd.com/api?functionId=api_basic_getArea&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046377&body=%7B%22parentId%22:-1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22:%22color%22,%22curRole%22:%221%22,%22requestClientType%22:%22jmPc%22%7D",
       "status": 200,
       "bodyLen": 2952,
       "reqBody": ""
@@ -937,10 +929,10 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
+      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734046377",
       "status": 200,
-      "bodyLen": 98,
-      "reqBody": "{\"request\":{\"belongParam\":{\"platform\":\"windows\",\"client\":\"WEB\"},\"bizRequest\":{\"currentIdentity\":\"01\",\"compositeIdentity\":\"01\",\"url\":\"https://shop.jd.com/jdm/gongxiao/shopEmbed/vender/purchaseManage\",\"accessSystem\":\"2\",\"menuId\":null,\"pid\":\"2\"}},\"accessContext\":{\"source\":\"web\"}}"
+      "bodyLen": 285,
+      "reqBody": "body=%7B%22states%22%3A%5B0%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22ASC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A20%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D&h5st=20260502230051386%3Bne2z2zjy1vi5jjy3%3Be8352%3Btk03wa25f1c2d18nXiZ0H5B5wQh2ypPbhwUHSpO18OedyPV6Xe7n7qr6kJKHxR-GirkdHLxh7QEeEsjMQSjhHtiF46Ay%3B4a3571d7bf08a9f9550d6d3a6bc83f2b%3B5.3%3B1777734046386%3Bq3EpJfYNBCVeCSUfyCFN5DEfGyFjLDIj7SFjLrJp-j4fLDIj9e1TJrpjh7JjFiYTIaod6nld2bVe2Tlf4TIT4fFfJiYT2XYe4TlfJWFjLDIj7SnQEiVS0ipjLDrgJnFe3XFf7PYd0nIe4jYT1r4T7XodKmFS0XIS5nVd2j1fJrJdJfUT1yVTIipjLDrgJnYgJrJdJbYOJipjLDrgJfIg4zZe1uWS-GFSMWoRJrJdJTEjLrJp-jZO1ylfAC2fBGmXUipjxjZQ8aFQKiEjLrJp-jJf4zVRUipjxjJS7ipjLDrguqpjhjpOl6Zfeipjxj5f6XETJrpjLrJp-fojxjZf6XETJrpjLrJp-bYfLDIj7nYOJipjLrpjh7pd_rJdJjYf2iFjLrpjLDrgJ7VVJKHRBSkQ4PEW5aGjLDIj_ulS9mFPJrpjLrJp-rojxjpd2iFjLrpjLDrg7rJdJPYOJipjLrpjh7pe6rJdJTYOJipjLrpjh7pfLDIj2XETJrpjLrJp-rojxjpe2iFjLrpjLDrg0bojxj5f2iFjLrpjLDrgJbIg6zpfJrJdJnYOJipjLrpjh7pfLDIjAOEjLrpjLDrg2rJdJfkQJrpjLrJp-rojxjpQJrpjLrJp-rojxjpS0ipjLrpjh-kjxjpS9WlOzWFjLrJp-3kjLDLjv5yyD5yyeJgyd9gyq9gytFixJrJdJjoPJrpjLrJpwqJdJrkPJrpjh7Jj3ToNL-oe1zVRUq5d7zpf6rpWdq5P0ulS9G1WJrJdJnVO4ipjLD7N%3Bf846a5af2d3409a42eca404e5b8d7952%3Bof7r36pSiy1QCa0T9WES-bEQGGlQI6ZNHuFT-bVR7qUT"
     },
     {
       "type": "xhr",
@@ -948,7 +940,7 @@
       "url": "https://cactus.jd.com/behavior_report",
       "status": 200,
       "bodyLen": 4260,
-      "reqBody": "data=~'nhF'%3F%5E'GJA%5C)76%3C7)5)5)k')'GJA%5C)76%3C6)5)5)k'X)'nhHA'%3F%5EX)'nhHH'%3F%5E'LHB)4666)721)405)%7C')'LHB)4603)7%3D0)405)%7C')'LHB)4626)7%3C3)405)%7C')'LHB)46%3D%3C)656)405)%7C')'LHB)4153)647)405)%7C')'LHB)4177)674)405)%7C')'LHB)416%3C)67%3D)405)%7C')'LHB)4103)663)405)%7C')'LHB)4127)617)405)%7C')'ALS)7567)667)464)%7C')'ALS)7501)671)47%3D)%7C')'ALS)7535)676)472)%7C')'ALS)7455)646)474)%7C')'ALS)7471)653)442)%7C')'ALS)7414)651)440)%7C')'ALS)740%3D)656)440)%7C')'ALS)7421)656)441)%7C')'ALS)7025)651)441)%7C')'ALS)70%3C5)65%3D)441)%7C')'M4)7352)642)447)%7C')'M4)7371)673)444)%7C')'M4)7315)616)45%3D)%7C')'M4)7302)631)450)%7C')'M4)7321)6%3C5)454)%7C')'M4)73%3C4)164)%3C6)%7C')'M4)7252)1%3D5)%3D1)%7C')'ALS)7271)06%3D)25)%7C')'ALS)7217)357)03)%7C')'LKUPQ)720%3C)30%3D)11)%7C')'VUDK)7221)25%3D)61)%7C')'LKUPQ)7%3D5%3D)2%3D%3D)74)%7C')'ALS)7%3C52)%3C41)1)%7C'X)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'ajf%3F17')'nhHFC'%3F'ajf%3F17')'lklqQv'%3F422224%3C171%3D12)'w%60Qv'%3F422224%3C172%3D05)'nhQ%40F'%3F61)'nhL%40F'%3F45)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B7%2B5%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F12)'gp1'%3F5)'gp0'%3F5)'gp3'%3F46)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'422203%3D1466643114%3C64%3C3')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F64%3C)'vfwluqqdbkph'%3F42)'rlkn%60%7C'%3F'uwjhuq)vuhV%7Cvq%60h)dqjg)fwjvvJwlblkLvjidq%60a)OAHZU%40A%40VQDIZOJ%5CD)OAHZU%40A%40VQDIZ%40%5DUJWQV)udw%60kq)oaqWlvnPqli)oaqWlvnVqjwdb%60Hdkdb%60w)%60%7DuIjbUjvq)idpkfmTp%60p%60)ZZvbhZZjiaC%60qfm)ZZOAR%40GVLBKM%40IU%40WZ!ADQDZZ)lvV%60fpw%60Fjkq%60%7Dq)ZZ_R%5DZFIVQDBZFILFNZZ)ZZHLFWJZDUUZUWJ%5D%5CZRLKAJRZZ)ZZfdiigdfnRwduu%60w)%60%7Dq%60wkdi)QA%40ksFjii%60fqjw)ZZoahZujwqdiZ705665Z421642%3D3%3C4557Zuwjhlv%60ZdulZid%7Cjpq')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735057%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5C')'ovQjn%60k'%3F'oaa56%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5CDDDDH00GNW7TDDDDDDFF6CTFLVJ_DIGT%5D')'kph'%3F4)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F422224%3C6%3D%3C%3D02)'%60'%3F6355x)~'q'%3F422224%3C6%3D%3C%3D02)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'Q%7CJwOsI%40tHhs'x"
+      "reqBody": "data=~'nhF'%3F%5E'GJA%5C)774%3D)5)5)k')'GJA%5C)774%3D)5)5)k'X)'nhHA'%3F%5EX)'nhHH'%3F%5E'MQHI)4)21%3C)07)%7C')'LHB)23)2%3C5)%3D2)%7C')'LHB)%3D3)2%3C%3D)%3C0)%7C')'LHB)454)%3D53)456)%7C')'LHB)442)%3D4%3C)443)%7C')'LHB)415)%3D62)461)%7C')'LHB)40%3D)%3D03)404)%7C')'LHB)741)%3C70)751)%7C')'LHB)710)%3C25)740)%7C')'LHB)704)%3C2%3C)740)%7C')'LHB)656)%3C%3D6)75%3D)%7C')'LHB)146)%3C%3D6)752)%7C')'LHB)104)%3C%3D3)756)%7C')'LHB)12%3C)%3C%3C1)755)%7C')'LHB)1%3D1)%3C%3C3)755)%7C')'LHB)057)%3C%3C%3C)4%3C%3C)%7C')'LHB)04%3D)4555)4%3C%3D)%7C')'LHB)061)4554)4%3C2)%7C')'LHB)004)4554)4%3C3)%7C')'LHB)%3D35)4557)4%3C3)%7C')'LHB)%3C57)4556)4%3C3)%7C')'LHB)%3C4%3C)4556)4%3C2)%7C')'LHB)%3C3%3D)4551)4%3C2)%7C')'LHB)%3C%3D0)4551)4%3C%3D)%7C')'ALS)7627)4550)4%3C%3D)%7C'X)'nhHHna'%3F%5EX)'nhHHnp'%3F%5EX)'nhQV'%3F%5EX)'nhQH'%3F%5EX)'nhL'%3F%5EX)'nhHF'%3F'ajf%3F7%3D')'nhHFC'%3F'ajf%3F7%3D')'lklqQv'%3F4222261511513)'w%60Qv'%3F4222261512502)'nhQ%40F'%3F72)'nhL%40F'%3F6)'rf'%3F5)'ra'%3F5)'i'%3F'%7Fm(FK')'iv'%3F'%7Fm(FK)%7Fm(Mdkv(FK')'hi'%3F7)'ui'%3F0)'pd'%3F'Hj%7Fliid*0%2B5%25-Rlkajrv%25KQ%2545%2B5%3E%25Rlk31%3E%25%7D31%2C%25Duui%60R%60gNlq*062%2B63%25-NMQHI)%25iln%60%25B%60fnj%2C%25aldk%7Dldj%60w(vmju(hdkdb%60w*4%2B7%2B44%25Fmwjh%60*413%2B5%2B23%3D5%2B4%3D%3D%25%40i%60fqwjk*14%2B6%2B5%25Vdcdwl*062%2B63')'uu'%3F~'u7'%3F'%E8%99%BB%E4%BB%84%E4%BB%8B%E4%B8%88%E7%9C%AD%E7%9C%B9'x)'%60%7Dq%60ka'%3F~'ra'%3F5)'i'%3F5)'iv'%3F0)'rn'%3F5)'gp6'%3F12)'gp1'%3F5)'gp0'%3F5)'gp3'%3F41)'gp2'%3F5)'gp%3D'%3F5)'gp%3C'%3F5)'gp47'%3F(%3D)'ppla'%3F'422203%3D1466643114%3C64%3C3')'h%60hjw%7C'%3F%3D)'s%60kajw'%3F'Bjjbi%60%25Lkf%2B')'uwjhlv%60'%3F5)'fjkk%60fqljk'%3F5)'kjqoalu'%3F'')'rlkn%60%7Ckph'%3F64%3C)'vfwluqqdbkph'%3F42)'rlkn%60%7C'%3F'udw%60kq)guZgl%7Fla)vfm%60api%60w)hjs%60Qj)ZZa%60cKjwhdiUwju)fw%60a%60kqldii%60vv)vfw%60%60kI%60cq)OAHZU%40A%40VQDIZ%40%5DUJWQV)oaqWlvnVqjwdb%60Hdkdb%60w)%60%7DuIjbUjvq)fil%60kqLkcjwhdqljk)QA%40ksFjii%60fqjw)odt)b%60qOa%40la)v%60vvljkVqjwdb%60)w%60ujwq%40wwjw)jkudb%60vmjr)ohvanUF)vfw%60%60kQju)kdslbdqjw')'ujvlqljk'%3F5)'s'%3F'75735171')'%60lacwjh'%3F6)'udvq%60'%3F'')'hvb'%3F'')'mlvqjw%7Ccdli%60a'%3F'~x')'a%7C%60%7D%60fpq%60'%3F''x)'uu4'%3F'')'gp4'%3F'')'r'%3F7035)'m'%3F4115)'jr'%3F4755)'jm'%3F%3D55)'pwi'%3F'mqquv%3F**vmju%2Boa%2Bfjh*oah*bjkb%7Dldj*vmju%40hg%60a*s%60ka%60w*upwfmdv%60Hdkdb%60')'jb'%3F'mqquv%3F**vmju%2Boa%2Bfjh')'uc'%3F'Rlk67')'uw'%3F4)'w%60'%3F'')'w%60c%60w%60w'%3F'')'gp7'%3F'%25%25%25%25dq%25mqquv%3F**vqjwdb%60%2B635gp%7Clhb%2Bfjh*r%60gfjkqdlk%60w*hdlk*ov(v%60fpwlq%7C(s6(wdf%2Bov%3As875735057%3F0%3F43005')'fdksdv'%3F'6g0%3Cd7c02cdd%3D05f53d76342%3C257%6013d')'r%60gbiCu'%3F'%60g5c6000d7g7f6g365c00a0%3Dd4%3D1fd7c')'ffk'%3F67)'ivf'%3F4)'vvf'%3F4)'fvf'%3F4)'q%7F'%3F'Dvld*Vmdkbmdl')'uia'%3F'UAC%25Sl%60r%60w)Fmwjh%60%25UAC%25Sl%60r%60w)Fmwjhlph%25UAC%25Sl%60r%60w)Hlfwjvjcq%25%40ab%60%25UAC%25Sl%60r%60w)R%60gNlq%25gpliq(lk%25UAC')'kjqoa'%3F'')'%60%7Dq%60kvljk'%3F'')'%60lacwjh'%3F6)'%60la'%3F'%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5C')'ovQjn%60k'%3F'oaa56%40JJ%5D0F6N0U0LAM7A1QSHD2CTUD2K7J%5CNAQNFMIUQHTRTD_FD%5CQ7THL7W%5DK21%5DB%40%5C%40HKG6Q16UHTK0MKOGK0IB_07%5C%5CDDDDH00%407F3PTDDDDDFGHTH22WKGGDVD%5D')'kph'%3F4)'idg%60iv'%3F%5E~'s'%3F'H4')'q'%3F422226155%3C504)'%60'%3F6355x)~'q'%3F422226155%3C507)'%60'%3F6355)'s'%3F'Cq'xX)'wdkajh'%3F'dDIk%5CTIGJhU0'x"
     },
     {
       "type": "xhr",
@@ -969,10 +961,10 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777719428116",
+      "url": "https://api.m.jd.com/api?functionId=api_order_list&scval=all&loginType=3&appid=gx-pc&client=pc&t=1777734047292",
       "status": 200,
-      "bodyLen": 319105,
-      "reqBody": "body=%7B%22states%22%3A%5B%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22DESC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A100%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55BKR2QAAAAAACC3FQCISOZALBQX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
+      "bodyLen": 318825,
+      "reqBody": "body=%7B%22states%22%3A%5B%5D%2C%22warnExceptionCodes%22%3A%5B%5D%2C%22sortDtoList%22%3A%5B%7B%22sortFieldType%22%3A%222%22%2C%22sortType%22%3A%22DESC%22%7D%5D%2C%22page%22%3A%7B%22current%22%3A1%2C%22pageSize%22%3A100%7D%2C%22clientType%22%3A1%7D&x-api-eid-token=jdd03EOOX5C3K5P5IDH2D4TVMA7FQPA7N2OYKDTKCHLPTMQWQAZCAYT2QMI2RXN74XGEYEMNB3T43PMQN5HNJBN5LGZ52YYAAAAM55E2C6UQAAAAACBMQM77RNBBASAX&ext=%7B%22requestSource%22%3A%22color%22%2C%22curRole%22%3A%221%22%2C%22requestClientType%22%3A%22jmPc%22%7D"
     }
   ]
 }

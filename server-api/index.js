@@ -10,6 +10,7 @@ const jwt = require('jsonwebtoken')
 const crypto = require('crypto')
 const multer = require('multer')
 const rateLimit = require('express-rate-limit')
+const mysql = require('mysql2/promise')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -25,6 +26,33 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
+
+// ========== MySQL 数据库连接 ==========
+const dbConfig = {
+  host: process.env.DB_HOST || '127.0.0.1',
+  port: process.env.DB_PORT || 3307,
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || 'jd123456',
+  database: process.env.DB_NAME || 'dianxiaoer',
+  waitForConnections: true,
+  connectionLimit: 5,
+  queueLimit: 0
+}
+
+const dbPool = mysql.createPool(dbConfig)
+
+async function getUserFromDB(username) {
+  try {
+    const [rows] = await dbPool.execute(
+      'SELECT id, username, phone, role, password_hash FROM users WHERE username = ? AND status = "enabled"',
+      [username]
+    )
+    return rows[0] || null
+  } catch (err) {
+    console.error('[DB] 查询用户失败:', err.message)
+    return null
+  }
+}
 
 // ========== SSL 证书 ==========
 const sslOptions = {
@@ -237,7 +265,7 @@ app.post('/api/register', registerLimiter, (req, res) => {
 })
 
 // 登录
-app.post('/api/login', loginLimiter, (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body
 
   if (!username || !password) {
@@ -248,80 +276,101 @@ app.post('/api/login', loginLimiter, (req, res) => {
     return res.status(429).json({ success: false, message: '登录失败次数过多，账号已锁定15分钟' })
   }
 
-  const users = readJson(USERS_FILE, {})
-  const user = users[username]
+  try {
+    // 从数据库查询用户
+    const user = await getUserFromDB(username)
 
-  if (!user) {
-    recordFailAttempt(username)
-    return res.status(401).json({ success: false, message: '账号或密码错误' })
-  }
-
-  const valid = bcrypt.compareSync(password, user.password)
-  if (!valid) {
-    recordFailAttempt(username)
-    return res.status(401).json({ success: false, message: '账号或密码错误' })
-  }
-
-  // 登录成功，清除失败记录
-  clearFailAttempts(username)
-
-  // 签发 JWT（7天有效期）
-  const accessToken = jwt.sign(
-    { sub: username, phone: user.phone || '' },
-    JWT_SECRET,
-    { expiresIn: '7d', issuer: 'dianxiaoer-api' }
-  )
-
-  console.log(`[API] 用户登录: ${username}`)
-  res.json({
-    success: true,
-    message: '登录成功',
-    accessToken,
-    tokenType: 'Bearer',
-    expiresIn: 604800,
-    user: {
-      username,
-      phone: user.phone || ''
+    if (!user) {
+      recordFailAttempt(username)
+      return res.status(401).json({ success: false, message: '账号或密码错误' })
     }
-  })
+
+    // 验证密码
+    const valid = bcrypt.compareSync(password, user.password_hash)
+    if (!valid) {
+      recordFailAttempt(username)
+      return res.status(401).json({ success: false, message: '账号或密码错误' })
+    }
+
+    // 登录成功，清除失败记录
+    clearFailAttempts(username)
+
+    // 签发 JWT（7天有效期）
+    const accessToken = jwt.sign(
+      { sub: username, phone: user.phone || '', role: user.role || 'staff' },
+      JWT_SECRET,
+      { expiresIn: '7d', issuer: 'dianxiaoer-api' }
+    )
+
+    console.log(`[API] 用户登录: ${username}`)
+    res.json({
+      success: true,
+      message: '登录成功',
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn: 604800,
+      user: {
+        username,
+        phone: user.phone || '',
+        role: user.role || 'staff'
+      }
+    })
+  } catch (err) {
+    console.error('[API] 登录错误:', err.message)
+    res.status(500).json({ success: false, message: '服务器错误' })
+  }
 })
 
 // 刷新令牌
-app.post('/api/refresh', authMiddleware, (req, res) => {
+app.post('/api/refresh', authMiddleware, async (req, res) => {
   const username = req.user.sub
-  const users = readJson(USERS_FILE, {})
-  const user = users[username]
-  if (!user) {
-    return res.status(401).json({ success: false, message: '用户不存在' })
+  
+  try {
+    const user = await getUserFromDB(username)
+    if (!user) {
+      return res.status(401).json({ success: false, message: '用户不存在' })
+    }
+    
+    const accessToken = jwt.sign(
+      { sub: username, phone: user.phone || '', role: user.role || 'staff' },
+      JWT_SECRET,
+      { expiresIn: '7d', issuer: 'dianxiaoer-api' }
+    )
+    
+    res.json({
+      success: true,
+      accessToken,
+      tokenType: 'Bearer',
+      expiresIn: 604800
+    })
+  } catch (err) {
+    console.error('[API] 刷新令牌错误:', err.message)
+    res.status(500).json({ success: false, message: '服务器错误' })
   }
-  const accessToken = jwt.sign(
-    { sub: username, phone: user.phone || '' },
-    JWT_SECRET,
-    { expiresIn: '7d', issuer: 'dianxiaoer-api' }
-  )
-  res.json({
-    success: true,
-    accessToken,
-    tokenType: 'Bearer',
-    expiresIn: 604800
-  })
 })
 
 // 获取当前用户信息
-app.get('/api/me', authMiddleware, (req, res) => {
+app.get('/api/me', authMiddleware, async (req, res) => {
   const username = req.user.sub
-  const users = readJson(USERS_FILE, {})
-  const user = users[username]
-  if (!user) {
-    return res.status(404).json({ success: false, message: '用户不存在' })
-  }
-  res.json({
-    success: true,
-    user: {
-      username,
-      phone: user.phone || ''
+  
+  try {
+    const user = await getUserFromDB(username)
+    if (!user) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
     }
-  })
+    
+    res.json({
+      success: true,
+      user: {
+        username,
+        phone: user.phone || '',
+        role: user.role || 'staff'
+      }
+    })
+  } catch (err) {
+    console.error('[API] 获取用户信息错误:', err.message)
+    res.status(500).json({ success: false, message: '服务器错误' })
+  }
 })
 
 // ========== 更新接口 ==========
@@ -417,31 +466,35 @@ app.get('/api/update/check', (req, res) => {
     const appVersion = req.query.appVersion || ''
     const currentNum = parseVersion(currentVersion)
 
-    if (appVersion && meta.full) {
+    // 支持两种字段名格式：fullUpdate 和 full
+    const full = meta.fullUpdate || meta.full
+    if (appVersion && full) {
       const appNum = parseVersion(appVersion)
-      const fullNum = parseVersion(meta.full.version)
+      const fullNum = parseVersion(full.version)
       if (fullNum > appNum) {
         return res.json({
           needUpdate: true,
           updateType: 'full',
-          version: meta.full.version,
-          changelog: meta.full.changelog || '',
+          version: full.version,
+          changelog: full.changelog || '',
           force: false
         })
       }
     }
 
-    if (meta.hot) {
-      const hotNum = parseVersion(meta.hot.version)
+    // 支持两种字段名格式：hotfix 和 hot
+    const hot = meta.hotfix || meta.hot
+    if (hot) {
+      const hotNum = parseVersion(hot.version)
       if (hotNum > currentNum) {
         return res.json({
           needUpdate: true,
           updateType: 'hot',
-          version: meta.hot.version,
-          changelog: meta.hot.changelog || '',
-          size: meta.hot.size || 0,
-          sha256: meta.hot.sha256 || '',
-          updatedAt: meta.hot.updatedAt
+          version: hot.version,
+          changelog: hot.changelog || '',
+          size: hot.size || 0,
+          sha256: hot.sha256 || '',
+          updatedAt: hot.updatedAt
         })
       }
     }

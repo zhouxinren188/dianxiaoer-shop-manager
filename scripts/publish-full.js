@@ -154,10 +154,48 @@ conn.on('ready', async () => {
     const health = await exec('curl -sk https://localhost:3001/api/health')
     console.log('  Health:', health.stdout.trim())
 
-    // 5. 通知服务器登记全量版本
+    // 5. 通知服务器登记全量版本（如果失败则手动更新）
     console.log('\n[5/5] 通知服务器登记全量版本...')
-    const result = await notifyServer(version)
-    console.log('  服务器响应:', result)
+    try {
+      const result = await notifyServer(version)
+      console.log('  服务器响应:', result)
+    } catch (e) {
+      console.log('  通知服务器失败（SSL 错误），使用 SSH 手动更新 update-meta.json...')
+      
+      // 读取当前 meta 并更新 fullUpdate
+      const metaFile = path.join(ROOT, 'server-api', 'updates', 'update-meta.json')
+      let meta = {}
+      try {
+        meta = JSON.parse(fs.readFileSync(metaFile, 'utf-8'))
+      } catch (err) {
+        console.log('  本地 meta 文件不存在，创建新的...')
+      }
+      
+      meta.fullUpdate = {
+        version: version,
+        url: `http://${HOST}:3001/updates/dianxiaoer-setup-${version}.exe`,
+        sha512: '',
+        size: exeSize,
+        changelog: `全量更新 v${version}`
+      }
+      meta.latestVersion = version
+      meta.releaseDate = new Date().toISOString()
+      
+      // 通过 SSH 更新远程 meta 文件
+      const remoteMetaPath = `${REMOTE_UPDATE_DIR}/update-meta.json`
+      const metaContent = JSON.stringify(meta, null, 2)
+      
+      await new Promise((resolve, reject) => {
+        conn.sftp((err, sftp) => {
+          if (err) return reject(err)
+          sftp.writeFile(remoteMetaPath, metaContent, 'utf8', (err) => {
+            if (err) return reject(err)
+            console.log('  已手动更新服务器上的 update-meta.json')
+            resolve()
+          })
+        })
+      })
+    }
 
     console.log('\n=== 全量发布完成 v' + version + ' ===')
     console.log('客户端启动后会自动检测到全量更新并提示安装。')

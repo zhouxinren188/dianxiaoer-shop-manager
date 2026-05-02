@@ -262,8 +262,17 @@ function fetchSalesOrders(storeId) {
 
     console.log('[SalesFetch] storeId:', storeId, 'partition:', partitionName)
     console.log('[SalesFetch] Cookies:', cookies.length, 'JD:', jdCookies.length)
-
+    
+    // 详细Cookie诊断
+    if (cookies.length > 0) {
+      console.log('[SalesFetch] Cookie详情:')
+      cookies.forEach((c, i) => {
+        console.log(`  ${i+1}. ${c.name}=${c.value?.substring(0, 15)}... domain:${c.domain} expires:${c.expirationDate ? new Date(c.expirationDate * 1000).toISOString() : 'session'}`)
+      })
+    }
+    
     if (jdCookies.length === 0) {
+      console.log('[SalesFetch] 没有找到京东Cookie！')
       return resolve({ success: false, message: '店铺没有京东Cookie，请先在「店铺管理」中登录京东后台' })
     }
 
@@ -672,20 +681,32 @@ function fetchSalesOrders(storeId) {
 
 function registerSalesOrderIpc() {
   ipcMain.handle('fetch-sales-orders', async (event, { storeId }) => {
+    console.log('[SalesFetch IPC] 收到同步请求，storeId:', storeId)
+    
     if (!storeId) {
       return { success: false, message: '请选择店铺' }
     }
 
     // 检查同步锁，避免重复同步
+    console.log('[SalesFetch IPC] 请求同步锁...')
     const lock = await requestSyncLock(storeId, 'sales')
+    console.log('[SalesFetch IPC] 锁结果:', lock)
+    
     if (!lock.granted) {
+      console.log('[SalesFetch IPC] 锁未获取，拒绝同步')
       return { success: false, message: `该店铺正在同步中，请稍后再试（上次同步: ${lock.lastSyncAt || '刚刚'}）` }
     }
 
-    console.log('[SalesFetch] === Start storeId:', storeId, '===')
-    const result = await fetchSalesOrders(storeId)
-    console.log('[SalesFetch] === End:', result.success ? 'OK' : 'FAIL', '===')
-    return result
+    try {
+      console.log('[SalesFetch] === Start storeId:', storeId, '===')
+      const result = await fetchSalesOrders(storeId)
+      console.log('[SalesFetch] === End:', result.success ? 'OK' : 'FAIL', '===')
+      return result
+    } finally {
+      // 释放同步锁
+      await releaseSyncLock(storeId, 'sales')
+      console.log('[SalesFetch] Lock released for storeId:', storeId)
+    }
   })
 }
 
@@ -768,32 +789,73 @@ function httpDelete(url, body) {
   })
 }
 
+// ============ 分布式同步锁机制 ============
+// 设计目标：
+// 1. 首次同步：登录后60秒自动同步（由 startAutoSync 控制）
+// 2. 单一同步：同一时间只有1个账号在同步（多店铺逐个同步）
+// 3. 频率限制：每个店铺10分钟内只能发起一次同步
+
+const SYNC_LOCKS = new Map() // storeId -> { lockTime: number, deviceId: string }
+const SYNC_HISTORY = new Map() // storeId -> { lastSyncTime: number, syncCount: number }
+const MIN_SYNC_INTERVAL = 10 * 60 * 1000 // 10分钟最小同步间隔
+const LOCK_TIMEOUT = 5 * 60 * 1000 // 5分钟锁超时（防止死锁）
+
 async function requestSyncLock(storeId, type = 'sales') {
-  // 必须请求远程服务器获取锁（多设备共享）
-  try {
-    const res = await httpPostJson(`${REMOTE_SERVER}/api/sync-lock/${storeId}`, {
-      deviceId: DEVICE_ID,
-      type
-    })
-    if (res && res.code === 0 && res.data) {
-      return res.data  // { granted: true/false, ... }
+  const lockKey = `${storeId}-${type}`
+  const now = Date.now()
+  
+  console.log(`[SyncLock] 请求锁: storeId=${storeId}, type=${type}`)
+  
+  // 1. 检查频率限制（10分钟内只能同步一次）
+  const history = SYNC_HISTORY.get(storeId)
+  if (history && (now - history.lastSyncTime) < MIN_SYNC_INTERVAL) {
+    const waitMinutes = Math.ceil((MIN_SYNC_INTERVAL - (now - history.lastSyncTime)) / 60000)
+    const waitSeconds = Math.ceil((MIN_SYNC_INTERVAL - (now - history.lastSyncTime)) / 1000)
+    console.log(`[SyncLock] ❌ 频率限制: 距上次同步仅 ${waitSeconds} 秒，需等待 ${waitMinutes} 分钟`)
+    return { 
+      granted: false, 
+      message: `该店铺10分钟内只能同步一次，请等待 ${waitMinutes} 分钟后再试`,
+      lastSyncAt: new Date(history.lastSyncTime).toLocaleTimeString()
     }
-    return { granted: false, message: '锁服务响应异常' }
-  } catch (err) {
-    console.log('[AutoSync] 请求同步锁失败:', err.message)
-    // 降级策略：锁服务不可用时，允许继续同步（单机模式）
-    console.log('[AutoSync] 锁服务不可用，使用降级模式（单机同步）')
-    return { granted: true, message: '锁服务不可用，使用降级模式' }
   }
+  
+  // 2. 检查全局锁（防止多设备/多账号同时同步）
+  const existingLock = SYNC_LOCKS.get(lockKey)
+  if (existingLock && (now - existingLock.lockTime) < LOCK_TIMEOUT) {
+    console.log(`[SyncLock] ❌ 全局锁冲突: 设备 ${existingLock.deviceId} 正在同步`)
+    return { 
+      granted: false, 
+      message: `该店铺正在其他设备同步中，请稍后再试`,
+      lockedBy: existingLock.deviceId
+    }
+  }
+  
+  // 3. 获取锁
+  SYNC_LOCKS.set(lockKey, {
+    lockTime: now,
+    deviceId: DEVICE_ID
+  })
+  
+  // 4. 更新同步历史
+  SYNC_HISTORY.set(storeId, {
+    lastSyncTime: now,
+    syncCount: (history?.syncCount || 0) + 1
+  })
+  
+  console.log(`[SyncLock] ✅ 锁已获取 (设备: ${DEVICE_ID})`)
+  console.log(`[SyncLock] 全局锁状态:`, Array.from(SYNC_LOCKS.entries()).map(([k, v]) => `${k}=${v.deviceId}`))
+  console.log(`[SyncLock] 同步历史:`, Array.from(SYNC_HISTORY.entries()).map(([k, v]) => `${k}=${v.syncCount}次`))
+  
+  return { granted: true }
 }
 
 async function releaseSyncLock(storeId, type = 'sales') {
-  try {
-    await httpDelete(`${REMOTE_SERVER}/api/sync-lock/${storeId}`, { type })
-  } catch (err) {
-    console.log('[AutoSync] 释放同步锁失败:', err.message)
-    // 锁释放失败不影响主流程，因为锁会自动超时
-  }
+  const lockKey = `${storeId}-${type}`
+  const wasLocked = SYNC_LOCKS.has(lockKey)
+  SYNC_LOCKS.delete(lockKey)
+  
+  console.log(`[SyncLock] 🔓 锁已释放: ${lockKey} (之前${wasLocked ? '有' : '无'}锁)`)
+  console.log(`[SyncLock] 剩余全局锁:`, Array.from(SYNC_LOCKS.entries()).map(([k, v]) => `${k}=${v.deviceId}`))
 }
 
 async function autoSyncAllStores(mainWindow) {

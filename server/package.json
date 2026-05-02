@@ -8,9 +8,10 @@
     "dev": "node index.js"
   },
   "dependencies": {
-    "express": "^4.21.2",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
-    "mysql2": "^3.14.0",
-    "jsonwebtoken": "^9.0.2"
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.14.0"
   }
 }

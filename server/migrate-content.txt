@@ -1,0 +1,38 @@
+const mysql = require('mysql2/promise')
+
+async function migrate() {
+  const conn = await mysql.createConnection({
+    host: '127.0.0.1',
+    port: 3307,
+    user: 'root',
+    password: 'jd123456',
+    database: 'dianxiaoer'
+  })
+  
+  try {
+    const [cols] = await conn.execute(
+      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'dianxiaoer' AND TABLE_NAME = 'stores' AND COLUMN_NAME = 'last_sync_at'"
+    )
+    
+    if (cols.length > 0) {
+      console.log('last_sync_at column already exists')
+    } else {
+      console.log('Adding last_sync_at column...')
+      await conn.execute(
+        "ALTER TABLE stores ADD COLUMN last_sync_at DATETIME DEFAULT NULL COMMENT 'last_sync_time'"
+      )
+      console.log('Column added successfully!')
+    }
+    
+    const [rows] = await conn.execute('DESCRIBE stores')
+    console.log('/nstores table structure:')
+    rows.forEach(r => console.log('  ' + r.Field))
+  } catch (err) {
+    console.error('Error:', err.message)
+  } finally {
+    await conn.end()
+    console.log('/nDone!')
+  }
+}
+
+migrate()

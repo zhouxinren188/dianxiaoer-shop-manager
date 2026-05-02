@@ -223,7 +223,7 @@ app.whenReady().then(async () => {
   startHeartbeat(mainWindow)
 
   // 启动订单自动同步（每10分钟，多店铺逐个执行）
-  startAutoSync(mainWindow)
+  // startAutoSync(mainWindow) // 已取消全局自动同步，改为用户手动控制
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

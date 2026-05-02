@@ -77,7 +77,11 @@
           </el-button>
           <span v-if="autoSyncStatus" class="auto-sync-tip">
             <el-icon class="sync-spin"><Refresh /></el-icon>
-            {{ autoSyncStatus }} 订单正在同步中...
+            {{ autoSyncStatus }}
+          </span>
+          <span v-if="syncSkipStatus" class="sync-skip-tip">
+            <el-icon><CircleClose /></el-icon>
+            {{ syncSkipStatus }}
           </span>
           <!-- 超时统计信息 -->
           <div class="filter-stats">
@@ -113,7 +117,7 @@
               <span class="func-item-label">京东订单</span>
               <el-switch v-model="funcSettings.syncJdOrder" @change="onFuncChange('syncJdOrder', $event)" />
             </div>
-            <p class="func-item-desc">(每10分钟，同步1次店铺订单信息及状态)</p>
+            <p class="func-item-desc" :class="{ 'sync-status-active': syncStatusText }">{{ syncStatusText || '(每10分钟，同步1次店铺订单信息及状态)' }}</p>
           </div>
           <div class="func-item">
             <div class="func-item-header">
@@ -842,19 +846,152 @@ const selectAll = ref(false)
 
 // 自动同步状态
 const autoSyncStatus = ref('')  // 正在同步的店铺名称，为空表示未在同步
+const syncSkipStatus = ref('')  // 跳过的店铺信息
+
+// 同步状态文本（用于显示在小字区域）
+const syncStatusText = computed(() => {
+  if (syncSkipStatus.value) {
+    return syncSkipStatus.value
+  }
+  if (autoSyncStatus.value) {
+    return autoSyncStatus.value
+  }
+  return ''
+})
 
 // ==================== 功能区 ====================
 
 const funcSettings = reactive({
   autoOutbound: true,
   largeLogistics: true,
-  syncJdOrder: true,
+  syncJdOrder: false,  // 默认关闭
   syncPurchaseOrder: true
 })
 
+let jdOrderSyncTimer = null
+
 function onFuncChange(key, value) {
   console.log(`[功能区开关] ${key}: ${value}`)
+  
+  if (key === 'syncJdOrder') {
+    if (value) {
+      // 开启京东订单自动同步
+      console.log('[自动同步] 开启京东订单自动同步')
+      startJdOrderAutoSync()
+      ElMessage.success('已开启京东订单自动同步（每10分钟）')
+    } else {
+      // 关闭京东订单自动同步
+      console.log('[自动同步] 关闭京东订单自动同步')
+      stopJdOrderAutoSync()
+      ElMessage.info('已关闭京东订单自动同步')
+    }
+  }
 }
+
+function startJdOrderAutoSync() {
+  // 立即执行一次
+  syncAllUserStores()
+  
+  // 每10分钟执行一次
+  jdOrderSyncTimer = setInterval(() => {
+    syncAllUserStores()
+  }, 10 * 60 * 1000)
+}
+
+function stopJdOrderAutoSync() {
+  if (jdOrderSyncTimer) {
+    clearInterval(jdOrderSyncTimer)
+    jdOrderSyncTimer = null
+  }
+}
+
+async function syncAllUserStores() {
+  console.log('[自动同步] 开始同步当前用户的所有京东店铺')
+  
+  try {
+    // 获取当前用户的所有京东店铺
+    const data = await fetchStores({ platform: 'jd', store_type: 'pop', status: 'enabled', pageSize: 100 })
+    const stores = data.list || []
+    
+    if (stores.length === 0) {
+      console.log('[自动同步] 当前用户没有京东店铺')
+      return
+    }
+    
+    console.log(`[自动同步] 找到 ${stores.length} 个京东店铺，开始逐个同步`)
+    
+    // 逐个同步店铺
+    for (let i = 0; i < stores.length; i++) {
+      const store = stores[i]
+      console.log(`[自动同步] [${i + 1}/${stores.length}] 检查店铺: ${store.name} (ID:${store.id})`)
+      
+      // 检查店铺最后同步时间
+      const lastSyncAt = store.last_sync_at
+      if (lastSyncAt) {
+        const lastSyncTime = new Date(lastSyncAt).getTime()
+        const now = Date.now()
+        const minutesSinceLastSync = (now - lastSyncTime) / 1000 / 60
+        
+        console.log(`[自动同步] 店铺 ${store.name} 距上次同步: ${minutesSinceLastSync.toFixed(1)} 分钟`)
+        
+        // 如果10分钟内已同步，跳过
+        if (minutesSinceLastSync < 10) {
+          const remainingMinutes = Math.ceil(10 - minutesSinceLastSync)
+          syncSkipStatus.value = `${store.name} ${remainingMinutes}分钟后同步`
+          console.log(`[自动同步] 跳过店铺: ${store.name}，${remainingMinutes}分钟后再试`)
+          // 3秒后清空跳过提示
+          await new Promise(resolve => setTimeout(resolve, 3000))
+          syncSkipStatus.value = ''
+          continue
+        }
+      }
+      
+      console.log(`[自动同步] [${i + 1}/${stores.length}] 同步店铺: ${store.name} (ID:${store.id})`)
+      
+      try {
+        // 同步开始前显示状态
+        autoSyncStatus.value = `${store.name} 正在同步中...`
+        
+        // 确保状态显示至少500ms（让Vue有时间更新DOM）
+        await new Promise(resolve => setTimeout(resolve, 500))
+        
+        const result = await window.electronAPI.invoke('fetch-sales-orders', {
+          storeId: store.id
+        })
+        
+        if (result.success) {
+          console.log(`[自动同步] [${i + 1}/${stores.length}] 成功: ${result.data?.list?.length || 0} 条订单`)
+          // 更新服务器上的同步时间
+          try {
+            await fetch(`/api/stores/${store.id}/sync-time`, { method: 'PUT' })
+          } catch (err) {
+            console.error('[自动同步] 更新同步时间失败:', err.message)
+          }
+        } else {
+          console.log(`[自动同步] [${i + 1}/${stores.length}] 失败: ${result.message}`)
+        }
+      } catch (err) {
+        console.error(`[自动同步] [${i + 1}/${stores.length}] 异常:`, err.message)
+      }
+      // 注意：不在这里清空 autoSyncStatus，让它保持显示直到下一个店铺开始同步
+      
+      // 多店铺之间间隔 30 秒
+      if (i < stores.length - 1) {
+        console.log('[自动同步] 等待 30 秒后同步下一个店铺...')
+        await new Promise(resolve => setTimeout(resolve, 30000))
+      }
+    }
+    
+    // 所有店铺同步完成后，清空状态
+    autoSyncStatus.value = ''
+    
+    console.log('[自动同步] 所有店铺同步完成')
+  } catch (err) {
+    console.error('[自动同步] 同步异常:', err.message)
+  }
+}
+
+// 组件卸载时清理定时器（在后面的 onUnmounted 中统一处理）
 
 function onFuncBtnClick(action) {
   console.log(`[功能区按钮] ${action}`)
@@ -1935,6 +2072,8 @@ onUnmounted(() => {
   if (unsubAutoSyncStart) { unsubAutoSyncStart(); unsubAutoSyncStart = null }
   if (unsubAutoSyncResult) { unsubAutoSyncResult(); unsubAutoSyncResult = null }
   autoSyncStatus.value = ''
+  // 清理京东订单自动同步定时器
+  stopJdOrderAutoSync()
 })
 </script>
 
@@ -2080,6 +2219,18 @@ onUnmounted(() => {
   margin: 2px 0 0;
   line-height: 1.3;
   white-space: nowrap;
+  transition: color 0.3s ease;
+}
+
+.func-item-desc.sync-status-active {
+  color: #e6a23c;
+  font-weight: 500;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 .func-btn-group {
@@ -2140,6 +2291,16 @@ onUnmounted(() => {
   margin-left: 10px;
   font-size: 13px;
   color: #e6a23c;
+  font-weight: 500;
+}
+
+.sync-skip-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  font-size: 13px;
+  color: #909399;
   font-weight: 500;
 }
 

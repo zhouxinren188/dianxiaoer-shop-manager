@@ -37,6 +37,29 @@
           <div class="topbar-divider"></div>
           <span class="topbar-date">{{ currentDate }}</span>
           <div class="topbar-divider"></div>
+          <!-- 用户菜单 -->
+          <el-dropdown trigger="click" @command="handleUserMenuCommand">
+            <div class="user-menu">
+              <el-icon :size="18"><User /></el-icon>
+              <span class="user-name">{{ currentUserName }}</span>
+              <el-icon class="user-arrow"><ArrowDown /></el-icon>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item disabled style="padding: 8px 16px;">
+                  <div class="user-info-dropdown">
+                    <div class="user-real-name">{{ userInfo.realName || currentUserName }}</div>
+                    <div class="user-role">{{ userInfo.role === 'super_admin' ? '超级管理员' : userInfo.role === 'admin' ? '管理员' : '普通用户' }}</div>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item divided command="logout">
+                  <el-icon><SwitchButton /></el-icon>
+                  <span>退出登录</span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <div class="topbar-divider"></div>
           <div class="win-controls">
             <div class="win-btn" @click="handleMinimize">
               <el-icon :size="14"><Minus /></el-icon>
@@ -60,11 +83,23 @@
 <script setup>
 import { ref, watch, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Close, Bell, Search, Minus, FullScreen } from '@element-plus/icons-vue'
+import { Close, Bell, Search, Minus, FullScreen, SwitchButton, User, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { logout } from '@/api/user'
 import Sidebar from './Sidebar.vue'
 
 const route = useRoute()
 const router = useRouter()
+
+// 用户信息
+const currentUserName = computed(() => localStorage.getItem('currentUser') || '用户')
+const userInfo = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('userInfo') || '{}')
+  } catch {
+    return {}
+  }
+})
 
 // 进入主界面时切换到大窗口尺寸
 onMounted(() => {
@@ -114,6 +149,22 @@ function handleMaximize() {
 
 function handleClose() {
   window.electronAPI?.invoke('window-close')
+}
+
+// 用户菜单命令处理
+function handleUserMenuCommand(command) {
+  if (command === 'logout') {
+    ElMessageBox.confirm('确定要退出登录吗？', '提示', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      type: 'warning'
+    }).then(() => {
+      logout()
+      ElMessage.success('已退出登录')
+      // 使用 router.replace 确保完全跳转
+      router.replace('/login')
+    }).catch(() => {})
+  }
 }
 </script>
 
@@ -228,6 +279,52 @@ function handleClose() {
   font-size: 14px;
   font-weight: 500;
   color: #303133;
+}
+
+/* 用户菜单 */
+.user-menu {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: #606266;
+  transition: color 0.2s;
+  padding: 0 8px;
+  height: 100%;
+}
+
+.user-menu:hover {
+  color: #2b5aed;
+}
+
+.user-name {
+  font-size: 14px;
+  font-weight: 500;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-arrow {
+  font-size: 12px;
+  transition: transform 0.2s;
+}
+
+.user-info-dropdown {
+  padding: 4px 0;
+}
+
+.user-real-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.user-role {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
 }
 
 /* 窗口控制按钮 */

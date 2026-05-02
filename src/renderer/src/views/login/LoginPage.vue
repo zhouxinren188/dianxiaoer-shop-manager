@@ -290,7 +290,8 @@ async function handleLogin() {
         }))
         if (rememberMe.value) {
           localStorage.setItem('rememberedUser', loginForm.username)
-          localStorage.setItem('rememberedPassword', btoa(loginForm.password))
+          // 使用 encodeURIComponent + btoa 安全编码，支持 Unicode 字符
+          localStorage.setItem('rememberedPassword', btoa(encodeURIComponent(loginForm.password)))
         } else {
           localStorage.removeItem('rememberedUser')
           localStorage.removeItem('rememberedPassword')

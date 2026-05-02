@@ -43,3 +43,15 @@ export function fetchUserStores(userId) {
 export function fetchUserWarehouses(userId) {
   return get(`/api/users/${userId}/warehouses`)
 }
+
+// 退出登录（清除 token，但保留记住的账号密码）
+export function logout() {
+  localStorage.removeItem('accessToken')
+  localStorage.removeItem('currentUser')
+  localStorage.removeItem('userInfo')
+  // 保留 rememberedUser 和 rememberedPassword，方便下次登录
+  // 清除主进程 token
+  if (window.electronAPI) {
+    window.electronAPI.invoke('set-auth-token', null).catch(() => {})
+  }
+}
