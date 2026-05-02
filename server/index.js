@@ -565,39 +565,13 @@ app.put('/api/stores/:id/sync-time', async (req, res) => {
 })
 
 // 创建店铺（自动设置 owner_id）
-// 如果 merchant_id 已存在，则更新原有店铺而不是创建新店铺
+// 注意：不再自动去重，允许创建重复店铺，由前端在登录成功后处理去重
 app.post('/api/stores', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { name, platform, store_type, account, password, merchant_id, shop_id, tags, status } = req.body
     
-    // 如果提供了 merchant_id，检查是否已存在
-    if (merchant_id) {
-      const [existingStores] = await pool.execute(
-        'SELECT id FROM stores WHERE merchant_id = ? AND owner_id = ?',
-        [merchant_id, ownerId]
-      )
-      
-      if (existingStores.length > 0) {
-        // 已存在相同 merchant_id 的店铺，更新它
-        const existingId = existingStores[0].id
-        console.log(`[Store] 发现重复店铺 merchant_id=${merchant_id}，更新店铺 ${existingId} 而不是创建新店铺`)
-        
-        await pool.execute(
-          `UPDATE stores SET 
-           name = ?, platform = ?, store_type = ?, account = ?, password = ?, 
-           merchant_id = ?, shop_id = ?, tags = ?, status = ?
-           WHERE id = ? AND owner_id = ?`,
-          [name || '', platform || '', store_type || '', account || '', password || '', 
-           merchant_id, shop_id || '', JSON.stringify(tags || []), status || 'enabled', existingId, ownerId]
-        )
-        
-        res.json(ok({ id: existingId, updated: true, ...req.body }))
-        return
-      }
-    }
-    
-    // 创建新店铺
+    // 创建新店铺（即使 merchant_id 已存在也创建）
     const [result] = await pool.execute(
       `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
