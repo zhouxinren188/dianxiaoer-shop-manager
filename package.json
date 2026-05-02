@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
