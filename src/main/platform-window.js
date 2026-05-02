@@ -545,31 +545,8 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
 
     if (Object.keys(updateBody).length > 0) {
       try {
-        // 如果有 merchant_id，先检查是否已存在于其他店铺
-        let targetStoreId = storeId
-        let isDuplicate = false
-        if (merchantId) {
-          try {
-            const checkRes = await httpRequest(`${BUSINESS_SERVER}/api/stores?merchant_id=${merchantId}`, {
-              method: 'GET'
-            })
-            const checkJson = JSON.parse(checkRes.data)
-            if (checkJson.code === 0 && checkJson.data && checkJson.data.list && checkJson.data.list.length > 0) {
-              // 检查是否是不同的店铺
-              const existingStore = checkJson.data.list.find(s => s.id !== storeId)
-              if (existingStore) {
-                console.log(`[PlatformWindow] 发现重复 merchant_id=${merchantId}，更新原有店铺 ${existingStore.id} 而不是 ${storeId}`)
-                targetStoreId = existingStore.id
-                isDuplicate = true
-              }
-            }
-          } catch (e) {
-            console.warn('[PlatformWindow] 检查重复店铺失败:', e.message)
-          }
-        }
-        
-        // 先更新店铺信息
-        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}`, {
+        // 直接更新当前店铺信息（不再检查重复）
+        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updateBody)
@@ -577,77 +554,26 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
         if (updateRes.statusCode >= 400) {
           console.error('[PlatformWindow] 更新店铺信息服务端拒绝:', updateRes.statusCode, updateRes.data)
         } else {
-          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${targetStoreId}):`, updateBody)
+          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${storeId}):`, updateBody)
         }
 
-        // 如果是重复店铺，需要：
-        // 1. 将 Cookie 保存到原有店铺（targetStoreId）的数据库中
-        // 2. 更新原有店铺的在线状态
-        // 3. 删除新建的空白店铺（storeId）
-        if (isDuplicate && targetStoreId !== storeId) {
-          console.log(`[PlatformWindow] 重复店铺处理：将 Cookie 复制到店铺 ${targetStoreId}，删除空白店铺 ${storeId}`)
-          
-          // 将 Cookie 复制到原有店铺（通过服务器直接写入数据库）
-          if (cookies && cookies.length > 0) {
-            try {
-              const cookieData = JSON.stringify(cookies)
-              const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/cookies`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ store_id: targetStoreId, cookie_data: cookieData, domain: platform })
-              })
-              console.log(`[PlatformWindow] Cookie 已复制到店铺 ${targetStoreId}`)
-            } catch (e) {
-              console.error('[PlatformWindow] 复制 Cookie 失败:', e.message)
-            }
+        // 5. 更新在线状态
+        try {
+          const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ online: true })
+          })
+          if (statusRes.statusCode >= 400) {
+            console.error('[PlatformWindow] 更新在线状态服务端拒绝:', statusRes.statusCode, statusRes.data)
           }
+        } catch (e) {
+          console.error('[PlatformWindow] 更新在线状态失败:', e.message)
+        }
 
-          // 更新原有店铺的在线状态
-          try {
-            await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}/status`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ online: true })
-            })
-            console.log(`[PlatformWindow] 店铺 ${targetStoreId} 在线状态已更新`)
-          } catch (e) {
-            console.error('[PlatformWindow] 更新在线状态失败:', e.message)
-          }
-
-          // 删除新建的空白店铺
-          try {
-            await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
-              method: 'DELETE'
-            })
-            console.log(`[PlatformWindow] 空白店铺 ${storeId} 已删除`)
-          } catch (e) {
-            console.error('[PlatformWindow] 删除空白店铺失败:', e.message)
-          }
-
-          // 通知前端刷新列表（使用原有店铺的 ID）
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('platform-login-success', { storeId: targetStoreId })
-          }
-        } else {
-          // 不是重复店铺，正常处理
-          // 5. 更新在线状态
-          try {
-            const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ online: true })
-            })
-            if (statusRes.statusCode >= 400) {
-              console.error('[PlatformWindow] 更新在线状态服务端拒绝:', statusRes.statusCode, statusRes.data)
-            }
-          } catch (e) {
-            console.error('[PlatformWindow] 更新在线状态失败:', e.message)
-          }
-
-          // 6. 通知前端刷新列表
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('platform-login-success', { storeId, account })
-          }
+        // 6. 通知前端刷新列表
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('platform-login-success', { storeId, account })
         }
       } catch (e) {
         console.error('[PlatformWindow] 更新店铺信息失败:', e.message)
