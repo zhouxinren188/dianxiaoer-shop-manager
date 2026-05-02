@@ -1,280 +1,245 @@
 #!/usr/bin/env node
 /**
- * 店小二后端一键部署脚本 (Windows 服务器 + NSSM)
- * 用法: node deploy.js [server|api|all]
- *   - server: 仅部署主API服务 (端口3002)
- *   - api:    仅部署认证API服务 (端口3000)
- *   - all:    部署全部 (默认)
+ * 店小二后端一键部署脚本
+ * 用法: node deploy.js
  */
 
 const fs = require('fs')
 const path = require('path')
 const { Client } = require('ssh2')
-const AdmZip = require('adm-zip')
+const archiver = require('archiver')
+const readline = require('readline')
 
-// ========== 部署配置 ==========
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
 
-const DEPLOY_CONFIG = {
-  // SSH 连接
-  ssh: {
-    host: '150.158.54.108',
-    port: 22,
-    username: 'administrator',
-    privateKeyPath: path.join(__dirname, 'server-key', 'id_rsa')
-  },
-
-  // 服务定义
-  services: {
-    server: {
-      name: 'dianxiaoer-server',
-      localDir: path.join(__dirname, 'server'),
-      remoteDir: 'C:\\Users\\Administrator\\dianxiaoer-server',
-      exclude: ['node_modules', 'logs', 'out.log', 'err.log', '*.log']
-    },
-    api: {
-      name: 'dianxiaoer-api',
-      localDir: path.join(__dirname, 'server-api'),
-      remoteDir: 'C:\\dianxiaoer-api',
-      exclude: ['node_modules', 'logs', 'data', 'certs', '.env', '*.log']
-    }
-  },
-
-  // NSSM 路径
-  nssm: 'C:\\nssm\\nssm.exe'
-}
-
-// ========== 工具函数 ==========
-
-function log(tag, msg) {
-  const time = new Date().toLocaleTimeString()
-  console.log(`[${time}] [${tag}] ${msg}`)
-}
-
-function shouldExclude(filePath, excludePatterns) {
-  const name = path.basename(filePath)
-  return excludePatterns.some(pattern => {
-    if (pattern.startsWith('*.')) {
-      return name.endsWith(pattern.slice(1))
-    }
-    return name === pattern
+function ask(question, defaultValue = '') {
+  return new Promise(resolve => {
+    const prompt = defaultValue ? `${question} (默认: ${defaultValue}): ` : `${question}: `
+    rl.question(prompt, answer => {
+      resolve(answer.trim() || defaultValue)
+    })
   })
 }
 
-// 打包目录为 zip
-function packDir(localDir, exclude) {
-  const zip = new AdmZip()
-  const baseName = path.basename(localDir)
+// 打包 server 目录
+async function packServer() {
+  const outputPath = path.join(__dirname, 'server-deploy.tar.gz')
+  const output = fs.createWriteStream(outputPath)
+  const archive = archiver('tar', { gzip: true })
 
-  function addDirectory(dirPath, zipPath) {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name)
-      const entryZipPath = zipPath ? `${zipPath}/${entry.name}` : entry.name
+  return new Promise((resolve, reject) => {
+    output.on('close', () => {
+      console.log(`[打包] 完成: ${outputPath} (${(archive.pointer() / 1024).toFixed(1)} KB)`)
+      resolve(outputPath)
+    })
+    archive.on('error', reject)
+    archive.on('warning', err => {
+      if (err.code !== 'ENOENT') reject(err)
+    })
 
-      if (shouldExclude(fullPath, exclude)) continue
-
-      if (entry.isDirectory()) {
-        addDirectory(fullPath, entryZipPath)
-      } else {
-        zip.addLocalFile(fullPath, zipPath || '')
-      }
-    }
-  }
-
-  addDirectory(localDir, '')
-  const outputPath = path.join(__dirname, `${baseName}-deploy.zip`)
-  zip.writeZip(outputPath)
-  const size = (fs.statSync(outputPath).size / 1024).toFixed(1)
-  log('打包', `${baseName} -> ${outputPath} (${size} KB)`)
-  return outputPath
+    archive.pipe(output)
+    archive.directory(path.join(__dirname, 'server'), 'server')
+    archive.finalize()
+  })
 }
 
-// 创建 SSH 连接
-function createConnection() {
+// SSH 上传文件并执行命令
+async function deployToServer(config, localFile) {
+  const conn = new Client()
+  const remoteDir = '/opt/dianxiaoer'
+  const remoteFile = `${remoteDir}/server-deploy.tar.gz`
+
   return new Promise((resolve, reject) => {
-    const conn = new Client()
+    conn.on('ready', () => {
+      console.log('[SSH] 连接成功')
+
+      conn.sftp((err, sftp) => {
+        if (err) return reject(err)
+
+        // 创建远程目录
+        conn.exec(`mkdir -p ${remoteDir}`, (err) => {
+          if (err) return reject(err)
+
+          console.log('[上传] 正在传输文件...')
+          sftp.fastPut(localFile, remoteFile, (err) => {
+            if (err) return reject(err)
+            console.log('[上传] 完成')
+
+            // 执行远程部署命令
+            const deployCmd = `
+              set -e
+              echo '=== 店小二后端部署 ==='
+              cd ${remoteDir}
+
+              echo '[1/6] 解压文件...'
+              tar -xzf server-deploy.tar.gz
+              cd server
+
+              echo '[2/6] 检查 Node.js...'
+              if ! command -v node &> /dev/null; then
+                echo 'Node.js 未安装，正在安装...'
+                curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+                apt-get install -y nodejs
+              fi
+              node -v
+
+              echo '[3/6] 检查 MySQL...'
+              if ! command -v mysql &> /dev/null; then
+                echo 'MySQL 未安装，正在安装...'
+                apt-get update
+                apt-get install -y mysql-server
+                systemctl start mysql
+                systemctl enable mysql
+              fi
+
+              echo '[4/6] 安装 npm 依赖...'
+              npm install --production
+
+              echo '[5/6] 初始化数据库...'
+              mysql -u${config.dbUser} -p'${config.dbPassword}' -e "CREATE DATABASE IF NOT EXISTS ${config.dbName} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" 2>/dev/null || true
+
+              echo '[6/6] 启动服务...'
+              if command -v pm2 &> /dev/null; then
+                pm2 delete dianxiaoer-server 2>/dev/null || true
+                pm2 start index.js --name dianxiaoer-server --env DB_HOST=${config.dbHost} --env DB_PORT=${config.dbPort} --env DB_USER=${config.dbUser} --env DB_PASSWORD='${config.dbPassword}' --env DB_NAME=${config.dbName}
+                pm2 save
+                echo '服务已通过 PM2 启动'
+              else
+                echo 'PM2 未安装，使用 nohup 启动...'
+                export DB_HOST=${config.dbHost}
+                export DB_PORT=${config.dbPort}
+                export DB_USER=${config.dbUser}
+                export DB_PASSWORD='${config.dbPassword}'
+                export DB_NAME=${config.dbName}
+                nohup node index.js > app.log 2>&1 &
+                echo '服务已后台启动'
+              fi
+
+              echo '=== 部署完成 ==='
+              echo '服务地址: http://${config.host}:3002'
+            `
+
+            console.log('[部署] 正在服务器上执行安装...')
+            conn.exec(deployCmd, (err, stream) => {
+              if (err) return reject(err)
+
+              stream.on('close', (code, signal) => {
+                if (code !== 0) {
+                  return reject(new Error(`远程命令退出码: ${code}`))
+                }
+                console.log('[部署] 服务器部署完成')
+                conn.end()
+                resolve()
+              })
+
+              stream.on('data', data => {
+                process.stdout.write(data.toString())
+              })
+
+              stream.stderr.on('data', data => {
+                process.stderr.write(data.toString())
+              })
+            })
+          })
+        })
+      })
+    })
+
+    conn.on('error', reject)
+
     const connectConfig = {
-      host: DEPLOY_CONFIG.ssh.host,
-      port: DEPLOY_CONFIG.ssh.port,
-      username: DEPLOY_CONFIG.ssh.username,
+      host: config.host,
+      port: config.port || 22,
+      username: config.username,
       readyTimeout: 30000
     }
 
-    const keyPath = DEPLOY_CONFIG.ssh.privateKeyPath
-    if (fs.existsSync(keyPath)) {
-      connectConfig.privateKey = fs.readFileSync(keyPath)
-      log('SSH', `使用私钥: ${keyPath}`)
-    } else {
-      reject(new Error(`SSH 私钥不存在: ${keyPath}`))
-      return
+    if (config.privateKey) {
+      connectConfig.privateKey = fs.readFileSync(config.privateKey)
+    } else if (config.password) {
+      connectConfig.password = config.password
     }
 
-    conn.on('ready', () => {
-      log('SSH', `已连接到 ${DEPLOY_CONFIG.ssh.host}`)
-      resolve(conn)
-    })
-    conn.on('error', reject)
     conn.connect(connectConfig)
   })
 }
 
-// 执行远程命令
-function remoteExec(conn, cmd) {
-  return new Promise((resolve, reject) => {
-    conn.exec(cmd, (err, stream) => {
-      if (err) return reject(err)
-      let stdout = '', stderr = ''
-      stream.on('data', d => {
-        const s = d.toString()
-        stdout += s
-        process.stdout.write(s)
-      })
-      stream.stderr.on('data', d => {
-        const s = d.toString()
-        stderr += s
-        process.stderr.write(s)
-      })
-      stream.on('close', (code) => {
-        resolve({ code, stdout, stderr })
-      })
-    })
-  })
-}
-
-// SFTP 上传
-function sftpUpload(conn, localPath, remotePath) {
-  return new Promise((resolve, reject) => {
-    conn.sftp((err, sftp) => {
-      if (err) return reject(err)
-      log('上传', `${path.basename(localPath)} -> ${remotePath}`)
-      sftp.fastPut(localPath, remotePath, (err) => {
-        if (err) return reject(err)
-        log('上传', '完成')
-        resolve()
-      })
-    })
-  })
-}
-
-// ========== 部署单个服务 ==========
-
-async function deployService(conn, serviceKey) {
-  const svc = DEPLOY_CONFIG.services[serviceKey]
-  log('部署', `========== ${svc.name} ==========`)
-
-  // 1. 检查本地目录
-  if (!fs.existsSync(svc.localDir)) {
-    throw new Error(`本地目录不存在: ${svc.localDir}`)
-  }
-
-  // 2. 打包
-  log('部署', '[1/4] 打包代码...')
-  const zipPath = packDir(svc.localDir, svc.exclude)
-  const zipName = path.basename(zipPath)
-  const remoteZip = `${svc.remoteDir}\\${zipName}`
-
-  try {
-    // 3. 确保远程目录存在
-    await remoteExec(conn, `if not exist "${svc.remoteDir}" mkdir "${svc.remoteDir}"`)
-
-    // 4. 停止服务
-    log('部署', '[2/4] 停止服务...')
-    await remoteExec(conn, `"${DEPLOY_CONFIG.nssm}" stop ${svc.name} 2>nul & echo ok`)
-
-    // 5. 上传
-    log('部署', '[3/4] 上传文件...')
-    await sftpUpload(conn, zipPath, remoteZip.replace(/\\/g, '/'))
-
-    // 6. 解压并安装依赖、启动服务
-    log('部署', '[4/4] 解压 & 安装依赖 & 启动...')
-    const deployCmd = [
-      `cd /d "${svc.remoteDir}"`,
-      // 使用 PowerShell 解压 zip (覆盖已有文件)
-      `powershell -Command "Expand-Archive -Path '${remoteZip}' -DestinationPath '${svc.remoteDir}' -Force"`,
-      // 删除 zip
-      `del /f "${remoteZip}"`,
-      // 安装 npm 依赖
-      `npm install --production`,
-      // 启动 NSSM 服务
-      `"${DEPLOY_CONFIG.nssm}" start ${svc.name}`,
-      `echo [完成] ${svc.name} 部署成功`
-    ].join(' && ')
-
-    const result = await remoteExec(conn, deployCmd)
-    if (result.code !== 0) {
-      log('警告', `${svc.name} 部署命令退出码: ${result.code}`)
-    }
-  } finally {
-    // 清理本地 zip
-    if (fs.existsSync(zipPath)) {
-      fs.unlinkSync(zipPath)
-    }
-  }
-}
-
-// ========== 主流程 ==========
-
 async function main() {
-  const target = process.argv[2] || 'all'
-  const validTargets = ['server', 'api', 'all']
-  if (!validTargets.includes(target)) {
-    console.error(`用法: node deploy.js [${validTargets.join('|')}]`)
-    process.exit(1)
-  }
-
   console.log('========================================')
-  console.log('  店小二 - 一键部署 (Windows + NSSM)')
-  console.log('========================================')
-  console.log(`  目标: ${target}`)
-  console.log(`  服务器: ${DEPLOY_CONFIG.ssh.host}`)
-  console.log('')
+  console.log('  店小二后端服务 - 一键部署')
+  console.log('========================================\n')
 
-  let conn
   try {
-    // 连接服务器
-    conn = await createConnection()
+    // 读取配置文件
+    const configPath = path.join(__dirname, 'deploy-config.json')
+    let config = {}
+    if (fs.existsSync(configPath)) {
+      try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+        console.log('[配置] 已读取 deploy-config.json')
+      } catch (e) {
+        console.warn('[配置] 读取 deploy-config.json 失败，将使用交互模式')
+      }
+    }
 
-    // 检查 NSSM 是否存在
-    const nssmCheck = await remoteExec(conn, `if exist "${DEPLOY_CONFIG.nssm}" (echo NSSM_OK) else (echo NSSM_MISSING)`)
-    if (nssmCheck.stdout.includes('NSSM_MISSING')) {
-      log('错误', `服务器上未找到 NSSM: ${DEPLOY_CONFIG.nssm}`)
-      log('提示', '请先在服务器上安装 NSSM 并运行 nssm-install.bat')
+    // 交互式补充缺失的配置
+    const defaults = {
+      host: '150.158.54.108',
+      port: '22',
+      username: 'root',
+      privateKey: '',
+      password: '',
+      dbHost: 'localhost',
+      dbPort: '3306',
+      dbUser: 'root',
+      dbPassword: '',
+      dbName: 'dianxiaoer'
+    }
+
+    for (const [key, defVal] of Object.entries(defaults)) {
+      if (!config[key]) {
+        const prompt = key === 'dbPassword' || key === 'password'
+          ? `${key} (输入时不显示): `
+          : `${key} (默认: ${defVal}): `
+        const answer = await new Promise(resolve => {
+          rl.question(prompt, ans => resolve(ans.trim()))
+        })
+        config[key] = answer || defVal
+      }
+    }
+
+    if (!config.privateKey && !config.password) {
+      console.error('错误: 必须提供私钥路径或密码')
       process.exit(1)
     }
 
-    // 部署服务
-    if (target === 'server' || target === 'all') {
-      await deployService(conn, 'server')
-    }
-    if (target === 'api' || target === 'all') {
-      await deployService(conn, 'api')
+    if (!config.dbPassword) {
+      console.error('错误: MySQL 密码不能为空')
+      process.exit(1)
     }
 
-    // 检查服务状态
-    console.log('')
-    log('状态', '========== 服务状态 ==========')
-    if (target === 'server' || target === 'all') {
-      await remoteExec(conn, `"${DEPLOY_CONFIG.nssm}" status dianxiaoer-server`)
-    }
-    if (target === 'api' || target === 'all') {
-      await remoteExec(conn, `"${DEPLOY_CONFIG.nssm}" status dianxiaoer-api`)
-    }
+    // 打包
+    console.log('\n[1/3] 打包服务端代码...')
+    const localFile = await packServer()
+
+    // 部署
+    console.log('\n[2/3] 连接远程服务器...')
+    await deployToServer(config, localFile)
+
+    // 清理
+    console.log('\n[3/3] 清理临时文件...')
+    fs.unlinkSync(localFile)
 
     console.log('\n========================================')
-    console.log('  部署完成！')
-    if (target === 'server' || target === 'all') {
-      console.log(`  主API:   http://${DEPLOY_CONFIG.ssh.host}:3001`)
-    }
-    if (target === 'api' || target === 'all') {
-      console.log(`  认证API: https://${DEPLOY_CONFIG.ssh.host}:3002`)
-    }
+    console.log('  部署成功！')
+    console.log(`  API 地址: http://${config.host}:3002`)
     console.log('========================================')
 
   } catch (err) {
-    log('错误', err.message)
+    console.error('\n[错误]', err.message)
     process.exit(1)
   } finally {
-    if (conn) conn.end()
+    rl.close()
   }
 }
 

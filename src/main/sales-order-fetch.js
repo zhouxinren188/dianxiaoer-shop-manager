@@ -609,8 +609,10 @@ function fetchSalesOrders(storeId) {
         order.finishTime = formatTimestamp(raw.finishTime || raw.completeTime)
 
         // 金额（从 orderPaymentInfo 嵌套对象取）
-        order.totalAmount = parseFloat(payInfo.shouldPay || payInfo.orderSum || 0) || 0
-        order.goodsAmount = parseFloat(payInfo.orderSum || payInfo.shouldPay || 0) || 0
+        // totalAmount: 应付总额（含运费）
+        // goodsAmount: 商品总额（不含运费）
+        order.totalAmount = parseFloat(payInfo.shouldPay || 0) || 0
+        order.goodsAmount = parseFloat(payInfo.orderSum || payInfo.goodsAmount || payInfo.shouldPay || 0) || 0
         order.shippingFee = parseFloat(payInfo.freight || 0) || 0
 
         // 支付方式
@@ -691,7 +693,7 @@ function registerSalesOrderIpc() {
 const AUTO_SYNC_INTERVAL = 10 * 60 * 1000 // 10 分钟
 const AUTO_SYNC_FIRST_DELAY = 60 * 1000   // 启动后 60 秒开始第一次
 const LOCAL_SERVER = 'http://localhost:3002'
-const REMOTE_SERVER = 'http://150.158.54.108:3001'
+const REMOTE_SERVER = 'http://150.158.54.108:3002'
 
 let autoSyncTimer = null
 let autoSyncRunning = false
@@ -739,6 +741,33 @@ function httpPostJson(url, body) {
   })
 }
 
+function httpDelete(url, body) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const postData = JSON.stringify(body)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname,
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(postData)
+    req.end()
+  })
+}
+
 async function requestSyncLock(storeId, type = 'sales') {
   // 必须请求远程服务器获取锁（多设备共享）
   try {
@@ -752,7 +781,18 @@ async function requestSyncLock(storeId, type = 'sales') {
     return { granted: false, message: '锁服务响应异常' }
   } catch (err) {
     console.log('[AutoSync] 请求同步锁失败:', err.message)
-    return { granted: false, message: '无法连接锁服务: ' + err.message }
+    // 降级策略：锁服务不可用时，允许继续同步（单机模式）
+    console.log('[AutoSync] 锁服务不可用，使用降级模式（单机同步）')
+    return { granted: true, message: '锁服务不可用，使用降级模式' }
+  }
+}
+
+async function releaseSyncLock(storeId, type = 'sales') {
+  try {
+    await httpDelete(`${REMOTE_SERVER}/api/sync-lock/${storeId}`, { type })
+  } catch (err) {
+    console.log('[AutoSync] 释放同步锁失败:', err.message)
+    // 锁释放失败不影响主流程，因为锁会自动超时
   }
 }
 
@@ -821,6 +861,9 @@ async function autoSyncAllStores(mainWindow) {
         }
       } catch (err) {
         console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 异常: ${err.message}`)
+      } finally {
+        // 同步完成后释放锁
+        await releaseSyncLock(store.store_id, 'sales')
       }
 
       // 多店铺之间间隔 30 秒，避免频繁操作
@@ -838,6 +881,9 @@ async function autoSyncAllStores(mainWindow) {
 }
 
 function startAutoSync(mainWindow) {
+  // 先清理已有定时器，防止重复创建
+  stopAutoSync()
+
   // 首次延迟执行
   setTimeout(() => {
     autoSyncAllStores(mainWindow)

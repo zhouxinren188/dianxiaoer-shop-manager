@@ -2,7 +2,7 @@ const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
 
-const BUSINESS_SERVER = 'http://150.158.54.108:3001'
+const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const HEARTBEAT_INTERVAL = 5 * 60 * 1000 // 5 分钟
 const FIRST_CHECK_DELAY = 10 * 1000 // 启动后 10 秒
 const REQUEST_TIMEOUT = 10 * 1000

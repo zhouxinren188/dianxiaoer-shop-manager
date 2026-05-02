@@ -6,7 +6,24 @@
         <div class="filter-grid">
           <div class="filter-item">
             <label class="filter-label">选择店铺</label>
-            <el-select v-model="searchForm.storeId" filterable clearable placeholder="全部店铺">
+            <el-select 
+              v-model="searchForm.storeId" 
+              filterable 
+              clearable 
+              placeholder="全部店铺"
+              @clear="searchForm.storeId = ''"
+            >
+              <template #prefix>
+                <span v-if="searchForm.storeId && searchForm.storeId !== ''" class="store-select-prefix">
+                  <span>{{ getStoreName(searchForm.storeId) }}</span>
+                  <el-tag v-if="getStoreOnlineStatus(searchForm.storeId)" type="success" size="small" style="margin-left:8px;">在线</el-tag>
+                </span>
+              </template>
+              <el-option label="全部店铺" :value="''">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <span>全部店铺</span>
+                </div>
+              </el-option>
               <el-option v-for="s in storeOptions" :key="s.id" :label="s.name" :value="s.id">
                 <div style="display:flex;align-items:center;justify-content:space-between">
                   <span>{{ s.name }}</span>
@@ -46,6 +63,26 @@
             <el-select v-model="searchForm.issueEvent" placeholder="无筛选" clearable>
               <el-option v-for="e in issueEventOptions" :key="e" :label="e" :value="e" />
             </el-select>
+          </div>
+        </div>
+        <!-- 查询和同步按钮 -->
+        <div class="filter-actions">
+          <el-button class="action-btn action-btn-orange" size="large" @click="handleQueryOrders">
+            <el-icon><Search /></el-icon>
+            <span>查询订单</span>
+          </el-button>
+          <el-button class="action-btn action-btn-blue" size="large" :disabled="loading || !!autoSyncStatus" @click="handleSyncOrders">
+            <el-icon><Refresh /></el-icon>
+            <span>同步订单</span>
+          </el-button>
+          <span v-if="autoSyncStatus" class="auto-sync-tip">
+            <el-icon class="sync-spin"><Refresh /></el-icon>
+            {{ autoSyncStatus }} 订单正在同步中...
+          </span>
+          <!-- 超时统计信息 -->
+          <div class="filter-stats">
+            <span class="filter-stat">出库即将超时订单数1：<em class="stat-num">{{ nearTimeoutCount }}</em></span>
+            <span class="filter-stat">超时未出库订单数：<em class="stat-num">{{ timeoutCount }}</em></span>
           </div>
         </div>
       </div>
@@ -92,28 +129,10 @@
     <!-- 2. 操作栏 -->
     <div class="action-bar">
       <div class="action-left">
-        <el-button class="action-btn action-btn-orange" @click="handleQueryOrders">
-          <el-icon><Search /></el-icon>
-          <span>查询订单</span>
-        </el-button>
-        <el-button class="action-btn action-btn-blue" :disabled="loading || !!autoSyncStatus" @click="handleSyncOrders">
-          <el-icon><Refresh /></el-icon>
-          <span>同步订单</span>
-        </el-button>
-        <span v-if="autoSyncStatus" class="auto-sync-tip">
-          <el-icon class="sync-spin"><Refresh /></el-icon>
-          {{ autoSyncStatus }} 订单正在同步中...
-        </span>
       </div>
       <div class="action-center">
-        <span class="action-stat">出库即将超时订单数：<em class="stat-num">{{ nearTimeoutCount }}</em></span>
-        <span class="action-stat">超时未出库订单数：<em class="stat-num">{{ timeoutCount }}</em></span>
       </div>
       <div class="action-right">
-        <el-button class="action-btn action-btn-green" @click="handleTrackShip">
-          <el-icon><Van /></el-icon>
-          <span>轨迹发货</span>
-        </el-button>
       </div>
     </div>
 
@@ -134,20 +153,21 @@
     <div class="table-card" v-loading="loading" element-loading-text="正在从京麦后台获取订单数据...">
       <!-- 表头 -->
       <div class="order-table-header">
-        <div class="ot-col ot-col-check">
-          <el-checkbox v-model="selectAll" @change="handleSelectAll" />
+        <div class="order-table-header-left">
+          <div class="ot-col ot-col-check">
+            <el-checkbox v-model="selectAll" @change="handleSelectAll" />
+          </div>
+          <div class="ot-col ot-col-index">序号</div>
+          <div class="ot-col ot-col-goods">商品信息</div>
+          <div class="ot-col ot-col-price">单价/数量</div>
+          <div class="ot-col ot-col-purchase">操作</div>
         </div>
-        <div class="ot-col ot-col-index">序号</div>
-        <div class="ot-col ot-col-goods">商品信息</div>
-        <div class="ot-col ot-col-price">单价/数量</div>
-        <div class="ot-col ot-col-purchase">采购</div>
-        <div class="ot-col ot-col-amount">订单金额</div>
-        <div class="ot-col ot-col-time">下单时间</div>
-        <div class="ot-col ot-col-logistics">物流信息</div>
-        <div class="ot-col ot-col-aftersale">售后信息</div>
-        <div class="ot-col ot-col-remark">商家备注</div>
-        <div class="ot-col ot-col-sysremark">系统备注</div>
-        <div class="ot-col ot-col-action">操作</div>
+        <div class="order-table-header-right">
+          <div class="ot-col ot-col-amount">订单金额</div>
+          <div class="ot-col ot-col-logistics">物流信息</div>
+          <div class="ot-col ot-col-remark">备注</div>
+          <div class="ot-col ot-col-action">操作</div>
+        </div>
       </div>
 
       <!-- 订单卡片列表 -->
@@ -171,6 +191,11 @@
               <span class="order-header-shop">{{ order.shopName }}</span>
               <el-tag size="small" :type="shopTagColorType(order.shopTag)" effect="plain" class="order-header-platform">{{ order.shopTag }}</el-tag>
               <span class="order-header-divider">|</span>
+              <span class="order-header-time-label">下单时间：</span>
+              <span class="order-header-time">{{ order.orderTime }}</span>
+              <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
+              <el-tag v-if="order.purchaseStatus" :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
+              <span class="order-header-divider">|</span>
               <span v-if="order.buyerAccount" class="order-header-account">{{ order.buyerAccount }}</span>
               <el-icon v-if="order.buyerAccount" class="order-header-chat-icon" title="打开京麦咚咚聊天" @click.stop="handleOpenChat(order)"><ChatDotRound /></el-icon>
               <span class="order-header-buyer">{{ order.customerName }}</span>
@@ -178,8 +203,6 @@
               <span class="order-header-address">{{ order.address }}</span>
             </div>
             <div class="order-header-right">
-              <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
-              <el-tag v-if="order.purchaseStatus" :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
             </div>
           </div>
 
@@ -250,16 +273,16 @@
                   </div>
                 </div>
                 <div class="ot-col ot-col-purchase">
-                  <el-button type="warning" size="small" plain @click.stop="handlePurchase(order, item, itemIdx)">
-                    <el-icon><ShoppingCart /></el-icon>
-                    <span>采购</span>
-                  </el-button>
-                </div>
-                <div class="ot-col ot-col-warehouse">
-                  <el-button size="small" plain @click.stop="handleBindWarehouse(order, item, itemIdx)">
-                    <el-icon><OfficeBuilding /></el-icon>
-                    <span>绑定仓库商品</span>
-                  </el-button>
+                  <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
+                    <el-button type="warning" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
+                      <el-icon><ShoppingCart /></el-icon>
+                      <span>采购下单</span>
+                    </el-button>
+                    <el-button type="primary" size="small" plain style="width:90px;margin-left:0" @click.stop="handleBindWarehouse(order, item, itemIdx)">
+                      <el-icon><OfficeBuilding /></el-icon>
+                      <span>绑定库存</span>
+                    </el-button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -280,27 +303,30 @@
                 </template>
                 <span v-else class="text-muted">--</span>
               </div>
-              <div class="ot-col ot-col-aftersale">
-                <el-tag v-if="order.issueEvent" type="warning" size="small">{{ order.issueEvent }}</el-tag>
-                <span v-else class="text-muted">--</span>
-              </div>
               <div class="ot-col ot-col-remark">
-                <span v-if="order.remark" class="remark-text">{{ order.remark }}</span>
-                <span v-else class="text-muted">--</span>
-                <el-button type="primary" link size="small" class="remark-edit-btn" @click.stop="handleEditRemark(order)">
-                  <el-icon><Edit /></el-icon>
-                </el-button>
-              </div>
-              <div class="ot-col ot-col-sysremark">
-                <span v-if="order.sysRemark" class="sysremark-text">{{ order.sysRemark }}</span>
-                <span v-else class="text-muted">--</span>
+                <div class="remark-cell">
+                  <div class="remark-item">
+                    <span class="remark-label">商:</span>
+                    <span class="remark-text remark-text-merchant">{{ order.remark || '点击编辑' }}</span>
+                    <el-button type="primary" link size="small" class="remark-edit-btn" @click.stop="handleEditRemark(order)">
+                      <el-icon><Edit /></el-icon>
+                    </el-button>
+                  </div>
+                  <div v-if="order.sysRemark" class="remark-item">
+                    <span class="remark-label">系:</span>
+                    <span class="remark-text">{{ order.sysRemark }}</span>
+                  </div>
+                  <span v-if="!order.remark && !order.sysRemark" class="text-muted" style="display:none;">--</span>
+                </div>
               </div>
               <div class="ot-col ot-col-action">
-                <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
-                <el-button type="success" link size="small" @click="handleSmsNotify(order)">
-                  <el-icon><Message /></el-icon>
-                  <span>短信</span>
-                </el-button>
+                <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
+                  <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
+                  <el-button type="success" link size="small" @click="handleSmsNotify(order)">
+                    <el-icon><Message /></el-icon>
+                    <span>短信</span>
+                  </el-button>
+                </div>
               </div>
             </div>
           </div>
@@ -403,6 +429,18 @@
           <el-tag type="warning">{{ currentOrder.issueEvent }}</el-tag>
         </div>
 
+        <div class="detail-section">
+          <h4 class="detail-section-title">备注信息</h4>
+          <div class="detail-remark-box">
+            <div class="detail-remark-label">商家备注：</div>
+            <div class="detail-remark-content">{{ currentOrder.remark || '暂无商家备注' }}</div>
+          </div>
+          <div class="detail-remark-box">
+            <div class="detail-remark-label">系统备注：</div>
+            <div class="detail-remark-content">{{ currentOrder.sysRemark || '暂无系统备注' }}</div>
+          </div>
+        </div>
+
         <div class="detail-footer">
           <el-button size="small" @click="onDetailAction('viewOriginal')">查看原单</el-button>
           <el-button size="small" @click="onDetailAction('contactBuyer')">联系买家</el-button>
@@ -415,117 +453,217 @@
     <!-- 6. 采购弹窗 -->
     <el-dialog
       v-model="purchaseDialogVisible"
-      title="采购下单"
-      width="560px"
+      width="960px"
       align-center
       :close-on-click-modal="false"
       @closed="onPurchaseDialogClosed"
+      class="purchase-dialog-redesign"
+      top="5vh"
     >
-      <!-- Step 1: idle 状态 - 信息+选账号 -->
-      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
-        <div class="purchase-goods-preview" style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #ebeef5;">
-          <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" style="width:64px;height:64px;border-radius:8px;flex-shrink:0;" fit="cover" />
-          <div v-else style="width:64px;height:64px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
-            <span style="color:#fff;font-size:20px;font-weight:700;">{{ purchaseInfo.goodsName.charAt(0) }}</span>
+      <template #header>
+        <div class="purchase-dialog-header">
+          <div class="header-left">
+            <div class="header-icon-wrapper">
+              <el-icon class="header-icon"><ShoppingCart /></el-icon>
+            </div>
+            <div class="header-text">
+              <h3 class="header-title">采购下单</h3>
+              <p class="header-subtitle">填写采购信息并选择货源</p>
+            </div>
           </div>
-          <div style="min-width:0;">
-            <p style="margin:0 0 4px;font-size:14px;font-weight:600;color:#1f2937;line-height:1.4;">{{ purchaseInfo.goodsName }}</p>
-            <p v-if="purchaseInfo.sku" style="margin:0;font-size:12px;color:#9ca3af;">{{ purchaseInfo.sku }}</p>
-            <p style="margin:4px 0 0;font-size:12px;color:#606266;">采购数量：{{ purchaseInfo.quantity }}</p>
+          <div class="header-steps">
+            <span class="step-item step-active">
+              <span class="step-num">1</span>
+              <span>配置采购</span>
+            </span>
+            <el-icon class="step-arrow"><ArrowRight /></el-icon>
+            <span class="step-item">
+              <span class="step-num">2</span>
+              <span>完成下单</span>
+            </span>
           </div>
         </div>
-        <el-descriptions :column="1" border size="small">
-          <el-descriptions-item label="销售订单号">{{ purchaseInfo.salesOrderNo }}</el-descriptions-item>
-          <el-descriptions-item label="采购编号">
-            <span style="color: #e6a23c; font-weight: 600">{{ purchaseInfo.purchaseNo }}</span>
-          </el-descriptions-item>
-        </el-descriptions>
-        <el-alert
-          type="info"
-          :closable="false"
-          style="margin-top: 16px"
-          title="操作提示"
-          description="填写货源链接并选择采购账号后点击「去下单」，系统将自动获取订单号并绑定。"
-        />
-        <div style="margin-top: 16px">
-          <el-form label-width="90px">
-            <el-form-item label="货源链接">
-              <div v-if="skuSources.length > 0" style="margin-bottom:8px;max-height:160px;overflow-y:auto;">
-                <div v-for="(src, idx) in skuSources" :key="idx"
-                  style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:all 0.2s;"
-                  :style="selectedSourceIndex === idx ? 'background:#ecf5ff;border:1px solid #409eff;' : 'background:#f5f7fa;border:1px solid transparent;'"
-                  @click="applySourceToPurchase(idx)">
-                  <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
-                  <span style="flex:1;min-width:0;font-size:12px;color:#409eff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" :title="src.purchase_link">{{ src.purchase_link }}</span>
-                  <span v-if="src.purchase_price" style="font-size:12px;color:#f56c6c;flex-shrink:0;">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
-                </div>
-              </div>
-              <div v-else style="color:#909399;font-size:13px;margin-bottom:8px;">暂无货源链接，请先添加</div>
-              <el-button type="primary" size="small" plain @click="openAddSourceForm">
-                <el-icon><Plus /></el-icon>
-                <span style="margin-left:4px;">新增货源</span>
-              </el-button>
-            </el-form-item>
-            <el-form-item label="采购平台">
-              <el-radio-group v-model="purchaseInfo.platform">
-                <el-radio value="taobao">淘宝/天猫</el-radio>
-                <el-radio value="pinduoduo">拼多多</el-radio>
-                <el-radio value="1688">1688</el-radio>
-              </el-radio-group>
-            </el-form-item>
-            <el-form-item label="采购账号">
-              <el-select v-model="purchaseInfo.selectedAccountId" placeholder="请选择采购账号" filterable style="width: 100%">
-                <el-option v-for="acc in filteredPurchaseAccounts" :key="acc.id" :label="acc.account || '未命名'" :value="acc.id">
-                  <div style="display:flex;align-items:center;justify-content:space-between">
-                    <span>{{ acc.account || '未命名' }}</span>
-                    <el-tag :type="acc.online ? 'success' : 'info'" size="small">{{ acc.online ? '在线' : '离线' }}</el-tag>
+      </template>
+      
+      <!-- Step 1: idle 状态 - 信息+选账号 -->
+      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
+        <!-- 顶部：商品信息横幅 -->
+        <div class="product-banner">
+          <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" class="product-banner-image" fit="cover" />
+          <div v-else class="product-banner-image product-banner-placeholder" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
+            <span class="product-initial">{{ purchaseInfo.goodsName.charAt(0) }}</span>
+          </div>
+          <div class="product-banner-info">
+            <h4 class="product-name">{{ purchaseInfo.goodsName }}</h4>
+            <p v-if="purchaseInfo.sku" class="product-sku">SKU: {{ purchaseInfo.sku }}</p>
+            <div class="product-meta-row">
+              <el-tag type="info" effect="plain" size="default">
+                <el-icon><Tickets /></el-icon>
+                数量: {{ purchaseInfo.quantity }}
+              </el-tag>
+              <el-tag type="warning" effect="plain" size="default">
+                <el-icon><Document /></el-icon>
+                采购编号: {{ purchaseInfo.purchaseNo }}
+              </el-tag>
+              <el-tag type="success" effect="plain" size="default">
+                <el-icon><Connection /></el-icon>
+                订单号: {{ purchaseInfo.salesOrderNo }}
+              </el-tag>
+            </div>
+          </div>
+        </div>
+
+        <!-- 主体内容区 -->
+        <div class="purchase-main-content">
+          <!-- 左侧：配置区 -->
+          <div class="config-section">
+            <div class="section-header">
+              <el-icon><Setting /></el-icon>
+              <span>采购配置</span>
+            </div>
+            
+            <div class="config-form">
+              <div class="form-group">
+                <label class="form-label required">货源链接</label>
+                <div v-if="skuSources.length > 0" class="source-selector">
+                  <div v-for="(src, idx) in skuSources" :key="idx"
+                    class="source-option"
+                    :class="{ 'source-option-active': selectedSourceIndex === idx }"
+                    @click="applySourceToPurchase(idx)">
+                    <div class="source-option-header">
+                      <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
+                      <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
+                    </div>
+                    <div class="source-option-link">{{ src.purchase_link }}</div>
                   </div>
-                </el-option>
-              </el-select>
-              <div v-if="filteredPurchaseAccounts.length === 0" style="color:#e6a23c;font-size:12px;margin-top:4px">
-                该平台暂无采购账号，请先在「采购订单」页面添加并登录
-              </div>
-            </el-form-item>
-            <el-form-item label="采购类型">
-              <el-radio-group v-model="purchaseInfo.purchaseType">
-                <el-radio value="dropship">三方代发</el-radio>
-                <el-radio value="warehouse">仓库发货</el-radio>
-              </el-radio-group>
-            </el-form-item>
-            <!-- 仓库发货时选择仓库 -->
-            <el-form-item v-if="purchaseInfo.purchaseType === 'warehouse'" label="选择仓库">
-              <el-select v-model="purchaseInfo.warehouseId" placeholder="请选择发货仓库" style="width: 100%" @change="onWarehouseChange">
-                <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
-              </el-select>
-              <div v-if="warehouseList.length === 0" style="color:#e6a23c;font-size:12px;margin-top:4px">
-                暂无仓库，请先在「仓库管理」页面添加
-              </div>
-            </el-form-item>
-            <!-- 收货地址预览 -->
-            <el-form-item label="收货地址">
-              <div style="background:#f5f7fa;border-radius:6px;padding:10px 12px;font-size:13px;line-height:1.8;color:#303133;width:100%">
-                <div v-if="purchaseInfo.shippingName || purchaseInfo.shippingPhone">
-                  <span style="font-weight:600">{{ purchaseInfo.shippingName }}</span>
-                  <span v-if="purchaseInfo.shippingPhone" style="margin-left:12px;color:#606266">{{ purchaseInfo.shippingPhone }}</span>
                 </div>
-                <div v-if="purchaseInfo.shippingAddress" style="color:#606266">{{ purchaseInfo.shippingAddress }}</div>
-                <div v-if="!purchaseInfo.shippingName && !purchaseInfo.shippingAddress" style="color:#c0c4cc">
-                  {{ purchaseInfo.purchaseType === 'dropship' ? '暂无买家地址信息' : '请选择发货仓库' }}
+                <div v-else class="source-empty-state">
+                  <el-icon><Box /></el-icon>
+                  <span>暂无货源，请先添加</span>
                 </div>
-                <div style="margin-top:4px">
-                  <el-tag size="small" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="plain">
-                    {{ purchaseInfo.purchaseType === 'dropship' ? '买家地址（三方代发）' : '仓库地址（仓库发货）' }}
+                <el-button type="primary" plain size="default" class="add-source-btn" @click="openAddSourceForm">
+                  <el-icon><Plus /></el-icon>
+                  <span>新增货源链接</span>
+                </el-button>
+              </div>
+
+              <div class="form-row">
+                <div class="form-group">
+                  <label class="form-label required">采购平台</label>
+                  <el-radio-group v-model="purchaseInfo.platform" class="platform-selector">
+                    <el-radio-button value="taobao">
+                      <el-icon><ShoppingBag /></el-icon>
+                      淘宝/天猫
+                    </el-radio-button>
+                    <el-radio-button value="pinduoduo">
+                      <el-icon><ShoppingCart /></el-icon>
+                      拼多多
+                    </el-radio-button>
+                    <el-radio-button value="1688">
+                      <el-icon><Shop /></el-icon>
+                      1688
+                    </el-radio-button>
+                  </el-radio-group>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label required">采购类型</label>
+                  <el-radio-group v-model="purchaseInfo.purchaseType" class="type-selector">
+                    <el-radio-button value="dropship">
+                      <el-icon><Van /></el-icon>
+                      三方代发
+                    </el-radio-button>
+                    <el-radio-button value="warehouse">
+                      <el-icon><OfficeBuilding /></el-icon>
+                      仓库发货
+                    </el-radio-button>
+                  </el-radio-group>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label required">采购账号</label>
+                <el-select v-model="purchaseInfo.selectedAccountId" placeholder="请选择采购账号" filterable class="full-width-select">
+                  <el-option v-for="acc in filteredPurchaseAccounts" :key="acc.id" :label="acc.account || '未命名'" :value="acc.id">
+                    <div class="account-option-new">
+                      <span>{{ acc.account || '未命名' }}</span>
+                      <el-tag :type="acc.online ? 'success' : 'info'" size="small" effect="plain">{{ acc.online ? '在线' : '离线' }}</el-tag>
+                    </div>
+                  </el-option>
+                </el-select>
+                <div v-if="filteredPurchaseAccounts.length === 0" class="form-warning">
+                  <el-icon><Warning /></el-icon>
+                  <span>该平台暂无采购账号，请先在「采购订单」页面添加并登录</span>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label required">选择仓库</label>
+                <el-select v-model="purchaseInfo.warehouseId" :placeholder="purchaseInfo.purchaseType === 'dropship' ? '请选择仓库（用于收货手机号）' : '请选择发货仓库'" class="full-width-select" @change="onWarehouseChange">
+                  <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
+                </el-select>
+                <div v-if="warehouseList.length === 0" class="form-warning">
+                  <el-icon><Warning /></el-icon>
+                  <span>暂无仓库，请先在「仓库管理」页面添加</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧：信息区 -->
+          <div class="info-section">
+            <div class="info-card address-info-card">
+              <div class="card-header">
+                <el-icon><Location /></el-icon>
+                <span>收货地址</span>
+              </div>
+              <div class="card-body">
+                <div v-if="purchaseInfo.shippingName || purchaseInfo.shippingPhone" class="address-contact-row">
+                  <span class="contact-name">{{ purchaseInfo.shippingName }}</span>
+                  <span v-if="purchaseInfo.shippingPhone" class="contact-phone">{{ purchaseInfo.shippingPhone }}</span>
+                </div>
+                <div v-if="purchaseInfo.shippingAddress" class="address-detail">{{ purchaseInfo.shippingAddress }}</div>
+                <div v-if="!purchaseInfo.shippingName && !purchaseInfo.shippingAddress" class="empty-address">
+                  <el-icon><InfoFilled /></el-icon>
+                  <span>选择仓库后自动填充地址</span>
+                </div>
+                <div class="address-footer">
+                  <el-tag size="default" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="light" class="address-type-badge">
+                    {{ purchaseInfo.purchaseType === 'dropship' ? '三方代发模式' : '仓库发货模式' }}
                   </el-tag>
+                  <el-button
+                    v-if="purchaseInfo.purchaseType === 'dropship'"
+                    type="primary"
+                    text
+                    size="default"
+                    :loading="purchaseInfo._sensitiveLoading"
+                    class="get-real-info-btn"
+                    @click="handleRevealBuyerInfoInPurchase"
+                  >
+                    <el-icon><View /></el-icon>
+                    <span>获取真实信息</span>
+                  </el-button>
                 </div>
               </div>
-            </el-form-item>
-            <el-form-item label="采购价">
-              <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" style="width: 180px" />
-            </el-form-item>
-            <el-form-item label="备注">
-              <el-input v-model="purchaseInfo.remark" type="textarea" :rows="2" placeholder="选填，方便下次采购时快速识别" />
-            </el-form-item>
-          </el-form>
+            </div>
+
+            <div class="info-card purchase-detail-card">
+              <div class="card-header">
+                <el-icon><EditPen /></el-icon>
+                <span>采购明细</span>
+              </div>
+              <div class="card-body">
+                <div class="detail-row">
+                  <span class="detail-label">采购单价</span>
+                  <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" class="price-input" />
+                </div>
+                <div class="detail-row full-width">
+                  <span class="detail-label">备注信息</span>
+                  <el-input v-model="purchaseInfo.remark" type="textarea" :rows="3" placeholder="选填，方便下次采购时快速识别" class="remark-input" />
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -665,10 +803,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete, Message } from '@element-plus/icons-vue'
+import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, TrendCharts, Box } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
-import { fetchSalesOrders, saveSalesOrders } from '@/api/salesOrder'
-import { createPurchaseOrder, bindPlatformOrderNo } from '@/api/purchaseOrder'
+import { fetchSalesOrders, saveSalesOrders, updateBuyerInfo } from '@/api/salesOrder'
+import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 import { fetchWarehouses } from '@/api/warehouse'
@@ -726,7 +864,7 @@ function onFuncBtnClick(action) {
 
 async function loadStores() {
   try {
-    const data = await fetchStores({ platform: 'jd', status: 'enabled', pageSize: 100 })
+    const data = await fetchStores({ platform: 'jd', store_type: 'pop', status: 'enabled', pageSize: 100 })
     storeOptions.value = data.list || []
     const onlineStore = storeOptions.value.find(s => s.online === 1)
     if (onlineStore) {
@@ -741,6 +879,11 @@ async function loadStores() {
 
 function getSelectedStoreName() {
   const store = storeOptions.value.find(s => s.id === searchForm.storeId)
+  return store ? store.name : ''
+}
+
+function getStoreNameById(storeId) {
+  const store = storeOptions.value.find(s => s.id === storeId)
   return store ? store.name : ''
 }
 
@@ -810,7 +953,7 @@ function mapServerOrder(row) {
     logisticsCompany: row.logistics_company || '',
     logisticsNo: row.logistics_no || '',
     outboundNo: row.logistics_no || '',
-    shopName: getSelectedStoreName(),
+    shopName: row.store_name || getStoreNameById(row.store_id),
     shopTag: '京东',
     items,
     issueEvent: null,
@@ -822,11 +965,20 @@ function mapServerOrder(row) {
 
 async function loadOrdersFromServer() {
   try {
-    const params = { pageSize: 500 }
+    const params = {
+      page: currentPage.value,
+      pageSize: pageSize.value
+    }
     if (searchForm.storeId) params.store_id = searchForm.storeId
+    if (searchForm.orderStatus) params.status = searchForm.orderStatus
     const data = await fetchSalesOrders(params)
     const list = (data.list || []).map(mapServerOrder)
     tableData.value = list
+    // 更新总数（如果后端返回了 total）
+    if (data.total !== undefined) {
+      // 注意：当使用服务器端分页时，total 应该是服务器返回的总数
+      // 但当前前端使用客户端分页，所以这里保持兼容两种模式
+    }
   } catch (err) {
     console.warn('从服务器加载订单失败:', err.message)
   }
@@ -901,10 +1053,122 @@ function handleOpenChat(order) {
   }
 }
 
+async function handleRevealBuyerInfo(order) {
+  if (order._sensitiveLoading) return
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  if (!searchForm.storeId) {
+    ElMessage.warning('请先选择店铺')
+    return
+  }
+
+  order._sensitiveLoading = true
+  try {
+    const result = await window.electronAPI.invoke('fetch-buyer-sensitive-info', {
+      storeId: searchForm.storeId,
+      orderId: order.orderNo
+    })
+
+    if (result.success && result.data) {
+      const info = result.data
+      if (info.buyerName) {
+        order.customerName = info.buyerName
+        order.receiver = info.buyerName
+      }
+      if (info.buyerPhone) {
+        order.customerPhone = info.buyerPhone
+      }
+      if (info.buyerAddress) {
+        order.address = info.buyerAddress
+      }
+      ElMessage.success('买家真实信息已获取')
+    } else {
+      console.log('[BuyerInfo] 解析失败，原始响应:', result.rawResponse)
+      ElMessage.error(result.message || '获取买家信息失败')
+    }
+  } catch (err) {
+    ElMessage.error('获取买家信息失败: ' + err.message)
+  } finally {
+    order._sensitiveLoading = false
+  }
+}
+
+async function handleRevealBuyerInfoInPurchase() {
+  if (purchaseInfo._sensitiveLoading) return
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  if (!searchForm.storeId) {
+    ElMessage.warning('请先选择店铺')
+    return
+  }
+
+  purchaseInfo._sensitiveLoading = true
+  try {
+    const result = await window.electronAPI.invoke('fetch-buyer-sensitive-info', {
+      storeId: searchForm.storeId,
+      orderId: purchaseInfo.salesOrderNo
+    })
+
+    if (result.success && result.data) {
+      const info = result.data
+      // 更新 purchaseInfo
+      if (info.buyerName) {
+        purchaseInfo.buyerName = info.buyerName
+      }
+      if (info.buyerPhone) {
+        purchaseInfo.buyerPhone = info.buyerPhone
+      }
+      if (info.buyerAddress) {
+        purchaseInfo.buyerAddress = info.buyerAddress
+      }
+      // 三方代发时同步更新收货地址
+      if (purchaseInfo.purchaseType === 'dropship') {
+        purchaseInfo.shippingName = purchaseInfo.buyerName
+        purchaseInfo.shippingPhone = purchaseInfo.buyerPhone
+        purchaseInfo.shippingAddress = purchaseInfo.buyerAddress
+      }
+      // 同步更新订单列表中的原始 order 对象
+      const order = tableData.value.find(o => o.orderNo === purchaseInfo.salesOrderNo)
+      if (order) {
+        if (info.buyerName) {
+          order.customerName = info.buyerName
+          order.receiver = info.buyerName
+        }
+        if (info.buyerPhone) order.customerPhone = info.buyerPhone
+        if (info.buyerAddress) order.address = info.buyerAddress
+      }
+      ElMessage.success('买家真实信息已获取')
+
+      // 回写到服务器
+      try {
+        await updateBuyerInfo(searchForm.storeId, purchaseInfo.salesOrderNo, info)
+      } catch (e) {
+        console.warn('[BuyerInfo] 回写服务器失败:', e.message)
+      }
+    } else {
+      ElMessage.error(result.message || '获取买家信息失败')
+    }
+  } catch (err) {
+    ElMessage.error('获取买家信息失败: ' + err.message)
+  } finally {
+    purchaseInfo._sensitiveLoading = false
+  }
+}
+
 async function handlePurchase(order, item, itemIdx) {
-  const timestamp = Date.now().toString(36).toUpperCase()
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase()
-  const purchaseNo = `CG${timestamp}${random}`
+  let purchaseNo
+  try {
+    const res = await fetchNextPurchaseNo()
+    purchaseNo = res.purchase_no || res.data?.purchase_no
+    if (!purchaseNo) throw new Error('empty')
+  } catch (e) {
+    ElMessage.error('获取采购编号失败')
+    return
+  }
 
   purchaseInfo.step = 1
   purchaseInfo.purchaseNo = purchaseNo
@@ -934,10 +1198,17 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.warehouseContact = ''
   purchaseInfo.warehousePhone = ''
   purchaseInfo.warehouseAddress = ''
-  // 默认使用买家地址（三方代发）
-  purchaseInfo.shippingName = order.customerName || ''
-  purchaseInfo.shippingPhone = order.customerPhone || ''
-  purchaseInfo.shippingAddress = order.address || ''
+  // 三方代发收货信息将在仓库加载后由 updateDropshipShipping() 完善手机号
+  // 姓名去掉[编号]，地址追加【派件联系{虚拟号}-{编号}】
+  const initNameCodeMatch = (order.customerName || '').match(/\[(\d+)\]/)
+  const initNameCode = initNameCodeMatch ? initNameCodeMatch[1] : ''
+  purchaseInfo.shippingName = (order.customerName || '').replace(/\[\d+\]/, '').trim()
+  purchaseInfo.shippingPhone = ''
+  let initAddr = (order.address || '').replace(/\.?\[\d+\]/, '').trim()
+  if (order.customerPhone && initNameCode) {
+    initAddr = initAddr + '【派件联系' + order.customerPhone + '-' + initNameCode + '】'
+  }
+  purchaseInfo.shippingAddress = initAddr
   purchaseDialogVisible.value = true
 
   // 注册 IPC 事件监听（用 try-catch 保护，避免阻断后续 API 加载）
@@ -980,9 +1251,14 @@ async function handlePurchase(order, item, itemIdx) {
     console.warn('[采购下单] 加载仓库失败:', e.message)
     ElMessage.warning('加载仓库失败: ' + e.message)
   }
-  // 如果只有一个仓库，自动选中
+  // 如果只有一个仓库，自动选中并更新收货地址
   if (warehouseList.value.length === 1) {
     applyWarehouseAddress(warehouseList.value[0])
+    if (purchaseInfo.purchaseType === 'dropship') {
+      updateDropshipShipping()
+    } else if (purchaseInfo.purchaseType === 'warehouse') {
+      updateWarehouseShipping()
+    }
   }
 
   // 加载该SKU的货源列表
@@ -1022,7 +1298,9 @@ async function loadSkuSources(skuId) {
         applySourceToPurchase(0)
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('加载SKU货源列表失败:', e.message)
+  }
 }
 
 // 将选中的货源填充到采购信息
@@ -1144,7 +1422,8 @@ const purchaseInfo = reactive({
   warehouseName: '',
   warehouseContact: '',
   warehousePhone: '',
-  warehouseAddress: ''
+  warehouseAddress: '',
+  _sensitiveLoading: false
 })
 
 // 货源管理
@@ -1178,16 +1457,41 @@ function applyWarehouseAddress(wh) {
   purchaseInfo.warehouseAddress = wh.location || wh.address || ''
 }
 
+// 三方代发：手机号=仓库手机号，姓名去掉[编号]，地址+【派件联系{虚拟号}-{编号}】
+function updateDropshipShipping() {
+  // 从买家姓名中提取编号并去掉，如 "苏宝宝[3899]" -> 姓名"苏宝宝"，编号"3899"
+  const nameCodeMatch = (purchaseInfo.buyerName || '').match(/\[(\d+)\]/)
+  const nameCode = nameCodeMatch ? nameCodeMatch[1] : ''
+  purchaseInfo.shippingName = (purchaseInfo.buyerName || '').replace(/\[\d+\]/, '').trim()
+  purchaseInfo.shippingPhone = purchaseInfo.warehousePhone || ''
+  // 地址也去掉.[编号]或[编号]，再追加派件联系后缀
+  let addr = (purchaseInfo.buyerAddress || '').replace(/\.?\[\d+\]/, '').trim()
+  if (purchaseInfo.buyerPhone && nameCode) {
+    addr = addr + '【派件联系' + purchaseInfo.buyerPhone + '-' + nameCode + '】'
+  }
+  purchaseInfo.shippingAddress = addr
+}
+
+// 仓库发货：地址=仓库地址+采购编号
+function updateWarehouseShipping() {
+  purchaseInfo.shippingName = purchaseInfo.warehouseContact || purchaseInfo.warehouseName
+  purchaseInfo.shippingPhone = purchaseInfo.warehousePhone
+  let addr = purchaseInfo.warehouseAddress || ''
+  if (purchaseInfo.purchaseNo) {
+    addr = addr + ' ' + purchaseInfo.purchaseNo
+  }
+  purchaseInfo.shippingAddress = addr
+}
+
 // 仓库下拉切换时更新地址
 function onWarehouseChange(whId) {
   const wh = warehouseList.value.find(w => w.id === whId)
   if (wh) {
     applyWarehouseAddress(wh)
-    // 如果当前是仓库发货，同步更新收货地址
-    if (purchaseInfo.purchaseType === 'warehouse') {
-      purchaseInfo.shippingName = wh.contact || wh.name || ''
-      purchaseInfo.shippingPhone = wh.phone || ''
-      purchaseInfo.shippingAddress = wh.location || wh.address || ''
+    if (purchaseInfo.purchaseType === 'dropship') {
+      updateDropshipShipping()
+    } else if (purchaseInfo.purchaseType === 'warehouse') {
+      updateWarehouseShipping()
     }
   }
 }
@@ -1195,13 +1499,9 @@ function onWarehouseChange(whId) {
 // 采购类型切换时自动更新收货地址
 watch(() => purchaseInfo.purchaseType, (type) => {
   if (type === 'dropship') {
-    purchaseInfo.shippingName = purchaseInfo.buyerName
-    purchaseInfo.shippingPhone = purchaseInfo.buyerPhone
-    purchaseInfo.shippingAddress = purchaseInfo.buyerAddress
+    updateDropshipShipping()
   } else if (type === 'warehouse') {
-    purchaseInfo.shippingName = purchaseInfo.warehouseContact || purchaseInfo.warehouseName
-    purchaseInfo.shippingPhone = purchaseInfo.warehousePhone
-    purchaseInfo.shippingAddress = purchaseInfo.warehouseAddress
+    updateWarehouseShipping()
   }
 })
 
@@ -1255,6 +1555,10 @@ function handleGoOrder() {
   }
   if (!purchaseInfo.selectedAccountId) {
     ElMessage.warning('请选择采购账号')
+    return
+  }
+  if (!purchaseInfo.warehouseId) {
+    ElMessage.warning('请选择仓库')
     return
   }
 
@@ -1386,6 +1690,7 @@ async function handlePurchaseSubmit() {
       sales_order_id: purchaseInfo.salesOrderId,
       sales_order_no: purchaseInfo.salesOrderNo,
       goods_name: purchaseInfo.goodsName,
+      goods_image: purchaseInfo.image,
       sku: purchaseInfo.sku,
       quantity: purchaseInfo.quantity,
       source_url: purchaseInfo.sourceUrl,
@@ -1428,6 +1733,18 @@ function handleSearchImage(item, platform) {
 }
 
 // ==================== 计算属性 ====================
+
+// 获取店铺名称
+function getStoreName(storeId) {
+  const store = storeOptions.value.find(s => s.id === storeId)
+  return store ? store.name : ''
+}
+
+// 获取店铺在线状态
+function getStoreOnlineStatus(storeId) {
+  const store = storeOptions.value.find(s => s.id === storeId)
+  return store ? store.online : false
+}
 
 const filteredOrders = computed(() => {
   return tableData.value.filter((order) => {
@@ -1532,9 +1849,12 @@ function handleStatusClick(status) {
 
 function handleSizeChange() {
   currentPage.value = 1
+  loadOrdersFromServer()
 }
 
-function handleCurrentChange() {}
+function handleCurrentChange() {
+  loadOrdersFromServer()
+}
 
 function onDetailAction(action) {
   console.log(`[详情操作] ${action}`, currentOrder.value?.orderNo)
@@ -1650,6 +1970,51 @@ onUnmounted(() => {
   gap: 10px 16px;
 }
 
+/* 筛选栏按钮 */
+.filter-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+/* 筛选栏统计信息 */
+.filter-stats {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.filter-stat {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* 功能区统计信息 */
+.func-stats {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f0f0f0;
+  flex-wrap: wrap;
+}
+
+.func-stat {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* 店铺选择器前缀样式 */
+.store-select-prefix {
+  display: flex;
+  align-items: center;
+  font-size: 14px;
+}
+
 .filter-item {
   display: flex;
   align-items: center;
@@ -1749,8 +2114,8 @@ onUnmounted(() => {
   color: #fff;
   border: none;
   border-radius: 6px;
-  padding: 8px 20px;
-  font-size: 13px;
+  padding: 10px 36px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   transition: opacity 0.2s;
@@ -1833,23 +2198,25 @@ onUnmounted(() => {
 }
 
 .stat-item {
-  padding: 8px 16px;
+  padding: 6px 16px;
   font-size: 14px;
   color: #6b7280;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
+  border-radius: 16px;
   transition: all 0.2s;
   white-space: nowrap;
+  background: transparent;
 }
 
 .stat-item:hover {
   color: #2b5aed;
+  background: rgba(43, 90, 237, 0.06);
 }
 
 .stat-item.active {
-  color: #2b5aed;
+  color: #ffffff;
   font-weight: 500;
-  border-bottom-color: #2b5aed;
+  background: #2b5aed;
 }
 
 .stat-count {
@@ -1874,11 +2241,35 @@ onUnmounted(() => {
   align-items: center;
   background: linear-gradient(180deg, #f8f9fb 0%, #f3f4f6 100%);
   border-bottom: 1px solid #e5e7eb;
-  padding: 11px 14px;
+  padding: 11px 0;
   font-size: 13px;
   font-weight: 600;
   color: #374151;
   letter-spacing: 0.2px;
+}
+
+.order-table-header-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 14px;
+  padding-right: 0;
+}
+
+.order-table-header-right {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-left: 1px solid #f0f0f0;
+  background: linear-gradient(180deg, #f8f9fb 0%, #f3f4f6 100%);
+  padding-right: 14px;
+}
+
+.order-table-header .ot-col {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 列宽定义 */
@@ -1893,35 +2284,40 @@ onUnmounted(() => {
 .ot-col-index {
   width: 50px;
   flex-shrink: 0;
-  text-align: center;
+  text-align: start;
 }
 
 .ot-col-goods {
-  flex: 1;
-  min-width: 0;
+  width: 660px;
+  flex-shrink: 0;
   padding: 0 8px;
 }
 
 .ot-col-price {
-  width: 110px;
+  width: 120px;
   flex-shrink: 0;
   text-align: center;
   padding: 0 4px;
 }
 
 .ot-col-purchase {
-  width: 80px;
+  width: 120px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 4px;
+  padding: 0 8px;
+}
+
+/* 内容区域采购列 - 左对齐垂直排列 */
+.order-body-left .ot-col-purchase {
+  align-items: flex-start;
+  justify-content: center;
+  padding: 8px;
 }
 
 .ot-col-warehouse {
-  width: 100px;
-  flex-shrink: 0;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   padding: 0 4px;
@@ -1930,6 +2326,9 @@ onUnmounted(() => {
 .ot-col-amount {
   width: 120px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   padding: 0 4px;
 }
@@ -1944,36 +2343,31 @@ onUnmounted(() => {
 .ot-col-logistics {
   width: 150px;
   flex-shrink: 0;
-  text-align: center;
-  padding: 0 4px;
-}
-
-.ot-col-aftersale {
-  width: 100px;
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   padding: 0 4px;
 }
 
 .ot-col-remark {
-  width: 120px;
+  width: 320px;
   flex-shrink: 0;
-  text-align: center;
-  padding: 0 4px;
-}
-
-.ot-col-sysremark {
-  width: 120px;
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   padding: 0 4px;
 }
 
 .ot-col-action {
-  width: 120px;
+  width: 100px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  padding: 0 4px;
+  padding: 0 8px;
 }
 
 /* 订单列表 */
@@ -2005,7 +2399,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  padding: 12px 16px;
+  padding: 8px 14px;
   font-size: 12px;
   border-left: 4px solid #52c41a;
   transition: all 0.2s;
@@ -2089,27 +2483,48 @@ onUnmounted(() => {
 .order-header-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
   margin-left: 12px;
+}
+
+.order-header-time {
+  font-size: 12px;
+  color: #6b7280;
+  font-family: 'DIN Alternate', 'Roboto Mono', monospace;
+  white-space: nowrap;
 }
 
 /* 订单卡片内容 */
 .order-card-body {
   display: flex;
   background: #fff;
+  padding: 0;
 }
 
-.order-body-left {
+.order-card-body .order-body-left {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding-left: 14px;
+  padding-right: 0;
+}
+
+.order-card-body .order-body-right {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-left: 1px solid #f0f0f0;
+  background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);
+  padding-right: 14px;
 }
 
 .product-row {
   display: flex;
   align-items: center;
-  padding: 16px 0;
-  min-height: 88px;
+  padding: 4px 0;
+  min-height: 60px;
   transition: background 0.15s;
 }
 
@@ -2135,8 +2550,8 @@ onUnmounted(() => {
 }
 
 .goods-img {
-  width: 58px;
-  height: 58px;
+  width: 80px;
+  height: 80px;
   border-radius: 8px;
   flex-shrink: 0;
   object-fit: cover;
@@ -2256,36 +2671,36 @@ onUnmounted(() => {
   color: #9ca3af;
 }
 
-/* 右侧订单级信息 */
-.order-body-right {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  border-left: 1px solid #f0f0f0;
-  background: linear-gradient(180deg, #fafbfc 0%, #ffffff 100%);
-}
-
+/* 右侧订单级信息列样式 */
 .order-body-right .ot-col-amount,
 .order-body-right .ot-col-time,
 .order-body-right .ot-col-logistics,
-.order-body-right .ot-col-aftersale,
-.order-body-right .ot-col-remark,
-.order-body-right .ot-col-sysremark,
-.order-body-right .ot-col-action {
+.order-body-right .ot-col-remark {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 16px 6px;
+  padding: 12px 8px;
   position: relative;
+}
+
+.order-body-right .ot-col-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12px 8px;
+  position: relative;
+}
+
+.order-body-right .ot-col-action .el-button {
+  margin-left: 0 !important;
 }
 
 .order-body-right .ot-col-amount::after,
 .order-body-right .ot-col-time::after,
 .order-body-right .ot-col-logistics::after,
-.order-body-right .ot-col-aftersale::after,
-.order-body-right .ot-col-remark::after,
-.order-body-right .ot-col-sysremark::after {
+.order-body-right .ot-col-remark::after {
   content: '';
   position: absolute;
   right: 0;
@@ -2346,6 +2761,26 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
+.remark-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
+}
+
+.remark-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.remark-label {
+  color: #9ca3af;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
 .remark-text {
   font-size: 12px;
   color: #4b5563;
@@ -2354,24 +2789,21 @@ onUnmounted(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
   word-break: break-all;
-  text-align: center;
+  flex: 1;
+  min-width: 0;
+}
+
+/* 商家备注蓝色字体 */
+.remark-text-merchant {
+  color: #2b5aed;
+  font-weight: 500;
 }
 
 .remark-edit-btn {
-  padding: 2px 0;
-  font-size: 13px;
-}
-
-.sysremark-text {
+  padding: 0;
   font-size: 12px;
-  color: #8c8c8c;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-all;
-  text-align: center;
-  font-style: italic;
+  flex-shrink: 0;
+  margin-left: 2px;
 }
 
 /* 分页 */
@@ -2503,5 +2935,1129 @@ onUnmounted(() => {
   padding-top: 20px;
   margin-top: 20px;
   border-top: 1px solid #f0f0f0;
+}
+
+/* 采购下单对话框 - 现代卡片风格 */
+.purchase-dialog-modern {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.purchase-dialog-modern :deep(.el-dialog__header) {
+  padding: 20px 24px;
+  border-bottom: 1px solid #e5e7eb;
+  margin: 0;
+}
+
+.purchase-dialog-modern :deep(.el-dialog__body) {
+  padding: 20px 24px;
+  background: #f5f7fa;
+}
+
+.purchase-dialog-modern :deep(.el-dialog__footer) {
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.dialog-header-modern {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-icon {
+  font-size: 20px;
+  color: #2b5aed;
+}
+
+.header-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+/* 信息卡片 */
+.info-card {
+  background: #ffffff;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.info-card:last-child {
+  margin-bottom: 0;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.card-title .el-icon {
+  font-size: 18px;
+  color: #2b5aed;
+}
+
+.card-title span {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+/* 商品预览 */
+.goods-preview-modern {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.goods-thumb {
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.goods-thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.goods-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.goods-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.goods-sku-text {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.goods-meta {
+  display: flex;
+  gap: 8px;
+}
+
+.order-info-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-label {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.info-value {
+  font-size: 14px;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.purchase-no-text {
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+/* 现代表单 */
+.modern-form :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
+.modern-form :deep(.el-form-item__label) {
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  padding-bottom: 6px;
+}
+
+/* 货源卡片列表 */
+.source-card-list {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.source-card {
+  padding: 12px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.source-card:hover {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-card-active {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.source-price-tag {
+  font-size: 14px;
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.source-link-text {
+  font-size: 13px;
+  color: #409eff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-tip {
+  color: #909399;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.add-source-btn-modern {
+  width: 100%;
+}
+
+/* 按钮组 */
+.platform-btn-group,
+.type-btn-group {
+  width: 100%;
+}
+
+.platform-btn-group :deep(.el-radio-button),
+.type-btn-group :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.platform-btn-group :deep(.el-radio-button__inner),
+.type-btn-group :deep(.el-radio-button__inner) {
+  width: 100%;
+}
+
+.full-select {
+  width: 100%;
+}
+
+.account-option-modern {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.warning-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e6a23c;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* 地址卡片 */
+.address-card-modern {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.address-header {
+  margin-bottom: 8px;
+}
+
+.address-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-right: 12px;
+}
+
+.address-phone {
+  font-size: 13px;
+  color: #606266;
+}
+
+.address-content {
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.address-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #c0c4cc;
+  font-size: 13px;
+  padding: 20px 0;
+}
+
+.address-footer-modern {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.address-type-label {
+  flex-shrink: 0;
+}
+
+.reveal-info-btn {
+  flex-shrink: 0;
+}
+
+.price-input-modern {
+  width: 100%;
+}
+
+/* 采购下单对话框 - 横屏布局 */
+.purchase-dialog-landscape {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.purchase-dialog-landscape :deep(.el-dialog__header) {
+  padding: 20px 24px;
+  border-bottom: 1px solid #e5e7eb;
+  margin: 0;
+}
+
+.purchase-dialog-landscape :deep(.el-dialog__body) {
+  padding: 20px 24px;
+  background: #f5f7fa;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.purchase-dialog-landscape :deep(.el-dialog__footer) {
+  padding: 16px 24px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.landscape-layout {
+  display: grid;
+  grid-template-columns: 420px 1fr;
+  gap: 16px;
+}
+
+.landscape-left {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.landscape-right {
+  display: flex;
+  flex-direction: column;
+}
+
+.source-config-card {
+  height: 100%;
+}
+
+.source-config-card .info-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.source-config-card .modern-form {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.source-card-list {
+  max-height: 220px;
+}
+
+/* 信息卡片 */
+.info-card {
+  background: #ffffff;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  padding: 20px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.card-title .el-icon {
+  font-size: 18px;
+  color: #2b5aed;
+}
+
+.card-title span {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+/* 商品预览 */
+.goods-preview-modern {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.goods-thumb {
+  width: 80px;
+  height: 80px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.goods-thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.goods-initial {
+  color: #fff;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.goods-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.goods-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.goods-sku-text {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.goods-meta {
+  display: flex;
+  gap: 8px;
+}
+
+.order-info-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.info-label {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.info-value {
+  font-size: 14px;
+  color: #1f2937;
+  font-weight: 500;
+}
+
+.purchase-no-text {
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+/* 现代表单 */
+.modern-form :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
+.modern-form :deep(.el-form-item__label) {
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  padding-bottom: 6px;
+}
+
+/* 货源卡片列表 */
+.source-card-list {
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.source-card {
+  padding: 12px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.source-card:hover {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-card-active {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.source-price-tag {
+  font-size: 14px;
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.source-link-text {
+  font-size: 13px;
+  color: #409eff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-tip {
+  color: #909399;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.add-source-btn-modern {
+  width: 100%;
+}
+
+/* 按钮组 */
+.platform-btn-group,
+.type-btn-group {
+  width: 100%;
+}
+
+.platform-btn-group :deep(.el-radio-button),
+.type-btn-group :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.platform-btn-group :deep(.el-radio-button__inner),
+.type-btn-group :deep(.el-radio-button__inner) {
+  width: 100%;
+}
+
+.full-select {
+  width: 100%;
+}
+
+.account-option-modern {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.warning-tip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e6a23c;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+/* 地址卡片 */
+.address-card-modern {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.address-header {
+  margin-bottom: 8px;
+}
+
+.address-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-right: 12px;
+}
+
+.address-phone {
+  font-size: 13px;
+  color: #606266;
+}
+
+.address-content {
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.address-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #c0c4cc;
+  font-size: 13px;
+  padding: 20px 0;
+}
+
+.address-footer-modern {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.address-type-label {
+  flex-shrink: 0;
+}
+
+.reveal-info-btn {
+  flex-shrink: 0;
+}
+
+.price-input-modern {
+  width: 100%;
+}
+
+/* 采购下单对话框 - 全新设计 */
+.purchase-dialog-redesign {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.purchase-dialog-redesign :deep(.el-dialog__header) {
+  padding: 20px 24px;
+  border-bottom: 1px solid #e8eaed;
+  margin: 0;
+  background: #ffffff;
+}
+
+.purchase-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header-icon-wrapper {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  background: #f0f5ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.header-icon {
+  font-size: 20px;
+  color: #2b5aed;
+}
+
+.header-text {
+  color: #1f2937;
+}
+
+.header-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.header-subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.header-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #f5f7fa;
+  border-radius: 20px;
+}
+
+.step-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #9ca3af;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.step-item.step-active {
+  color: #2b5aed;
+  font-weight: 600;
+}
+
+.step-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7280;
+}
+
+.step-item.step-active .step-num {
+  background: #2b5aed;
+  color: #ffffff;
+}
+
+.step-arrow {
+  color: #d1d5db;
+  font-size: 14px;
+}
+
+.purchase-dialog-redesign :deep(.el-dialog__body) {
+  padding: 20px 24px;
+  background: #fafbfc;
+  max-height: 75vh;
+  overflow-y: auto;
+}
+
+.purchase-dialog-redesign :deep(.el-dialog__footer) {
+  padding: 16px 24px;
+  border-top: 1px solid #e8eaed;
+  background: #ffffff;
+}
+
+/* 商品横幅 */
+.product-banner {
+  display: flex;
+  gap: 16px;
+  padding: 16px;
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e8eaed;
+  margin-bottom: 16px;
+}
+
+.product-banner-image {
+  width: 80px;
+  height: 80px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.product-banner-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.product-initial {
+  color: #ffffff;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.product-banner-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.product-name {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.product-sku {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+.product-meta-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.product-meta-row .el-tag {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 主体内容 */
+.purchase-main-content {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+}
+
+/* 配置区 */
+.config-section {
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e8eaed;
+  padding: 20px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.section-header .el-icon {
+  font-size: 18px;
+  color: #2b5aed;
+}
+
+.section-header span {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.form-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.form-label.required::before {
+  content: '*';
+  color: #f56c6c;
+  margin-right: 4px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* 货源选择器 */
+.source-selector {
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-option {
+  padding: 12px;
+  background: #f9fafb;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.source-option:hover {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-option-active {
+  background: #ecf5ff;
+  border-color: #409eff;
+}
+
+.source-option-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.source-option-price {
+  font-size: 15px;
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.source-option-link {
+  font-size: 13px;
+  color: #409eff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: #909399;
+  font-size: 14px;
+  background: #f9fafb;
+  border-radius: 8px;
+}
+
+.add-source-btn {
+  width: 100%;
+}
+
+/* 平台/类型选择器 */
+.platform-selector,
+.type-selector {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.platform-selector :deep(.el-radio-button),
+.type-selector :deep(.el-radio-button) {
+  flex: 1;
+}
+
+.platform-selector :deep(.el-radio-button__inner),
+.type-selector :deep(.el-radio-button__inner) {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.type-selector {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.full-width-select {
+  width: 100%;
+}
+
+.account-option-new {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.form-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #e6a23c;
+  font-size: 12px;
+  padding: 8px 12px;
+  background: #fef3c7;
+  border-radius: 6px;
+}
+
+/* 信息卡片 */
+.info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.info-card {
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e8eaed;
+  overflow: hidden;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fafbfc;
+  border-bottom: 1px solid #e8eaed;
+}
+
+.card-header .el-icon {
+  font-size: 16px;
+  color: #2b5aed;
+}
+
+.card-header span {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.card-body {
+  padding: 16px;
+}
+
+.address-contact-row {
+  margin-bottom: 6px;
+}
+
+.contact-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-right: 10px;
+}
+
+.contact-phone {
+  font-size: 13px;
+  color: #606266;
+}
+
+.address-detail {
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.empty-address {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #c0c4cc;
+  font-size: 13px;
+  padding: 20px 0;
+}
+
+.address-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 12px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.address-type-badge {
+  flex-shrink: 0;
+}
+
+.get-real-info-btn {
+  flex-shrink: 0;
+}
+
+.purchase-detail-card .card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.detail-row.full-width {
+  flex: 1;
+}
+
+.detail-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.price-input {
+  width: 100%;
+}
+
+.remark-input {
+  width: 100%;
 }
 </style>

@@ -32,5 +32,10 @@ export function updatePurchaseAccountStatus(id, online) {
 
 // 获取采购账号Cookie
 export function fetchPurchaseAccountCookie(accountId) {
-  return get(`/api/purchase-accounts/${accountId}/cookie`)
+  return get(`/api/purchase-accounts/${accountId}/cookies`)
+}
+
+// 保存采购账号Cookie
+export function savePurchaseAccountCookie(accountId, data) {
+  return post(`/api/purchase-accounts/${accountId}/cookies`, data)
 }

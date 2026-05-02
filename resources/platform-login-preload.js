@@ -193,6 +193,58 @@ function init() {
   // 延迟提取商家信息（等页面渲染完成）
   setTimeout(extractAndSendStoreInfo, 3000)
   setTimeout(extractAndSendStoreInfo, 6000)
+
+  // 监听页面导航，当跳转到后台页面时重新提取商家信息
+  let navigationCount = 0
+  const maxNavigations = 5 // 最多监听 5 次导航
+  const navCheckInterval = 2000 // 每次导航后等待 2 秒再提取
+
+  window.addEventListener('popstate', handleNavigation)
+  window.addEventListener('hashchange', handleNavigation)
+
+  // 监听所有链接点击
+  document.addEventListener('click', (e) => {
+    const link = e.target.closest('a')
+    if (link && link.href) {
+      // 延迟检查，等待导航完成
+      setTimeout(() => {
+        navigationCount++
+        if (navigationCount <= maxNavigations) {
+          handleNavigation()
+        }
+      }, 1500)
+    }
+  }, true)
+
+  // 使用 PerformanceObserver 监听页面导航
+  if (window.PerformanceObserver) {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.type === 'navigate' || entry.type === 'reload') {
+            navigationCount++
+            if (navigationCount <= maxNavigations) {
+              setTimeout(handleNavigation, navCheckInterval)
+            }
+          }
+        }
+      })
+      observer.observe({ entryTypes: ['navigation'] })
+    } catch (e) {
+      // PerformanceObserver 不可用时静默失败
+    }
+  }
+
+  function handleNavigation() {
+    // 检查是否导航到了后台页面
+    if (isBackendPage()) {
+      console.log('[Preload] 检测到后台页面导航，重新提取商家信息')
+      // 延迟提取，等待页面完全加载
+      setTimeout(extractAndSendStoreInfo, 2000)
+      setTimeout(extractAndSendStoreInfo, 5000)
+      setTimeout(extractAndSendStoreInfo, 8000)
+    }
+  }
 }
 
 if (document.readyState === 'loading') {

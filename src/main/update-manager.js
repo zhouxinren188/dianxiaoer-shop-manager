@@ -201,6 +201,9 @@ function initUpdateManager(win) {
     return
   }
 
+  // 允许自签名证书（用于连接自建 HTTPS 更新服务器）
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+
   // 配置 electron-updater
   configureUpdater()
 
@@ -231,8 +234,8 @@ function initUpdateManager(win) {
   // 注册 IPC
   registerIpc()
 
-  // 启动时延迟检查更新
-  setTimeout(() => checkForUpdates(false), 5000)
+  // 启动时立即检查更新（1秒后，给窗口渲染留时间）
+  setTimeout(() => checkForUpdates(false), 1000)
 
   // 每 30 分钟检查一次
   setInterval(() => checkForUpdates(false), 30 * 60 * 1000)

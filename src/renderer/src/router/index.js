@@ -100,25 +100,13 @@ const router = createRouter({
   routes
 })
 
-// 注意：不在这里清除 token，避免 Vite HMR 模块重加载时误清 token
-// 应用启动的 token 验证逻辑由 beforeEach 导航守卫处理
-
-router.beforeEach((to, from) => {
+router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('accessToken')
-  if (to.path !== '/login' && !token) {
-    return '/login'
+  if (to.path === '/login') {
+    token ? next('/') : next()
+  } else {
+    token ? next() : next('/login')
   }
-})
-
-// 导航失败诊断日志
-router.afterEach((to, from, failure) => {
-  if (failure) {
-    console.warn('[Router] 导航失败:', failure.type, failure.message, `from=${from.path} to=${to.path}`)
-  }
-})
-
-router.onError((error) => {
-  console.error('[Router] 路由错误:', error)
 })
 
 export default router

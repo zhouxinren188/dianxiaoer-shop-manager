@@ -29,3 +29,8 @@ export function updatePurchaseStatus(id, data) {
 export function syncPlatformOrders(data) {
   return post('/api/purchase-orders/sync', data)
 }
+
+// 获取下一个采购编号
+export function fetchNextPurchaseNo() {
+  return get('/api/purchase-orders/next-no')
+}

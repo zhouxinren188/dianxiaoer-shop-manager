@@ -4,7 +4,7 @@ setlocal EnableDelayedExpansion
 
 :: ============================================================
 :: 店小二 - NSSM 服务安装脚本
-:: 将 dianxiaoer-server (端口3001) 和 dianxiaoer-api (端口3002)
+:: 将 dianxiaoer-server (端口3002) 和 dianxiaoer-api (端口3001)
 :: 注册为 Windows 服务，开机自启 + 自动重启
 :: ============================================================
 
@@ -25,13 +25,13 @@ set "NSSM=C:\nssm\nssm.exe"
 :: Node.js 路径
 set "NODE_EXE=C:\Program Files\nodejs\node.exe"
 
-:: 服务1: dianxiaoer-server（主API服务，端口3001）
+:: 服务1: dianxiaoer-server（业务API服务，端口3002）
 set "SVC1_NAME=dianxiaoer-server"
 set "SVC1_DIR=C:\Users\Administrator\dianxiaoer-server"
 set "SVC1_SCRIPT=index.js"
 set "SVC1_LOG_DIR=C:\Users\Administrator\dianxiaoer-server\logs"
 
-:: 服务2: dianxiaoer-api（认证API服务，端口3002）
+:: 服务2: dianxiaoer-api（认证API服务，端口3001）
 set "SVC2_NAME=dianxiaoer-api"
 set "SVC2_DIR=C:\dianxiaoer-api"
 set "SVC2_SCRIPT=index.js"
@@ -70,7 +70,7 @@ echo.
 
 echo [1/2] 安装服务: %SVC1_NAME%
 echo       目录: %SVC1_DIR%
-echo       端口: 3001
+echo       端口: 3002
 
 if not exist "%SVC1_DIR%\%SVC1_SCRIPT%" (
     echo [错误] 未找到入口文件: %SVC1_DIR%\%SVC1_SCRIPT%
@@ -104,7 +104,7 @@ if %errorlevel% neq 0 (
     DB_USER=root ^
     DB_PASSWORD=jd123456 ^
     DB_NAME=dianxiaoer ^
-    PORT=3001 ^
+    PORT=3002 ^
     NODE_ENV=production
 
 :: 配置日志输出
@@ -124,8 +124,8 @@ if %errorlevel% neq 0 (
 "%NSSM%" set %SVC1_NAME% Start SERVICE_AUTO_START
 
 :: 描述
-"%NSSM%" set %SVC1_NAME% DisplayName "店小二主API服务"
-"%NSSM%" set %SVC1_NAME% Description "店小二网店管家 - 主API服务器 (端口3001, MySQL)"
+"%NSSM%" set %SVC1_NAME% DisplayName "店小二业务API服务"
+"%NSSM%" set %SVC1_NAME% Description "店小二网店管家 - 业务API服务器 (端口3002, MySQL)"
 
 echo       [OK] %SVC1_NAME% 安装完成
 echo.
@@ -134,7 +134,7 @@ echo.
 
 echo [2/2] 安装服务: %SVC2_NAME%
 echo       目录: %SVC2_DIR%
-echo       端口: 3002
+echo       端口: 3001
 
 if not exist "%SVC2_DIR%\%SVC2_SCRIPT%" (
     echo [错误] 未找到入口文件: %SVC2_DIR%\%SVC2_SCRIPT%
@@ -161,8 +161,9 @@ if %errorlevel% neq 0 (
 :: 配置工作目录
 "%NSSM%" set %SVC2_NAME% AppDirectory "%SVC2_DIR%"
 
-:: 配置环境变量（server-api 使用 .env 文件，但也可显式设置）
+:: 配置环境变量（server-api 显式设置 PORT=3001）
 "%NSSM%" set %SVC2_NAME% AppEnvironmentExtra ^
+    PORT=3001 ^
     NODE_ENV=production
 
 :: 配置日志输出
@@ -183,7 +184,7 @@ if %errorlevel% neq 0 (
 
 :: 描述
 "%NSSM%" set %SVC2_NAME% DisplayName "店小二认证API服务"
-"%NSSM%" set %SVC2_NAME% Description "店小二网店管家 - 认证API服务器 (端口3002, HTTPS+JWT)"
+"%NSSM%" set %SVC2_NAME% Description "店小二网店管家 - 认证API服务器 (端口3001, HTTPS+JWT)"
 
 echo       [OK] %SVC2_NAME% 安装完成
 echo.

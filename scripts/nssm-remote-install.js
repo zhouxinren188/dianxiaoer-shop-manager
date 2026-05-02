@@ -33,7 +33,7 @@ conn.on('ready', () => {
     'echo === 安装 dianxiaoer-api 服务 ===',
     'C:\\nssm\\nssm.exe install dianxiaoer-api "C:\\Program Files\\nodejs\\node.exe" "index.js"',
     'C:\\nssm\\nssm.exe set dianxiaoer-api AppDirectory "C:\\dianxiaoer-api"',
-    'C:\\nssm\\nssm.exe set dianxiaoer-api AppEnvironmentExtra NODE_ENV=production',
+    'C:\\nssm\\nssm.exe set dianxiaoer-api AppEnvironmentExtra PORT=3001 NODE_ENV=production',
     'if not exist "C:\\dianxiaoer-api\\logs" mkdir "C:\\dianxiaoer-api\\logs"',
     'C:\\nssm\\nssm.exe set dianxiaoer-api AppStdout "C:\\dianxiaoer-api\\logs\\stdout.log"',
     'C:\\nssm\\nssm.exe set dianxiaoer-api AppStderr "C:\\dianxiaoer-api\\logs\\stderr.log"',

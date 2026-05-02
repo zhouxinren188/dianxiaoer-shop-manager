@@ -1044,6 +1044,29 @@ app.post('/api/sales-orders/batch', async (req, res) => {
   }
 })
 
+// 更新销售订单买家信息（仅更新 buyer_name, buyer_phone, buyer_address）
+app.put('/api/sales-orders/:orderId/buyer-info', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { store_id, buyerName, buyerPhone, buyerAddress } = req.body
+    if (!store_id || !orderId) return res.json(fail('store_id 和 orderId 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(+store_id)) {
+      return res.status(403).json(fail('无权操作此店铺订单'))
+    }
+
+    const [result] = await pool.execute(
+      `UPDATE sales_orders SET buyer_name=?, buyer_phone=?, buyer_address=?, updated_at=NOW()
+       WHERE store_id=? AND order_id=?`,
+      [buyerName || '', buyerPhone || '', buyerAddress || '', store_id, orderId]
+    )
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 分页查询销售订单（权限过滤）
 app.get('/api/sales-orders', async (req, res) => {
   try {

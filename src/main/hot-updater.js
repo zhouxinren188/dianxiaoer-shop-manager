@@ -1,5 +1,5 @@
 const { app } = require('electron')
-const http = require('http')
+const https = require('https')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
@@ -45,7 +45,7 @@ function clearHotUpdate() {
 // onProgress: 进度回调 (percent)
 function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
   return new Promise((resolve, reject) => {
-    http.get(url, { timeout: 60000 }, (res) => {
+    https.get(url, { timeout: 60000, rejectUnauthorized: false }, (res) => {
       if (res.statusCode !== 200) {
         return reject(new Error('下载失败: HTTP ' + res.statusCode))
       }

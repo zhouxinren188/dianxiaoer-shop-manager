@@ -4,7 +4,7 @@ function post(path, data) {
   return new Promise((resolve, reject) => {
     const req = http.request({
       hostname: 'localhost',
-      port: 3002,
+      port: 3001,
       path: path,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }

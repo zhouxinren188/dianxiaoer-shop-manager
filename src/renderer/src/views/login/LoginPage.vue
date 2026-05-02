@@ -233,7 +233,7 @@ onMounted(async () => {
   } catch {}
 })
 
-const API_BASE = 'https://150.158.54.108:3001'
+const API_BASE = 'http://150.158.54.108:3001'
 // const API_BASE = 'http://localhost:3001'  // 本地开发
 
 async function handleLogin() {

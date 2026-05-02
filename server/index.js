@@ -2,8 +2,11 @@ const express = require('express')
 const cors = require('cors')
 const path = require('path')
 const fs = require('fs')
-const multer = require('multer')
+const jwt = require('jsonwebtoken')
 const { pool, initDB } = require('./db')
+
+// JWT 密钥（与 dianxiaoer-api 保持一致）
+const JWT_SECRET = 'bfb3079104c65c88d55b4ed46624c07b171d8254c87ec40a2f485370d10ee159a7115459fc9d249051bcd60bc0849633c47c4a8d1a4f167cce27aabfd152effd'
 
 const app = express()
 app.use(cors())
@@ -20,36 +23,63 @@ function fail(message) {
 // ============ 全局认证中间件 ============
 
 // 不需要认证的路径
-const publicPaths = ['/api/login', '/api/register', '/health']
-// 不需要认证的路径前缀（更新检查、静态更新文件等）
-const publicPrefixes = ['/updates', '/api/update']
+const publicPaths = ['/health']
 
 app.use(async (req, res, next) => {
   // 公开接口跳过认证
-  if (publicPaths.includes(req.path) || publicPrefixes.some(p => req.path.startsWith(p))) {
+  if (publicPaths.includes(req.path)) {
     return next()
   }
 
   const authHeader = req.headers['authorization'] || ''
   const token = authHeader.replace('Bearer ', '').trim()
 
-  if (!token || !token.startsWith('token_')) {
+  if (!token) {
     return res.status(401).json({ code: 1, message: '未登录或 token 无效' })
   }
 
   try {
-    const [rows] = await pool.execute(
-      `SELECT ut.user_id, u.id, u.username, u.real_name, u.phone,
-              u.user_type, u.role, u.parent_id, u.status
-       FROM user_tokens ut
-       INNER JOIN users u ON ut.user_id = u.id
-       WHERE ut.token = ? AND u.status = 'enabled'`,
-      [token]
-    )
-    if (!rows.length) {
+    let user = null
+
+    if (token.startsWith('token_')) {
+      // 自定义 token 校验（兼容旧方式）
+      const [rows] = await pool.execute(
+        `SELECT ut.user_id, u.id, u.username, u.real_name, u.phone,
+                u.user_type, u.role, u.parent_id, u.status
+         FROM user_tokens ut
+         INNER JOIN users u ON ut.user_id = u.id
+         WHERE ut.token = ? AND u.status = 'enabled'`,
+        [token]
+      )
+      user = rows[0] || null
+    } else {
+      // JWT 校验（来自 3001 dianxiaoer-api）
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET)
+        const username = decoded.sub || decoded.username
+        if (username) {
+          const [rows] = await pool.execute(
+            `SELECT id, username, real_name, phone,
+                    user_type, role, parent_id, status
+             FROM users
+             WHERE username = ? AND status = 'enabled'`,
+            [username]
+          )
+          if (rows.length) {
+            user = rows[0]
+            user.user_id = user.id
+          }
+        }
+      } catch (jwtErr) {
+        console.error('[Auth] JWT 校验失败:', jwtErr.message)
+      }
+    }
+
+    if (!user) {
       return res.status(401).json({ code: 1, message: 'token 已失效，请重新登录' })
     }
-    req.user = rows[0]
+
+    req.user = user
     next()
   } catch (err) {
     console.error('[Auth] 认证失败:', err.message)
@@ -169,105 +199,6 @@ app.get('/api/users', async (req, res) => {
     res.json(ok({ list, total }))
   } catch (err) {
     console.error(err)
-    res.status(500).json(fail(err.message))
-  }
-})
-
-// 登录
-app.post('/api/login', async (req, res) => {
-  try {
-    const { username, password } = req.body
-    if (!username || !password) {
-      return res.status(400).json({ code: 1, message: '用户名和密码不能为空' })
-    }
-    const [rows] = await pool.execute(
-      'SELECT * FROM users WHERE username = ? AND status = ?',
-      [username, 'enabled']
-    )
-    if (!rows.length) {
-      return res.status(401).json({ code: 1, message: '账号或密码错误' })
-    }
-    const user = rows[0]
-    if (user.password_hash !== password) {
-      return res.status(401).json({ code: 1, message: '账号或密码错误' })
-    }
-    const token = 'token_' + Date.now() + '_' + Math.random().toString(36).slice(2)
-
-    // 将 token 存入数据库
-    await pool.execute(
-      'INSERT INTO user_tokens (user_id, token) VALUES (?, ?)',
-      [user.id, token]
-    )
-
-    // 清理该用户超过 30 天的旧 token
-    await pool.execute(
-      'DELETE FROM user_tokens WHERE user_id = ? AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)',
-      [user.id]
-    )
-
-    res.json(ok({
-      accessToken: token,
-      tokenType: 'Bearer',
-      user: {
-        id: user.id,
-        username: user.username,
-        realName: user.real_name,
-        phone: user.phone,
-        userType: user.user_type,
-        role: user.role
-      }
-    }))
-  } catch (err) {
-    res.status(500).json(fail(err.message))
-  }
-})
-
-// 注册（新注册默认为 master 主账号）
-app.post('/api/register', async (req, res) => {
-  try {
-    const { username, password, realName, phone } = req.body
-    if (!username || !password) {
-      return res.status(400).json({ code: 1, message: '用户名和密码不能为空' })
-    }
-
-    const [exists] = await pool.execute('SELECT id FROM users WHERE username = ?', [username])
-    if (exists.length) return res.json(fail('用户名已存在'))
-
-    const [result] = await pool.execute(
-      `INSERT INTO users (username, real_name, phone, password_hash, user_type, role, parent_id, status)
-       VALUES (?, ?, ?, ?, 'master', 'admin', NULL, 'enabled')`,
-      [username, realName || username, phone || '', password]
-    )
-
-    const token = 'token_' + Date.now() + '_' + Math.random().toString(36).slice(2)
-    await pool.execute('INSERT INTO user_tokens (user_id, token) VALUES (?, ?)', [result.insertId, token])
-
-    res.json(ok({
-      accessToken: token,
-      tokenType: 'Bearer',
-      user: {
-        id: result.insertId,
-        username,
-        realName: realName || username,
-        phone: phone || '',
-        userType: 'master',
-        role: 'admin'
-      }
-    }))
-  } catch (err) {
-    res.status(500).json(fail(err.message))
-  }
-})
-
-// 获取当前登录用户信息
-app.get('/api/me', async (req, res) => {
-  try {
-    const r = req.user
-    res.json(ok({
-      id: r.id, username: r.username, realName: r.real_name, phone: r.phone,
-      userType: r.user_type, role: r.role, status: r.status
-    }))
-  } catch (err) {
     res.status(500).json(fail(err.message))
   }
 })
@@ -603,6 +534,16 @@ app.post('/api/stores', async (req, res) => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [name || '', platform || '', store_type || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled', ownerId]
     )
+
+    // 如果是子账号创建的店铺，自动关联到子账号（写入 user_stores 表）
+    if (req.user.user_type !== 'master') {
+      await pool.execute(
+        'INSERT IGNORE INTO user_stores (user_id, store_id) VALUES (?, ?)',
+        [req.user.id, result.insertId]
+      )
+      console.log(`[Store] 子账号 ${req.user.username} 创建店铺 ${result.insertId}，已自动关联`)
+    }
+
     res.json(ok({ id: result.insertId, ...req.body }))
   } catch (err) {
     res.status(500).json(fail(err.message))
@@ -944,8 +885,8 @@ app.get('/api/supply-orders', async (req, res) => {
       return res.status(403).json(fail('无权查看此店铺订单'))
     }
 
-    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(pageSize)
-    const limit = parseInt(pageSize)
+    const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(pageSize, 10)
+    const limit = parseInt(pageSize, 10)
 
     let where = 'WHERE store_id = ?'
     const params = [store_id]
@@ -1048,14 +989,37 @@ app.post('/api/sales-orders/batch', async (req, res) => {
   }
 })
 
+// 更新销售订单买家信息（仅更新 buyer_name, buyer_phone, buyer_address）
+app.put('/api/sales-orders/:orderId/buyer-info', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { store_id, buyerName, buyerPhone, buyerAddress } = req.body
+    if (!store_id || !orderId) return res.json(fail('store_id 和 orderId 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(+store_id)) {
+      return res.status(403).json(fail('无权操作此店铺订单'))
+    }
+
+    const [result] = await pool.execute(
+      `UPDATE sales_orders SET buyer_name=?, buyer_phone=?, buyer_address=?, updated_at=NOW()
+       WHERE store_id=? AND order_id=?`,
+      [buyerName || '', buyerPhone || '', buyerAddress || '', store_id, orderId]
+    )
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 分页查询销售订单（权限过滤）
 app.get('/api/sales-orders', async (req, res) => {
   try {
     const { store_id, status, page = 1, pageSize = 20 } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
-    const offset = (Math.max(1, parseInt(page)) - 1) * parseInt(pageSize)
-    const limit = parseInt(pageSize)
+    const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(pageSize, 10)
+    const limit = parseInt(pageSize, 10)
 
     let where = 'WHERE 1=1'
     const params = []
@@ -1115,6 +1079,266 @@ app.get('/api/sales-orders/:orderId', async (req, res) => {
   }
 })
 
+// ============ SKU 采购配置 ============
+
+app.get('/api/sku-purchase-config', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { sku_id } = req.query
+    let sql = 'SELECT * FROM sku_purchase_config WHERE owner_id = ?'
+    const params = [ownerId]
+    if (sku_id) { sql += ' AND sku_id = ?'; params.push(sku_id) }
+    sql += ' ORDER BY id DESC'
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok({ list: rows, total: rows.length }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/sku-purchase-config', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { id, sku_id, platform, purchase_link, purchase_price, remark } = req.body
+    if (!sku_id) return res.json(fail('sku_id 不能为空'))
+    if (id) {
+      await pool.execute(
+        'UPDATE sku_purchase_config SET platform=?, purchase_link=?, purchase_price=?, remark=? WHERE id=? AND owner_id=?',
+        [platform||'', purchase_link||'', purchase_price||0, remark||'', id, ownerId]
+      )
+      res.json(ok({ id }))
+    } else {
+      const [result] = await pool.execute(
+        'INSERT INTO sku_purchase_config (sku_id, platform, purchase_link, purchase_price, remark, owner_id) VALUES (?,?,?,?,?,?)',
+        [sku_id, platform||'', purchase_link||'', purchase_price||0, remark||'', ownerId]
+      )
+      res.json(ok({ id: result.insertId }))
+    }
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.delete('/api/sku-purchase-config/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    await pool.execute('DELETE FROM sku_purchase_config WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/sku-purchase-config/update-price', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { sku_id, purchase_link, purchase_price, platform } = req.body
+    if (!sku_id || !purchase_link || !purchase_price) {
+      return res.json(fail('sku_id, purchase_link, purchase_price 不能为空'))
+    }
+    const [rows] = await pool.execute(
+      'SELECT id FROM sku_purchase_config WHERE sku_id=? AND purchase_link=? AND owner_id=?',
+      [sku_id, purchase_link, ownerId]
+    )
+    if (rows.length > 0) {
+      await pool.execute(
+        'UPDATE sku_purchase_config SET purchase_price=?, updated_at=NOW() WHERE id=?',
+        [purchase_price, rows[0].id]
+      )
+      res.json(ok({ id: rows[0].id, action: 'updated' }))
+    } else {
+      const [result] = await pool.execute(
+        'INSERT INTO sku_purchase_config (sku_id, platform, purchase_link, purchase_price, owner_id) VALUES (?,?,?,?,?)',
+        [sku_id, platform || '', purchase_link, purchase_price, ownerId]
+      )
+      res.json(ok({ id: result.insertId, action: 'created' }))
+    }
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// ============ 采购账号管理 ============
+
+app.get('/api/purchase-accounts', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [rows] = await pool.execute(
+      'SELECT id, account, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
+      [ownerId]
+    )
+    res.json(ok({ list: rows, total: rows.length }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/purchase-accounts', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account, password, platform } = req.body
+    if (!platform) return res.json(fail('platform 不能为空'))
+    const [result] = await pool.execute(
+      'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
+      [account||'', password||'', platform, ownerId]
+    )
+    res.json(ok({ id: result.insertId }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-accounts/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account, password, platform } = req.body
+    const fields = []; const values = []
+    if (account !== undefined) { fields.push('account=?'); values.push(account) }
+    if (password !== undefined) { fields.push('password=?'); values.push(password) }
+    if (platform !== undefined) { fields.push('platform=?'); values.push(platform) }
+    if (!fields.length) return res.json(fail('没有要修改的字段'))
+    values.push(req.params.id, ownerId)
+    await pool.execute('UPDATE purchase_accounts SET ' + fields.join(',') + ' WHERE id=? AND owner_id=?', values)
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.delete('/api/purchase-accounts/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    await pool.execute('DELETE FROM purchase_cookies WHERE account_id=?', [req.params.id])
+    await pool.execute('DELETE FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const accountId = req.params.id
+    const { cookie_data, platform } = req.body
+    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [accountId, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
+    await pool.execute(
+      'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
+      [accountId, typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data||[]), platform||'']
+    )
+    await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.get('/api/purchase-accounts/:id/cookies', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
+    const [rows] = await pool.execute('SELECT * FROM purchase_cookies WHERE account_id=?', [req.params.id])
+    res.json(ok(rows.length ? rows[0] : null))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-accounts/:id/status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { online } = req.body
+    await pool.execute('UPDATE purchase_accounts SET online=? WHERE id=? AND owner_id=?', [online?1:0, req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// ============ 采购订单 ============
+
+// 获取下一个采购编号（按用户隔离，自动递增）
+app.get('/api/purchase-orders/next-no', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [[row]] = await pool.execute(
+      'SELECT purchase_no FROM purchase_orders WHERE owner_id=? ORDER BY id DESC LIMIT 1',
+      [ownerId]
+    )
+    let nextNum = 1
+    if (row && row.purchase_no) {
+      const num = parseInt(row.purchase_no, 10)
+      if (!isNaN(num)) nextNum = num + 1
+    }
+    const purchaseNo = String(nextNum).padStart(4, '0')
+    res.json(ok({ purchase_no: purchaseNo }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.post('/api/purchase-orders', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
+            source_url, platform, purchase_price, remark,
+            purchase_type, shipping_name, shipping_phone, shipping_address } = req.body
+    if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
+    await pool.execute(
+      `INSERT INTO purchase_orders
+        (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
+         source_url, platform, purchase_price, remark,
+         purchase_type, shipping_name, shipping_phone, shipping_address,
+         status, owner_id)
+       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?)
+       ON DUPLICATE KEY UPDATE
+         sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
+         goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), quantity=VALUES(quantity),
+         source_url=VALUES(source_url), platform=VALUES(platform),
+         purchase_price=VALUES(purchase_price), remark=VALUES(remark),
+         purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
+         shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
+         updated_at=NOW()`,
+      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
+       source_url||'', platform||'', purchase_price||0, remark||'',
+       purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'',
+       ownerId]
+    )
+    res.json(ok({ purchase_no }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { platform_order_no } = req.body
+    if (!platform_order_no) return res.json(fail('platform_order_no 不能为空'))
+    await pool.execute(
+      'UPDATE purchase_orders SET platform_order_no=?, status=? WHERE purchase_no=? AND owner_id=?',
+      [platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
+    )
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.get('/api/purchase-orders', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { page=1, pageSize=20, status, platform } = req.query
+    let sql = 'SELECT * FROM purchase_orders WHERE owner_id=?'
+    const params = [ownerId]
+    if (status) { sql += ' AND status=?'; params.push(status) }
+    if (platform) { sql += ' AND platform=?'; params.push(platform) }
+    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
+    const [[{ total }]] = await pool.execute(countSql, params)
+    const limit = Math.max(1, parseInt(pageSize,10)||20)
+    const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
+    sql += ' ORDER BY id DESC LIMIT ' + limit + ' OFFSET ' + offset
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok({ list: rows, total }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-orders/:id/status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { status } = req.body
+    await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// 获取采购订单详情（权限校验）
+app.get('/api/purchase-orders/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [rows] = await pool.execute(
+      'SELECT * FROM purchase_orders WHERE id=? AND owner_id=?',
+      [req.params.id, ownerId]
+    )
+    if (!rows.length) return res.status(404).json(fail('采购订单不存在'))
+    res.json(ok(rows[0]))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 // ============ 健康检查 ============
 
 app.get('/health', async (req, res) => {
@@ -1123,179 +1347,6 @@ app.get('/health', async (req, res) => {
     res.json({ status: 'ok', time: new Date().toISOString() })
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message })
-  }
-})
-
-// ============ 统一更新接口 ============
-
-const UPDATE_DIR = path.join(__dirname, 'updates')
-const HOT_DIR = path.join(UPDATE_DIR, 'hot')
-const META_FILE = path.join(UPDATE_DIR, 'update-meta.json')
-const ADMIN_PASSWORD = 'dianxiaoer2026'
-
-// 确保目录存在
-if (!fs.existsSync(UPDATE_DIR)) fs.mkdirSync(UPDATE_DIR, { recursive: true })
-if (!fs.existsSync(HOT_DIR)) fs.mkdirSync(HOT_DIR, { recursive: true })
-
-// 静态文件服务：提供 latest.yml 和 .exe（供 electron-updater 全量更新使用）
-app.use('/updates', express.static(UPDATE_DIR))
-
-// 读取/写入 meta
-function readMeta() {
-  if (!fs.existsSync(META_FILE)) return { hot: null, full: null }
-  try { return JSON.parse(fs.readFileSync(META_FILE, 'utf-8')) } catch { return { hot: null, full: null } }
-}
-function writeMeta(meta) {
-  fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2))
-}
-
-// 兼容旧版 version.json → 迁移到 update-meta.json
-const OLD_VERSION_FILE = path.join(UPDATE_DIR, 'version.json')
-if (fs.existsSync(OLD_VERSION_FILE) && !fs.existsSync(META_FILE)) {
-  try {
-    const old = JSON.parse(fs.readFileSync(OLD_VERSION_FILE, 'utf-8'))
-    writeMeta({ hot: { version: old.version, changelog: old.changelog || '', filename: `update-${old.version}.zip`, size: old.size || 0, sha256: '', updatedAt: old.updatedAt || new Date().toISOString() }, full: null })
-    console.log('[Update] 已从 version.json 迁移到 update-meta.json')
-  } catch {}
-}
-
-// 版本号比较
-function parseVersion(v) {
-  const parts = String(v || '0.0.0').split('.').map(Number)
-  return parts[0] * 10000 + (parts[1] || 0) * 100 + (parts[2] || 0)
-}
-
-// 热更新上传
-const hotUploadStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, HOT_DIR),
-  filename: (req, file, cb) => {
-    const ver = req.body.version || Date.now()
-    cb(null, `update-${ver}.zip`)
-  }
-})
-const hotUploadMiddleware = multer({
-  storage: hotUploadStorage,
-  limits: { fileSize: 100 * 1024 * 1024 }
-}).single('file')
-
-app.post('/api/update/upload', (req, res) => {
-  const password = req.headers['x-admin-password']
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(403).json({ code: 1, message: '未授权' })
-  }
-  hotUploadMiddleware(req, res, (err) => {
-    if (err) {
-      console.error('[Update] 上传失败:', err.message)
-      return res.status(500).json({ code: 1, message: '上传失败: ' + err.message })
-    }
-    const version = req.body.version
-    const changelog = req.body.changelog || ''
-    const sha256 = req.body.sha256 || ''
-    if (!version) {
-      return res.status(400).json({ code: 1, message: 'version 不能为空' })
-    }
-    const filePath = path.join(HOT_DIR, `update-${version}.zip`)
-    if (!fs.existsSync(filePath)) {
-      return res.status(500).json({ code: 1, message: '文件保存失败' })
-    }
-    const stat = fs.statSync(filePath)
-    // 如果客户端没发 sha256，服务端自己算
-    let finalSha256 = sha256
-    if (!finalSha256) {
-      const crypto = require('crypto')
-      const hash = crypto.createHash('sha256')
-      hash.update(fs.readFileSync(filePath))
-      finalSha256 = hash.digest('hex')
-    }
-    const meta = readMeta()
-    meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, updatedAt: new Date().toISOString() }
-    writeMeta(meta)
-    console.log(`[Update] 热更新包已上传: v${version} (${(stat.size / 1024).toFixed(1)} KB)`)
-    res.json({ code: 0, message: '上传成功', version, size: stat.size, sha256: finalSha256 })
-  })
-})
-
-// 全量更新通知（发布全量更新后调用，更新 meta.full）
-app.post('/api/update/notify-full', (req, res) => {
-  const password = req.headers['x-admin-password']
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(403).json({ code: 1, message: '未授权' })
-  }
-  const { version, changelog } = req.body || {}
-  if (!version) {
-    return res.status(400).json({ code: 1, message: 'version 不能为空' })
-  }
-  const meta = readMeta()
-  meta.full = { version, changelog: changelog || '', updatedAt: new Date().toISOString() }
-  writeMeta(meta)
-  console.log(`[Update] 全量更新已登记: v${version}`)
-  res.json({ code: 0, message: '全量更新登记成功', version })
-})
-
-// 统一检查更新（支持 appVersion 参数区分全量/热更新）
-app.get('/api/update/check', (req, res) => {
-  try {
-    const meta = readMeta()
-    const currentVersion = req.query.version || '0.0.0'
-    const appVersion = req.query.appVersion || ''
-    const currentNum = parseVersion(currentVersion)
-
-    // 优先检查全量更新（当有 appVersion 参数时）
-    if (appVersion && meta.full) {
-      const appNum = parseVersion(appVersion)
-      const fullNum = parseVersion(meta.full.version)
-      if (fullNum > appNum) {
-        return res.json({
-          needUpdate: true,
-          updateType: 'full',
-          version: meta.full.version,
-          changelog: meta.full.changelog || '',
-          force: false
-        })
-      }
-    }
-
-    // 检查热更新
-    if (meta.hot) {
-      const hotNum = parseVersion(meta.hot.version)
-      if (hotNum > currentNum) {
-        return res.json({
-          needUpdate: true,
-          updateType: 'hot',
-          version: meta.hot.version,
-          changelog: meta.hot.changelog || '',
-          size: meta.hot.size || 0,
-          sha256: meta.hot.sha256 || '',
-          updatedAt: meta.hot.updatedAt
-        })
-      }
-    }
-
-    res.json({ needUpdate: false, updateType: 'none' })
-  } catch (err) {
-    console.error('[Update] 检查失败:', err.message)
-    res.status(500).json({ needUpdate: false, error: err.message })
-  }
-})
-
-// 热更新下载
-app.get('/api/update/download', (req, res) => {
-  try {
-    const meta = readMeta()
-    if (!meta.hot) {
-      return res.status(404).json({ code: 1, message: '暂无热更新包' })
-    }
-    const filePath = path.join(HOT_DIR, meta.hot.filename)
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ code: 1, message: '热更新包文件不存在' })
-    }
-    res.setHeader('Content-Type', 'application/zip')
-    res.setHeader('Content-Disposition', `attachment; filename=${meta.hot.filename}`)
-    res.setHeader('Content-Length', fs.statSync(filePath).size)
-    fs.createReadStream(filePath).pipe(res)
-  } catch (err) {
-    console.error('[Update] 下载失败:', err.message)
-    res.status(500).json({ code: 1, message: err.message })
   }
 })
 

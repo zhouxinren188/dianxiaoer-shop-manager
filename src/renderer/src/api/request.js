@@ -1,5 +1,6 @@
 // 后端服务地址（远程服务器）
-const BASE_URL = 'http://150.158.54.108:3001'
+const BASE_URL = 'http://150.158.54.108:3002'
+// const BASE_URL = 'http://localhost:3002'  // 本地开发
 
 async function request(url, options = {}) {
   const { method = 'GET', data, params, timeout = 10000 } = options
@@ -39,15 +40,28 @@ async function request(url, options = {}) {
     clearTimeout(timer)
 
     const contentType = res.headers.get('content-type') || ''
+
+    // 检查是否是 HTML 错误页面（如 502/503/504）
+    if (contentType.includes('text/html')) {
+      const htmlText = await res.text()
+      console.error('[API Error] 服务器返回 HTML:', htmlText.substring(0, 200))
+      throw new Error(`服务器返回异常 (HTTP ${res.status})，请检查后端服务是否正常运行`)
+    }
+
     const responseText = await res.text()
 
     if (!contentType.includes('application/json')) {
+      console.error('[API Error] 非 JSON 响应:', responseText.substring(0, 200))
       throw new Error('服务器返回异常，请检查后端服务是否正常运行')
     }
 
     const json = JSON.parse(responseText)
 
     if (json.code !== 0) {
+      // 401 未登录错误不抛出，由调用方处理
+      if (json.code === 1 && json.message && json.message.includes('登录')) {
+        return json
+      }
       throw new Error(json.message || '请求失败')
     }
     return json.data

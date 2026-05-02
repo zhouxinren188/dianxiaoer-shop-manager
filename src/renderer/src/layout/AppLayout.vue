@@ -125,6 +125,8 @@ function handleClose() {
 .app-aside {
   background-color: #001529;
   overflow: hidden;
+  position: relative;
+  z-index: 2100;
 }
 
 .app-right {

@@ -19,7 +19,7 @@ const ROOT = path.join(__dirname, '..')
 const OUT_DIR = path.join(ROOT, 'out')
 const DIST_DIR = path.join(ROOT, 'dist')
 
-const UPDATE_SERVER = 'http://150.158.54.108:3001'
+const UPDATE_SERVER = 'https://150.158.54.108:3001'
 const ADMIN_PASSWORD = 'dianxiaoer2026'
 
 // 从命令行参数或 package.json 读取版本
@@ -86,7 +86,7 @@ if (shouldUpload) {
 }
 
 function uploadToServer(filePath, ver, sha256) {
-  const http = require('http')
+  const https = require('https')
   const url = new URL(`${UPDATE_SERVER}/api/update/upload`)
 
   const boundary = '----FormBoundary' + Date.now().toString(16)
@@ -114,6 +114,7 @@ function uploadToServer(filePath, ver, sha256) {
     port: url.port,
     path: url.pathname,
     method: 'POST',
+    rejectUnauthorized: false,
     headers: {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
       'Content-Length': bodyLength,
@@ -121,7 +122,7 @@ function uploadToServer(filePath, ver, sha256) {
     }
   }
 
-  const req = http.request(options, (res) => {
+  const req = https.request(options, (res) => {
     let data = ''
     res.on('data', (chunk) => (data += chunk))
     res.on('end', () => {
