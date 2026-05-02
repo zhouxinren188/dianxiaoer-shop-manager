@@ -5,12 +5,12 @@
  * 流程：
  * 1. 构建 + 打包安装程序 (electron-vite build && electron-builder --win)
  * 2. 通过 SFTP 上传 .exe + latest.yml + .blockmap 到服务器 /updates/ 目录
- * 3. 同时部署最新 server/index.js 到服务器
+ * 3. 部署最新 server-api/index.js 到 dianxiaoer-api 服务器
  * 4. 调用 /api/update/notify-full 通知服务器登记全量版本
  */
 const { execSync } = require('child_process')
 const { Client } = require('ssh2')
-const http = require('http')
+const https = require('https')
 const path = require('path')
 const fs = require('fs')
 
@@ -21,10 +21,10 @@ const HOST = '150.158.54.108'
 const SSH_PORT = 22
 const USERNAME = 'administrator'
 const PASSWORD = 'K9#m2$vL5@zQ'
-const REMOTE_DIR = 'C:/Users/Administrator/dianxiaoer-server'
+const REMOTE_DIR = 'C:/Users/Administrator/dianxiaoer-api'
 const REMOTE_UPDATE_DIR = `${REMOTE_DIR}/updates`
 const NSSM = 'C:/nssm/nssm.exe'
-const UPDATE_SERVER = 'http://150.158.54.108:3001'
+const UPDATE_SERVER = 'https://150.158.54.108:3001'
 const ADMIN_PASSWORD = 'dianxiaoer2026'
 
 // 从 package.json 读取版本
@@ -90,11 +90,12 @@ function notifyServer(ver) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ version: ver, changelog: `全量更新 v${ver}` })
     const url = new URL(`${UPDATE_SERVER}/api/update/notify-full`)
-    const req = http.request({
+    const req = https.request({
       hostname: url.hostname,
       port: url.port,
       path: url.pathname,
       method: 'POST',
+      rejectUnauthorized: false,
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
@@ -134,17 +135,23 @@ conn.on('ready', async () => {
       await sftpUpload(sftp, blockmapFile, `${REMOTE_UPDATE_DIR}/dianxiaoer-setup-${version}.exe.blockmap`)
     }
 
-    // 4. 上传最新 server/index.js 并重启服务
+    // 4. 上传最新 server-api/index.js 并重启服务
     console.log('\n[4/5] 部署服务端代码...')
-    const localServerFile = path.join(ROOT, 'server', 'index.js')
+    const localServerFile = path.join(ROOT, 'server-api', 'index.js')
     await sftpUpload(sftp, localServerFile, `${REMOTE_DIR}/index.js`)
+    const localPkgFile = path.join(ROOT, 'server-api', 'package.json')
+    await sftpUpload(sftp, localPkgFile, `${REMOTE_DIR}/package.json`)
+
+    // 远程安装依赖
+    console.log('  安装依赖...')
+    await exec(`cd /d "${REMOTE_DIR}" && npm install --production`)
 
     console.log('  重启服务...')
-    await exec(`${NSSM} restart dianxiaoer-server`)
+    await exec(`${NSSM} restart dianxiaoer-api`)
     await new Promise(r => setTimeout(r, 5000))
 
     // 验证服务健康
-    const health = await exec('curl -s http://localhost:3001/health')
+    const health = await exec('curl -sk https://localhost:3001/api/health')
     console.log('  Health:', health.stdout.trim())
 
     // 5. 通知服务器登记全量版本

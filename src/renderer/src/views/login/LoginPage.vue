@@ -66,7 +66,7 @@
                 />
               </el-form-item>
               <div class="login-options">
-                <el-checkbox v-model="loginForm.remember" size="small">记住密码</el-checkbox>
+                <el-checkbox v-model="rememberMe" size="small">记住密码</el-checkbox>
               </div>
               <el-form-item>
                 <el-button
@@ -148,7 +148,7 @@
           </template>
 
           <div class="login-footer">
-            <span class="footer-text">v1.0.1</span>
+            <span class="footer-text">v{{ appVersion }}</span>
           </div>
         </div>
       </div>
@@ -167,11 +167,13 @@ const loginFormRef = ref(null)
 const registerFormRef = ref(null)
 const loading = ref(false)
 const isRegister = ref(false)
+const appVersion = ref('...')
+
+const rememberMe = ref(false)
 
 const loginForm = reactive({
   username: '',
-  password: '',
-  remember: false
+  password: ''
 })
 
 const registerForm = reactive({
@@ -189,7 +191,7 @@ const loginRules = {
 const registerRules = {
   username: [
     { required: true, message: '请输入账号', trigger: 'blur' },
-    { min: 3, max: 20, message: '账号长度为 3-20 个字符', trigger: 'blur' }
+    { min: 2, max: 20, message: '账号长度为 2-20 个字符', trigger: 'blur' }
   ],
   phone: [
     { required: true, message: '请输入手机号', trigger: 'blur' },
@@ -223,18 +225,28 @@ function handleClose() {
 }
 
 // 进入登录页时确保窗口为登录尺寸
-onMounted(() => {
+onMounted(async () => {
   window.electronAPI?.invoke('window-set-login-size')
+  try {
+    const ver = await window.electronAPI?.invoke('get-app-version')
+    if (ver) appVersion.value = ver
+  } catch {}
 })
 
-const API_BASE = 'http://150.158.54.108:3001'
+const API_BASE = 'https://150.158.54.108:3001'
+// const API_BASE = 'http://localhost:3001'  // 本地开发
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
+    
+    const apiUrl = `${API_BASE}/api/login`
+    console.log('[Login] 开始请求:', apiUrl)
+    console.log('[Login] 请求参数:', { username: loginForm.username })
+    
     try {
-      const response = await fetch(`${API_BASE}/api/login`, {
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -242,7 +254,28 @@ async function handleLogin() {
           password: loginForm.password
         })
       })
+      
+      console.log('[Login] 响应状态:', response.status, response.statusText)
+      console.log('[Login] 响应头:', Object.fromEntries(response.headers.entries()))
+      
+      // 检查响应状态
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+      
+      // 检查响应内容类型
+      const contentType = response.headers.get('content-type') || ''
+      console.log('[Login] 内容类型:', contentType)
+      
+      if (!contentType.includes('application/json')) {
+        const text = await response.text()
+        console.error('[Login] 非 JSON 响应:', text.substring(0, 500))
+        throw new Error('服务器返回格式错误')
+      }
+      
       const res = await response.json()
+      console.log('[Login] 服务器响应:', JSON.stringify(res).substring(0, 200))
+      
       const isOldFormat = res && res.code === 0 && res.data && res.data.accessToken
       const isNewFormat = res && res.success === true && res.accessToken
       if (isOldFormat || isNewFormat) {
@@ -255,7 +288,7 @@ async function handleLogin() {
           role: user.role || '',
           realName: user.realName || ''
         }))
-        if (loginForm.remember) {
+        if (rememberMe.value) {
           localStorage.setItem('rememberedUser', loginForm.username)
           localStorage.setItem('rememberedPassword', btoa(loginForm.password))
         } else {
@@ -275,7 +308,23 @@ async function handleLogin() {
         ElMessage.error(res?.message || '账号或密码错误')
       }
     } catch (e) {
-      ElMessage.error('网络错误，无法连接服务器')
+      console.error('[Login] 登录异常:', e)
+      console.error('[Login] 错误详情:', {
+        name: e.name,
+        message: e.message,
+        stack: e.stack
+      })
+      
+      // 提供更详细的错误信息
+      let errorMsg = '登录失败'
+      if (e.name === 'TypeError' && e.message.includes('fetch')) {
+        errorMsg = '无法连接服务器，请检查网络或服务器状态'
+      } else if (e.message.includes('Failed to fetch')) {
+        errorMsg = '网络连接失败，请检查：1) 服务器是否运行 2) 防火墙设置 3) HTTPS 证书'
+      } else {
+        errorMsg = `${e.message || '未知错误'}`
+      }
+      ElMessage.error(errorMsg)
     }
     loading.value = false
   })
@@ -319,7 +368,7 @@ const rememberedUser = localStorage.getItem('rememberedUser')
 const rememberedPassword = localStorage.getItem('rememberedPassword')
 if (rememberedUser) {
   loginForm.username = rememberedUser
-  loginForm.remember = true
+  rememberMe.value = true
 }
 if (rememberedPassword) {
   try {

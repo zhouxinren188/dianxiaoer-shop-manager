@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.1.0",
+  "version": "1.2.3",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -51,7 +51,7 @@
     },
     "publish": {
       "provider": "generic",
-      "url": "http://150.158.54.108:3001/updates"
+      "url": "https://150.158.54.108:3001/updates"
     },
     "artifactName": "dianxiaoer-setup-${version}.${ext}"
   },

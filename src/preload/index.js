@@ -10,6 +10,7 @@ const validInvokeChannels = [
   'window-close',
   'window-set-login-size',
   'window-set-main-size',
+  'get-app-version',
   'user-get-all',
   'user-register',
   'user-login',

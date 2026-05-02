@@ -113,6 +113,7 @@ ipcMain.handle('window-maximize', (event) => {
 ipcMain.handle('window-close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
+ipcMain.handle('get-app-version', () => app.getVersion())
 ipcMain.handle('open-external-url', (event, { url }) => {
   if (!url) return { success: false, message: '网址为空' }
 
