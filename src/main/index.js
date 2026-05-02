@@ -1,3 +1,6 @@
+// 信任自签名证书（必须在任何 HTTPS 请求之前设置）
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
 
