@@ -161,7 +161,6 @@
           <div class="ot-col ot-col-check">
             <el-checkbox v-model="selectAll" @change="handleSelectAll" />
           </div>
-          <div class="ot-col ot-col-index">序号</div>
           <div class="ot-col ot-col-goods">商品信息</div>
           <div class="ot-col ot-col-price">单价/数量</div>
           <div class="ot-col ot-col-purchase">操作</div>
@@ -181,10 +180,9 @@
           v-for="(order, orderIdx) in pagedOrders"
           :key="order.id"
         >
-          <!-- 订单卡片头部条 -->
+          <!-- 订单卡片头部条：核心信息区 -->
           <div class="order-card-header"
                :style="{
-                 borderLeftColor: statusBorderColor(order.orderStatus),
                  background: statusBgColor(order.orderStatus)
                }">
             <div class="order-header-left">
@@ -194,17 +192,11 @@
               <span class="order-header-divider">|</span>
               <span class="order-header-shop">{{ order.shopName }}</span>
               <el-tag size="small" :type="shopTagColorType(order.shopTag)" effect="plain" class="order-header-platform">{{ order.shopTag }}</el-tag>
-              <span class="order-header-divider">|</span>
-              <span class="order-header-time-label">下单时间：</span>
-              <span class="order-header-time">{{ order.orderTime }}</span>
               <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
               <el-tag v-if="order.purchaseStatus" :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
               <span class="order-header-divider">|</span>
-              <span v-if="order.buyerAccount" class="order-header-account">{{ order.buyerAccount }}</span>
-              <el-icon v-if="order.buyerAccount" class="order-header-chat-icon" title="打开京麦咚咚聊天" @click.stop="handleOpenChat(order)"><ChatDotRound /></el-icon>
-              <span class="order-header-buyer">{{ order.customerName }}</span>
-              <span v-if="order.customerPhone" class="order-header-phone">{{ order.customerPhone }}</span>
-              <span class="order-header-address">{{ order.address }}</span>
+              <span class="order-header-time-label">下单时间：</span>
+              <span class="order-header-time">{{ order.orderTime }}</span>
             </div>
             <div class="order-header-right">
             </div>
@@ -221,9 +213,6 @@
                 :class="{ 'product-row-border': itemIdx < order.items.length - 1 }"
               >
                 <div class="ot-col ot-col-check"></div>
-                <div class="ot-col ot-col-index">
-                  <span v-if="itemIdx === 0" class="index-num">{{ (currentPage - 1) * pageSize + orderIdx + 1 }}</span>
-                </div>
                 <div class="ot-col ot-col-goods">
                   <div class="goods-cell">
                     <el-image
@@ -241,31 +230,34 @@
                     <div class="goods-info">
                       <p class="goods-name">{{ item.name }}</p>
                       <p class="goods-sku" v-if="item.sku">{{ item.sku }}</p>
-                      <div class="goods-search-row">
-                        <el-popover placement="bottom-start" trigger="hover" :width="180">
-                          <template #reference>
-                            <span class="goods-search-link">搜标题</span>
-                          </template>
-                          <div class="search-platform-list">
-                            <span class="search-platform-item" @click="handleSearchTitle(item, 'taobao')">淘宝</span>
-                            <span class="search-platform-divider">|</span>
-                            <span class="search-platform-item" @click="handleSearchTitle(item, '1688')">1688</span>
-                            <span class="search-platform-divider">|</span>
-                            <span class="search-platform-item" @click="handleSearchTitle(item, 'pdd')">拼多多</span>
-                          </div>
-                        </el-popover>
-                        <el-popover placement="bottom-start" trigger="hover" :width="180">
-                          <template #reference>
-                            <span class="goods-search-link">搜图片</span>
-                          </template>
-                          <div class="search-platform-list">
-                            <span class="search-platform-item" @click="handleSearchImage(item, 'taobao')">淘宝</span>
-                            <span class="search-platform-divider">|</span>
-                            <span class="search-platform-item" @click="handleSearchImage(item, '1688')">1688</span>
-                            <span class="search-platform-divider">|</span>
-                            <span class="search-platform-item" @click="handleSearchImage(item, 'pdd')">拼多多</span>
-                          </div>
-                        </el-popover>
+                      <div class="goods-sku-row">
+                        <el-tag v-if="item.purchaseStatus" :type="purchaseStatusTagType(item.purchaseStatus)" size="small" effect="plain">{{ item.purchaseStatus }}</el-tag>
+                        <div class="goods-search-links">
+                          <el-popover placement="bottom-start" trigger="hover" :width="180">
+                            <template #reference>
+                              <span class="goods-search-link">搜标题</span>
+                            </template>
+                            <div class="search-platform-list">
+                              <span class="search-platform-item" @click="handleSearchTitle(item, 'taobao')">淘宝</span>
+                              <span class="search-platform-divider">|</span>
+                              <span class="search-platform-item" @click="handleSearchTitle(item, '1688')">1688</span>
+                              <span class="search-platform-divider">|</span>
+                              <span class="search-platform-item" @click="handleSearchTitle(item, 'pdd')">拼多多</span>
+                            </div>
+                          </el-popover>
+                          <el-popover placement="bottom-start" trigger="hover" :width="180">
+                            <template #reference>
+                              <span class="goods-search-link">搜图片</span>
+                            </template>
+                            <div class="search-platform-list">
+                              <span class="search-platform-item" @click="handleSearchImage(item, 'taobao')">淘宝</span>
+                              <span class="search-platform-divider">|</span>
+                              <span class="search-platform-item" @click="handleSearchImage(item, '1688')">1688</span>
+                              <span class="search-platform-divider">|</span>
+                              <span class="search-platform-item" @click="handleSearchImage(item, 'pdd')">拼多多</span>
+                            </div>
+                          </el-popover>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -297,9 +289,7 @@
                 <span class="amount-main">¥{{ order.actualAmount.toFixed(2) }}</span>
                 <p class="amount-sub">含运费 ¥{{ order.shippingFee.toFixed(2) }}</p>
               </div>
-              <div class="ot-col ot-col-time">
-                <span class="time-text">{{ order.orderTime }}</span>
-              </div>
+
               <div class="ot-col ot-col-logistics">
                 <template v-if="order.logisticsCompany">
                   <p class="logistics-company">{{ order.logisticsCompany }}</p>
@@ -332,6 +322,20 @@
                   </el-button>
                 </div>
               </div>
+            </div>
+          </div>
+
+          <!-- 订单卡片底部：买家信息区 -->
+          <div class="order-card-footer-buyer">
+            <span class="order-buyer-label">买家:</span>
+            <span class="order-buyer-name">{{ order.customerName }}</span>
+            <span v-if="order.customerPhone" class="order-buyer-phone">[{{ order.customerPhone }}]</span>
+            <span class="order-header-divider">|</span>
+            <span class="order-address-label">收货地址:</span>
+            <span class="order-address-text" :title="order.address">{{ order.address }}</span>
+            <div class="order-contact-btn" @click.stop="handleOpenChat(order)">
+              <el-icon><ChatDotRound /></el-icon>
+              <span>联系买家</span>
             </div>
           </div>
         </div>
@@ -2414,7 +2418,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   align-items: center;
-  padding-left: 14px;
+  padding-left: 10px;
   padding-right: 0;
 }
 
@@ -2435,27 +2439,23 @@ onUnmounted(() => {
 
 /* 列宽定义 */
 .ot-col-check {
-  width: 48px;
+  width: 36px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.ot-col-index {
-  width: 50px;
+.ot-col-goods {
+  width: 420px;
   flex-shrink: 0;
-  text-align: start;
+  padding: 0 8px 0 0;
 }
 
-.ot-col-goods {
-  width: 660px;
-  flex-shrink: 0;
-  padding: 0 8px;
-}
+/* 商品信息单元格 */
 
 .ot-col-price {
-  width: 120px;
+  width: 110px;
   flex-shrink: 0;
   text-align: center;
   padding: 0 4px;
@@ -2470,9 +2470,9 @@ onUnmounted(() => {
   padding: 0 8px;
 }
 
-/* 内容区域采购列 - 左对齐垂直排列 */
+/* 内容区域采购列 - 居中对齐 */
 .order-body-left .ot-col-purchase {
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   padding: 8px;
 }
@@ -2485,7 +2485,7 @@ onUnmounted(() => {
 }
 
 .ot-col-amount {
-  width: 120px;
+  width: 130px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2502,7 +2502,7 @@ onUnmounted(() => {
 }
 
 .ot-col-logistics {
-  width: 150px;
+  width: 140px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2512,7 +2512,7 @@ onUnmounted(() => {
 }
 
 .ot-col-remark {
-  width: 320px;
+  width: 260px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2522,7 +2522,7 @@ onUnmounted(() => {
 }
 
 .ot-col-action {
-  width: 100px;
+  width: 110px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -2554,7 +2554,7 @@ onUnmounted(() => {
   border-color: #d0d5dd;
 }
 
-/* 订单卡片头部 */
+/* 订单卡片头部（第一行：核心信息区） */
 .order-card-header {
   display: flex;
   align-items: center;
@@ -2562,8 +2562,62 @@ onUnmounted(() => {
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   padding: 8px 14px;
   font-size: 12px;
-  border-left: 4px solid #52c41a;
   transition: all 0.2s;
+}
+
+/* 订单卡片底部：买家信息区 */
+.order-card-footer-buyer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  background: #f8f9fb;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.order-buyer-label,
+.order-address-label {
+  color: #9ca3af;
+  flex-shrink: 0;
+}
+
+.order-buyer-name {
+  color: #111827;
+  font-weight: 600;
+}
+
+.order-buyer-phone {
+  color: #6b7280;
+  font-family: monospace;
+}
+
+.order-address-text {
+  color: #6b7280;
+  font-size: 12px;
+  max-width: 500px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.order-contact-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #2b5aed;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.order-contact-btn:hover {
+  background: #eef2ff;
 }
 
 .order-header-left {
@@ -2668,7 +2722,7 @@ onUnmounted(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding-left: 14px;
+  padding-left: 1px;
   padding-right: 0;
 }
 
@@ -2684,8 +2738,8 @@ onUnmounted(() => {
 .product-row {
   display: flex;
   align-items: center;
-  padding: 4px 0;
-  min-height: 60px;
+  padding: 8px 0;
+  min-height: 86px;
   transition: background 0.15s;
 }
 
@@ -2697,12 +2751,6 @@ onUnmounted(() => {
   border-bottom: 1px dashed #e5e7eb;
 }
 
-.index-num {
-  font-size: 13px;
-  color: #6b7280;
-  font-weight: 500;
-}
-
 /* 商品信息单元格 */
 .goods-cell {
   display: flex;
@@ -2711,9 +2759,9 @@ onUnmounted(() => {
 }
 
 .goods-img {
-  width: 80px;
-  height: 80px;
-  border-radius: 8px;
+  width: 70px;
+  height: 70px;
+  border-radius: 6px;
   flex-shrink: 0;
   object-fit: cover;
   cursor: pointer;
@@ -2726,7 +2774,7 @@ onUnmounted(() => {
 }
 
 :deep(.goods-img .el-image__inner) {
-  border-radius: 8px;
+  border-radius: 6px;
 }
 
 .goods-img-placeholder {
@@ -2768,11 +2816,17 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.goods-search-row {
+.goods-sku-row {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.goods-search-links {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-top: 4px;
 }
 
 .goods-search-link {
@@ -2834,7 +2888,6 @@ onUnmounted(() => {
 
 /* 右侧订单级信息列样式 */
 .order-body-right .ot-col-amount,
-.order-body-right .ot-col-time,
 .order-body-right .ot-col-logistics,
 .order-body-right .ot-col-remark {
   display: flex;
