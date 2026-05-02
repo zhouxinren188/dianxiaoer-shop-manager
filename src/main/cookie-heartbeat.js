@@ -1,5 +1,6 @@
 const http = require('http')
 const https = require('https')
+const { session } = require('electron')
 const { getAuthToken } = require('./auth-store')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
@@ -11,7 +12,7 @@ const REQUEST_TIMEOUT = 10 * 1000
 const HEARTBEAT_URLS = {
   taobao: 'https://myseller.taobao.com/home.htm',
   tmall: 'https://myseller.taobao.com/home.htm',
-  jd: 'https://shop.jd.com/main',
+  jd: 'https://shop.jd.com/index.action',  // 京东商家后台首页
   pdd: 'https://mms.pinduoduo.com/home',
   douyin: 'https://fxg.jinritemai.com/ffa/mshop/homepage/overview'
 }
@@ -86,77 +87,162 @@ function cookiesToHeader(cookies) {
   }
 }
 
+// 直接从 Electron session 检查店铺 Cookie 是否有效
+async function checkStoreSession(storeId, platform) {
+  try {
+    const partitionName = `persist:platform-${storeId}`
+    const ses = session.fromPartition(partitionName)
+    const cookies = await ses.cookies.get({})
+    
+    console.log(`[Heartbeat] Session检查 store_id=${storeId} Cookie数量=${cookies.length}`)
+    
+    if (!cookies || cookies.length === 0) {
+      return false // 没有Cookie
+    }
+    
+    // 检查是否有京东相关的Cookie
+    const jdCookies = cookies.filter(c => 
+      c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk'))
+    )
+    
+    console.log(`[Heartbeat] Session检查 store_id=${storeId} 京东Cookie数量=${jdCookies.length}`)
+    
+    if (jdCookies.length === 0) {
+      return false // 没有京东Cookie
+    }
+    
+    // 检查Cookie是否过期
+    const now = Math.floor(Date.now() / 1000)
+    const hasExpiredCookie = jdCookies.some(c => 
+      c.expirationDate && c.expirationDate > 0 && c.expirationDate < now
+    )
+    
+    if (hasExpiredCookie) {
+      console.log(`[Heartbeat] Session检查 store_id=${storeId} 发现过期Cookie`)
+      return false
+    }
+    
+    return true // Cookie有效
+  } catch (err) {
+    console.error(`[Heartbeat] Session检查失败 store_id=${storeId}:`, err.message)
+    return false
+  }
+}
+
 // 检测单个店铺的在线状态
 async function checkSingleStore(storeId, platform, cookieData) {
   const heartbeatUrl = HEARTBEAT_URLS[platform]
-  if (!heartbeatUrl) return null // 未知平台，跳过
+  if (!heartbeatUrl) {
+    console.log(`[Heartbeat] 未知平台: '${platform}'`)
+    return null // 未知平台，跳过
+  }
 
   const cookieHeader = cookiesToHeader(cookieData)
-  if (!cookieHeader) return false // 无有效 Cookie
+  if (!cookieHeader) {
+    console.log(`[Heartbeat] Cookie解析失败 store_id=${storeId}`)
+    return false // 无有效 Cookie
+  }
 
   try {
+    console.log(`[Heartbeat] 开始请求: ${heartbeatUrl}`)
     const res = await httpGet(heartbeatUrl, {
       'Cookie': cookieHeader,
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
+    console.log(`[Heartbeat] 响应状态: ${res.statusCode}`)
 
     // 302 重定向到登录页 = 离线
     if (res.statusCode === 302 || res.statusCode === 301) {
       const location = res.headers.location || ''
+      // 京东的特殊处理：任何重定向都视为Cookie失效
+      if (platform === 'jd') {
+        return false
+      }
       if (location.includes('login') || location.includes('sign') || location.includes('passport')) {
         return false
       }
     }
 
-    // 401/403 = 离线
-    if (res.statusCode === 401 || res.statusCode === 403) {
+    // 401/403/404/500 = 离线
+    if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 404 || res.statusCode === 500) {
       return false
     }
 
-    // 200 且响应中不包含登录页面特征 = 在线
+    // 200 状态码需要进一步验证
     if (res.statusCode === 200) {
       const body = res.data.toLowerCase()
-      if (body.includes('login') && body.includes('password') && body.includes('form')) {
-        return false // 返回的是登录页面
+      
+      // 京东特殊处理：检测是否返回了错误页面或登录提示
+      if (platform === 'jd') {
+        // 京东Cookie失效的典型特征
+        if (body.includes('login') || 
+            body.includes('passport.jd.com') ||
+            body.includes('wlf-passport') ||
+            body.includes('未登录') ||
+            body.includes('请先登录')) {
+          return false
+        }
+        
+        // 检测是否返回了空数据或错误提示
+        if (body.includes('error') || body.includes('异常') || body.length < 1000) {
+          return false
+        }
       }
+      
+      // 通用检测：返回的是登录页面
+      if (body.includes('login') && body.includes('password') && body.includes('form')) {
+        return false
+      }
+      
       return true
     }
 
     return null // 其他状态码，不做判断
-  } catch {
+  } catch (err) {
+    console.error(`[Heartbeat] 网络请求失败 store_id=${storeId}:`, err.message)
     return null // 网络错误，不更新状态
   }
 }
 
 async function checkAllStores(mainWindow) {
   try {
-    // 获取所有启用店铺的 Cookie
-    const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies`)
+    // 获取所有店铺信息
+    const res = await httpRequest(`${BUSINESS_SERVER}/api/stores`)
     const json = JSON.parse(res.data)
-    if (json.code !== 0 || !json.data) return
+    if (json.code !== 0 || !json.data || !json.data.list) {
+      console.log('[Heartbeat] 获取店铺列表失败:', json.message || '未知错误')
+      return
+    }
 
-    const stores = json.data
+    const stores = json.data.list
+    console.log(`[Heartbeat] 获取到 ${stores.length} 个店铺`)
 
     // 串行检测，避免并发风控
     for (const store of stores) {
-      const online = await checkSingleStore(store.store_id, store.platform, store.cookie_data)
-      if (online === null) continue // 网络错误，不更新
+      const storeId = store.id || store.store_id
+      console.log(`[Heartbeat] 检测 store_id=${storeId} platform='${store.platform}'`)
+      
+      // 直接从Electron session检查Cookie
+      const online = await checkStoreSession(storeId, store.platform)
+      
+      console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online}`)
 
       // 更新服务器状态
       try {
-        await httpRequest(`${BUSINESS_SERVER}/api/stores/${store.store_id}/status`, {
+        await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/status`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ online })
         })
+        console.log(`[Heartbeat] 已更新 store_id=${storeId} online=${online}`)
       } catch (e) {
-        console.error(`[Heartbeat] 更新状态失败 store_id=${store.store_id}:`, e.message)
+        console.error(`[Heartbeat] 更新状态失败 store_id=${storeId}:`, e.message)
       }
 
       // 通知渲染进程
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('store-status-changed', {
-          storeId: store.store_id,
+          storeId: storeId,
           online
         })
       }

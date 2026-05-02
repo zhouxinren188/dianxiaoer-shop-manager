@@ -3,6 +3,7 @@ const cors = require('cors')
 const path = require('path')
 const fs = require('fs')
 const jwt = require('jsonwebtoken')
+const bcrypt = require('bcryptjs')
 const { pool, initDB } = require('./db')
 
 // JWT 密钥（与 dianxiaoer-api 保持一致）
@@ -23,7 +24,7 @@ function fail(message) {
 // ============ 全局认证中间件 ============
 
 // 不需要认证的路径
-const publicPaths = ['/health']
+const publicPaths = ['/health', '/api/sync-lock']
 
 app.use(async (req, res, next) => {
   // 公开接口跳过认证
@@ -238,10 +239,13 @@ app.post('/api/users', async (req, res) => {
     // 主账号创建的子账号，parent_id 指向自己
     const parentId = (userType === 'master') ? null : req.user.id
 
+    // 使用 bcrypt 加密密码
+    const passwordHash = password ? bcrypt.hashSync(password, 10) : ''
+
     const [result] = await pool.execute(
       `INSERT INTO users (username, real_name, phone, password_hash, user_type, role, parent_id, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [username, realName || username, phone || '', password || '', userType || 'sub', role || 'staff', parentId, status || 'enabled']
+      [username, realName || username, phone || '', passwordHash, userType || 'sub', role || 'staff', parentId, status || 'enabled']
     )
 
     res.json(ok({ id: result.insertId, username, realName: realName || username, phone, userType, role, status }))
@@ -261,7 +265,7 @@ app.put('/api/users/:id', async (req, res) => {
     )
     if (!check.length) return res.status(403).json(fail('无权操作此用户'))
 
-    const { realName, phone, userType, role, status } = req.body
+    const { realName, phone, userType, role, status, password } = req.body
     const fields = []
     const values = []
 
@@ -270,6 +274,10 @@ app.put('/api/users/:id', async (req, res) => {
     if (userType !== undefined) { fields.push('user_type = ?'); values.push(userType) }
     if (role !== undefined) { fields.push('role = ?'); values.push(role) }
     if (status !== undefined) { fields.push('status = ?'); values.push(status) }
+    if (password !== undefined && password) {
+      fields.push('password_hash = ?');
+      values.push(bcrypt.hashSync(password, 10))
+    }
 
     if (!fields.length) return res.json(fail('没有要修改的字段'))
     values.push(req.params.id)
@@ -476,7 +484,7 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
 // 查询店铺列表（按权限过滤）
 app.get('/api/stores', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, name, platform, store_type, status, online } = req.query
+    const { page = 1, pageSize = 10, name, platform, store_type, status, online, merchant_id } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
@@ -492,6 +500,7 @@ app.get('/api/stores', async (req, res) => {
     if (store_type) { sql += ' AND store_type = ?'; params.push(store_type) }
     if (status) { sql += ' AND status = ?'; params.push(status) }
     if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
+    if (merchant_id) { sql += ' AND merchant_id = ?'; params.push(merchant_id) }
 
     const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
     const [countRows] = await pool.execute(countSql, params)
@@ -524,11 +533,71 @@ app.get('/api/stores/:id', async (req, res) => {
   }
 })
 
+// 获取店铺最后同步时间
+app.get('/api/stores/:id/last-sync', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    const id = +req.params.id
+    if (!storeIds.includes(id)) {
+      return res.status(403).json(fail('无权访问此店铺'))
+    }
+    const [rows] = await pool.execute('SELECT last_sync_at FROM stores WHERE id = ?', [id])
+    if (!rows.length) return res.status(404).json(fail('店铺不存在'))
+    res.json(ok({ lastSyncAt: rows[0].last_sync_at }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 更新店铺最后同步时间
+app.put('/api/stores/:id/sync-time', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    const id = +req.params.id
+    if (!storeIds.includes(id)) {
+      return res.status(403).json(fail('无权修改此店铺'))
+    }
+    await pool.execute('UPDATE stores SET last_sync_at = NOW() WHERE id = ?', [id])
+    res.json(ok(true))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 创建店铺（自动设置 owner_id）
+// 如果 merchant_id 已存在，则更新原有店铺而不是创建新店铺
 app.post('/api/stores', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { name, platform, store_type, account, password, merchant_id, shop_id, tags, status } = req.body
+    
+    // 如果提供了 merchant_id，检查是否已存在
+    if (merchant_id) {
+      const [existingStores] = await pool.execute(
+        'SELECT id FROM stores WHERE merchant_id = ? AND owner_id = ?',
+        [merchant_id, ownerId]
+      )
+      
+      if (existingStores.length > 0) {
+        // 已存在相同 merchant_id 的店铺，更新它
+        const existingId = existingStores[0].id
+        console.log(`[Store] 发现重复店铺 merchant_id=${merchant_id}，更新店铺 ${existingId} 而不是创建新店铺`)
+        
+        await pool.execute(
+          `UPDATE stores SET 
+           name = ?, platform = ?, store_type = ?, account = ?, password = ?, 
+           merchant_id = ?, shop_id = ?, tags = ?, status = ?
+           WHERE id = ? AND owner_id = ?`,
+          [name || '', platform || '', store_type || '', account || '', password || '', 
+           merchant_id, shop_id || '', JSON.stringify(tags || []), status || 'enabled', existingId, ownerId]
+        )
+        
+        res.json(ok({ id: existingId, updated: true, ...req.body }))
+        return
+      }
+    }
+    
+    // 创建新店铺
     const [result] = await pool.execute(
       `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

@@ -232,13 +232,24 @@ function registerPlatformWindowIpc(mainWindow) {
             console.log('[PlatformWindow] 页面提取到商家信息:', info)
           }
 
-          // 如果已经拿到 venderId 或 shopId，立即执行一次预保存
+          // 如果已经拿到 venderId 或 shopId，立即执行保存
           const extracted = storeExtractedInfo.get(sid) || {}
           if (extracted.venderId || extracted.shopId) {
-            console.log('[PlatformWindow] 提取成功，执行预保存')
+            console.log('[PlatformWindow] 提取成功，执行保存并3秒后自动关闭窗口')
             const cred = storeCredentials.get(sid) || {}
-            saveStoreInfo(mw, sid, plat, cred.account, cred.password).catch(err => {
-              console.error('[PlatformWindow] 预保存失败:', err.message)
+            
+            // 保存店铺信息
+            saveStoreInfo(mw, sid, plat, cred.account, cred.password).then(() => {
+              // 保存成功后，3秒后自动关闭窗口
+              setTimeout(() => {
+                if (!win.isDestroyed()) {
+                  console.log('[PlatformWindow] 信息已保存，3秒后自动关闭窗口')
+                  win._saveDone = true // 标记已保存，避免close事件再次保存
+                  win.close()
+                }
+              }, 3000)
+            }).catch(err => {
+              console.error('[PlatformWindow] 保存失败:', err.message)
             })
           } else if (retryCount < maxRetries) {
             // 还没拿到关键数据，继续重试
@@ -345,11 +356,31 @@ function registerPlatformWindowIpc(mainWindow) {
 
       const plat = storePlatforms.get(storeId)
       const cred = storeCredentials.get(storeId) || {}
+      const extracted = storeExtractedInfo.get(storeId) || {}
 
-      console.log('[PlatformWindow] 窗口关闭，保存信息 storeId=', storeId, 'account=', cred.account)
+      console.log('[PlatformWindow] 窗口关闭，检查店铺信息 storeId=', storeId)
 
       const doSaveAndDestroy = async () => {
-        if (plat) {
+        // 检查是否获取到了关键信息（venderId 或 shopId）
+        const hasKeyInfo = extracted.venderId || extracted.shopId
+
+        if (!hasKeyInfo && plat) {
+          // 未获取到关键信息，删除空白店铺卡片
+          console.log('[PlatformWindow] 未获取到店铺信息，删除空白店铺 storeId=', storeId)
+          try {
+            await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+              method: 'DELETE'
+            })
+            console.log('[PlatformWindow] 空白店铺已删除 storeId=', storeId)
+          } catch (err) {
+            console.error('[PlatformWindow] 删除空白店铺失败:', err.message)
+          }
+          // 通知前端刷新列表（storeId=null 表示删除而非更新）
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('platform-login-success', { storeId: null })
+          }
+        } else if (plat) {
+          // 有关键信息，正常保存
           try {
             await saveStoreInfo(mainWindow, storeId, plat, cred.account, cred.password)
           } catch (err) {
@@ -366,7 +397,7 @@ function registerPlatformWindowIpc(mainWindow) {
         storeCredentials.delete(storeId)
         storeExtractedInfo.delete(storeId)
 
-        // 保存完成后真正销毁窗口
+        // 保存/删除完成后真正销毁窗口
         win.destroy()
       }
 
@@ -514,7 +545,28 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
 
     if (Object.keys(updateBody).length > 0) {
       try {
-        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+        // 如果有 merchant_id，先检查是否已存在于其他店铺
+        let targetStoreId = storeId
+        if (merchantId) {
+          try {
+            const checkRes = await httpRequest(`${BUSINESS_SERVER}/api/stores?merchant_id=${merchantId}`, {
+              method: 'GET'
+            })
+            const checkJson = JSON.parse(checkRes.data)
+            if (checkJson.code === 0 && checkJson.data && checkJson.data.list && checkJson.data.list.length > 0) {
+              // 检查是否是不同的店铺
+              const existingStore = checkJson.data.list.find(s => s.id !== storeId)
+              if (existingStore) {
+                console.log(`[PlatformWindow] 发现重复 merchant_id=${merchantId}，更新原有店铺 ${existingStore.id} 而不是 ${storeId}`)
+                targetStoreId = existingStore.id
+              }
+            }
+          } catch (e) {
+            console.warn('[PlatformWindow] 检查重复店铺失败:', e.message)
+          }
+        }
+        
+        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updateBody)
@@ -522,7 +574,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
         if (updateRes.statusCode >= 400) {
           console.error('[PlatformWindow] 更新店铺信息服务端拒绝:', updateRes.statusCode, updateRes.data)
         } else {
-          console.log('[PlatformWindow] 已更新店铺信息:', updateBody)
+          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${targetStoreId}):`, updateBody)
         }
       } catch (e) {
         console.error('[PlatformWindow] 更新店铺信息失败:', e.message)
