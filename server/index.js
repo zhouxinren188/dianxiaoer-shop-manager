@@ -6,6 +6,11 @@ const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const { pool, initDB } = require('./db')
 
+// 版本标记 - 用于验证代码是否更新
+const APP_VERSION = 'v1.0.32-taobao-cookie-filter'
+console.log(`[Server] Application version: ${APP_VERSION}`)
+console.log('[Server] Taobao cookie filter: ENABLED (fix HTTP 431 error)')
+
 // JWT 密钥（与 dianxiaoer-api 保持一致）
 const JWT_SECRET = 'bfb3079104c65c88d55b4ed46624c07b171d8254c87ec40a2f485370d10ee159a7115459fc9d249051bcd60bc0849633c47c4a8d1a4f167cce27aabfd152effd'
 
@@ -1342,15 +1347,15 @@ app.post('/api/purchase-orders', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const { purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
             source_url, platform, purchase_price, remark,
-            purchase_type, shipping_name, shipping_phone, shipping_address } = req.body
+            purchase_type, shipping_name, shipping_phone, shipping_address, account_id } = req.body
     if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
     await pool.execute(
       `INSERT INTO purchase_orders
         (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
          source_url, platform, purchase_price, remark,
-         purchase_type, shipping_name, shipping_phone, shipping_address,
+         purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
          status, owner_id)
-       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?)
+       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?)
        ON DUPLICATE KEY UPDATE
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
          goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), quantity=VALUES(quantity),
@@ -1358,10 +1363,11 @@ app.post('/api/purchase-orders', async (req, res) => {
          purchase_price=VALUES(purchase_price), remark=VALUES(remark),
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
          shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
+         account_id=VALUES(account_id),
          updated_at=NOW()`,
       [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
-       purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'',
+       purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
        ownerId]
     )
     res.json(ok({ purchase_no }))
@@ -1385,11 +1391,23 @@ app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { page=1, pageSize=20, status, platform } = req.query
-    let sql = 'SELECT * FROM purchase_orders WHERE owner_id=?'
+    let sql = `
+      SELECT po.*, pa.account as account_name
+      FROM purchase_orders po
+      LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+      WHERE po.owner_id=?
+    `
     const params = [ownerId]
     if (status) { sql += ' AND status=?'; params.push(status) }
     if (platform) { sql += ' AND platform=?'; params.push(platform) }
-    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
+    
+    // 正确的COUNT查询
+    const countSql = `
+      SELECT COUNT(*) as total
+      FROM purchase_orders po
+      LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+      WHERE po.owner_id=?
+    `
     const [[{ total }]] = await pool.execute(countSql, params)
     const limit = Math.max(1, parseInt(pageSize,10)||20)
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
@@ -1413,7 +1431,9 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { sales_order_no, goods_name, sku, quantity, purchase_price, platform,
-            source_url, remark, logistics_no, logistics_company } = req.body
+            source_url, remark, logistics_no, logistics_company, account_id } = req.body
+
+    console.log(`[Update Purchase Order] id=${req.params.id}, account_id=${account_id}, body=${JSON.stringify(req.body)}`)
 
     const fields = []
     const values = []
@@ -1428,18 +1448,26 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     if (remark !== undefined) { fields.push('remark=?'); values.push(remark) }
     if (logistics_no !== undefined) { fields.push('logistics_no=?'); values.push(logistics_no) }
     if (logistics_company !== undefined) { fields.push('logistics_company=?'); values.push(logistics_company) }
+    if (account_id !== undefined) { fields.push('account_id=?'); values.push(account_id || null) }
+
+    console.log(`[Update Purchase Order] fields=${fields.join(', ')}, values=${JSON.stringify(values)}`)
 
     if (!fields.length) return res.json(fail('没有要修改的字段'))
 
     values.push(req.params.id, ownerId)
     fields.push('updated_at=NOW()')
 
-    await pool.execute(
-      `UPDATE purchase_orders SET ${fields.join(', ')} WHERE id=? AND owner_id=?`,
-      values
-    )
+    const sql = `UPDATE purchase_orders SET ${fields.join(', ')} WHERE id=? AND owner_id=?`
+    console.log(`[Update Purchase Order] SQL=${sql}`)
+    
+    const [result] = await pool.execute(sql, values)
+    console.log(`[Update Purchase Order] affectedRows=${result.affectedRows}`)
+    
     res.json(ok(true))
-  } catch (err) { res.status(500).json(fail(err.message)) }
+  } catch (err) { 
+    console.error(`[Update Purchase Order] Error:`, err)
+    res.status(500).json(fail(err.message)) 
+  }
 })
 
 // 获取采购订单详情（权限校验）
@@ -1568,13 +1596,13 @@ app.post('/api/purchase-orders/sync', async (req, res) => {
       matchedCount++
       const newStatus = statusMap[platformOrder.status] || localOrder.status
 
-      // 更新订单状态
-      if (newStatus !== localOrder.status) {
+      // 更新订单状态和account_id
+      if (newStatus !== localOrder.status || !localOrder.account_id) {
         await pool.execute(
-          'UPDATE purchase_orders SET status=? WHERE id=?',
-          [newStatus, localOrder.id]
+          'UPDATE purchase_orders SET status=?, account_id=? WHERE id=?',
+          [newStatus, account_id, localOrder.id]
         )
-        console.log(`[Sync] Updated order ${localOrder.purchase_no}: ${localOrder.status} -> ${newStatus}`)
+        console.log(`[Sync] Updated order ${localOrder.purchase_no}: ${localOrder.status} -> ${newStatus}, account_id=${account_id}`)
       }
 
       // 如果物流信息存在，也同步更新
@@ -1622,8 +1650,8 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
 
     // 获取Cookie
     const [cookieRows] = await pool.execute(
-      'SELECT pc.cookie_data FROM purchase_cookies pc WHERE pc.account_id = ?',
-      [account_id]
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
+      [account_id, ownerId]
     )
     if (!cookieRows.length) {
       return res.json(fail('采购账号未登录，请先登录该账号'))
@@ -1706,27 +1734,37 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
 
     const localOrder = localOrders[0]
 
-    // 更新状态
+    // 更新状态和account_id
+    const updateFields = []
+    const updateValues = []
+    
     if (newStatus && newStatus !== localOrder.status) {
-      await pool.execute(
-        'UPDATE purchase_orders SET status=? WHERE id=?',
-        [newStatus, localOrder.id]
-      )
+      updateFields.push('status=?')
+      updateValues.push(newStatus)
       console.log(`[Sync-Single] Updated status: ${localOrder.status} -> ${newStatus}`)
     }
+    
+    // 始终设置account_id（即使已存在）
+    updateFields.push('account_id=?')
+    updateValues.push(account_id)
 
     // 更新物流信息
     if (orderInfo.logistics_no) {
-      await pool.execute(
-        'UPDATE purchase_orders SET logistics_no=?, logistics_company=?, logistics_status=? WHERE id=?',
-        [
-          orderInfo.logistics_no || null,
-          orderInfo.logistics_company || null,
-          orderInfo.logistics_status || null,
-          localOrder.id
-        ]
+      updateFields.push('logistics_no=?', 'logistics_company=?', 'logistics_status=?')
+      updateValues.push(
+        orderInfo.logistics_no || null,
+        orderInfo.logistics_company || null,
+        orderInfo.logistics_status || null
       )
       console.log(`[Sync-Single] Updated logistics: ${orderInfo.logistics_no} (${orderInfo.logistics_company})`)
+    }
+
+    if (updateFields.length > 0) {
+      updateValues.push(localOrder.id)
+      await pool.execute(
+        `UPDATE purchase_orders SET ${updateFields.join(', ')} WHERE id=?`,
+        updateValues
+      )
     }
 
     res.json({
@@ -1751,7 +1789,20 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
  */
 async function syncTaobaoOrders(cookies) {
   const https = require('https')
-  const cookieStr = buildCookieString(cookies)
+  const crypto = require('crypto')
+  
+  // 淘宝H5 API只需要关键Cookie,避免请求头过大(HTTP 431错误)
+  // 只保留必需的Cookie字段
+  const requiredCookies = ['_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 't', 'sgcookie', 'enc', 'existShop', 'lgc', 'dnk', 'cna', 'tracknick', '_tb_token_', 'thw', 'hng']
+  let essentialCookies = []
+  
+  if (Array.isArray(cookies)) {
+    essentialCookies = cookies.filter(c => requiredCookies.includes(c.name))
+    console.log(`[Sync] Filtered cookies: ${cookies.length} -> ${essentialCookies.length}`)
+  }
+  
+  const cookieStr = buildCookieString(essentialCookies)
+  console.log(`[Sync] Cookie string length: ${cookieStr.length} bytes`)
 
   // 构建请求数据（正确的格式，与浏览器一致）
   const dataObj = {
@@ -1772,13 +1823,25 @@ async function syncTaobaoOrders(cookies) {
 
   const dataStr = JSON.stringify(dataObj)
   const timestamp = Date.now()
+  // 淘宝H5 API签名使用的时间戳需要除以60000取整（防重放攻击）
+  const signTimestamp = Math.floor(timestamp / 60000)
+
+  // 从Cookie中提取token用于签名
+  const tokenMatch = cookieStr.match(/_m_h5_tk=([^;]+)/)
+  const token = tokenMatch ? tokenMatch[1].split('_')[0] : ''
+
+  // 生成签名: MD5(token&signTimestamp&appKey&data)
+  const signStr = `${token}&${signTimestamp}&12574478&${dataStr}`
+  const sign = crypto.createHash('md5').update(signStr).digest('hex')
+
+  console.log(`[Sync] Token: ${token}, SignTimestamp: ${signTimestamp}, Sign: ${sign}`)
 
   // 构建URL参数（与浏览器抓包一致）
   const params = new URLSearchParams({
     jsv: '2.7.2',
     appKey: '12574478',
     t: timestamp.toString(),
-    sign: 'test',
+    sign: sign,
     v: '1.0',
     ecode: '1',
     timeout: '8000',
@@ -1794,6 +1857,8 @@ async function syncTaobaoOrders(cookies) {
     data: dataStr
   })
 
+  const postData = `data=${encodeURIComponent(dataStr)}`
+
   const options = {
     hostname: 'h5api.m.taobao.com',
     path: `/h5/mtop.taobao.order.queryboughtlistv2/1.0/?${params.toString()}`,
@@ -1802,8 +1867,10 @@ async function syncTaobaoOrders(cookies) {
       'Cookie': cookieStr,
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Accept': '*/*',
-      'Referer': 'https://buyertrade.taobao.com/'
+      'Accept': 'application/json',
+      'Referer': 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
+      'Content-Length': Buffer.byteLength(postData),
+      'Origin': 'https://buyertrade.taobao.com'
     }
   }
 
@@ -1817,6 +1884,16 @@ async function syncTaobaoOrders(cookies) {
         try {
           console.log('[Sync] Taobao H5 API response status:', res.statusCode)
           console.log('[Sync] Response sample:', data.substring(0, 500))
+          
+          // 检查是否是HTML错误页面
+          if (data.trim().startsWith('<') || data.includes('Cannot pro')) {
+            console.error('[Sync] Received HTML response instead of JSON')
+            console.error('[Sync] HTML response preview:', data.substring(0, 1000))
+            console.error('[Sync] Request URL:', options.hostname + options.path)
+            console.error('[Sync] Response headers:', JSON.stringify(res.headers))
+            reject(new Error('淘宝API返回错误页面，Cookie可能已失效'))
+            return
+          }
           
           const orders = parseTaobaoH5Response(data)
           console.log('[Sync] Parsed orders count:', orders.length)
@@ -1834,6 +1911,7 @@ async function syncTaobaoOrders(cookies) {
       req.destroy()
       reject(new Error('请求超时')) 
     })
+    req.write(postData)
     req.end()
   })
 }
@@ -1963,7 +2041,18 @@ function parseTaobaoH5Response(responseText) {
 async function queryTaobaoOrderByNo(cookies, orderNo) {
   const https = require('https')
   const crypto = require('crypto')
-  const cookieStr = buildCookieString(cookies)
+  
+  // 淘宝H5 API只需要关键Cookie,避免请求头过大(HTTP 431错误)
+  const requiredCookies = ['_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 't', 'sgcookie', 'enc', 'existShop', 'lgc', 'dnk', 'cna', 'tracknick', '_tb_token_', 'thw', 'hng']
+  let essentialCookies = []
+  
+  if (Array.isArray(cookies)) {
+    essentialCookies = cookies.filter(c => requiredCookies.includes(c.name))
+    console.log(`[Query-Taobao] Filtered cookies: ${cookies.length} -> ${essentialCookies.length}`)
+  }
+  
+  const cookieStr = buildCookieString(essentialCookies)
+  console.log(`[Query-Taobao] Cookie string length: ${cookieStr.length} bytes`)
 
   console.log(`[Query-Taobao] Querying order: ${orderNo}`)
 
@@ -1987,14 +2076,18 @@ async function queryTaobaoOrderByNo(cookies, orderNo) {
 
   const dataStr = JSON.stringify(dataObj)
   const timestamp = Date.now()
+  // 淘宝H5 API签名使用的时间戳需要除以60000取整（防重放攻击）
+  const signTimestamp = Math.floor(timestamp / 60000)
 
   // 从Cookie中提取token
   const tokenMatch = cookieStr.match(/_m_h5_tk=([^;]+)/)
   const token = tokenMatch ? tokenMatch[1].split('_')[0] : ''
 
   // 生成签名
-  const signStr = `${token}&${timestamp}&12574478&${dataStr}`
+  const signStr = `${token}&${signTimestamp}&12574478&${dataStr}`
   const sign = crypto.createHash('md5').update(signStr).digest('hex')
+  
+  console.log(`[Query-Taobao] Token: ${token}, SignTimestamp: ${signTimestamp}`)
 
   const params = new URLSearchParams({
     jsv: '2.7.2',
@@ -2024,11 +2117,12 @@ async function queryTaobaoOrderByNo(cookies, orderNo) {
     method: 'POST',
     headers: {
       'Cookie': cookieStr,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) dianxiaoer-shop-manager/1.2.11 Chrome/146.0.7680.188 Electron/41.3.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'application/json',
       'Referer': 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
-      'Content-Length': Buffer.byteLength(postData)
+      'Content-Length': Buffer.byteLength(postData),
+      'Origin': 'https://buyertrade.taobao.com'
     }
   }
 
@@ -2045,7 +2139,18 @@ async function queryTaobaoOrderByNo(cookies, orderNo) {
           // 检查是否是HTML错误页面
           if (data.trim().startsWith('<') || data.includes('Cannot pro')) {
             console.error(`[Query-Taobao] Received HTML response instead of JSON`)
-            reject(new Error('淘宝API返回错误页面，Cookie可能已失效'))
+            console.error(`[Query-Taobao] Response status: ${res.statusCode}`)
+            console.error(`[Query-Taobao] HTML content (first 2000 chars):`, data.substring(0, 2000))
+            
+            // 保存错误响应到文件供调试
+            const fs = require('fs')
+            const errorFile = `taobao-error-${Date.now()}.html`
+            try {
+              fs.writeFileSync(errorFile, data.substring(0, 5000))
+              console.error(`[Query-Taobao] Error saved to: C:\\dianxiaoer-server\\${errorFile}`)
+            } catch(e) {}
+            
+            reject(new Error(`淘宝API返回错误页面(HTTP ${res.statusCode})，错误详情已保存到服务器文件`))
             return
           }
           
@@ -2531,13 +2636,6 @@ async function validatePlatformCookie(platform, cookies) {
             }
           }
 
-          // 检查HTML内容是否包含登录关键词
-          if (data.includes('请登录') || data.includes('login') || data.includes('passport')) {
-            console.log(`[Sync] Login keywords found in response, cookie expired`)
-            resolve(false)
-            return
-          }
-
           // HTTP 401/403 = 认证失败
           if (statusCode === 401 || statusCode === 403) {
             console.log(`[Sync] HTTP ${statusCode}, cookie expired`)
@@ -2545,8 +2643,8 @@ async function validatePlatformCookie(platform, cookies) {
             return
           }
 
-          // 其他状态码认为Cookie有效
-          console.log(`[Sync] Cookie appears valid`)
+          // 其他状态码认为Cookie有效(不再检查HTML内容中的login关键词,因为淘宝页面经常包含这些词)
+          console.log(`[Sync] Cookie appears valid (status ${statusCode})`)
           resolve(true)
         })
       })
@@ -2577,9 +2675,9 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
 
-    // 1. 获取采购订单信息
+    // 1. 获取采购订单信息（包含account_id）
     const [rows] = await pool.execute(
-      'SELECT logistics_no, logistics_company, platform FROM purchase_orders WHERE id=? AND owner_id=?',
+      'SELECT logistics_no, logistics_company, platform, account_id FROM purchase_orders WHERE id=? AND owner_id=?',
       [req.params.id, ownerId]
     )
 
@@ -2595,14 +2693,14 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
     // 2. 查询物流轨迹（优先从平台获取，其次使用第三方API）
     let trackingData = null
 
-    // 尝试从平台API获取物流轨迹
+    // 尝试从平台API获取物流轨迹（使用订单关联的account_id）
     try {
       if (order.platform === 'taobao') {
-        trackingData = await queryTaobaoLogistics(order.logistics_no, order.logistics_company, ownerId)
+        trackingData = await queryTaobaoLogistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
       } else if (order.platform === '1688') {
-        trackingData = await query1688Logistics(order.logistics_no, order.logistics_company, ownerId)
+        trackingData = await query1688Logistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
       } else if (order.platform === 'pinduoduo') {
-        trackingData = await queryPddLogistics(order.logistics_no, order.logistics_company, ownerId)
+        trackingData = await queryPddLogistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
       }
     } catch (e) {
       console.log(`[Logistics] 平台物流查询失败: ${e.message}，尝试第三方API`)
@@ -2626,16 +2724,35 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
 /**
  * 查询淘宝物流轨迹
  */
-async function queryTaobaoLogistics(logisticsNo, company, ownerId) {
+async function queryTaobaoLogistics(logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
-  // 淘宝物流查询API（需要有效的Cookie）
-  const cookieRows = await pool.execute(
-    'SELECT pc.cookie_data FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "taobao" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
-    [ownerId]
-  )
+  let cookieRows = []
+  
+  // 优先使用订单关联的account_id获取Cookie
+  if (accountId) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
+      [accountId, ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 使用订单关联的淘宝账号 "${cookieRows[0].account}" (id=${accountId}) 查询物流`)
+    }
+  }
+  
+  // 如果account_id无效或Cookie不存在，fallback到该用户名下最近的淘宝账号
+  if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "taobao" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
+      [ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 订单无account_id，使用最近的淘宝账号 "${cookieRows[0].account}" 查询物流`)
+    }
+  }
 
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    console.log(`[Logistics] 未找到淘宝账号Cookie，owner_id=${ownerId}`)
     return null
   }
 
@@ -2686,15 +2803,35 @@ async function queryTaobaoLogistics(logisticsNo, company, ownerId) {
 /**
  * 查询1688物流轨迹
  */
-async function query1688Logistics(logisticsNo, company, ownerId) {
+async function query1688Logistics(logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
-  const cookieRows = await pool.execute(
-    'SELECT pc.cookie_data FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "1688" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
-    [ownerId]
-  )
+  let cookieRows = []
+  
+  // 优先使用订单关联的account_id获取Cookie
+  if (accountId) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
+      [accountId, ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 使用订单关联的1688账号 "${cookieRows[0].account}" (id=${accountId}) 查询物流`)
+    }
+  }
+  
+  // 如果account_id无效或Cookie不存在，fallback
+  if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "1688" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
+      [ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 订单无account_id，使用最近的1688账号 "${cookieRows[0].account}" 查询物流`)
+    }
+  }
 
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    console.log(`[Logistics] 未找到1688账号Cookie，owner_id=${ownerId}`)
     return null
   }
 
@@ -2747,15 +2884,35 @@ async function query1688Logistics(logisticsNo, company, ownerId) {
 /**
  * 查询拼多多物流轨迹
  */
-async function queryPddLogistics(logisticsNo, company, ownerId) {
+async function queryPddLogistics(logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
-  const cookieRows = await pool.execute(
-    'SELECT pc.cookie_data FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "pinduoduo" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
-    [ownerId]
-  )
+  let cookieRows = []
+  
+  // 优先使用订单关联的account_id获取Cookie
+  if (accountId) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
+      [accountId, ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 使用订单关联的拼多多账号 "${cookieRows[0].account}" (id=${accountId}) 查询物流`)
+    }
+  }
+  
+  // 如果account_id无效或Cookie不存在，fallback
+  if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    cookieRows = await pool.execute(
+      'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "pinduoduo" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
+      [ownerId]
+    )
+    if (cookieRows.length && cookieRows[0].cookie_data) {
+      console.log(`[Logistics] 订单无account_id，使用最近的拼多多账号 "${cookieRows[0].account}" 查询物流`)
+    }
+  }
 
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
+    console.log(`[Logistics] 未找到拼多多账号Cookie，owner_id=${ownerId}`)
     return null
   }
 

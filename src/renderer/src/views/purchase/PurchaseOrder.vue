@@ -42,8 +42,8 @@
         <el-form-item label="采购编号">
           <el-input v-model="filterForm.purchaseNo" placeholder="请输入采购编号" clearable style="width: 160px" />
         </el-form-item>
-        <el-form-item label="平台订单号">
-          <el-input v-model="filterForm.platformOrderNo" placeholder="请输入平台订单号" clearable style="width: 180px" />
+        <el-form-item label="采购订单号">
+          <el-input v-model="filterForm.platformOrderNo" placeholder="请输入采购订单号" clearable style="width: 180px" />
         </el-form-item>
         <el-form-item label="关联销售单号">
           <el-input v-model="filterForm.salesOrderNo" placeholder="请输入销售单号" clearable style="width: 160px" />
@@ -120,7 +120,14 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="platform_order_no" label="平台订单号" width="180" align="center">
+        <el-table-column prop="account_name" label="采购账号" width="140" align="center">
+          <template #default="{ row }">
+            <span v-if="row.account_name">{{ row.account_name }}</span>
+            <span v-else class="text-muted">--</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="platform_order_no" label="采购订单号" width="180" align="center">
           <template #default="{ row }">
             <span v-if="row.platform_order_no">{{ row.platform_order_no }}</span>
             <el-tag v-else type="info" size="small">未绑定</el-tag>
@@ -230,7 +237,7 @@
           <el-descriptions-item label="采购编号">
             <span style="font-weight: 600; color: #e6a23c">{{ currentRow.purchase_no }}</span>
           </el-descriptions-item>
-          <el-descriptions-item label="平台订单号">{{ currentRow.platform_order_no || '--' }}</el-descriptions-item>
+          <el-descriptions-item label="采购订单号">{{ currentRow.platform_order_no || '--' }}</el-descriptions-item>
           <el-descriptions-item label="采购平台">{{ platformLabel(currentRow.platform) }}</el-descriptions-item>
           <el-descriptions-item label="商品名称">{{ currentRow.goods_name }}</el-descriptions-item>
           <el-descriptions-item label="规格">{{ currentRow.sku || '--' }}</el-descriptions-item>
@@ -469,8 +476,13 @@
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
-        <el-form-item label="平台订单号">
-          <el-input v-model="editPurchaseForm.platformOrderNo" placeholder="已发货后填入平台订单号（可选）" />
+        <el-form-item label="采购账号">
+          <el-select v-model="editPurchaseForm.accountId" placeholder="请选择采购账号（可选）" style="width: 100%" clearable>
+            <el-option v-for="acc in accountList.filter(a => a.platform === editPurchaseForm.platform && a.cookie_valid)" :key="acc.id" :label="acc.username" :value="acc.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="采购订单号">
+          <el-input v-model="editPurchaseForm.platformOrderNo" placeholder="已发货后填入采购订单号（可选）" />
         </el-form-item>
         <el-form-item label="物流单号">
           <el-input v-model="editPurchaseForm.logisticsNo" placeholder="已发货后填入物流单号（可选）" />
@@ -523,7 +535,12 @@
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
-        <el-form-item label="平台订单号">
+        <el-form-item label="采购账号">
+          <el-select v-model="addPurchaseForm.accountId" placeholder="请选择采购账号（可选）" style="width: 100%" clearable>
+            <el-option v-for="acc in accountList.filter(a => a.platform === addPurchaseForm.platform && a.cookie_valid)" :key="acc.id" :label="acc.username" :value="acc.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="采购订单号">
           <el-input v-model="addPurchaseForm.platformOrderNo" placeholder="已发货后填入物流单号（可选）" />
         </el-form-item>
         <el-form-item label="货源链接">
@@ -832,7 +849,16 @@ async function loadData() {
   loading.value = true
   try {
     const data = await fetchPurchaseOrders({ pageSize: 500 })
-    tableData.value = data.list || data || []
+    const orders = data.list || data || []
+    
+    // 为每个订单填充account_name
+    tableData.value = orders.map(order => {
+      const account = accountList.value.find(acc => acc.id === order.account_id)
+      return {
+        ...order,
+        account_name: account ? account.username : null
+      }
+    })
   } catch (err) {
     console.warn('加载采购订单失败:', err.message)
     tableData.value = []
@@ -920,6 +946,7 @@ const addPurchaseForm = reactive({
   quantity: 1,
   purchasePrice: 0,
   platform: 'taobao',
+  accountId: null,
   platformOrderNo: '',
   sourceUrl: '',
   remark: ''
@@ -937,6 +964,7 @@ const editPurchaseForm = reactive({
   quantity: 1,
   purchasePrice: 0,
   platform: 'taobao',
+  accountId: null,
   platformOrderNo: '',
   logisticsNo: '',
   logisticsCompany: '',
@@ -953,6 +981,7 @@ function handleEditPurchase(row) {
   editPurchaseForm.quantity = row.quantity || 1
   editPurchaseForm.purchasePrice = row.purchase_price || 0
   editPurchaseForm.platform = row.platform || 'taobao'
+  editPurchaseForm.accountId = row.account_id || null
   editPurchaseForm.platformOrderNo = row.platform_order_no || ''
   editPurchaseForm.logisticsNo = row.logistics_no || ''
   editPurchaseForm.logisticsCompany = row.logistics_company || ''
@@ -980,13 +1009,14 @@ async function handleEditPurchaseSubmit() {
       quantity: editPurchaseForm.quantity,
       purchase_price: editPurchaseForm.purchasePrice,
       platform: editPurchaseForm.platform,
+      account_id: editPurchaseForm.accountId,
       source_url: editPurchaseForm.sourceUrl,
       remark: editPurchaseForm.remark,
       logistics_no: editPurchaseForm.logisticsNo,
       logistics_company: editPurchaseForm.logisticsCompany
     })
 
-    // 如果填了平台订单号且之前没有，则绑定
+    // 如果填了采购订单号且之前没有，则绑定
     if (editPurchaseForm.platformOrderNo && editPurchaseForm.platformOrderNo !== editPurchaseForm.purchaseNo) {
       await bindPlatformOrderNo(editPurchaseForm.purchaseNo, { platform_order_no: editPurchaseForm.platformOrderNo })
     }
@@ -1006,6 +1036,7 @@ function handleAddPurchase() {
   addPurchaseForm.quantity = 1
   addPurchaseForm.purchasePrice = 0
   addPurchaseForm.platform = 'taobao'
+  addPurchaseForm.accountId = null
   addPurchaseForm.platformOrderNo = ''
   addPurchaseForm.sourceUrl = ''
   addPurchaseForm.remark = ''
@@ -1041,11 +1072,12 @@ async function handleAddPurchaseSubmit() {
       quantity: addPurchaseForm.quantity,
       purchase_price: addPurchaseForm.purchasePrice,
       platform: addPurchaseForm.platform,
+      account_id: addPurchaseForm.accountId,
       source_url: addPurchaseForm.sourceUrl,
       remark: addPurchaseForm.remark
     })
 
-    // 如果填了平台订单号，则绑定
+    // 如果填了采购订单号，则绑定
     if (addPurchaseForm.platformOrderNo) {
       await bindPlatformOrderNo(purchaseNo, { platform_order_no: addPurchaseForm.platformOrderNo })
     }
@@ -1087,7 +1119,7 @@ async function handleSyncSubmit() {
 // 单个订单同步
 async function handleSyncSingle(row) {
   if (!row.platform || !row.platform_order_no) {
-    ElMessage.warning('该订单没有平台信息或平台订单号')
+    ElMessage.warning('该订单没有平台信息或采购订单号')
     return
   }
   
@@ -1095,15 +1127,29 @@ async function handleSyncSingle(row) {
     console.log('[Sync-Single] 订单信息:', {
       platform: row.platform,
       platform_order_no: row.platform_order_no,
+      account_id: row.account_id,
       purchase_no: row.purchase_no
     })
-    console.log('[Sync-Single] 账号列表:', accountList.value)
     
-    // 查找匹配的采购账号（platform匹配且cookie有效）
-    const account = accountList.value.find(acc => {
-      console.log(`[Sync-Single] 检查账号: id=${acc.id}, platform=${acc.platform}, cookie_valid=${acc.cookie_valid}`)
-      return acc.platform === row.platform && acc.cookie_valid
-    })
+    // 优先使用订单已关联的account_id
+    let account = null
+    if (row.account_id) {
+      account = accountList.value.find(acc => acc.id === row.account_id)
+      if (account) {
+        console.log('[Sync-Single] 使用订单已关联的账号:', account)
+      }
+    }
+    
+    // 如果订单没有关联账号，查找匹配的采购账号（platform匹配且cookie有效）
+    if (!account) {
+      console.log('[Sync-Single] 订单未关联账号，开始查找匹配的账号')
+      console.log('[Sync-Single] 账号列表:', accountList.value)
+      
+      account = accountList.value.find(acc => {
+        console.log(`[Sync-Single] 检查账号: id=${acc.id}, platform=${acc.platform}, cookie_valid=${acc.cookie_valid}`)
+        return acc.platform === row.platform && acc.cookie_valid
+      })
+    }
     
     if (!account) {
       // 尝试查找任意该平台的账号（不管cookie_valid）
@@ -1116,7 +1162,7 @@ async function handleSyncSingle(row) {
       return
     }
     
-    console.log('[Sync-Single] 找到账号:', account)
+    console.log('[Sync-Single] 最终使用账号:', account)
     
     const loading = ElMessage({
       message: `正在同步订单 ${row.platform_order_no}...`,
@@ -1149,9 +1195,9 @@ async function handleSyncSingle(row) {
 
 // ==================== 生命周期 ====================
 
-onMounted(() => {
-  loadData()
-  loadAccounts()
+onMounted(async () => {
+  await loadAccounts()  // 先加载账号列表
+  await loadData()       // 再加载采购订单数据
 
   // 监听采购账号登录成功事件
   if (window.electronAPI) {

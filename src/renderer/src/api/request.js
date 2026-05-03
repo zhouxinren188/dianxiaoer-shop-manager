@@ -1,6 +1,6 @@
-// 后端服务地址（远程服务器）
-const BASE_URL = 'http://150.158.54.108:3002'
-// const BASE_URL = 'http://localhost:3002'  // 本地开发
+// 后端服务地址
+const BASE_URL = 'http://150.158.54.108:3002'  // 远程服务器
+// const BASE_URL = 'http://localhost:3002'  // 本地开发（调试用）
 
 async function request(url, options = {}) {
   const { method = 'GET', data, params, timeout = 10000 } = options
