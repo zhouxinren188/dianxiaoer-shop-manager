@@ -1,9 +1,7 @@
 <template>
   <div class="sidebar-container">
     <div class="sidebar-logo">
-      <div class="logo-icon">
-        <el-icon :size="20" color="#fff"><Shop /></el-icon>
-      </div>
+      <img src="/logo.png" alt="logo" class="logo-img" />
       <span class="logo-text">店小二网店管家</span>
     </div>
     <el-menu
@@ -157,7 +155,6 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  Shop,
   HomeFilled,
   List,
   Service,
@@ -296,15 +293,12 @@ onUnmounted(() => {
   gap: 12px;
 }
 
-.logo-icon {
+.logo-img {
   width: 32px;
   height: 32px;
-  background: #2b5aed;
   border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
+  object-fit: cover;
 }
 
 .logo-text {

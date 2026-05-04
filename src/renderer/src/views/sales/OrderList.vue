@@ -6,30 +6,26 @@
         <div class="filter-grid">
           <div class="filter-item">
             <label class="filter-label">选择店铺</label>
-            <el-select 
-              v-model="searchForm.storeId" 
-              filterable 
-              clearable 
+            <el-select
+              v-model="searchForm.storeId"
+              filterable
+              clearable
               placeholder="全部店铺"
               @clear="searchForm.storeId = ''"
             >
-              <template #prefix>
-                <span v-if="searchForm.storeId && searchForm.storeId !== ''" class="store-select-prefix">
-                  <span>{{ getStoreName(searchForm.storeId) }}</span>
-                  <el-tag v-if="getStoreOnlineStatus(searchForm.storeId)" type="success" size="small" style="margin-left:8px;">在线</el-tag>
-                </span>
-              </template>
-              <el-option label="全部店铺" :value="''">
-                <div style="display:flex;align-items:center;justify-content:space-between">
-                  <span>全部店铺</span>
-                </div>
-              </el-option>
-              <el-option v-for="s in storeOptions" :key="s.id" :label="s.name" :value="s.id">
+              <el-option label="全部店铺" :value="''" />
+              <el-option v-for="s in filteredStoreOptions" :key="s.id" :label="s.name" :value="s.id">
                 <div style="display:flex;align-items:center;justify-content:space-between">
                   <span>{{ s.name }}</span>
                   <el-tag v-if="s.online" type="success" size="small">在线</el-tag>
                 </div>
               </el-option>
+              <template #label="{ label, value }">
+                <div class="store-select-prefix">
+                  <el-tag v-if="getStoreOnlineStatus(value)" type="success" size="small" style="margin-right:6px;">在线</el-tag>
+                  <span>{{ label }}</span>
+                </div>
+              </template>
             </el-select>
           </div>
           <div class="filter-item">
@@ -49,13 +45,19 @@
             <el-input v-model="searchForm.customerName" placeholder="请输入关键词" clearable />
           </div>
           <div class="filter-item">
-            <label class="filter-label">客户电话</label>
-            <el-input v-model="searchForm.customerPhone" placeholder="请输入关键词" clearable />
+            <label class="filter-label">采购状态</label>
+            <el-select v-model="searchForm.purchaseStatus" placeholder="全部状态" clearable>
+              <el-option label="未采购" value="未采购" />
+              <el-option label="已采购（三方代发）" value="已采购（三方代发）" />
+              <el-option label="已采购（仓库转发）" value="已采购（仓库转发）" />
+              <el-option label="仓库有货" value="仓库有货" />
+              <el-option label="已忽略" value="已忽略" />
+            </el-select>
           </div>
           <div class="filter-item">
-            <label class="filter-label">订单状态</label>
-            <el-select v-model="searchForm.orderStatus" placeholder="请选择" clearable>
-              <el-option v-for="s in orderStatusOptions" :key="s" :label="s" :value="s" />
+            <label class="filter-label">店铺标签</label>
+            <el-select v-model="searchForm.storeTag" placeholder="全部标签" clearable filterable @clear="searchForm.storeTag = ''">
+              <el-option v-for="tag in storeTagOptions" :key="tag" :label="tag" :value="tag" />
             </el-select>
           </div>
           <div class="filter-item">
@@ -71,13 +73,13 @@
             <el-icon><Search /></el-icon>
             <span>查询订单</span>
           </el-button>
-          <el-button class="action-btn action-btn-blue" size="large" :disabled="loading || !!autoSyncStatus" @click="handleSyncOrders">
+          <el-button class="action-btn action-btn-blue" size="large" :disabled="loading || !!syncStatusText" @click="handleSyncOrders">
             <el-icon><Refresh /></el-icon>
             <span>同步订单</span>
           </el-button>
-          <span v-if="autoSyncStatus" class="auto-sync-tip">
+          <span v-if="syncStatusText" class="auto-sync-tip">
             <el-icon class="sync-spin"><Refresh /></el-icon>
-            {{ autoSyncStatus }}
+            {{ syncStatusText }}
           </span>
           <span v-if="syncSkipStatus" class="sync-skip-tip">
             <el-icon><CircleClose /></el-icon>
@@ -149,7 +151,7 @@
         :class="{ active: activeStatus === item.value }"
         @click="handleStatusClick(item.value)"
       >
-        {{ item.label }}<span class="stat-count">({{ item.count }})</span>
+        {{ item.label }}<span v-if="item.count !== null" class="stat-count">({{ item.count }})</span>
       </span>
     </div>
 
@@ -191,9 +193,9 @@
               <span class="order-header-no">{{ order.orderNo }}</span>
               <span class="order-header-divider">|</span>
               <span class="order-header-shop">{{ order.shopName }}</span>
-              <el-tag size="small" :type="shopTagColorType(order.shopTag)" effect="plain" class="order-header-platform">{{ order.shopTag }}</el-tag>
               <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
-              <el-tag v-if="order.purchaseStatus" :type="purchaseStatusTagType(order.purchaseStatus)" size="small" effect="plain">{{ order.purchaseStatus }}</el-tag>
+              <el-tag v-if="getDisplayPurchaseStatus(order)" :type="purchaseStatusTagType(getDisplayPurchaseStatus(order))" size="small" effect="plain">{{ getDisplayPurchaseStatus(order) }}</el-tag>
+              <el-link v-if="order.purchaseStatus === '未采购'" type="info" :underline="false" style="margin-left:2px;font-size:12px" @click.stop="handleIgnorePurchase(order)">忽略</el-link>
               <span class="order-header-divider">|</span>
               <span class="order-header-time-label">下单时间：</span>
               <span class="order-header-time">{{ order.orderTime }}</span>
@@ -331,12 +333,23 @@
             <span class="order-buyer-name">{{ order.customerName }}</span>
             <span v-if="order.customerPhone" class="order-buyer-phone">[{{ order.customerPhone }}]</span>
             <span class="order-header-divider">|</span>
-            <span class="order-address-label">收货地址:</span>
-            <span class="order-address-text" :title="order.address">{{ order.address }}</span>
             <div class="order-contact-btn" @click.stop="handleOpenChat(order)">
               <el-icon><ChatDotRound /></el-icon>
               <span>联系买家</span>
             </div>
+            <span class="order-header-divider">|</span>
+            <span class="order-address-label">收货地址:</span>
+            <span class="order-address-text" :title="order.address">{{ order.address }}</span>
+            <el-button
+              type="primary"
+              text
+              size="small"
+              :loading="order._sensitiveLoading"
+              class="order-reveal-btn"
+              @click.stop="handleRevealBuyerInfo(order)"
+            >
+              <el-icon><View /></el-icon>
+            </el-button>
           </div>
         </div>
       </div>
@@ -365,7 +378,8 @@
           <div class="detail-header-left">
             <span class="detail-order-no">{{ currentOrder.orderNo }}</span>
             <el-tag :type="orderStatusTagType(currentOrder.orderStatus)" size="small">{{ currentOrder.orderStatus }}</el-tag>
-            <el-tag v-if="currentOrder.purchaseStatus" :type="purchaseStatusTagType(currentOrder.purchaseStatus)" size="small" effect="plain">{{ currentOrder.purchaseStatus }}</el-tag>
+            <el-tag v-if="getDisplayPurchaseStatus(currentOrder)" :type="purchaseStatusTagType(getDisplayPurchaseStatus(currentOrder))" size="small" effect="plain">{{ getDisplayPurchaseStatus(currentOrder) }}</el-tag>
+            <el-link v-if="currentOrder.purchaseStatus === '未采购'" type="info" :underline="false" style="margin-left:2px;font-size:12px" @click.stop="handleIgnorePurchase(currentOrder)">忽略</el-link>
           </div>
           <span class="detail-order-time">{{ currentOrder.orderTime }}</span>
         </div>
@@ -811,9 +825,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Goods, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Link, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, TrendCharts, Box } from '@element-plus/icons-vue'
-import { fetchStores } from '@/api/store'
-import { fetchSalesOrders, saveSalesOrders, updateBuyerInfo } from '@/api/salesOrder'
+import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box } from '@element-plus/icons-vue'
+import { fetchStores, updateStoreSyncTime } from '@/api/store'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
@@ -821,7 +835,7 @@ import { fetchWarehouses } from '@/api/warehouse'
 
 // ==================== 筛选项配置 ====================
 
-const orderStatusOptions = ['待付款', '待发货', '已发货', '已完成', '已取消']
+const orderStatusOptions = ['待付款', '待出库', '已出库', '暂停订单', '已完成', '已取消']
 const issueEventOptions = ['超时未发货', '库存不足', '物流异常', '客户拒收']
 
 const AVATAR_COLORS = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
@@ -830,6 +844,8 @@ const AVATAR_COLORS = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#
 
 const storeOptions = ref([])
 const tableData = ref([])
+const total = ref(0)
+const statusCounts = ref({ total: 0, counts: {} })
 const loading = ref(false)
 
 const searchForm = reactive({
@@ -838,28 +854,28 @@ const searchForm = reactive({
   goodsName: '',
   outboundNo: '',
   customerName: '',
-  customerPhone: '',
-  orderStatus: '',
+  purchaseStatus: '',
+  storeTag: '',
   issueEvent: ''
 })
 
-const activeStatus = ref('')
+const activeStatus = ref('待出库')
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(10)
 const selectAll = ref(false)
 
-// 自动同步状态
-const autoSyncStatus = ref('')  // 正在同步的店铺名称，为空表示未在同步
-const syncSkipStatus = ref('')  // 跳过的店铺信息
+// 同步状态（拆分为独立变量，避免竞态条件）
+const manualSyncStatus = ref('')       // 手动同步状态
+const autoSyncStatus = ref('')         // 渲染进程自动同步状态
+const mainProcessSyncStatus = ref('')  // 主进程自动同步状态
+const syncSkipStatus = ref('')         // 跳过的店铺信息
 
 // 同步状态文本（用于显示在小字区域）
 const syncStatusText = computed(() => {
-  if (syncSkipStatus.value) {
-    return syncSkipStatus.value
-  }
-  if (autoSyncStatus.value) {
-    return autoSyncStatus.value
-  }
+  if (syncSkipStatus.value) return syncSkipStatus.value
+  if (manualSyncStatus.value) return manualSyncStatus.value
+  if (autoSyncStatus.value) return autoSyncStatus.value
+  if (mainProcessSyncStatus.value) return mainProcessSyncStatus.value
   return ''
 })
 
@@ -964,12 +980,28 @@ async function syncAllUserStores() {
         })
         
         if (result.success) {
-          console.log(`[自动同步] [${i + 1}/${stores.length}] 成功: ${result.data?.list?.length || 0} 条订单`)
+          const orders = result.data?.list || []
+          console.log(`[自动同步] [${i + 1}/${stores.length}] 成功: ${orders.length} 条订单`)
+          // 保存订单到服务器
+          if (orders.length > 0) {
+            try {
+              await saveSalesOrders(store.id, orders)
+              console.log(`[自动同步] [${i + 1}/${stores.length}] 已保存 ${orders.length} 条订单到服务器`)
+            } catch (saveErr) {
+              console.error(`[自动同步] [${i + 1}/${stores.length}] 保存订单失败:`, saveErr.message)
+            }
+          }
           // 更新服务器上的同步时间
           try {
-            await fetch(`/api/stores/${store.id}/sync-time`, { method: 'PUT' })
+            await updateStoreSyncTime(store.id)
           } catch (err) {
             console.error('[自动同步] 更新同步时间失败:', err.message)
+          }
+          // 静默更新状态计数（不影响用户当前浏览的表格）
+          try {
+            await loadStatusCounts()
+          } catch (refreshErr) {
+            console.error(`[自动同步] [${i + 1}/${stores.length}] 状态计数刷新失败:`, refreshErr.message)
           }
         } else {
           console.log(`[自动同步] [${i + 1}/${stores.length}] 失败: ${result.message}`)
@@ -997,30 +1029,16 @@ async function syncAllUserStores() {
 
 // 组件卸载时清理定时器（在后面的 onUnmounted 中统一处理）
 
-function onFuncBtnClick(action) {
-  console.log(`[功能区按钮] ${action}`)
-}
-
 // ==================== 数据加载 ====================
 
 async function loadStores() {
   try {
     const data = await fetchStores({ platform: 'jd', store_type: 'pop', status: 'enabled', pageSize: 100 })
     storeOptions.value = data.list || []
-    const onlineStore = storeOptions.value.find(s => s.online === 1)
-    if (onlineStore) {
-      searchForm.storeId = onlineStore.id
-    } else if (storeOptions.value.length > 0) {
-      searchForm.storeId = storeOptions.value[0].id
-    }
+    // 默认不选中任何店铺，即"全部店铺"
   } catch (err) {
     console.error('加载店铺列表失败:', err.message)
   }
-}
-
-function getSelectedStoreName() {
-  const store = storeOptions.value.find(s => s.id === searchForm.storeId)
-  return store ? store.name : ''
 }
 
 function getStoreNameById(storeId) {
@@ -1079,8 +1097,9 @@ function mapServerOrder(row) {
     id: row.id,
     selected: false,
     orderNo: row.order_id,
-    orderStatus: row.status_text || '',
-    purchaseStatus: '',
+    orderStatus: STATUS_ALIAS_MAP[row.status_text] || row.status_text || '',
+    purchaseStatus: row.purchase_status || '未采购',
+    hasInventory: row.has_inventory || false,
     orderTime: row.order_time || '',
     amount: parseFloat(row.goods_amount) || 0,
     shippingFee: parseFloat(row.shipping_fee) || 0,
@@ -1111,17 +1130,54 @@ async function loadOrdersFromServer() {
       pageSize: pageSize.value
     }
     if (searchForm.storeId) params.store_id = searchForm.storeId
-    if (searchForm.orderStatus) params.status = searchForm.orderStatus
+    if (activeStatus.value) params.status = activeStatus.value
+    if (searchForm.storeTag) params.store_tag = searchForm.storeTag
+    if (searchForm.orderNo) params.order_id = searchForm.orderNo
+    if (searchForm.goodsName) params.goods_name = searchForm.goodsName
+    if (searchForm.customerName) params.customer_name = searchForm.customerName
+    if (searchForm.purchaseStatus) params.purchase_status = searchForm.purchaseStatus
+    if (searchForm.outboundNo) params.outbound_no = searchForm.outboundNo
     const data = await fetchSalesOrders(params)
     const list = (data.list || []).map(mapServerOrder)
     tableData.value = list
-    // 更新总数（如果后端返回了 total）
-    if (data.total !== undefined) {
-      // 注意：当使用服务器端分页时，total 应该是服务器返回的总数
-      // 但当前前端使用客户端分页，所以这里保持兼容两种模式
-    }
+    total.value = data.total || 0
   } catch (err) {
     console.warn('从服务器加载订单失败:', err.message)
+  }
+}
+
+// 状态名称标准化映射（与后端保持一致，防止数据库中存在旧名称）
+const STATUS_ALIAS_MAP = {
+  '等待付款': '待付款',
+  '等待出库': '待出库',
+  '锁定': '暂停订单',
+  '暂停': '暂停订单',
+  '已发货': '已出库',
+}
+
+async function loadStatusCounts() {
+  try {
+    const params = {}
+    if (searchForm.storeId) params.store_id = searchForm.storeId
+    if (searchForm.storeTag) params.store_tag = searchForm.storeTag
+    if (searchForm.orderNo) params.order_id = searchForm.orderNo
+    if (searchForm.goodsName) params.goods_name = searchForm.goodsName
+    if (searchForm.customerName) params.customer_name = searchForm.customerName
+    if (searchForm.purchaseStatus) params.purchase_status = searchForm.purchaseStatus
+    if (searchForm.outboundNo) params.outbound_no = searchForm.outboundNo
+    const data = await fetchSalesOrderStatusCounts(params)
+    // request.js 在 token 失效时可能返回完整 JSON { code:1, message:'...' } 而非 json.data
+    if (!data || typeof data !== 'object') return
+    if (data.code !== undefined && data.total === undefined) return
+    // 标准化状态名称（处理后端未更新的情况）
+    const normalizedCounts = {}
+    for (const [key, val] of Object.entries(data.counts || {})) {
+      const normalizedKey = STATUS_ALIAS_MAP[key] || key
+      normalizedCounts[normalizedKey] = (normalizedCounts[normalizedKey] || 0) + val
+    }
+    statusCounts.value = { total: data.total || 0, counts: normalizedCounts }
+  } catch (err) {
+    console.warn('加载状态计数失败:', err.message)
   }
 }
 
@@ -1130,6 +1186,7 @@ async function loadOrdersFromServer() {
 function handleQueryOrders() {
   currentPage.value = 1
   loadOrdersFromServer()
+  loadStatusCounts()
 }
 
 async function handleSyncOrders() {
@@ -1146,7 +1203,7 @@ async function handleSyncOrders() {
   // 显示正在同步的店铺名
   const currentStore = storeOptions.value.find(s => s.id === searchForm.storeId)
   const storeName = currentStore ? currentStore.name : '店铺'
-  autoSyncStatus.value = storeName
+  manualSyncStatus.value = storeName
 
   loading.value = true
   activeStatus.value = ''
@@ -1167,6 +1224,13 @@ async function handleSyncOrders() {
           console.warn('保存订单到服务器失败:', saveErr.message)
         }
         await loadOrdersFromServer()
+        loadStatusCounts()
+      }
+      // 无论是否有订单，都更新同步时间，防止自动同步重复触发
+      try {
+        await updateStoreSyncTime(searchForm.storeId)
+      } catch (err) {
+        console.error('[手动同步] 更新同步时间失败:', err.message)
       }
     } else {
       ElMessage({ message: result.message || '获取订单失败', type: 'error', center: true })
@@ -1175,12 +1239,8 @@ async function handleSyncOrders() {
     ElMessage({ message: '获取订单失败: ' + err.message, type: 'error', center: true })
   } finally {
     loading.value = false
-    autoSyncStatus.value = ''
+    manualSyncStatus.value = ''
   }
-}
-
-function handleTrackShip() {
-  console.log('[操作栏] 轨迹发货')
 }
 
 function handleOpenChat(order) {
@@ -1218,15 +1278,16 @@ async function handleRevealBuyerInfo(order) {
         order.customerName = info.buyerName
         order.receiver = info.buyerName
       }
-      if (info.buyerPhone) {
-        order.customerPhone = info.buyerPhone
-      }
-      if (info.buyerAddress) {
-        order.address = info.buyerAddress
-      }
+      if (info.buyerPhone) order.customerPhone = info.buyerPhone
+      if (info.buyerAddress) order.address = info.buyerAddress
       ElMessage.success('买家真实信息已获取')
+
+      try {
+        await updateBuyerInfo(searchForm.storeId, order.orderNo, info)
+      } catch (e) {
+        console.warn('[BuyerInfo] 回写服务器失败:', e.message)
+      }
     } else {
-      console.log('[BuyerInfo] 解析失败，原始响应:', result.rawResponse)
       ElMessage.error(result.message || '获取买家信息失败')
     }
   } catch (err) {
@@ -1363,14 +1424,12 @@ async function handlePurchase(order, item, itemIdx) {
   try {
     const res = await fetchPurchaseAccounts()
     console.log('[采购下单] 采购账号API返回:', JSON.stringify(res))
-    if (res && res.list) {
-      purchaseAccounts.value = res.list
-    } else if (Array.isArray(res)) {
-      purchaseAccounts.value = res
-    } else {
-      purchaseAccounts.value = []
-      console.warn('[采购下单] 采购账号API返回格式异常:', res)
-    }
+    const rawList = res && res.list ? res.list : (Array.isArray(res) ? res : [])
+    purchaseAccounts.value = rawList.map(a => ({
+      ...a,
+      username: a.account || a.username || '',
+      status: a.online ? 'online' : 'offline'
+    }))
   } catch (e) {
     console.warn('[采购下单] 加载采购账号失败:', e.message)
     ElMessage.warning('加载采购账号失败: ' + e.message)
@@ -1711,10 +1770,17 @@ function handleGoOrder() {
   // 记住使用的账号
   localStorage.setItem('lastPurchaseAccount_' + purchaseInfo.platform, String(purchaseInfo.selectedAccountId))
 
+  // 获取选中的采购账号名称和密码
+  const selectedAccount = purchaseAccounts.value.find(acc => acc.id === purchaseInfo.selectedAccountId)
+  const accountName = selectedAccount ? (selectedAccount.username || selectedAccount.name || '') : ''
+  const accountPassword = selectedAccount ? (selectedAccount.password || '') : ''
+
   // 调用主进程打开采购窗口
   if (window.electronAPI) {
     window.electronAPI.invoke('open-purchase-order-window', {
       accountId: purchaseInfo.selectedAccountId,
+      accountName: accountName,
+      password: accountPassword,
       purchaseUrl: finalUrl,
       platform: purchaseInfo.platform,
       purchaseInfo: {
@@ -1753,8 +1819,10 @@ let unsubOrderCaptured = null
 let unsubWindowClosed = null
 let unsubAddressFilled = null
 let unsubAddressSetupDone = null
+let unsubAddressSetupStart = null
 let unsubAutoSyncStart = null
 let unsubAutoSyncResult = null
+let unsubStoreStatusChanged = null
 
 function setupPurchaseListeners() {
   if (!window.electronAPI) return
@@ -1769,8 +1837,30 @@ function setupPurchaseListeners() {
       } else {
         purchaseInfo.captureStatus = 'captured'
         ElMessage.success('采购订单已自动创建并绑定')
+        // 立即更新tableData中对应订单的sysRemark和采购状态，无需刷新
+        if (data.salesOrderId) {
+          const order = tableData.value.find(o => o.id === data.salesOrderId)
+          if (order) {
+            if (data.sysRemark) {
+              order.sysRemark = data.sysRemark
+              order.sys_remark = data.sysRemark
+            }
+            // 根据采购类型更新采购状态
+            order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+            order.hasInventory = false
+          }
+        }
         // 成功后自动关闭对话框（释放遮罩层，恢复侧边栏可点击）
         setTimeout(() => { purchaseDialogVisible.value = false }, 1500)
+        // 刷新采购账号列表（更新在线状态）
+        fetchPurchaseAccounts().then(res => {
+          const rawList = res && res.list ? res.list : (Array.isArray(res) ? res : [])
+          purchaseAccounts.value = rawList.map(a => ({
+            ...a,
+            username: a.account || a.username || '',
+            status: a.online ? 'online' : 'offline'
+          }))
+        }).catch(() => {})
       }
     }
   })
@@ -1781,6 +1871,15 @@ function setupPurchaseListeners() {
         purchaseInfo.captureStatus = 'idle'
         ElMessage.info('未检测到订单号，请手动输入')
       }
+      // 窗口关闭时刷新采购账号在线状态（用户可能手动登录了）
+      fetchPurchaseAccounts().then(res => {
+        const rawList = res && res.list ? res.list : (Array.isArray(res) ? res : [])
+        purchaseAccounts.value = rawList.map(a => ({
+          ...a,
+          username: a.account || a.username || '',
+          status: a.online ? 'online' : 'offline'
+        }))
+      }).catch(() => {})
     }
   })
   unsubAddressFilled = window.electronAPI.onUpdate('purchase-address-filled', (data) => {
@@ -1796,9 +1895,18 @@ function setupPurchaseListeners() {
   unsubAddressSetupDone = window.electronAPI.onUpdate('purchase-address-setup-done', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
       ElMessage({
-        message: '温馨提示：地址已修改成功，请您继续采购！',
+        message: '地址已修改成功',
         type: 'success',
-        duration: 5000,
+        duration: 3000
+      })
+    }
+  })
+  unsubAddressSetupStart = window.electronAPI.onUpdate('purchase-address-setup-start', (data) => {
+    if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      ElMessage({
+        message: '正在为您自动设置收货地址，请稍候...',
+        type: 'info',
+        duration: 4000,
         showClose: true
       })
     }
@@ -1810,6 +1918,7 @@ function cleanupPurchaseListeners() {
   if (unsubWindowClosed) { unsubWindowClosed(); unsubWindowClosed = null }
   if (unsubAddressFilled) { unsubAddressFilled(); unsubAddressFilled = null }
   if (unsubAddressSetupDone) { unsubAddressSetupDone(); unsubAddressSetupDone = null }
+  if (unsubAddressSetupStart) { unsubAddressSetupStart(); unsubAddressSetupStart = null }
 }
 
 function onPurchaseDialogClosed() {
@@ -1850,6 +1959,12 @@ async function handlePurchaseSubmit() {
     })
 
     ElMessage.success('采购单创建并绑定成功')
+    // 更新本地订单的采购状态
+    const order = tableData.value.find(o => o.id === purchaseInfo.salesOrderId)
+    if (order) {
+      order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+      order.hasInventory = false
+    }
     purchaseDialogVisible.value = false
   } catch (err) {
     ElMessage.error('采购操作失败: ' + err.message)
@@ -1887,40 +2002,33 @@ function getStoreOnlineStatus(storeId) {
   return store ? store.online : false
 }
 
-const filteredOrders = computed(() => {
-  return tableData.value.filter((order) => {
-    if (searchForm.orderNo && !order.orderNo.includes(searchForm.orderNo)) return false
-    if (searchForm.goodsName) {
-      const hasGoods = order.items.some(item => item.name.includes(searchForm.goodsName))
-      if (!hasGoods) return false
-    }
-    if (searchForm.outboundNo && !order.outboundNo.includes(searchForm.outboundNo)) return false
-    if (searchForm.customerName && !order.customerName.includes(searchForm.customerName)) return false
-    if (searchForm.customerPhone && !order.customerPhone.includes(searchForm.customerPhone)) return false
-    if (searchForm.orderStatus && order.orderStatus !== searchForm.orderStatus) return false
-    if (activeStatus.value && order.orderStatus !== activeStatus.value) return false
-    return true
-  })
-})
-
-const total = computed(() => filteredOrders.value.length)
-
-const pagedOrders = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredOrders.value.slice(start, start + pageSize.value)
-})
-
-const statusTabs = computed(() => {
-  const all = tableData.value.length
-  const counts = {}
-  for (const o of tableData.value) {
-    if (o.orderStatus) {
-      counts[o.orderStatus] = (counts[o.orderStatus] || 0) + 1
+// 店铺标签选项（从所有店铺的 tags 字段汇总去重）
+const storeTagOptions = computed(() => {
+  const tagSet = new Set()
+  for (const s of storeOptions.value) {
+    if (Array.isArray(s.tags)) {
+      s.tags.forEach(t => t && tagSet.add(t))
     }
   }
+  return [...tagSet].sort()
+})
+
+// 按标签过滤的店铺列表（用于"选择店铺"下拉联动）
+const filteredStoreOptions = computed(() => {
+  if (!searchForm.storeTag) return storeOptions.value
+  return storeOptions.value.filter(s => Array.isArray(s.tags) && s.tags.includes(searchForm.storeTag))
+})
+
+// 服务端分页，tableData 已经是当前页的数据
+const pagedOrders = computed(() => tableData.value)
+
+const statusTabs = computed(() => {
+  const sc = statusCounts.value
+  // 不显示数量的状态：全部、已完成、已取消
+  const noCountSet = new Set(['', '已完成', '已取消'])
   return [
-    { label: '全部', value: '', count: all },
-    ...orderStatusOptions.map((s) => ({ label: s, value: s, count: counts[s] || 0 }))
+    { label: '全部', value: '', count: noCountSet.has('') ? null : sc.total },
+    ...orderStatusOptions.map((s) => ({ label: s, value: s, count: noCountSet.has(s) ? null : (sc.counts[s] || 0) }))
   ]
 })
 
@@ -1975,8 +2083,8 @@ function handleReset() {
     goodsName: '',
     outboundNo: '',
     customerName: '',
-    customerPhone: '',
-    orderStatus: '',
+    purchaseStatus: '',
+    storeTag: '',
     issueEvent: ''
   })
   activeStatus.value = ''
@@ -1986,6 +2094,7 @@ function handleReset() {
 function handleStatusClick(status) {
   activeStatus.value = status
   currentPage.value = 1
+  loadOrdersFromServer()
 }
 
 function handleSizeChange() {
@@ -2004,25 +2113,35 @@ function onDetailAction(action) {
 // ==================== Tag 类型映射 ====================
 
 function orderStatusTagType(status) {
-  const map = { '待付款': 'warning', '待发货': 'danger', '已发货': '', '已完成': 'success', '已取消': 'info' }
+  const map = { '待付款': 'warning', '待出库': 'danger', '已出库': '', '暂停订单': 'warning', '已完成': 'success', '已取消': 'info' }
   return map[status] || ''
 }
 
 function purchaseStatusTagType(status) {
-  const map = { '待采购': 'warning', '采购中': '', '已采购': 'success', '采购失败': 'danger' }
+  const map = { '未采购': 'warning', '已采购（三方代发）': 'success', '已采购（仓库转发）': '', '仓库有货': '', '已忽略': 'info' }
   return map[status] || ''
 }
 
-function shopTagColorType(tag) {
-  const map = { '京东': 'danger', '天猫': '', '拼多多': 'warning', '抖音': 'success' }
-  return map[tag] || ''
+function getDisplayPurchaseStatus(order) {
+  if (order.purchaseStatus === '未采购' && order.hasInventory) return '仓库有货'
+  return order.purchaseStatus
+}
+
+async function handleIgnorePurchase(order) {
+  try {
+    await updateSalesOrderPurchaseStatus(order.id, '已忽略')
+    order.purchaseStatus = '已忽略'
+    order.hasInventory = false
+  } catch (err) {
+    ElMessage.error('操作失败: ' + err.message)
+  }
 }
 
 function statusBorderColor(status) {
   const map = {
     '待付款': '#e6a23c',
-    '待发货': '#f56c6c',
-    '已发货': '#409eff',
+    '待出库': '#f56c6c',
+    '已出库': '#409eff',
     '已完成': '#52c41a',
     '已取消': '#909399'
   }
@@ -2032,8 +2151,8 @@ function statusBorderColor(status) {
 function statusBgColor(status) {
   const map = {
     '待付款': 'linear-gradient(135deg, #fffcf5 0%, #fff8eb 100%)',
-    '待发货': 'linear-gradient(135deg, #fff5f5 0%, #fff0f0 100%)',
-    '已发货': 'linear-gradient(135deg, #f0f7ff 0%, #e8f4ff 100%)',
+    '待出库': 'linear-gradient(135deg, #fff5f5 0%, #fff0f0 100%)',
+    '已出库': 'linear-gradient(135deg, #f0f7ff 0%, #e8f4ff 100%)',
     '已完成': 'linear-gradient(135deg, #f0faf0 0%, #e8f8e8 100%)',
     '已取消': 'linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%)'
   }
@@ -2046,23 +2165,42 @@ watch(() => searchForm.storeId, () => {
   activeStatus.value = ''
   currentPage.value = 1
   loadOrdersFromServer()
+  loadStatusCounts()
+})
+
+watch(() => searchForm.storeTag, () => {
+  // 如果当前选中的店铺不在标签过滤范围内，清空店铺选择
+  if (searchForm.storeId && searchForm.storeTag) {
+    const inFiltered = filteredStoreOptions.value.some(s => s.id === searchForm.storeId)
+    if (!inFiltered) searchForm.storeId = ''
+  }
+  activeStatus.value = ''
+  currentPage.value = 1
+  loadOrdersFromServer()
+  loadStatusCounts()
 })
 
 onMounted(async () => {
   await loadStores()
   loadOrdersFromServer()
+  loadStatusCounts()
 
   // 监听自动同步事件
   if (window.electronAPI) {
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
-      autoSyncStatus.value = data.storeName || '店铺'
+      mainProcessSyncStatus.value = data.storeName || '店铺'
     })
-    unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', (data) => {
-      autoSyncStatus.value = ''
-      // 同步成功后自动刷新订单列表
-      if (data.success && data.storeId === searchForm.storeId) {
+    unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', async (data) => {
+      mainProcessSyncStatus.value = ''
+      // 订单已由主进程直接保存到服务器，此处只做刷新
+      if (data.success) {
         loadOrdersFromServer()
+        loadStatusCounts()
       }
+    })
+    // 监听店铺在线状态变化（心跳检测），重新加载店铺列表即可
+    unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', () => {
+      loadStores()
     })
   }
 })
@@ -2075,7 +2213,10 @@ onUnmounted(() => {
   // 清理自动同步 IPC 监听器
   if (unsubAutoSyncStart) { unsubAutoSyncStart(); unsubAutoSyncStart = null }
   if (unsubAutoSyncResult) { unsubAutoSyncResult(); unsubAutoSyncResult = null }
+  if (unsubStoreStatusChanged) { unsubStoreStatusChanged(); unsubStoreStatusChanged = null }
+  manualSyncStatus.value = ''
   autoSyncStatus.value = ''
+  mainProcessSyncStatus.value = ''
   // 清理京东订单自动同步定时器
   stopJdOrderAutoSync()
 })
@@ -2603,7 +2744,6 @@ onUnmounted(() => {
 }
 
 .order-contact-btn {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -2650,10 +2790,6 @@ onUnmounted(() => {
 .order-header-shop {
   color: #374151;
   font-weight: 600;
-  flex-shrink: 0;
-}
-
-.order-header-platform {
   flex-shrink: 0;
 }
 
@@ -4242,6 +4378,12 @@ onUnmounted(() => {
 }
 
 .get-real-info-btn {
+  flex-shrink: 0;
+}
+
+.order-reveal-btn {
+  padding: 0 4px;
+  margin-left: 4px;
   flex-shrink: 0;
 }
 

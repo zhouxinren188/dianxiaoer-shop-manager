@@ -8,7 +8,7 @@ conn.on('ready', () => {
   console.log('SSH connected');
   
   const localFile = path.join(__dirname, 'server', 'index.js');
-  const remoteFile = 'C:/Users/Administrator/dianxiaoer-server/index.js';
+  const remoteFile = 'C:/dianxiaoer-server/index.js';
   
   conn.sftp((err, sftp) => {
     if (err) { console.error('SFTP error:', err.message); conn.end(); process.exit(1); }

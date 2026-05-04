@@ -31,3 +31,7 @@ export function toggleStoreStatus(id, status) {
 export function fetchStoreCookie(storeId) {
   return get(`/api/cookies/${storeId}`)
 }
+
+export function updateStoreSyncTime(storeId) {
+  return put(`/api/stores/${storeId}/sync-time`)
+}

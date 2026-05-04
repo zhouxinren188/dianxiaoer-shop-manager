@@ -42,6 +42,9 @@
         <el-form-item label="采购编号">
           <el-input v-model="filterForm.purchaseNo" placeholder="请输入采购编号" clearable style="width: 160px" />
         </el-form-item>
+        <el-form-item label="物流单号">
+          <el-input v-model="filterForm.logisticsNo" placeholder="请输入物流单号" clearable style="width: 180px" />
+        </el-form-item>
         <el-form-item label="采购订单号">
           <el-input v-model="filterForm.platformOrderNo" placeholder="请输入采购订单号" clearable style="width: 180px" />
         </el-form-item>
@@ -55,7 +58,7 @@
             <el-option label="1688" value="1688" />
           </el-select>
         </el-form-item>
-        <el-form-item label="采购状态">
+        <el-form-item label="订单状态">
           <el-select v-model="filterForm.status" placeholder="全部" clearable style="width: 130px">
             <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
@@ -169,7 +172,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="status" label="采购状态" width="110" align="center">
+        <el-table-column prop="status" label="订单状态" width="110" align="center">
           <template #default="{ row }">
             <el-tag :type="statusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
           </template>
@@ -251,7 +254,7 @@
             <span v-else>--</span>
           </el-descriptions-item>
           <el-descriptions-item label="关联销售单号">{{ currentRow.sales_order_no }}</el-descriptions-item>
-          <el-descriptions-item label="采购状态">
+          <el-descriptions-item label="订单状态">
             <el-tag :type="statusTagType(currentRow.status)" size="small">{{ statusLabel(currentRow.status) }}</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="物流公司">{{ currentRow.logistics_company || '--' }}</el-descriptions-item>
@@ -279,8 +282,8 @@
           <el-descriptions-item label="物流公司">{{ logisticsData.company || '--' }}</el-descriptions-item>
           <el-descriptions-item label="物流单号">{{ logisticsData.tracking_no || '--' }}</el-descriptions-item>
           <el-descriptions-item label="数据来源">
-            <el-tag size="small" :type="logisticsData.source === 'express100' ? 'success' : 'primary'">
-              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '1688' : logisticsData.source === 'pinduoduo' ? '拼多多' : '快递100' }}
+            <el-tag size="small" :type="logisticsData.source === 'express100' ? 'success' : logisticsData.source === 'local' ? 'info' : 'primary'">
+              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '1688' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地记录' : '快递100' }}
             </el-tag>
           </el-descriptions-item>
         </el-descriptions>
@@ -298,7 +301,7 @@
             </el-card>
           </el-timeline-item>
         </el-timeline>
-        <el-empty v-else description="暂无物流轨迹信息" />
+        <el-empty v-else :description="logisticsData.source === 'local' ? '暂无详细轨迹，可到平台查看物流详情' : '暂无物流轨迹信息'" />
       </div>
       <div v-else v-loading="logisticsLoading" style="min-height: 200px"></div>
     </el-dialog>
@@ -602,7 +605,8 @@ const accountList = ref([])
 async function loadAccounts() {
   try {
     const data = await fetchPurchaseAccounts()
-    accountList.value = (data.list || data || []).map(a => ({
+    const rawList = data.list || data || []
+    accountList.value = rawList.map(a => ({
       ...a,
       username: a.account || a.username || '',
       status: a.online ? 'online' : 'offline',
@@ -687,11 +691,12 @@ function handleEditAccount(row) {
 
 async function handleEditAccountSubmit() {
   try {
-    await updatePurchaseAccount(editAccountForm.id, {
+    const submitData = {
       platform: editAccountForm.platform,
       account: editAccountForm.username,
       password: editAccountForm.password
-    })
+    }
+    await updatePurchaseAccount(editAccountForm.id, submitData)
     editAccountVisible.value = false
     ElMessage.success('账号信息已更新')
     await loadAccounts()
@@ -719,9 +724,11 @@ function handleImportAccount() {
 
 // 监听 Electron 主进程登录成功事件，自动刷新列表
 let unsubLoginSuccess = null
+let unsubOrderCaptured = null
 
 const filterForm = reactive({
   purchaseNo: '',
+  logisticsNo: '',
   platformOrderNo: '',
   salesOrderNo: '',
   platform: '',
@@ -793,6 +800,9 @@ const filteredData = computed(() => {
   if (filterForm.purchaseNo) {
     data = data.filter(r => r.purchase_no && r.purchase_no.includes(filterForm.purchaseNo))
   }
+  if (filterForm.logisticsNo) {
+    data = data.filter(r => r.logistics_no && r.logistics_no.includes(filterForm.logisticsNo))
+  }
   if (filterForm.platformOrderNo) {
     data = data.filter(r => r.platform_order_no && r.platform_order_no.includes(filterForm.platformOrderNo))
   }
@@ -828,6 +838,7 @@ function handleSearch() {
 
 function handleReset() {
   filterForm.purchaseNo = ''
+  filterForm.logisticsNo = ''
   filterForm.platformOrderNo = ''
   filterForm.salesOrderNo = ''
   filterForm.platform = ''
@@ -1097,15 +1108,49 @@ function handleSync() {
 async function handleSyncSubmit() {
   syncing.value = true
   try {
-    const result = await syncPlatformOrders({
-      platform: syncForm.platform,
-      account_id: syncForm.accountId
-    })
-    const count = result?.matched_count || 0
-    if (count > 0) {
-      ElMessage.success(`同步完成，匹配到 ${count} 条采购订单已更新`)
+    // 使用浏览器窗口方案同步
+    if (window.electronAPI) {
+      const result = await window.electronAPI.invoke('sync-purchase-orders-browser', {
+        accountId: String(syncForm.accountId),
+        platform: syncForm.platform
+      })
+      if (result.success) {
+        const count = result.matchedCount || 0
+        const total = result.orders?.length || 0
+        if (count > 0) {
+          ElMessage.success(`同步完成，平台获取 ${total} 条订单，匹配更新 ${count} 条`)
+        } else {
+          ElMessage.info(`同步完成，平台获取 ${total} 条订单，暂无新的匹配`)
+        }
+      } else {
+        if (result.needsRelogin) {
+          ElMessage.warning({
+            message: '采购账号登录已过期，请在账号管理中重新登录',
+            duration: 5000
+          })
+          await loadAccounts()
+          accountManageVisible.value = true
+        } else {
+          const msg = result.message || '未知错误'
+          ElMessage.error('同步失败: ' + msg)
+          if (msg.includes('未登录')) {
+            await loadAccounts()
+            accountManageVisible.value = true
+          }
+        }
+      }
     } else {
-      ElMessage.info('同步完成，暂无新的匹配订单')
+      // 降级到服务端方案
+      const result = await syncPlatformOrders({
+        platform: syncForm.platform,
+        account_id: syncForm.accountId
+      })
+      const count = result?.matched_count || 0
+      if (count > 0) {
+        ElMessage.success(`同步完成，匹配到 ${count} 条采购订单已更新`)
+      } else {
+        ElMessage.info('同步完成，暂无新的匹配订单')
+      }
     }
     syncDialogVisible.value = false
     await loadData()
@@ -1122,7 +1167,7 @@ async function handleSyncSingle(row) {
     ElMessage.warning('该订单没有平台信息或采购订单号')
     return
   }
-  
+
   try {
     console.log('[Sync-Single] 订单信息:', {
       platform: row.platform,
@@ -1130,7 +1175,7 @@ async function handleSyncSingle(row) {
       account_id: row.account_id,
       purchase_no: row.purchase_no
     })
-    
+
     // 优先使用订单已关联的account_id
     let account = null
     if (row.account_id) {
@@ -1139,57 +1184,91 @@ async function handleSyncSingle(row) {
         console.log('[Sync-Single] 使用订单已关联的账号:', account)
       }
     }
-    
-    // 如果订单没有关联账号，查找匹配的采购账号（platform匹配且cookie有效）
+
+    // 如果订单没有关联账号，查找匹配的采购账号（platform匹配）
     if (!account) {
       console.log('[Sync-Single] 订单未关联账号，开始查找匹配的账号')
-      console.log('[Sync-Single] 账号列表:', accountList.value)
-      
-      account = accountList.value.find(acc => {
-        console.log(`[Sync-Single] 检查账号: id=${acc.id}, platform=${acc.platform}, cookie_valid=${acc.cookie_valid}`)
-        return acc.platform === row.platform && acc.cookie_valid
-      })
+      account = accountList.value.find(acc => acc.platform === row.platform)
     }
-    
+
     if (!account) {
-      // 尝试查找任意该平台的账号（不管cookie_valid）
-      const anyAccount = accountList.value.find(acc => acc.platform === row.platform)
-      if (!anyAccount) {
-        ElMessage.warning(`系统中没有${platformLabel(row.platform)}采购账号，请先添加账号`)
-      } else {
-        ElMessage.warning(`${platformLabel(row.platform)}账号Cookie已失效，请重新登录`)
-      }
+      ElMessage.warning(`系统中没有${platformLabel(row.platform)}采购账号，请先添加账号`)
       return
     }
-    
+
     console.log('[Sync-Single] 最终使用账号:', account)
-    
+
     const loading = ElMessage({
       message: `正在同步订单 ${row.platform_order_no}...`,
       type: 'info',
       duration: 0
     })
-    
-    const result = await syncSinglePurchaseOrder({
-      platform: row.platform,
-      account_id: account.id,
-      platform_order_no: row.platform_order_no
-    })
-    
-    loading.close()
-    
-    if (result.success) {
-      const statusText = result.status ? `状态: ${result.status}` : ''
-      const logisticsText = result.logistics_no ? `物流: ${result.logistics_no}` : ''
-      const message = [statusText, logisticsText].filter(Boolean).join(', ')
-      ElMessage.success(`同步成功！${message || '无更新'}`)
+
+    try {
+      // 优先使用浏览器窗口方案（不再有 SESSION_EXPIRED 问题）
+      if (window.electronAPI) {
+        const result = await window.electronAPI.invoke('sync-purchase-order-browser', {
+          accountId: String(account.id),
+          platformOrderNo: row.platform_order_no,
+          platform: row.platform
+        })
+
+        if (result.success && result.orderInfo) {
+          const dbResult = result.dbResult || {}
+          const parts = []
+          if (dbResult.status) parts.push(`状态: ${dbResult.status}`)
+          if (dbResult.logistics_no) parts.push(`物流单号: ${dbResult.logistics_no}`)
+          if (dbResult.logistics_company) parts.push(`${dbResult.logistics_company}`)
+          const message = parts.join(', ')
+          ElMessage.success(`同步成功！${message || '无更新'}`)
+        } else if (result.needsRelogin) {
+          ElMessage.warning({
+            message: '采购账号登录已过期，请在账号管理中重新登录',
+            duration: 5000
+          })
+          await loadAccounts()
+          accountManageVisible.value = true
+          return
+        } else {
+          const msg = result.message || '未知错误'
+          ElMessage.error('同步失败: ' + msg)
+          // 未登录时自动打开账号管理
+          if (msg.includes('未登录')) {
+            await loadAccounts()
+            accountManageVisible.value = true
+          }
+          return
+        }
+      } else {
+        // 降级到服务端方案
+        const result = await syncSinglePurchaseOrder({
+          platform: row.platform,
+          account_id: account.id,
+          platform_order_no: row.platform_order_no
+        })
+        const parts = []
+        if (result.status) parts.push(`状态: ${result.status}`)
+        if (result.logistics_no) parts.push(`物流单号: ${result.logistics_no}`)
+        if (result.logistics_company) parts.push(`${result.logistics_company}`)
+        const message = parts.join(', ')
+        ElMessage.success(`同步成功！${message || '无更新'}`)
+      }
       await loadData()
-    } else {
-      ElMessage.warning(result.message || '同步失败')
+    } finally {
+      loading.close()
     }
   } catch (err) {
     console.error('[Sync-Single] 错误:', err)
-    ElMessage.error('同步失败: ' + err.message)
+    if (err.needsRelogin || err.code === 2 || (err.message && err.message.includes('会话已过期'))) {
+      ElMessage.warning({
+        message: '采购账号登录已过期，请在账号管理中重新登录',
+        duration: 5000
+      })
+      await loadAccounts()
+      accountManageVisible.value = true
+    } else {
+      ElMessage.error('同步失败: ' + err.message)
+    }
   }
 }
 
@@ -1204,6 +1283,12 @@ onMounted(async () => {
     unsubLoginSuccess = window.electronAPI.onUpdate('purchase-account-login-success', () => {
       loadAccounts()
     })
+    // 监听采购单自动创建并绑定成功事件，刷新列表
+    unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
+      if (data.success) {
+        loadData()
+      }
+    })
   }
 })
 
@@ -1211,6 +1296,10 @@ onUnmounted(() => {
   if (unsubLoginSuccess) {
     unsubLoginSuccess()
     unsubLoginSuccess = null
+  }
+  if (unsubOrderCaptured) {
+    unsubOrderCaptured()
+    unsubOrderCaptured = null
   }
 })
 </script>

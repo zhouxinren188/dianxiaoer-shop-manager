@@ -35,9 +35,9 @@ export function syncPlatformOrders(data) {
   return post('/api/purchase-orders/sync', data)
 }
 
-// 同步单个采购订单的状态和物流
+// 同步单个采购订单的状态和物流（需要较长超时，淘宝API可能需要20秒）
 export function syncSinglePurchaseOrder(data) {
-  return post('/api/purchase-orders/sync-single', data)
+  return post('/api/purchase-orders/sync-single', data, 30000)
 }
 
 // 获取下一个采购编号

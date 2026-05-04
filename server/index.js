@@ -12,7 +12,9 @@ console.log(`[Server] Application version: ${APP_VERSION}`)
 console.log('[Server] Taobao cookie filter: ENABLED (fix HTTP 431 error)')
 
 // JWT 密钥（与 dianxiaoer-api 保持一致）
-const JWT_SECRET = 'bfb3079104c65c88d55b4ed46624c07b171d8254c87ec40a2f485370d10ee159a7115459fc9d249051bcd60bc0849633c47c4a8d1a4f167cce27aabfd152effd'
+// 优先从环境变量读取，否则使用默认值
+const JWT_SECRET = process.env.JWT_SECRET || 'bfb3079104c65c88d55b4ed46624c07b171d8254c87ec40a2f485370d10ee159a7115459fc9d249051bcd60bc0849633c47c4a8d1a4f167cce27aabfd152effd'
+console.log(`[Server] JWT_SECRET source: ${process.env.JWT_SECRET ? 'ENV' : 'DEFAULT'}`)
 
 const app = express()
 app.use(cors())
@@ -29,7 +31,7 @@ function fail(message) {
 // ============ 全局认证中间件 ============
 
 // 不需要认证的路径
-const publicPaths = ['/health', '/api/sync-lock']
+const publicPaths = ['/health', '/api/sync-lock', '/api/auth/login']
 
 app.use(async (req, res, next) => {
   // 公开接口跳过认证
@@ -94,6 +96,19 @@ app.use(async (req, res, next) => {
 })
 
 // ============ 辅助函数 ============
+
+// 状态名称标准化映射（JD API 返回值 → 前端标准名称）
+const STATUS_ALIAS_MAP = {
+  '等待付款': '待付款',
+  '等待出库': '待出库',
+  '锁定': '暂停订单',
+  '暂停': '暂停订单',
+  '已发货': '已出库',
+}
+
+function normalizeStatusText(statusText) {
+  return STATUS_ALIAS_MAP[statusText] || statusText
+}
 
 // 获取当前用户对应的主账号 ID（master 就是自己，sub 取 parent_id）
 function getOwnerId(user) {
@@ -1031,6 +1046,7 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            item_count, all_items, raw_data)
          VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?, ?,?,?,?,?, ?,?,?)
          ON DUPLICATE KEY UPDATE
+           store_id=VALUES(store_id),
            order_state=VALUES(order_state), status_text=VALUES(status_text),
            order_time=VALUES(order_time), payment_time=VALUES(payment_time),
            ship_time=VALUES(ship_time), finish_time=VALUES(finish_time),
@@ -1086,10 +1102,70 @@ app.put('/api/sales-orders/:orderId/buyer-info', async (req, res) => {
   }
 })
 
+// 更新销售订单系统备注（采购绑定成功后自动写入）
+app.put('/api/sales-orders/:orderId/sys-remark', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { sys_remark } = req.body
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    // 尝试通过 store_id 校验权限；如果用户没有关联店铺则仅用 id 匹配
+    // （sales_orders 可能没有 owner_id 列，所以不用 owner_id 过滤）
+    const storeIds = await getAccessibleStoreIds(req.user)
+    let result
+    if (storeIds.length > 0) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      ;[result] = await pool.execute(
+        `UPDATE sales_orders SET sys_remark=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+        [sys_remark || '', orderId, ...storeIds]
+      )
+    } else {
+      // 用户没有关联店铺时，仅用 id 匹配（已通过 JWT 认证，安全性可接受）
+      ;[result] = await pool.execute(
+        'UPDATE sales_orders SET sys_remark=?, updated_at=NOW() WHERE id=?',
+        [sys_remark || '', orderId]
+      )
+    }
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 更新销售订单采购状态（仅允许手动设置为'已忽略'）
+app.put('/api/sales-orders/:orderId/purchase-status', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { purchase_status } = req.body
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+    if (!purchase_status) return res.json(fail('purchase_status 不能为空'))
+    if (purchase_status !== '已忽略') return res.json(fail('仅允许设置为已忽略'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    let result
+    if (storeIds.length > 0) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      ;[result] = await pool.execute(
+        `UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+        [purchase_status, orderId, ...storeIds]
+      )
+    } else {
+      ;[result] = await pool.execute(
+        'UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=?',
+        [purchase_status, orderId]
+      )
+    }
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 分页查询销售订单（权限过滤）
 app.get('/api/sales-orders', async (req, res) => {
   try {
-    const { store_id, status, page = 1, pageSize = 20 } = req.query
+    const { store_id, status, page = 1, pageSize = 20,
+            order_id, goods_name, customer_name, customer_phone, outbound_no, store_tag, purchase_status } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(pageSize, 10)
@@ -1115,8 +1191,50 @@ app.get('/api/sales-orders', async (req, res) => {
     }
 
     if (status) {
-      where += ' AND status_text = ?'
-      params.push(status)
+      // 支持标准化状态名过滤：前端传 "待出库" 也能匹配数据库中的 "等待出库"
+      const reverseAliases = Object.entries(STATUS_ALIAS_MAP)
+        .filter(([, v]) => v === status)
+        .map(([k]) => k)
+      if (reverseAliases.length > 0) {
+        where += ` AND status_text IN (${[status, ...reverseAliases].map(() => '?').join(',')})`
+        params.push(status, ...reverseAliases)
+      } else {
+        where += ' AND status_text = ?'
+        params.push(status)
+      }
+    }
+    if (order_id) {
+      where += ' AND order_id LIKE ?'
+      params.push(`%${order_id}%`)
+    }
+    if (goods_name) {
+      where += ' AND (product_name LIKE ? OR all_items LIKE ?)'
+      params.push(`%${goods_name}%`, `%${goods_name}%`)
+    }
+    if (customer_name) {
+      where += ' AND buyer_name LIKE ?'
+      params.push(`%${customer_name}%`)
+    }
+    if (customer_phone) {
+      where += ' AND buyer_phone LIKE ?'
+      params.push(`%${customer_phone}%`)
+    }
+    if (outbound_no) {
+      where += ' AND logistics_no LIKE ?'
+      params.push(`%${outbound_no}%`)
+    }
+    if (store_tag) {
+      where += ' AND store_id IN (SELECT id FROM stores WHERE JSON_CONTAINS(tags, ?))'
+      params.push(JSON.stringify(store_tag))
+    }
+    if (purchase_status) {
+      if (purchase_status === '仓库有货') {
+        where += ' AND purchase_status = ?'
+        params.push('未采购')
+      } else {
+        where += ' AND purchase_status = ?'
+        params.push(purchase_status)
+      }
     }
 
     const [[{ total }]] = await pool.execute(
@@ -1125,7 +1243,132 @@ app.get('/api/sales-orders', async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT * FROM sales_orders ${where} ORDER BY order_time DESC LIMIT ${limit} OFFSET ${offset}`, params
     )
+
+    // 动态检测仓库有货：对"未采购"订单批量查询 inventory 表
+    if (rows.length > 0) {
+      const ownerId = getOwnerId(req.user)
+      const skuSet = new Set()
+      rows.forEach(row => {
+        if (row.purchase_status === '未采购') {
+          if (row.sku_id) skuSet.add(row.sku_id)
+          // 解析 all_items 提取多 SKU
+          try {
+            const items = typeof row.all_items === 'string' ? JSON.parse(row.all_items || 'null') : row.all_items
+            if (Array.isArray(items)) {
+              items.forEach(it => { if (it.skuId) skuSet.add(it.skuId) })
+            }
+          } catch {}
+        }
+      })
+      if (skuSet.size > 0) {
+        try {
+          const skuList = [...skuSet]
+          const invPlaceholders = skuList.map(() => '?').join(',')
+          const [invRows] = await pool.execute(
+            `SELECT DISTINCT sku FROM inventory WHERE sku IN (${invPlaceholders}) AND quantity > 0 AND owner_id = ?`,
+            [...skuList, ownerId]
+          )
+          const invSkuSet = new Set(invRows.map(r => r.sku))
+          rows.forEach(row => {
+            row.has_inventory = false
+            if (row.purchase_status === '未采购') {
+              if (row.sku_id && invSkuSet.has(row.sku_id)) {
+                row.has_inventory = true
+              } else {
+                try {
+                  const items = typeof row.all_items === 'string' ? JSON.parse(row.all_items || 'null') : row.all_items
+                  if (Array.isArray(items) && items.some(it => it.skuId && invSkuSet.has(it.skuId))) {
+                    row.has_inventory = true
+                  }
+                } catch {}
+              }
+            }
+          })
+        } catch (e) {
+          rows.forEach(row => { row.has_inventory = false })
+        }
+      } else {
+        rows.forEach(row => { row.has_inventory = false })
+      }
+    }
+
     res.json(ok({ list: rows, total }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取销售订单状态计数（用于状态标签栏）
+app.get('/api/sales-orders/status-counts', async (req, res) => {
+  try {
+    const { store_id, order_id, goods_name, customer_name, customer_phone, outbound_no, store_tag, purchase_status } = req.query
+    const storeIds = await getAccessibleStoreIds(req.user)
+
+    let where = 'WHERE 1=1'
+    const params = []
+
+    if (store_id) {
+      if (!storeIds.includes(+store_id)) {
+        return res.status(403).json(fail('无权查看此店铺订单'))
+      }
+      where += ' AND store_id = ?'
+      params.push(store_id)
+    } else {
+      if (!storeIds.length) {
+        return res.json(ok({ total: 0, counts: {} }))
+      }
+      const placeholders = storeIds.map(() => '?').join(',')
+      where += ` AND store_id IN (${placeholders})`
+      params.push(...storeIds)
+    }
+    if (order_id) {
+      where += ' AND order_id LIKE ?'
+      params.push(`%${order_id}%`)
+    }
+    if (goods_name) {
+      where += ' AND (product_name LIKE ? OR all_items LIKE ?)'
+      params.push(`%${goods_name}%`, `%${goods_name}%`)
+    }
+    if (customer_name) {
+      where += ' AND buyer_name LIKE ?'
+      params.push(`%${customer_name}%`)
+    }
+    if (customer_phone) {
+      where += ' AND buyer_phone LIKE ?'
+      params.push(`%${customer_phone}%`)
+    }
+    if (outbound_no) {
+      where += ' AND logistics_no LIKE ?'
+      params.push(`%${outbound_no}%`)
+    }
+    if (store_tag) {
+      where += ' AND store_id IN (SELECT id FROM stores WHERE JSON_CONTAINS(tags, ?))'
+      params.push(JSON.stringify(store_tag))
+    }
+    if (purchase_status) {
+      if (purchase_status === '仓库有货') {
+        where += ' AND purchase_status = ?'
+        params.push('未采购')
+      } else {
+        where += ' AND purchase_status = ?'
+        params.push(purchase_status)
+      }
+    }
+
+    const [[{ total }]] = await pool.execute(
+      `SELECT COUNT(*) as total FROM sales_orders ${where}`, params
+    )
+    const [statusRows] = await pool.execute(
+      `SELECT status_text, COUNT(*) as count FROM sales_orders ${where} GROUP BY status_text`, params
+    )
+    const counts = {}
+    statusRows.forEach(r => {
+      if (r.status_text) {
+        const normalizedStatus = normalizeStatusText(r.status_text)
+        counts[normalizedStatus] = (counts[normalizedStatus] || 0) + r.count
+      }
+    })
+    res.json(ok({ total, counts }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -1230,7 +1473,7 @@ app.get('/api/purchase-accounts', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const [rows] = await pool.execute(
-      'SELECT id, account, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
+      'SELECT id, account, password, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
       [ownerId]
     )
     
@@ -1324,17 +1567,16 @@ app.put('/api/purchase-accounts/:id/status', async (req, res) => {
 
 // ============ 采购订单 ============
 
-// 获取下一个采购编号（按用户隔离，自动递增）
+// 获取下一个采购编号（全局递增，避免编号冲突）
 app.get('/api/purchase-orders/next-no', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const [[row]] = await pool.execute(
-      'SELECT purchase_no FROM purchase_orders WHERE owner_id=? ORDER BY id DESC LIMIT 1',
-      [ownerId]
+    // 只取纯数字格式的 purchase_no，忽略 TEST_ 等非编号数据
+    const [rows] = await pool.execute(
+      "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^[0-9]+$' ORDER BY id DESC LIMIT 1"
     )
     let nextNum = 1
-    if (row && row.purchase_no) {
-      const num = parseInt(row.purchase_no, 10)
+    if (rows.length > 0 && rows[0].purchase_no) {
+      const num = parseInt(rows[0].purchase_no, 10)
       if (!isNaN(num)) nextNum = num + 1
     }
     const purchaseNo = String(nextNum).padStart(4, '0')
@@ -1357,6 +1599,7 @@ app.post('/api/purchase-orders', async (req, res) => {
          status, owner_id)
        VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?)
        ON DUPLICATE KEY UPDATE
+         owner_id=VALUES(owner_id),
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
          goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), quantity=VALUES(quantity),
          source_url=VALUES(source_url), platform=VALUES(platform),
@@ -1364,12 +1607,26 @@ app.post('/api/purchase-orders', async (req, res) => {
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
          shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
          account_id=VALUES(account_id),
+         status='pending',
          updated_at=NOW()`,
       [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
        ownerId]
     )
+    // 创建采购单成功后，自动更新关联销售订单的采购状态
+    if (sales_order_id) {
+      try {
+        const purchaseStatus = purchase_type === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+        await pool.execute(
+          'UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=?',
+          [purchaseStatus, sales_order_id]
+        )
+      } catch (e) {
+        console.warn('[PurchaseOrders] 更新销售订单采购状态失败(非关键):', e.message)
+      }
+    }
+
     res.json(ok({ purchase_no }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -1676,7 +1933,7 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       if (!isValid) {
         console.log(`[Sync-Single] Cookie validation failed`)
         await pool.execute('UPDATE purchase_accounts SET online=0 WHERE id=?', [account_id])
-        return res.json({ success: false, message: 'Cookie已失效，请重新登录采购账号' })
+        return res.json(fail('Cookie已失效，请重新登录采购账号'))
       }
       console.log(`[Sync-Single] Cookie validation passed`)
     } catch (e) {
@@ -1688,7 +1945,20 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
     let orderInfo = null
     try {
       if (platform === 'taobao') {
-        orderInfo = await queryTaobaoOrderByNo(cookies, platform_order_no)
+        orderInfo = await queryTaobaoOrderByNo(cookies, platform_order_no, {
+          onCookiesRefreshed: async (updatedCookies) => {
+            // 刷新成功后回写 cookie 到数据库，供后续请求使用
+            try {
+              await pool.execute(
+                'UPDATE purchase_cookies SET cookie_data=?, saved_at=NOW() WHERE account_id=?',
+                [JSON.stringify(updatedCookies), account_id]
+              )
+              console.log(`[Sync-Single] Refreshed cookies saved to DB for account ${account_id}`)
+            } catch (dbErr) {
+              console.error(`[Sync-Single] Failed to save refreshed cookies: ${dbErr.message}`)
+            }
+          }
+        })
       } else if (platform === '1688') {
         orderInfo = await query1688OrderByNo(cookies, platform_order_no)
       } else if (platform === 'pinduoduo') {
@@ -1698,17 +1968,27 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       }
     } catch (e) {
       console.error(`[Sync-Single] Platform API error: ${e.message}`)
-      return res.json({ success: false, message: `查询失败: ${e.message}` })
+      // 检测 SESSION_EXPIRED：标记账号下线，返回特定错误码通知前端
+      if (e.code === 'SESSION_EXPIRED' || e.message.includes('会话已过期')) {
+        await pool.execute('UPDATE purchase_accounts SET online=0 WHERE id=?', [account_id])
+        console.log(`[Sync-Single] Account ${account_id} marked offline due to session expiry`)
+        return res.json({ code: 2, message: '淘宝会话已过期，请重新登录采购账号', needsRelogin: true })
+      }
+      return res.json(fail(`查询失败: ${e.message}`))
     }
 
     if (!orderInfo) {
-      return res.json({ success: false, message: '未找到该订单' })
+      return res.json(fail('未找到该订单'))
     }
 
     console.log(`[Sync-Single] Found order:`, JSON.stringify(orderInfo))
 
     // 更新本地数据库
     const statusMap = {
+      '等待买家付款': 'pending',
+      '买家已付款': 'pending',
+      '待发货': 'pending',
+      '待收货': 'shipped',
       '卖家已发货': 'shipped',
       '已发货': 'shipped',
       '已签收': 'received',
@@ -1716,20 +1996,22 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       '运输中': 'in_transit',
       '派送中': 'in_transit',
       '已成交': 'completed',
+      '交易关闭': 'cancelled',
       '已取消': 'cancelled',
-      '退款成功': 'refunded'
+      '退款成功': 'refunded',
+      '退款中': 'refunded'
     }
 
     const newStatus = statusMap[orderInfo.status] || null
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, purchase_no, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
     if (localOrders.length === 0) {
-      return res.json({ success: false, message: '本地未找到对应的采购订单' })
+      return res.json(fail('本地未找到对应的采购订单'))
     }
 
     const localOrder = localOrders[0]
@@ -1737,26 +2019,27 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
     // 更新状态和account_id
     const updateFields = []
     const updateValues = []
-    
+
     if (newStatus && newStatus !== localOrder.status) {
       updateFields.push('status=?')
       updateValues.push(newStatus)
       console.log(`[Sync-Single] Updated status: ${localOrder.status} -> ${newStatus}`)
     }
-    
+
     // 始终设置account_id（即使已存在）
     updateFields.push('account_id=?')
     updateValues.push(account_id)
 
-    // 更新物流信息
+    // 更新物流信息（仅更新有值的字段，避免 null 覆盖已有数据）
     if (orderInfo.logistics_no) {
-      updateFields.push('logistics_no=?', 'logistics_company=?', 'logistics_status=?')
-      updateValues.push(
-        orderInfo.logistics_no || null,
-        orderInfo.logistics_company || null,
-        orderInfo.logistics_status || null
-      )
-      console.log(`[Sync-Single] Updated logistics: ${orderInfo.logistics_no} (${orderInfo.logistics_company})`)
+      updateFields.push('logistics_no=?')
+      updateValues.push(orderInfo.logistics_no)
+      console.log(`[Sync-Single] Updated logistics_no: ${orderInfo.logistics_no}`)
+    }
+    if (orderInfo.logistics_company) {
+      updateFields.push('logistics_company=?')
+      updateValues.push(orderInfo.logistics_company)
+      console.log(`[Sync-Single] Updated logistics_company: ${orderInfo.logistics_company}`)
     }
 
     if (updateFields.length > 0) {
@@ -1767,19 +2050,221 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       )
     }
 
-    res.json({
-      success: true,
+    res.json(ok({
       status: newStatus || localOrder.status,
       logistics_no: orderInfo.logistics_no || localOrder.logistics_no,
-      logistics_company: orderInfo.logistics_company,
-      logistics_status: orderInfo.logistics_status,
-      message: '同步成功'
-    })
+      logistics_company: orderInfo.logistics_company || localOrder.logistics_company,
+      logistics_status: orderInfo.logistics_status || ''
+    }))
   } catch (err) {
     console.error(`[Sync-Single] Error: ${err.message}`)
     res.status(500).json(fail(err.message))
   }
 })
+
+// 浏览器方案同步 - 单个订单更新端点
+// 接收 Electron 主进程从浏览器窗口捕获的订单数据，更新数据库
+app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account_id, platform, platform_order_no, order_info } = req.body
+
+    console.log(`[Browser-Sync-Update] account_id=${account_id}, order_no=${platform_order_no}, platform=${platform}`)
+
+    if (!account_id || !platform || !platform_order_no || !order_info) {
+      return res.json(fail('参数不完整'))
+    }
+
+    // 订单状态映射表
+    const statusMap = {
+      '等待买家付款': 'pending',
+      '买家已付款': 'pending',
+      '待发货': 'pending',
+      '待收货': 'shipped',
+      '卖家已发货': 'shipped',
+      '已发货': 'shipped',
+      '已签收': 'received',
+      '交易成功': 'received',
+      '运输中': 'in_transit',
+      '派送中': 'in_transit',
+      '已成交': 'completed',
+      '交易关闭': 'cancelled',
+      '已取消': 'cancelled',
+      '退款成功': 'refunded',
+      '退款中': 'refunded'
+    }
+
+    const newStatus = statusMap[order_info.status] || null
+
+    // 查找本地采购订单
+    const [localOrders] = await pool.execute(
+      'SELECT id, purchase_no, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      [ownerId, platform_order_no]
+    )
+
+    if (localOrders.length === 0) {
+      return res.json(fail('本地未找到对应的采购订单'))
+    }
+
+    const localOrder = localOrders[0]
+
+    // 更新状态和物流信息
+    const updateFields = []
+    const updateValues = []
+
+    if (newStatus && newStatus !== localOrder.status) {
+      updateFields.push('status=?')
+      updateValues.push(newStatus)
+      console.log(`[Browser-Sync-Update] 状态更新: ${localOrder.status} -> ${newStatus}`)
+    }
+
+    // 始终设置 account_id
+    updateFields.push('account_id=?')
+    updateValues.push(account_id)
+
+    // 更新物流信息（仅更新有值的字段，避免 null 覆盖已有数据）
+    if (order_info.logistics_no) {
+      updateFields.push('logistics_no=?')
+      updateValues.push(order_info.logistics_no)
+      console.log(`[Browser-Sync-Update] 物流单号: ${order_info.logistics_no}`)
+    }
+    if (order_info.logistics_company) {
+      updateFields.push('logistics_company=?')
+      updateValues.push(order_info.logistics_company)
+      console.log(`[Browser-Sync-Update] 物流公司: ${order_info.logistics_company}`)
+    }
+
+    if (updateFields.length > 0) {
+      updateValues.push(localOrder.id)
+      await pool.execute(
+        `UPDATE purchase_orders SET ${updateFields.join(', ')} WHERE id=?`,
+        updateValues
+      )
+    }
+
+    res.json(ok({
+      status: newStatus || localOrder.status,
+      logistics_no: order_info.logistics_no || localOrder.logistics_no,
+      logistics_company: order_info.logistics_company || localOrder.logistics_company,
+      logistics_status: order_info.logistics_status || ''
+    }))
+  } catch (err) {
+    console.error(`[Browser-Sync-Update] Error: ${err.message}`)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 浏览器方案同步 - 批量订单更新端点
+// 接收 Electron 主进程从浏览器窗口捕获的全部订单，匹配并更新数据库
+app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account_id, platform, orders } = req.body
+
+    console.log(`[Browser-Sync-Batch] account_id=${account_id}, platform=${platform}, orders=${orders?.length || 0}`)
+
+    if (!account_id || !platform || !orders || !Array.isArray(orders)) {
+      return res.json(fail('参数不完整'))
+    }
+
+    // 获取本地已绑定的采购订单
+    const [localOrders] = await pool.execute(
+      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      [ownerId, '']
+    )
+
+    if (localOrders.length === 0) {
+      return res.json(ok({ matched_count: 0, total_platform: orders.length, message: '本地暂无已绑定平台订单号的采购订单' }))
+    }
+
+    // 订单状态映射
+    const statusMap = {
+      '等待买家付款': 'pending',
+      '买家已付款': 'pending',
+      '待发货': 'pending',
+      '待收货': 'shipped',
+      '卖家已发货': 'shipped',
+      '已发货': 'shipped',
+      '已签收': 'received',
+      '交易成功': 'received',
+      '运输中': 'in_transit',
+      '派送中': 'in_transit',
+      '已成交': 'completed',
+      '交易关闭': 'cancelled',
+      '已取消': 'cancelled',
+      '退款成功': 'refunded',
+      '退款中': 'refunded'
+    }
+
+    let matchedCount = 0
+
+    for (const platformOrder of orders) {
+      const localOrder = localOrders.find(lo => lo.platform_order_no === platformOrder.order_no)
+      if (!localOrder) continue
+
+      matchedCount++
+      const newStatus = statusMap[platformOrder.status] || localOrder.status
+
+      const updateFields = []
+      const updateValues = []
+
+      if (newStatus !== localOrder.status || !localOrder.account_id) {
+        updateFields.push('status=?')
+        updateValues.push(newStatus)
+      }
+
+      updateFields.push('account_id=?')
+      updateValues.push(account_id)
+
+      if (platformOrder.logistics_no) {
+        updateFields.push('logistics_no=?')
+        updateValues.push(platformOrder.logistics_no)
+      }
+      if (platformOrder.logistics_company) {
+        updateFields.push('logistics_company=?')
+        updateValues.push(platformOrder.logistics_company)
+      }
+
+      if (updateFields.length > 0) {
+        updateValues.push(localOrder.id)
+        await pool.execute(
+          `UPDATE purchase_orders SET ${updateFields.join(', ')} WHERE id=?`,
+          updateValues
+        )
+        console.log(`[Browser-Sync-Batch] 更新订单 ${localOrder.purchase_no}: status=${newStatus}, logistics=${platformOrder.logistics_no || '无'}`)
+      }
+    }
+
+    console.log(`[Browser-Sync-Batch] 完成: 匹配 ${matchedCount} 条`)
+    res.json(ok({ matched_count: matchedCount, total_platform: orders.length }))
+  } catch (err) {
+    console.error(`[Browser-Sync-Batch] Error: ${err.message}`)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 物流公司代码映射表 ============
+const CP_CODE_MAP = {
+  'YUNDA': '韵达快递', 'ZTO': '中通快递', 'STO': '申通快递', 'SF': '顺丰速运',
+  'YTO': '圆通速递', 'HTKY': '百世快递', 'JD': '京东物流', 'EMS': 'EMS',
+  'DBL': '德邦快递', 'YZPY': '邮政快递包裹', 'JD_VD': '京东快运',
+  'ANE': '安能物流', 'XBWL': '新邦物流', 'FAST': '快捷快递',
+  'QFKD': '全峰快递', 'DB': '德邦物流', 'RDB': '德邦快运',
+  'ZJS': '宅急送', 'TTKDY': '天天快递', 'UC': '优速快递',
+  'SNWL': '苏宁物流', 'PFCNE': '品骏快递', 'JDWL': '京东快递',
+  'HHT': '天天快递', 'GZL': '广州物流', 'CNPL': '菜鸟直送',
+  'CAINIAO': '菜鸟裹裹', 'BNQD': '百世快运', 'YZSAM': '邮政标准快递'
+}
+
+/**
+ * 根据 cpCode 获取物流公司名称
+ * 优先使用 API 返回的 cpName，为空时用 cpCode 映射兜底
+ */
+function resolveLogisticsCompany(cpName, cpCode) {
+  if (cpName && cpName.trim()) return cpName.trim()
+  if (cpCode && CP_CODE_MAP[cpCode.toUpperCase()]) return CP_CODE_MAP[cpCode.toUpperCase()]
+  return cpName || ''
+}
 
 // ============ 平台订单同步函数 ============
 
@@ -1939,7 +2424,15 @@ function parseTaobaoH5Response(responseText) {
       return orders
     }
     
-    const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+    let data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
+    // 处理嵌套 data.data 结构（部分API响应格式: { data: { data: { shopInfo_...: ... }, ret: [...] } }）
+    // 检查 data 中是否有任何以 shopInfo_ 或 orderStatus_ 开头的键（前缀匹配，避免误判 shopInfo_12345 等动态键）
+    const hasShopInfoKey = Object.keys(data).some(k => k.startsWith('shopInfo_'))
+    const hasOrderStatusKey = Object.keys(data).some(k => k.startsWith('orderStatus_'))
+    if (data && data.data && typeof data.data === 'object' && !hasShopInfoKey && !hasOrderStatusKey) {
+      console.log('[Sync] Detected nested data.data structure, unwrapping...')
+      data = data.data
+    }
     console.log('[Sync] Data keys:', Object.keys(data))
     
     // 组件化布局：遍历所有组件，按订单ID聚合信息
@@ -2007,7 +2500,7 @@ function parseTaobaoH5Response(responseText) {
       }
     }
     
-    // 转换为数组
+    // 转换为数组，用 cpCode 兜底 logistics_company
     for (const orderId of Object.keys(orderMap)) {
       const order = orderMap[orderId]
       if (order.order_no) {
@@ -2015,7 +2508,7 @@ function parseTaobaoH5Response(responseText) {
           order_no: order.order_no,
           status: order.status || '',
           logistics_no: order.logistics_no || '',
-          logistics_company: order.logistics_company || '',
+          logistics_company: resolveLogisticsCompany(order.logistics_company || '', order.logistics_company_code || ''),
           logistics_company_code: order.logistics_company_code || '',
           logistics_status: order.logistics_status || ''
         })
@@ -2038,7 +2531,14 @@ function parseTaobaoH5Response(responseText) {
 /**
  * 按订单号查询淘宝订单
  */
-async function queryTaobaoOrderByNo(cookies, orderNo) {
+/**
+ * 按订单号查询淘宝订单
+ * @param {Array} cookies - cookie数组
+ * @param {string} orderNo - 订单号
+ * @param {Object} [options] - 可选参数
+ * @param {Function} [options.onCookiesRefreshed] - cookie刷新回调，参数为更新后的cookie数组
+ */
+async function queryTaobaoOrderByNo(cookies, orderNo, { onCookiesRefreshed } = {}) {
   const https = require('https')
   const crypto = require('crypto')
   
@@ -2130,12 +2630,12 @@ async function queryTaobaoOrderByNo(cookies, orderNo) {
     const req = https.request(options, (res) => {
       let data = ''
       res.on('data', chunk => { data += chunk })
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
           console.log(`[Query-Taobao] Response status: ${res.statusCode}`)
           console.log(`[Query-Taobao] Response headers:`, JSON.stringify(res.headers).substring(0, 300))
           console.log(`[Query-Taobao] Response sample:`, data.substring(0, 500))
-          
+
           // 检查是否是HTML错误页面
           if (data.trim().startsWith('<') || data.includes('Cannot pro')) {
             console.error(`[Query-Taobao] Received HTML response instead of JSON`)
@@ -2156,21 +2656,148 @@ async function queryTaobaoOrderByNo(cookies, orderNo) {
           
           const response = JSON.parse(data)
           console.log(`[Query-Taobao] API response ret:`, response.ret)
+          console.log(`[Query-Taobao] response.data type: ${typeof response.data}, keys: ${response.data ? Object.keys(response.data).join(',') : 'N/A'}`)
 
           if (response.ret && response.ret[0] === 'SUCCESS::调用成功') {
             // 解析订单数据
             const orders = parseTaobaoH5Response(data)
+            console.log(`[Query-Taobao] Parsed ${orders.length} orders, searching for orderNo=${orderNo}`)
             if (orders.length > 0) {
+              console.log(`[Query-Taobao] Order numbers found:`, orders.map(o => o.order_no))
               // 查找匹配的订单
-              const order = orders.find(o => o.order_no === orderNo)
+              const order = orders.find(o => o.order_no === orderNo || o.order_no === String(orderNo))
               if (order) {
-                console.log(`[Query-Taobao] Found order:`, order)
+                console.log(`[Query-Taobao] Found matching order:`, JSON.stringify(order))
                 resolve(order)
               } else {
+                console.log(`[Query-Taobao] No order matched orderNo=${orderNo}`)
                 resolve(null)
               }
             } else {
+              console.log(`[Query-Taobao] No orders parsed from API response`)
               resolve(null)
+            }
+          } else if (response.ret && response.ret[0] && response.ret[0].includes('SESSION_EXPIRED')) {
+            // Token过期处理：多层刷新策略
+            console.log(`[Query-Taobao] Session expired, starting token refresh flow...`)
+
+            // 第一步：尝试从当前响应的 Set-Cookie 提取新 token
+            const setCookies = res.headers['set-cookie'] || []
+            let newTk = ''
+            let newTkEnc = ''
+            for (const sc of setCookies) {
+              const tkMatch = sc.match(/_m_h5_tk=([^;]+)/)
+              if (tkMatch) newTk = tkMatch[1]
+              const tkEncMatch = sc.match(/_m_h5_tk_enc=([^;]+)/)
+              if (tkEncMatch) newTkEnc = tkEncMatch[1]
+            }
+
+            // 第二步：如果 Set-Cookie 没有新 token，通过 warmup 请求刷新
+            if (!newTk) {
+              console.log(`[Query-Taobao] No token in Set-Cookie, trying warmup refresh...`)
+              const refreshResult = await refreshTaobaoH5Token(cookies)
+              if (refreshResult.success) {
+                newTk = refreshResult.newTk
+                newTkEnc = refreshResult.newTkEnc
+              }
+            }
+
+            // 第三步：有新 token → 重建签名 + 更新 cookie + 重试
+            if (newTk) {
+              console.log(`[Query-Taobao] Got refreshed token, rebuilding request and retrying...`)
+
+              // 通知调用方更新数据库中的 cookie
+              if (onCookiesRefreshed) {
+                try {
+                  const updatedCookies = updateCookiesWithNewToken(cookies, newTk, newTkEnc)
+                  await onCookiesRefreshed(updatedCookies)
+                  console.log(`[Query-Taobao] Cookies updated in database via callback`)
+                } catch (cbErr) {
+                  console.error(`[Query-Taobao] Cookie update callback error: ${cbErr.message}`)
+                }
+              }
+
+              // 用新 token 重建签名并重试
+              const retryTimestamp = Date.now()
+              const retrySignTs = Math.floor(retryTimestamp / 60000)
+              const retryToken = newTk.split('_')[0]
+              const retrySignStr = `${retryToken}&${retrySignTs}&12574478&${dataStr}`
+              const retrySign = crypto.createHash('md5').update(retrySignStr).digest('hex')
+
+              // 更新 cookie 字符串中的 _m_h5_tk
+              let retryCookieStr = cookieStr
+              retryCookieStr = retryCookieStr.replace(/_m_h5_tk=[^;]+/, `_m_h5_tk=${newTk}`)
+              if (newTkEnc) {
+                retryCookieStr = retryCookieStr.replace(/_m_h5_tk_enc=[^;]+/, `_m_h5_tk_enc=${newTkEnc}`)
+              }
+
+              const retryParams = new URLSearchParams({
+                jsv: '2.7.2', appKey: '12574478', t: retryTimestamp.toString(),
+                sign: retrySign, v: '1.0', ecode: '1', timeout: '8000',
+                dataType: 'json', valueType: 'original',
+                ttid: '1@tbwang_windows_1.0.0#pc', needLogin: 'true',
+                type: 'originaljson', isHttps: '1', needRetry: 'true',
+                api: 'mtop.taobao.order.queryboughtlistV2',
+                __customTag__: 'boughtList_all_OrderSearch', preventFallback: 'true'
+              })
+
+              const retryOptions = {
+                hostname: 'h5api.m.taobao.com',
+                path: `/h5/mtop.taobao.order.queryboughtlistv2/1.0/?${retryParams.toString()}`,
+                method: 'POST',
+                headers: {
+                  'Cookie': retryCookieStr,
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept': 'application/json',
+                  'Referer': 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
+                  'Content-Length': Buffer.byteLength(postData),
+                  'Origin': 'https://buyertrade.taobao.com'
+                }
+              }
+
+              const retryReq = https.request(retryOptions, (retryRes) => {
+                let retryData = ''
+                retryRes.on('data', chunk => { retryData += chunk })
+                retryRes.on('end', () => {
+                  try {
+                    console.log(`[Query-Taobao] Retry response:`, retryData.substring(0, 500))
+                    const retryResponse = JSON.parse(retryData)
+                    if (retryResponse.ret && retryResponse.ret[0] === 'SUCCESS::调用成功') {
+                      const orders = parseTaobaoH5Response(retryData)
+                      console.log(`[Query-Taobao] Retry parsed ${orders.length} orders, searching for orderNo=${orderNo}`)
+                      if (orders.length > 0) {
+                        console.log(`[Query-Taobao] Retry order numbers:`, orders.map(o => o.order_no))
+                      }
+                      const order = orders.find(o => o.order_no === orderNo || o.order_no === String(orderNo))
+                      if (order) {
+                        console.log(`[Query-Taobao] Retry found matching order:`, JSON.stringify(order))
+                      }
+                      resolve(order || null)
+                    } else if (retryResponse.ret && retryResponse.ret[0] && retryResponse.ret[0].includes('SESSION_EXPIRED')) {
+                      // 重试后仍然 SESSION_EXPIRED — 主会话 cookie 已过期
+                      console.log(`[Query-Taobao] Retry also returned SESSION_EXPIRED - main session expired`)
+                      const err = new Error('淘宝会话已过期，请重新登录采购账号')
+                      err.code = 'SESSION_EXPIRED'
+                      reject(err)
+                    } else {
+                      reject(new Error(retryResponse.ret ? retryResponse.ret.join(', ') : '重试后仍然失败'))
+                    }
+                  } catch (e) {
+                    reject(new Error(`重试响应解析失败: ${e.message}`))
+                  }
+                })
+              })
+              retryReq.on('error', reject)
+              retryReq.setTimeout(15000, () => { retryReq.destroy(); reject(new Error('重试请求超时')) })
+              retryReq.write(postData)
+              retryReq.end()
+            } else {
+              // 第四步：无法刷新 token — 主会话 cookie 已过期，需要用户重新登录
+              console.log(`[Query-Taobao] Token refresh failed - main session cookies expired`)
+              const err = new Error('淘宝会话已过期，请重新登录采购账号')
+              err.code = 'SESSION_EXPIRED'
+              reject(err)
             }
           } else {
             const errorMsg = response.ret ? response.ret.join(', ') : 'API调用失败'
@@ -2668,6 +3295,183 @@ async function validatePlatformCookie(platform, cookies) {
   })
 }
 
+// ============ 淘宝 H5 Token 刷新 ============
+
+/**
+ * 通过轻量级 API 请求刷新 _m_h5_tk token
+ * 访问淘宝 H5 API 网关，触发 Set-Cookie 返回新的 _m_h5_tk
+ * @param {Array|Object} cookies - 原始 cookie 数组
+ * @returns {{ newTk: string, newTkEnc: string, success: boolean }}
+ */
+async function refreshTaobaoH5Token(cookies) {
+  const https = require('https')
+  const crypto = require('crypto')
+
+  const requiredCookies = ['_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 't', 'sgcookie', 'enc', 'existShop', 'lgc', 'dnk', 'cna', 'tracknick', '_tb_token_', 'thw', 'hng']
+  let essentialCookies = []
+  if (Array.isArray(cookies)) {
+    essentialCookies = cookies.filter(c => requiredCookies.includes(c.name))
+  }
+  const cookieStr = buildCookieString(essentialCookies)
+
+  console.log(`[Token-Refresh] Attempting H5 token refresh, cookie length: ${cookieStr.length}`)
+
+  // 使用 mtop.common.getTimestamp 轻量API触发token刷新
+  const timestamp = Date.now()
+  const signTimestamp = Math.floor(timestamp / 60000)
+  const tokenMatch = cookieStr.match(/_m_h5_tk=([^;]+)/)
+  const oldToken = tokenMatch ? tokenMatch[1].split('_')[0] : ''
+
+  const dataStr = '{}'
+  const signStr = `${oldToken}&${signTimestamp}&12574478&${dataStr}`
+  const sign = crypto.createHash('md5').update(signStr).digest('hex')
+
+  const params = new URLSearchParams({
+    jsv: '2.7.2',
+    appKey: '12574478',
+    t: timestamp.toString(),
+    sign: sign,
+    v: '1.0',
+    ecode: '1',
+    timeout: '8000',
+    dataType: 'json',
+    api: 'mtop.common.getTimestamp',
+    isHttps: '1',
+    needRetry: 'true'
+  })
+
+  const options = {
+    hostname: 'h5api.m.taobao.com',
+    path: `/h5/mtop.common.getTimestamp/1.0/?${params.toString()}`,
+    method: 'GET',
+    headers: {
+      'Cookie': cookieStr,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json',
+      'Referer': 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm'
+    }
+  }
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      const setCookies = res.headers['set-cookie'] || []
+      let newTk = ''
+      let newTkEnc = ''
+
+      for (const sc of setCookies) {
+        const tkMatch = sc.match(/_m_h5_tk=([^;]+)/)
+        if (tkMatch) newTk = tkMatch[1]
+        const tkEncMatch = sc.match(/_m_h5_tk_enc=([^;]+)/)
+        if (tkEncMatch) newTkEnc = tkEncMatch[1]
+      }
+
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        if (newTk) {
+          console.log(`[Token-Refresh] Success! Got new _m_h5_tk: ${newTk.substring(0, 16)}...`)
+          resolve({ newTk, newTkEnc, success: true })
+        } else {
+          console.log(`[Token-Refresh] Failed - no new token in Set-Cookie`)
+          console.log(`[Token-Refresh] Response status: ${res.statusCode}, Set-Cookie count: ${setCookies.length}`)
+          // 尝试第二种方式：访问淘宝订单列表页面获取token
+          refreshTaobaoH5TokenViaPage(cookieStr).then(result => {
+            resolve(result)
+          })
+        }
+      })
+    })
+
+    req.on('error', (e) => {
+      console.log(`[Token-Refresh] Request error: ${e.message}`)
+      resolve({ newTk: '', newTkEnc: '', success: false })
+    })
+
+    req.setTimeout(10000, () => {
+      req.destroy()
+      console.log(`[Token-Refresh] Request timeout`)
+      resolve({ newTk: '', newTkEnc: '', success: false })
+    })
+
+    req.end()
+  })
+}
+
+/**
+ * 通过访问淘宝页面刷新 _m_h5_tk（备选方案）
+ * @param {string} cookieStr - cookie字符串
+ * @returns {{ newTk: string, newTkEnc: string, success: boolean }}
+ */
+async function refreshTaobaoH5TokenViaPage(cookieStr) {
+  const https = require('https')
+
+  console.log(`[Token-Refresh] Trying page-based refresh via buyertrade.taobao.com...`)
+
+  const options = {
+    hostname: 'buyertrade.taobao.com',
+    path: '/trade/itemlist/list_bought_items.htm',
+    method: 'GET',
+    headers: {
+      'Cookie': cookieStr,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+    }
+  }
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      const setCookies = res.headers['set-cookie'] || []
+      let newTk = ''
+      let newTkEnc = ''
+
+      for (const sc of setCookies) {
+        const tkMatch = sc.match(/_m_h5_tk=([^;]+)/)
+        if (tkMatch) newTk = tkMatch[1]
+        const tkEncMatch = sc.match(/_m_h5_tk_enc=([^;]+)/)
+        if (tkEncMatch) newTkEnc = tkEncMatch[1]
+      }
+
+      if (newTk) {
+        console.log(`[Token-Refresh-Page] Success! Got new _m_h5_tk from page visit`)
+        resolve({ newTk, newTkEnc, success: true })
+      } else {
+        console.log(`[Token-Refresh-Page] Failed - main session cookies may be expired`)
+        resolve({ newTk: '', newTkEnc: '', success: false })
+      }
+    })
+
+    req.on('error', () => resolve({ newTk: '', newTkEnc: '', success: false }))
+    req.setTimeout(10000, () => { req.destroy(); resolve({ newTk: '', newTkEnc: '', success: false }) })
+    req.end()
+  })
+}
+
+/**
+ * 更新 cookie 数组中的 _m_h5_tk 和 _m_h5_tk_enc
+ * @param {Array} cookies - 原始 cookie 数组
+ * @param {string} newTk - 新的 _m_h5_tk 值
+ * @param {string} newTkEnc - 新的 _m_h5_tk_enc 值
+ * @returns {Array} 更新后的 cookie 数组
+ */
+function updateCookiesWithNewToken(cookies, newTk, newTkEnc) {
+  const updated = cookies.map(c => ({ ...c }))
+  const tkIdx = updated.findIndex(c => c.name === '_m_h5_tk')
+  if (tkIdx >= 0) {
+    updated[tkIdx] = { ...updated[tkIdx], value: newTk }
+  } else {
+    updated.push({ name: '_m_h5_tk', value: newTk })
+  }
+  if (newTkEnc) {
+    const tkEncIdx = updated.findIndex(c => c.name === '_m_h5_tk_enc')
+    if (tkEncIdx >= 0) {
+      updated[tkEncIdx] = { ...updated[tkEncIdx], value: newTkEnc }
+    } else {
+      updated.push({ name: '_m_h5_tk_enc', value: newTkEnc })
+    }
+  }
+  return updated
+}
+
 // ============ 物流轨迹查询 ============
 
 // 查询物流轨迹
@@ -2711,7 +3515,14 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
       try {
         trackingData = await queryExpress100(order.logistics_no, order.logistics_company)
       } catch (e) {
-        return res.json(fail(`物流查询失败: ${e.message}`))
+        // 快递100也不可用，返回已有的基本信息（物流单号、公司）
+        console.log(`[Logistics] 快递100查询失败: ${e.message}，返回基本信息`)
+        return res.json(ok({
+          company: order.logistics_company || '',
+          tracking_no: order.logistics_no || '',
+          tracks: [],
+          source: 'local'
+        }))
       }
     }
 
@@ -3059,6 +3870,71 @@ async function queryExpress100(logisticsNo, company) {
     req.end()
   })
 }
+
+// ============ 小程序登录接口 ============
+// 供仓库小程序使用，返回 token 供后续 API 调用
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body
+    if (!username || !password) {
+      return res.json(fail('用户名和密码不能为空'))
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT id, username, real_name, phone, user_type, role, parent_id, status, password_hash FROM users WHERE username = ?',
+      [username]
+    )
+
+    if (!rows.length) {
+      return res.json(fail('用户名或密码错误'))
+    }
+
+    const user = rows[0]
+    if (user.status === 'disabled') {
+      return res.json(fail('账号已被禁用'))
+    }
+
+    // 验证密码
+    const valid = bcrypt.compareSync(password, user.password_hash)
+    if (!valid) {
+      return res.json(fail('用户名或密码错误'))
+    }
+
+    // 签发 JWT
+    const token = jwt.sign(
+      { sub: user.username, user_id: user.id },
+      JWT_SECRET,
+      { expiresIn: '7d', issuer: 'dianxiaoer-server' }
+    )
+
+    // 保存 token 到 user_tokens 表
+    await pool.execute(
+      'INSERT INTO user_tokens (user_id, token) VALUES (?, ?) ON DUPLICATE KEY UPDATE token = ?',
+      [user.id, token, token]
+    )
+
+    res.json(ok({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        realName: user.real_name,
+        phone: user.phone,
+        userType: user.user_type,
+        role: user.role
+      }
+    }))
+  } catch (err) {
+    console.error('[Auth] 登录失败:', err.message)
+    res.status(500).json(fail('登录失败'))
+  }
+})
+
+// ============ 仓库管理路由 ============
+
+const warehouseRouter = require('./routes/warehouse')(pool)
+app.use('/api/warehouse', warehouseRouter)
 
 // ============ 健康检查 ============
 

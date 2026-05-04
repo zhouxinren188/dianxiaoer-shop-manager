@@ -45,6 +45,11 @@
             <el-button type="primary" @click="handleDownload">立即下载</el-button>
           </template>
 
+          <!-- 下载中：显示后台下载按钮 -->
+          <template v-if="updateState === 'downloading'">
+            <el-button @click="minimizeToBar">后台下载</el-button>
+          </template>
+
           <!-- 下载完成：显示安装按钮 -->
           <template v-if="updateState === 'ready'">
             <el-button type="success" @click="handleInstall">
@@ -69,31 +74,62 @@
       </div>
     </el-dialog>
 
-    <!-- 顶部更新提示条 -->
-    <el-alert
-      v-if="showTopAlert && !dialogVisible"
-      :title="topAlertText"
-      type="info"
-      :closable="true"
-      @close="showTopAlert = false"
-      class="top-update-alert"
-    >
-      <template #default>
-        <el-button type="primary" link size="small" @click="dialogVisible = true">立即更新</el-button>
-      </template>
-    </el-alert>
+    <!-- 后台下载浮标 -->
+    <transition name="float-fade">
+      <div
+        v-if="showFloatBar"
+        class="download-float"
+        @click="restoreDialog"
+      >
+        <el-icon :size="16"><Download /></el-icon>
+        <span class="float-text">下载中 {{ downloadPercent }}%</span>
+        <el-progress
+          :percentage="downloadPercent"
+          :stroke-width="3"
+          :show-text="false"
+          class="float-progress"
+        />
+      </div>
+    </transition>
+
+    <!-- 全屏安装遮罩（全量更新时显示，防止用户误以为软件没在更新） -->
+    <transition name="install-fade">
+      <div v-if="isInstalling" class="install-overlay">
+        <div class="install-overlay-content">
+          <div class="install-spinner">
+            <el-icon :size="56" color="#409EFF"><Loading /></el-icon>
+          </div>
+          <p class="install-title">正在安装更新</p>
+          <p class="install-desc">应用即将退出并启动安装程序，请稍候...</p>
+          <p class="install-hint">安装完成后将自动重新启动</p>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 下载完成浮标 -->
+    <transition name="float-fade">
+      <div
+        v-if="showReadyFloat"
+        class="download-float ready"
+        @click="restoreDialog"
+      >
+        <el-icon :size="16" color="#67C23A"><CircleCheck /></el-icon>
+        <span class="float-text">更新就绪，点击安装</span>
+      </div>
+    </transition>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Download, CircleCheck } from '@element-plus/icons-vue'
+import { Download, CircleCheck, Loading } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 const dialogVisible = ref(false)
 const noUpdateVisible = ref(false)
-const showTopAlert = ref(false)
-const updateState = ref('idle') // idle | available | downloading | ready | error
+const isMinimized = ref(false)
+const isInstalling = ref(false)
+const updateState = ref('idle') // idle | available | downloading | ready | error | installing
 const downloadPercent = ref(0)
 const errorMsg = ref('')
 
@@ -107,11 +143,20 @@ const updateInfo = ref({
 
 const isDownloading = computed(() => updateState.value === 'downloading')
 
-const topAlertText = computed(() => {
-  const v = updateInfo.value.version
-  if (updateInfo.value.type === 'hot') return `发现新版本 ${v}（快速更新）`
-  return `发现新版本 ${v}（完整更新）`
-})
+// 后台下载浮标：仅在最小化 + 下载中时显示
+const showFloatBar = computed(() => isMinimized.value && updateState.value === 'downloading')
+// 下载完成浮标：仅在最小化 + 就绪时显示
+const showReadyFloat = computed(() => isMinimized.value && updateState.value === 'ready')
+
+function minimizeToBar() {
+  isMinimized.value = true
+  dialogVisible.value = false
+}
+
+function restoreDialog() {
+  isMinimized.value = false
+  dialogVisible.value = true
+}
 
 function formatSize(bytes) {
   if (!bytes) return ''
@@ -130,7 +175,7 @@ function registerListeners() {
     updateState.value = 'available'
     errorMsg.value = ''
     downloadPercent.value = 0
-    showTopAlert.value = true
+    isMinimized.value = false
     dialogVisible.value = true
   }))
 
@@ -145,12 +190,22 @@ function registerListeners() {
 
   removeListeners.push(window.electronAPI.onUpdate('um-update-ready', (info) => {
     updateState.value = 'ready'
-    ElMessage.success('更新下载完成')
+    if (isMinimized.value) {
+      // 最小化状态：用浮标提示，不打断用户
+      ElMessage.success('更新下载完成，点击右下角浮标安装')
+    } else {
+      ElMessage.success('更新下载完成')
+    }
   }))
 
   removeListeners.push(window.electronAPI.onUpdate('um-update-error', (info) => {
     updateState.value = 'error'
     errorMsg.value = info.message || '更新失败'
+    // 出错时自动恢复弹窗
+    if (isMinimized.value) {
+      isMinimized.value = false
+      dialogVisible.value = true
+    }
     ElMessage.error('更新失败: ' + (info.message || '未知错误'))
   }))
 }
@@ -168,6 +223,13 @@ async function handleDownload() {
 }
 
 async function handleInstall() {
+  if (updateInfo.value.type === 'full') {
+    // 全量更新：先显示安装遮罩，让用户明确知道正在安装
+    isInstalling.value = true
+    dialogVisible.value = false
+    // 等待遮罩渲染完成后再调用安装
+    await new Promise(r => setTimeout(r, 800))
+  }
   await window.electronAPI.invoke('um-install')
 }
 
@@ -189,15 +251,6 @@ onUnmounted(() => {
 <style scoped>
 .app-updater {
   position: relative;
-}
-
-.top-update-alert {
-  position: fixed;
-  top: 0;
-  left: 240px;
-  right: 0;
-  z-index: 2000;
-  border-radius: 0;
 }
 
 .update-content {
@@ -256,5 +309,136 @@ onUnmounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+/* 后台下载浮标 */
+.download-float {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 2100;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  transition: box-shadow 0.2s;
+  min-width: 180px;
+}
+
+.download-float:hover {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+}
+
+.download-float.ready {
+  border-color: #67C23A;
+  background: #f0f9eb;
+}
+
+.float-text {
+  font-size: 13px;
+  color: #606266;
+  white-space: nowrap;
+}
+
+.download-float.ready .float-text {
+  color: #67C23A;
+  font-weight: 500;
+}
+
+.float-progress {
+  flex: 1;
+  min-width: 40px;
+}
+
+/* 浮标动画 */
+.float-fade-enter-active {
+  transition: all 0.3s ease-out;
+}
+
+.float-fade-leave-active {
+  transition: all 0.2s ease-in;
+}
+
+.float-fade-enter-from {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.float-fade-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+/* 全屏安装遮罩 */
+.install-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.install-overlay-content {
+  text-align: center;
+  background: #fff;
+  border-radius: 16px;
+  padding: 48px 56px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.install-spinner {
+  margin-bottom: 20px;
+}
+
+.install-spinner .el-icon {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.install-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0 0 12px;
+}
+
+.install-desc {
+  font-size: 14px;
+  color: #606266;
+  margin: 0 0 8px;
+}
+
+.install-hint {
+  font-size: 13px;
+  color: #909399;
+  margin: 0;
+}
+
+.install-fade-enter-active {
+  transition: opacity 0.3s ease;
+}
+
+.install-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.install-fade-enter-from,
+.install-fade-leave-to {
+  opacity: 0;
 }
 </style>

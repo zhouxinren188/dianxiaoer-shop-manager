@@ -262,7 +262,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import {
   Goods,
   Search,
@@ -417,9 +417,30 @@ const filteredData = computed(() => {
     data = data.filter(item => isWarning(item))
   }
 
-  pageInfo.total = data.length
   const start = (pageInfo.page - 1) * pageInfo.pageSize
   return data.slice(start, start + pageInfo.pageSize)
+})
+
+watch(filteredData, (val) => {
+  // 从 computed 中移出，避免在 computed 内变异 reactive 状态
+  // 重新计算符合条件的总条数
+  let data = [...tableData.value]
+  if (filterForm.warehouse) {
+    data = data.filter(item => item.warehouse === filterForm.warehouse)
+  }
+  if (filterForm.id) {
+    data = data.filter(item => String(item.id).includes(filterForm.id))
+  }
+  if (filterForm.name) {
+    data = data.filter(item => item.name.toLowerCase().includes(filterForm.name.toLowerCase()))
+  }
+  if (filterForm.location) {
+    data = data.filter(item => item.location.toLowerCase().includes(filterForm.location.toLowerCase()))
+  }
+  if (filterForm.warningOnly) {
+    data = data.filter(item => isWarning(item))
+  }
+  pageInfo.total = data.length
 })
 
 function handleSearch() {

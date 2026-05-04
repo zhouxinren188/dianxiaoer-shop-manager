@@ -228,7 +228,7 @@ function authMiddleware(req, res, next) {
 // ========== API 路由 ==========
 
 // 注册
-app.post('/api/register', registerLimiter, (req, res) => {
+app.post('/api/register', registerLimiter, async (req, res) => {
   const { username, password, phone } = req.body
 
   if (!username || !password || !phone) {
@@ -247,21 +247,28 @@ app.post('/api/register', registerLimiter, (req, res) => {
     return res.status(400).json({ success: false, message: '手机号格式不正确' })
   }
 
-  const users = readJson(USERS_FILE, {})
-  if (users[username]) {
-    return res.status(409).json({ success: false, message: '该账号已存在' })
-  }
+  try {
+    // 检查数据库中是否已存在
+    const [existing] = await dbPool.execute('SELECT id FROM users WHERE username = ?', [username])
+    if (existing.length) {
+      return res.status(409).json({ success: false, message: '该账号已存在' })
+    }
 
-  const hashedPassword = bcrypt.hashSync(password, 10)
-  users[username] = {
-    password: hashedPassword,
-    phone: phone,
-    createdAt: new Date().toISOString()
-  }
-  writeJson(USERS_FILE, users)
+    const hashedPassword = bcrypt.hashSync(password, 10)
 
-  console.log(`[API] 新用户注册: ${username}`)
-  res.json({ success: true, message: '注册成功' })
+    // 写入MySQL数据库（注册用户默认为主账号 master）
+    const [result] = await dbPool.execute(
+      `INSERT INTO users (username, phone, password_hash, user_type, role, parent_id, status, real_name)
+       VALUES (?, ?, ?, 'master', 'admin', NULL, 'enabled', ?)`,
+      [username, phone, hashedPassword, username]
+    )
+
+    console.log(`[API] 新用户注册: ${username} (id=${result.insertId})`)
+    res.json({ success: true, message: '注册成功' })
+  } catch (err) {
+    console.error('[API] 注册失败:', err.message)
+    res.status(500).json({ success: false, message: '注册失败，请稍后重试' })
+  }
 })
 
 // 登录
@@ -419,6 +426,7 @@ app.post('/api/update/upload', (req, res) => {
     const version = req.body.version
     const changelog = req.body.changelog || ''
     const sha256 = req.body.sha256 || ''
+    const baseVersion = req.body.baseVersion || ''
     if (!version) {
       return res.status(400).json({ code: 1, message: 'version 不能为空' })
     }
@@ -434,7 +442,7 @@ app.post('/api/update/upload', (req, res) => {
       finalSha256 = hash.digest('hex')
     }
     const meta = readMeta()
-    meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, updatedAt: new Date().toISOString() }
+    meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, baseVersion, updatedAt: new Date().toISOString() }
     writeMeta(meta)
     console.log(`[Update] 热更新包已上传: v${version} (${(stat.size / 1024).toFixed(1)} KB)`)
     res.json({ code: 0, message: '上传成功', version, size: stat.size, sha256: finalSha256 })
@@ -487,15 +495,21 @@ app.get('/api/update/check', (req, res) => {
     if (hot) {
       const hotNum = parseVersion(hot.version)
       if (hotNum > currentNum) {
-        return res.json({
-          needUpdate: true,
-          updateType: 'hot',
-          version: hot.version,
-          changelog: hot.changelog || '',
-          size: hot.size || 0,
-          sha256: hot.sha256 || '',
-          updatedAt: hot.updatedAt
-        })
+        // 校验 baseVersion：热更新只能应用于匹配的基础版本
+        if (hot.baseVersion && appVersion && parseVersion(appVersion) !== parseVersion(hot.baseVersion)) {
+          // 用户的基础版本与热更新要求的不匹配，不返回热更新
+          console.log(`[Update] 热更新 baseVersion 不匹配: 用户appVersion=${appVersion}, 要求baseVersion=${hot.baseVersion}`)
+        } else {
+          return res.json({
+            needUpdate: true,
+            updateType: 'hot',
+            version: hot.version,
+            changelog: hot.changelog || '',
+            size: hot.size || 0,
+            sha256: hot.sha256 || '',
+            updatedAt: hot.updatedAt
+          })
+        }
       }
     }
 

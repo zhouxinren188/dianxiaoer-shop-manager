@@ -87,6 +87,74 @@ function cookiesToHeader(cookies) {
   }
 }
 
+// 从数据库查询店铺 Cookie 并恢复到 Electron session
+async function restoreCookiesFromDB(storeId) {
+  try {
+    const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies/${storeId}`)
+    if (res.statusCode !== 200) {
+      console.log(`[Heartbeat] 数据库无Cookie记录 store_id=${storeId} (HTTP ${res.statusCode})`)
+      return false
+    }
+    const json = JSON.parse(res.data)
+    if (json.code !== 0 || !json.data || !json.data.cookie_data) {
+      console.log(`[Heartbeat] 数据库Cookie记录为空 store_id=${storeId}`)
+      return false
+    }
+
+    const dbCookies = typeof json.data.cookie_data === 'string'
+      ? JSON.parse(json.data.cookie_data)
+      : json.data.cookie_data
+
+    if (!Array.isArray(dbCookies) || dbCookies.length === 0) {
+      console.log(`[Heartbeat] 数据库Cookie数据为空数组 store_id=${storeId}`)
+      return false
+    }
+
+    // 写入 Electron session
+    const partitionName = `persist:platform-${storeId}`
+    const ses = session.fromPartition(partitionName)
+
+    let restored = 0
+    for (const c of dbCookies) {
+      if (!c.name || !c.domain) continue
+      try {
+        const cookie = { url: buildCookieUrl(c), name: c.name, value: c.value || '', domain: c.domain, path: c.path || '/' }
+        if (c.secure) cookie.secure = true
+        if (c.httpOnly) cookie.httpOnly = true
+        if (c.sameSite) cookie.sameSite = c.sameSite
+        if (c.expirationDate && c.expirationDate > 0) {
+          cookie.expirationDate = c.expirationDate
+        }
+        await ses.cookies.set(cookie)
+        restored++
+      } catch (e) {
+        // 个别 Cookie 写入失败不影响整体
+      }
+    }
+
+    console.log(`[Heartbeat] 从数据库恢复Cookie store_id=${storeId} 成功=${restored}/${dbCookies.length}`)
+
+    // 恢复后立即刷盘，确保 Cookie 持久化到磁盘
+    // 否则 session 对象被 GC 后，下次 session.fromPartition() 从磁盘加载会丢失这些 Cookie
+    if (restored > 0) {
+      await new Promise(resolve => ses.flushStorageData(resolve))
+      console.log(`[Heartbeat] Cookie已刷盘 store_id=${storeId}`)
+    }
+
+    return restored > 0
+  } catch (err) {
+    console.error(`[Heartbeat] 从数据库恢复Cookie失败 store_id=${storeId}:`, err.message)
+    return false
+  }
+}
+
+// 根据 Cookie 的 domain 和 secure 属性构建 URL
+function buildCookieUrl(c) {
+  const secure = c.secure !== false && !c.domain.includes('localhost')
+  const domain = c.domain.startsWith('.') ? c.domain.substring(1) : c.domain
+  return `${secure ? 'https' : 'http'}://${domain}${c.path || '/'}`
+}
+
 // 直接从 Electron session 检查店铺 Cookie 是否有效
 async function checkStoreSession(storeId, platform) {
   try {
@@ -97,36 +165,76 @@ async function checkStoreSession(storeId, platform) {
     console.log(`[Heartbeat] Session检查 store_id=${storeId} Cookie数量=${cookies.length}`)
     
     if (!cookies || cookies.length === 0) {
-      return false // 没有Cookie
+      // Session 无 Cookie，尝试从数据库恢复
+      console.log(`[Heartbeat] store_id=${storeId} Session无Cookie，尝试从数据库恢复...`)
+      const restored = await restoreCookiesFromDB(storeId)
+      if (!restored) {
+        console.log(`[Heartbeat] store_id=${storeId} 数据库也无Cookie → 离线`)
+        return false
+      }
+      // 恢复后重新检查
+      const restoredCookies = await ses.cookies.get({})
+      if (!restoredCookies || restoredCookies.length === 0) {
+        console.log(`[Heartbeat] store_id=${storeId} 恢复后仍无Cookie → 离线`)
+        return false
+      }
+      console.log(`[Heartbeat] store_id=${storeId} 恢复后Cookie数量=${restoredCookies.length}，继续检查有效性`)
+      return checkCookieValidity(storeId, restoredCookies)
     }
-    
-    // 检查是否有京东相关的Cookie
-    const jdCookies = cookies.filter(c => 
-      c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk'))
-    )
-    
-    console.log(`[Heartbeat] Session检查 store_id=${storeId} 京东Cookie数量=${jdCookies.length}`)
-    
-    if (jdCookies.length === 0) {
-      return false // 没有京东Cookie
-    }
-    
-    // 检查Cookie是否过期
-    const now = Math.floor(Date.now() / 1000)
-    const hasExpiredCookie = jdCookies.some(c => 
-      c.expirationDate && c.expirationDate > 0 && c.expirationDate < now
-    )
-    
-    if (hasExpiredCookie) {
-      console.log(`[Heartbeat] Session检查 store_id=${storeId} 发现过期Cookie`)
-      return false
-    }
-    
-    return true // Cookie有效
+
+    return checkCookieValidity(storeId, cookies)
   } catch (err) {
     console.error(`[Heartbeat] Session检查失败 store_id=${storeId}:`, err.message)
     return false
   }
+}
+
+// 检查 Cookie 有效性（从 checkStoreSession 抽取）
+function checkCookieValidity(storeId, cookies) {
+  // 检查是否有京东相关的Cookie
+  const jdCookies = cookies.filter(c => 
+    c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk'))
+  )
+
+  console.log(`[Heartbeat] store_id=${storeId} 京东Cookie数量=${jdCookies.length}`)
+
+  if (jdCookies.length === 0) {
+    // 没有京东Cookie，尝试从数据库恢复
+    console.log(`[Heartbeat] store_id=${storeId} Session有Cookie但无京东Cookie，尝试从数据库恢复...`)
+    return false
+  }
+
+  // 诊断：打印所有京东 Cookie 的名称、域名、过期时间
+  const now = Math.floor(Date.now() / 1000)
+  const jdCookieSummary = jdCookies.map(c => {
+    const exp = c.expirationDate ? (c.expirationDate > 0 ? (c.expirationDate < now ? '已过期' : `还剩${Math.round((c.expirationDate - now) / 3600)}h`) : '会话级') : '无过期'
+    return `${c.name}(${c.domain}, ${exp})`
+  }).join(', ')
+  console.log(`[Heartbeat] store_id=${storeId} Cookie详情: ${jdCookieSummary}`)
+
+  // 京东登录凭证 Cookie 名称
+  const KEY_COOKIE_NAMES = ['pt_key', 'pt_pin', 'thor', 'pinId', 'pin', 'CookieJD']
+  const keyCookies = jdCookies.filter(c => KEY_COOKIE_NAMES.includes(c.name))
+
+  console.log(`[Heartbeat] store_id=${storeId} 关键登录Cookie: ${keyCookies.length}个`, keyCookies.map(c => c.name).join(', ') || '(无)')
+
+  if (keyCookies.length === 0) {
+    // 没有找到关键Cookie名，只要有 jd.com Cookie 就认为在线
+    console.log(`[Heartbeat] store_id=${storeId} 未识别关键Cookie名，按Cookie存在判定 → 在线`)
+    return true
+  }
+
+  const keyExpired = keyCookies.some(c => 
+    c.expirationDate && c.expirationDate > 0 && c.expirationDate < now
+  )
+
+  if (keyExpired) {
+    console.log(`[Heartbeat] store_id=${storeId} 关键登录Cookie已过期 → 离线`)
+    return false
+  }
+
+  console.log(`[Heartbeat] store_id=${storeId} 关键Cookie有效 → 在线`)
+  return true
 }
 
 // 检测单个店铺的在线状态
@@ -174,7 +282,6 @@ async function checkSingleStore(storeId, platform, cookieData) {
       
       // 京东特殊处理：检测是否返回了错误页面或登录提示
       if (platform === 'jd') {
-        // 京东Cookie失效的典型特征
         if (body.includes('login') || 
             body.includes('passport.jd.com') ||
             body.includes('wlf-passport') ||
@@ -183,7 +290,6 @@ async function checkSingleStore(storeId, platform, cookieData) {
           return false
         }
         
-        // 检测是否返回了空数据或错误提示
         if (body.includes('error') || body.includes('异常') || body.length < 1000) {
           return false
         }
@@ -221,9 +327,16 @@ async function checkAllStores(mainWindow) {
     for (const store of stores) {
       const storeId = store.id || store.store_id
       console.log(`[Heartbeat] 检测 store_id=${storeId} platform='${store.platform}'`)
-      
-      // 直接从Electron session检查Cookie
-      const online = await checkStoreSession(storeId, store.platform)
+
+      // 跳过正在同步的店铺，避免 Cookie 恢复干扰同步
+      const isSyncing = global.__activeSyncStores && global.__activeSyncStores.has(storeId)
+      let online
+      if (isSyncing) {
+        console.log(`[Heartbeat] store_id=${storeId} 正在同步中，跳过Cookie检查`)
+        online = true  // 同步进行中说明Cookie有效
+      } else {
+        online = await checkStoreSession(storeId, store.platform)
+      }
       
       console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online}`)
 

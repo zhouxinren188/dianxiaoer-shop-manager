@@ -71,6 +71,121 @@ function httpRequest(url, options = {}) {
   })
 }
 
+// 生成登录表单自动填充脚本（注入到采购登录窗口）
+// 与 purchase-order-capture.js 中的 buildLoginAutoFillScript 保持一致
+function buildLoginAutoFillScript(accountName, password) {
+  if (!accountName && !password) return ''
+  return `
+(function() {
+  var account = ${JSON.stringify(accountName || '')};
+  var password = ${JSON.stringify(password || '')};
+  if (!account && !password) return;
+  if (window.__loginAutoFillDone) return;
+  window.__loginAutoFillDone = true;
+
+  function setInputValue(el, value) {
+    var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function isAccountInput(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    var type = (el.type || '').toLowerCase();
+    if (type === 'password' || type === 'hidden' || type === 'submit' || type === 'checkbox' || type === 'radio') return false;
+    var name = (el.name || '').toLowerCase();
+    var id = (el.id || '').toLowerCase();
+    var placeholder = (el.placeholder || '').toLowerCase();
+    var cls = (el.className || '').toLowerCase();
+    var autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase();
+    // 属性匹配
+    var matched = name.includes('login') || name.includes('user') || name.includes('account') ||
+      name.includes('phone') || name.includes('mobile') || name.includes('uname') ||
+      id.includes('login') || id.includes('user') || id.includes('account') ||
+      id.includes('phone') || id.includes('mobile') || id.includes('uname') ||
+      placeholder.includes('\\u8d26\\u53f7') || placeholder.includes('\\u7528\\u6237\\u540d') ||
+      placeholder.includes('\\u624b\\u673a\\u53f7') || placeholder.includes('\\u90ae\\u7bb1') || placeholder.includes('\\u4f1a\\u5458\\u540d') ||
+      placeholder.includes('\\u767b\\u5f55\\u540d') ||
+      cls.includes('login') || cls.includes('user') || cls.includes('account') ||
+      autocomplete.includes('username') || autocomplete.includes('email');
+    if (matched) return true;
+    // 回退：文本类型输入框（type=text/tel/email 或无 type）视为候选
+    if (type === '' || type === 'text' || type === 'tel' || type === 'email') return 'maybe';
+    return false;
+  }
+
+  function isPasswordInput(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    if (el.type !== 'password') return false;
+    var name = (el.name || '').toLowerCase();
+    return !name.includes('verify') && !name.includes('captcha') && !name.includes('code');
+  }
+
+  function isVisible(el) {
+    return el.offsetWidth > 0 && el.offsetHeight > 0;
+  }
+
+  function fillLoginForm() {
+    var inputs = document.querySelectorAll('input');
+    var filled = 0;
+    var accountEl = null;
+    var maybeAccountEls = [];
+    var passwordEl = null;
+
+    inputs.forEach(function(el) {
+      if (!isVisible(el)) return;
+      if (password && isPasswordInput(el)) {
+        passwordEl = el;
+      }
+      if (account) {
+        var result = isAccountInput(el);
+        if (result === true) {
+          accountEl = el;
+        } else if (result === 'maybe') {
+          maybeAccountEls.push(el);
+        }
+      }
+    });
+
+    // 如果属性匹配未找到账号框，回退到位置匹配：取密码框之前的最后一个候选文本输入框
+    if (!accountEl && account && maybeAccountEls.length > 0) {
+      if (passwordEl) {
+        for (var i = maybeAccountEls.length - 1; i >= 0; i--) {
+          if (maybeAccountEls[i].compareDocumentPosition(passwordEl) & Node.DOCUMENT_POSITION_FOLLOWING) {
+            accountEl = maybeAccountEls[i];
+            break;
+          }
+        }
+      }
+      if (!accountEl) {
+        accountEl = maybeAccountEls[0];
+      }
+    }
+
+    if (accountEl && account) {
+      setInputValue(accountEl, account);
+      filled++;
+    }
+    if (passwordEl && password) {
+      setInputValue(passwordEl, password);
+      filled++;
+    }
+    if (filled > 0) {
+      console.log('[LoginAutoFill] Filled ' + filled + ' fields');
+    }
+  }
+
+  // 多次重试，兼容 React 异步渲染
+  fillLoginForm();
+  setTimeout(fillLoginForm, 1500);
+  setTimeout(fillLoginForm, 3000);
+
+  console.log('[LoginAutoFill] Credentials injected, account=' + (account ? 'YES' : 'NO') + ', password=' + (password ? 'YES' : 'NO'));
+})()
+`
+}
+
 function registerPlatformWindowIpc(mainWindow) {
   const preloadPath = path.join(__dirname, '../../resources/platform-login-preload.js')
   console.log('[PlatformWindow] preload path:', preloadPath)
@@ -399,6 +514,16 @@ function registerPlatformWindowIpc(mainWindow) {
         storeCredentials.delete(storeId)
         storeExtractedInfo.delete(storeId)
 
+        // 销毁窗口前先刷盘，确保 session 数据（Cookie等）持久化到磁盘
+        // 避免 win.destroy() 后内存中 session 数据丢失导致心跳检测不到 Cookie
+        try {
+          const ses = session.fromPartition(`persist:platform-${storeId}`)
+          await new Promise(resolve => ses.flushStorageData(resolve))
+          console.log('[PlatformWindow] Session数据已刷盘 storeId=', storeId)
+        } catch (e) {
+          console.error('[PlatformWindow] Session刷盘失败:', e.message)
+        }
+
         // 保存/删除完成后真正销毁窗口
         win.destroy()
       }
@@ -702,6 +827,60 @@ function registerPurchaseAccountIpc(mainWindow) {
 
     // 登录成功检测：延迟确认策略
     let loginDetected = false
+    let h5WarmupDone = false
+
+    // 保存 cookies 到服务器的通用函数
+    async function saveCookiesToServer() {
+      if (win.isDestroyed()) return null
+      try {
+        const ses = session.fromPartition(partitionName)
+        const cookies = await ses.cookies.get({})
+        if (cookies && cookies.length > 0) {
+          const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
+          })
+          console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
+          return { count: cookies.length, hasH5Tk }
+        }
+        return { count: 0, hasH5Tk: false }
+      } catch (err) {
+        console.error('[PurchaseWindow] Cookies 保存失败:', err.message)
+        return null
+      }
+    }
+
+    // 淘宝账号需要 _m_h5_tk：如果没有则导航到已买到的商品页面来获取
+    async function ensureH5TokenAndSave() {
+      if (win.isDestroyed() || h5WarmupDone) return
+      h5WarmupDone = true
+
+      // 第一次保存
+      const result = await saveCookiesToServer()
+
+      // 淘宝平台：如果没有 _m_h5_tk，需要导航到商品列表页触发 H5 API 来获取
+      if (platform === 'taobao' && result && !result.hasH5Tk) {
+        console.log('[PurchaseWindow] 未找到 _m_h5_tk，导航到已买到的商品页面获取...')
+        const h5WarmupUrl = 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm'
+        try {
+          await win.loadURL(h5WarmupUrl)
+        } catch (e) {
+          console.warn('[PurchaseWindow] 导航到商品列表页失败:', e.message)
+        }
+        // 等页面加载和 JS 执行完毕后再次保存
+        setTimeout(async () => {
+          const result2 = await saveCookiesToServer()
+          if (result2 && result2.hasH5Tk) {
+            console.log('[PurchaseWindow] _m_h5_tk 已获取并保存')
+          } else {
+            console.warn('[PurchaseWindow] 导航后仍未获取到 _m_h5_tk')
+          }
+        }, 8000)
+      }
+    }
+
     win.webContents.on('did-navigate', (e, url) => {
       if (loginDetected) return
       const backendUrl = PURCHASE_BACKEND_URLS[platform] || ''
@@ -710,6 +889,20 @@ function registerPurchaseAccountIpc(mainWindow) {
       if (!isLoginPage && backendUrl) {
         loginDetected = true
         console.log('[PurchaseWindow] 检测到登录成功:', url)
+        // 延迟5秒保存cookies（等页面JS执行完毕，H5 API请求完成）
+        setTimeout(ensureH5TokenAndSave, 5000)
+      }
+
+      // 登录页自动填充账号密码
+      if (isLoginPage && (account || password)) {
+        setTimeout(() => {
+          if (win.isDestroyed() || loginDetected) return
+          const script = buildLoginAutoFillScript(account || '', password || '')
+          if (script) {
+            win.webContents.executeJavaScript(script).catch(() => {})
+            console.log('[PurchaseWindow] Login auto-fill script injected, account=' + (account ? 'YES' : 'NO') + ', password=' + (password ? 'YES' : 'NO'))
+          }
+        }, 1000)
       }
     })
 
@@ -748,7 +941,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       if (cookies && cookies.length > 0) {
         try {
           const cookieData = JSON.stringify(cookies)
-          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookie`, {
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cookie_data: cookieData, platform })
@@ -796,6 +989,31 @@ function registerPurchaseAccountIpc(mainWindow) {
       win.close()
     }
     return { success: true }
+  })
+
+  // 从浏览器 session 刷新 cookies 到服务器数据库
+  // 前端在同步之前调用此接口，确保服务器能拿到最新的 _m_h5_tk 等 token
+  ipcMain.handle('refresh-purchase-cookies', async (event, { accountId, platform }) => {
+    try {
+      const partitionName = `persist:purchase-${accountId}`
+      const ses = session.fromPartition(partitionName)
+      const cookies = await ses.cookies.get({})
+      if (cookies && cookies.length > 0) {
+        await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
+        })
+        // 检查是否有 _m_h5_tk（淘宝 H5 API 签名所需）
+        const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+        console.log(`[PurchaseWindow] 刷新 cookies 到服务器: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
+        return { success: true, count: cookies.length, hasH5Tk }
+      }
+      return { success: true, count: 0, hasH5Tk: false }
+    } catch (err) {
+      console.error('[PurchaseWindow] 刷新 cookies 失败:', err.message)
+      return { success: false, error: err.message }
+    }
   })
 }
 

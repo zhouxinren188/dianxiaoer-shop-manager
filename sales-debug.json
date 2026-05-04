@@ -1,75 +1,84 @@
 {
-  "timestamp": "2026-05-02T21:04:40.550Z",
-  "storeId": 41,
+  "timestamp": "2026-05-04T18:20:36.493Z",
+  "storeId": 54,
   "phase": "success",
-  "ordersCount": 50,
-  "totalCount": 50,
+  "ordersCount": 15,
+  "totalCount": 15,
   "apiUrl": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderPage",
   "rawSampleOrders": [
     {
       "orderType": 22,
       "orderPromiseInfo": {
         "expChanged": false,
-        "promiseShipDate": 1777662000000,
-        "orderWarningDesc": "发货超时，需尽快发货",
-        "orderWarningDate": 1777662000000,
-        "orderWarningTimeStamp": 93843071,
-        "orderWarningType": 9,
-        "orderWarningFormat": "已逾期 %s"
+        "promiseShipDate": 1778007600000,
+        "orderWarningDate": 1778007600000,
+        "orderWarningTimeStamp": 88800844,
+        "orderWarningType": 10,
+        "orderWarningFormat": "%s 内需发货"
       },
-      "orderId": "3483255007089793",
-      "orderCreateTime": 1777453876000,
-      "paymentConfirmTime": 1777453884000,
+      "orderId": "3488467011423650",
+      "orderCreateTime": 1777901099000,
+      "paymentConfirmTime": 1777901112000,
       "orderItems": [
         {
-          "skuName": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
-          "imgUrl": "//img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
-          "itemId": "截25/11.12128352",
-          "skuUuid": "1012_F2a1m4B1606362484100927488",
-          "skuUrl": "//item.jd.com/10198582176948.html?sdx=ehi-lLxFuZiE6JnJaItZhMQhtzaYDAMrsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
+          "skuName": "太阳能车载香薰香水汽车内装饰品旋转中控台摆件持久淡香氛除异味 翡翠绿-摩天轮香薰+花香味香水",
+          "imgUrl": "//img10.360buyimg.com/n1/jfs/t1/414349/38/19228/172655/69d9d3c3F3ea6da10/008332032028d551.jpg",
+          "itemId": "4.11/TB817892723121",
+          "skuUuid": "1012_F2A3V4V1608238323216216064",
+          "skuUrl": "//item.jd.com/10217121189697.html?sdx=ehi-lLxFuZiE6JnKYIRdjschuDmXAQwrsmpJt61MYNSLcdOgKppb4XXkrU_qXmaV9w",
           "customSkuFlagMap": {},
           "num": 1,
-          "jdPrice": 518,
-          "saleAttributes": "[{\"dim\":1,\"saleName\":\"规格\",\"saleValue\":\"45（直径45cm）\",\"sequenceNo\":5}]",
+          "jdPrice": 106.02,
+          "saleAttributes": "[{\"dim\":1,\"saleName\":\"颜色\",\"saleValue\":\"翡翠绿-摩天轮香薰+花香味香水\",\"sequenceNo\":6}]",
           "serviceName": "",
-          "skuId": "10198582176948"
+          "skuId": "10217121189697"
         }
       ],
-      "userPin": "wdwsmfLsAhdzNC",
+      "userPin": "jd_CYdjYtzOKOUu",
       "orderSpecialViews": [
         {
-          "name": "晚发赔",
-          "id": 7,
+          "name": "JDL京东物流",
+          "id": 28,
           "tips": [
             {
               "type": "text",
-              "content": "当商家订单未按承诺时间发货时，京东将会从商家钱包账户（包括钱包、货款、保证金等）中扣除对应的消费者赔付金，并将同等金额以京豆的形式发放给对应的消费者，具体请以赔付信息为准。（实付金额≤3元、特殊商品、特殊服务及不可抗力因素不赔付）"
+              "content": "前台对消费者展示【JDL京东物流】标签的订单"
             }
           ]
         },
         {
-          "name": "催单",
-          "id": 105,
+          "name": "消费者选择京配",
+          "id": 101,
           "tips": [
             {
               "type": "text",
-              "content": "消费者进行催单的订单，请对催单工单进行 协商回复，避免延迟发货纠纷"
+              "content": "消费者下单时选择使用京东系快递发货，商家发货需选择京东系快递"
+            }
+          ]
+        },
+        {
+          "name": "店铺报备",
+          "id": 138,
+          "tips": [
+            {
+              "type": "text",
+              "content": "通过店铺报备过的订单，需要在报备时间内发货，店铺星级及延迟发发货考核免责"
             }
           ]
         }
       ],
       "orderConsigneeInfo": {
-        "countyId": 51939,
-        "consName": "邢**",
-        "consMobilePhone": "1******5296",
-        "consAddress": "上海闵行区华漕镇**********",
-        "cityId": 2825,
-        "townId": 0,
-        "provinceId": 2
+        "countyId": 37918,
+        "consName": "姜**",
+        "consMobilePhone": "1******1827",
+        "consAddress": "山东青岛市崂山区**********",
+        "cityId": 1007,
+        "townId": 37973,
+        "provinceId": 13
       },
       "venderWareHouse": {
-        "wareHouseId": 0,
-        "wareHouseName": "商家全国仓"
+        "wareHouseId": 800014550,
+        "wareHouseName": "宿迁沭阳九问云仓1号库"
       },
       "orderStatusInfo": {
         "autoShipResult": false,
@@ -86,7 +95,7 @@
         "noStandardType": null,
         "fiveStarHKOrderFlag": null,
         "popConsignmentBorderFlag": null,
-        "delayDeliveryRemindFlag": null,
+        "delayDeliveryRemindFlag": "1",
         "jingHongOrderFlag": null,
         "tiktokOrderFlag": null,
         "icmpOrderFlag": "0",
@@ -143,60 +152,97 @@
         "globalDirectOrder": null
       },
       "orderPaymentInfo": {
-        "shouldPay": 518,
+        "shouldPay": 106.02,
         "freight": 0,
         "paymentTypeName": "在线支付",
-        "receivables": 518,
+        "receivables": 106.02,
         "commission": 0,
-        "orderSum": 518,
+        "orderSum": 106.02,
         "paymentType": 4
       }
     },
     {
       "orderType": 22,
       "orderPromiseInfo": {
-        "expChanged": false
+        "expChanged": false,
+        "promiseShipDate": 1778007600000,
+        "orderWarningDate": 1778007600000,
+        "orderWarningTimeStamp": 88800844,
+        "orderWarningType": 10,
+        "orderWarningFormat": "%s 内需发货"
       },
-      "orderId": "3470456002304828",
-      "orderCreateTime": 1776274469000,
-      "paymentConfirmTime": 1776274477000,
+      "orderId": "3488480004158444",
+      "orderCreateTime": 1777866086000,
+      "paymentConfirmTime": 1777866100000,
       "orderItems": [
         {
-          "skuName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "imgUrl": "//img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
-          "itemId": "截25/8.5123",
-          "skuUuid": "1012_f3K4O3B1601415738509111296",
-          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
+          "skuName": "徕本车载吸尘器无线手持家用车用两用超强吸力吹吸一体机新款 【合金黑无刷plus】AI智控+飓风强吸力+赠可水洗滤芯3",
+          "imgUrl": "//img12.360buyimg.com/n1/jfs/t1/421349/13/868/104769/69df432fFdd455252/00833203204a6bb0.jpg",
+          "itemId": "4.15/TM1010800602371",
+          "skuUuid": "1012_d1Q2B1q1608091393056428032",
+          "skuUrl": "//item.jd.com/10217617047812.html?sdx=ehi-lLxFuZiE6JnKYIRajcEgtDeZCQkrsmpJt61MYNSLcdOgKppb4XXkrU_qXmaV9w",
           "customSkuFlagMap": {},
-          "num": 2,
-          "jdPrice": 598,
-          "saleAttributes": "[{\"dim\":1,\"saleName\":\"规格\",\"saleValue\":\"藤编猫头款拉杆包送毛绒垫\",\"sequenceNo\":1}]",
+          "num": 1,
+          "jdPrice": 89,
+          "saleAttributes": "[{\"dim\":1,\"saleName\":\"颜色及规格\",\"saleValue\":\"【合金黑无刷plus】AI智控+飓风强吸力+赠可水洗滤芯3\",\"sequenceNo\":13}]",
           "serviceName": "",
-          "skuId": "10169888029044"
+          "skuId": "10217617047812"
         }
       ],
-      "userPin": "忧郁青年",
+      "userPin": "jd_IsbCzEfZGhcq",
+      "orderSpecialViews": [
+        {
+          "name": "JDL京东物流",
+          "id": 28,
+          "tips": [
+            {
+              "type": "text",
+              "content": "前台对消费者展示【JDL京东物流】标签的订单"
+            }
+          ]
+        },
+        {
+          "name": "消费者选择京配",
+          "id": 101,
+          "tips": [
+            {
+              "type": "text",
+              "content": "消费者下单时选择使用京东系快递发货，商家发货需选择京东系快递"
+            }
+          ]
+        },
+        {
+          "name": "店铺报备",
+          "id": 138,
+          "tips": [
+            {
+              "type": "text",
+              "content": "通过店铺报备过的订单，需要在报备时间内发货，店铺星级及延迟发发货考核免责"
+            }
+          ]
+        }
+      ],
       "orderConsigneeInfo": {
-        "countyId": 8558,
-        "consName": "苏**",
-        "consMobilePhone": "1******7861",
-        "consAddress": "江苏宿迁市沭阳县**********",
-        "cityId": 933,
-        "townId": 60093,
-        "provinceId": 12
+        "countyId": 3760,
+        "consName": "吕**",
+        "consMobilePhone": "1******8320",
+        "consAddress": "海南文昌市东郊镇**********",
+        "cityId": 3698,
+        "townId": 0,
+        "provinceId": 23
       },
       "venderWareHouse": {
-        "wareHouseId": 0,
-        "wareHouseName": "商家全国仓"
+        "wareHouseId": 800014550,
+        "wareHouseName": "宿迁沭阳九问云仓1号库"
       },
       "orderStatusInfo": {
         "autoShipResult": false,
-        "orderStatusName": "已取消",
-        "orderStatusDesc": "订单已取消",
-        "orderStatus": 29,
+        "orderStatusName": "待出库",
+        "orderStatusDesc": "买家已付款，待商家发货",
+        "orderStatus": 8,
         "autoShipFlag": false
       },
-      "skuTotalNum": 2,
+      "skuTotalNum": 1,
       "orderFlagVo": {
         "guoBuOrderFlag": null,
         "bmallOrderFlag": null,
@@ -204,7 +250,7 @@
         "noStandardType": null,
         "fiveStarHKOrderFlag": null,
         "popConsignmentBorderFlag": null,
-        "delayDeliveryRemindFlag": null,
+        "delayDeliveryRemindFlag": "1",
         "jingHongOrderFlag": null,
         "tiktokOrderFlag": null,
         "icmpOrderFlag": "0",
@@ -261,60 +307,111 @@
         "globalDirectOrder": null
       },
       "orderPaymentInfo": {
-        "shouldPay": 1196,
+        "shouldPay": 89,
         "freight": 0,
         "paymentTypeName": "在线支付",
-        "receivables": 1196,
+        "receivables": 89,
         "commission": 0,
-        "orderSum": 1196,
+        "orderSum": 89,
         "paymentType": 4
       }
     },
     {
       "orderType": 22,
       "orderPromiseInfo": {
-        "expChanged": false
+        "expChanged": false,
+        "promiseShipDate": 1777921200000,
+        "orderWarningDesc": "发货预警，即将逾期",
+        "orderWarningDate": 1777921200000,
+        "orderWarningTimeStamp": 2400846,
+        "orderWarningType": 8,
+        "orderWarningFormat": "%s 内需发货"
       },
-      "orderId": "3470456002305791",
-      "orderCreateTime": 1776274410000,
-      "paymentConfirmTime": 1776274497000,
+      "orderId": "3487401006491129",
+      "orderCreateTime": 1777806192000,
+      "paymentConfirmTime": 1777806198000,
       "orderItems": [
         {
-          "skuName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "imgUrl": "//img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
-          "itemId": "截25/8.5123",
-          "skuUuid": "1012_F2C1j2U1601415481234599936",
-          "skuUrl": "//item.jd.com/10169888029044.html?sdx=ehi-lLxFuZiE6JnJZ4pUhM4gsjmRDA8rsmpJt65NZt6JPe_RLJpb4XngrUzgV2CR",
+          "skuName": "智能车载便携电子调温加热沉香熏香器送礼年会礼品老山檀车载熏香 【黑色】车载熏香炉（三挡控温、车熄自动断电） 木质调",
+          "imgUrl": "//img13.360buyimg.com/n1/jfs/t1/415308/40/16104/124264/69d9d3beFf4fd4508/00833203207b973a.jpg",
+          "itemId": "4.11/TB1000007315992",
+          "skuUuid": "1012_d1QI2O1607816246087020544",
+          "skuUrl": "//item.jd.com/10217121219580.html?sdx=ehi-lLxFuZiE6JnKYIRdjscisTmUAAsrsmpJt61MYNSLcdOgKppb4XXkrU_qXmaV9w",
           "customSkuFlagMap": {},
-          "num": 5,
-          "jdPrice": 598,
-          "saleAttributes": "[{\"dim\":1,\"saleName\":\"规格\",\"saleValue\":\"藤编猫头款拉杆包送毛绒垫\",\"sequenceNo\":1}]",
+          "num": 1,
+          "jdPrice": 134.92,
+          "saleAttributes": "[{\"dim\":1,\"saleName\":\"颜色\",\"saleValue\":\"【黑色】车载熏香炉（三挡控温、车熄自动断电）\",\"sequenceNo\":4},{\"dim\":2,\"saleName\":\"尺码\",\"saleValue\":\"木质调\",\"sequenceNo\":1}]",
           "serviceName": "",
-          "skuId": "10169888029044"
+          "skuId": "10217121219580"
         }
       ],
-      "userPin": "忧郁青年",
+      "userPin": "tonyliulxj",
+      "orderLatestTrackInfo": {
+        "latestTrackInfo": "您的订单由京东云仓拣货完成，待出库交付给京东配送，运单号为JDVB61237620878",
+        "noLogisticsFlag": false,
+        "logiCoprId": "2087",
+        "logiCoprName": "京东快递",
+        "latestTopTitle": "仓库处理中",
+        "packageNum": 1
+      },
+      "orderSpecialViews": [
+        {
+          "name": "JDL京东物流",
+          "id": 28,
+          "tips": [
+            {
+              "type": "text",
+              "content": "前台对消费者展示【JDL京东物流】标签的订单"
+            }
+          ]
+        },
+        {
+          "name": "消费者选择京配",
+          "id": 101,
+          "tips": [
+            {
+              "type": "text",
+              "content": "消费者下单时选择使用京东系快递发货，商家发货需选择京东系快递"
+            }
+          ]
+        },
+        {
+          "name": "店铺报备",
+          "id": 138,
+          "tips": [
+            {
+              "type": "text",
+              "content": "通过店铺报备过的订单，需要在报备时间内发货，店铺星级及延迟发发货考核免责"
+            }
+          ]
+        }
+      ],
       "orderConsigneeInfo": {
-        "countyId": 8558,
-        "consName": "苏**",
-        "consMobilePhone": "1******7861",
-        "consAddress": "江苏宿迁市沭阳县**********",
-        "cityId": 933,
-        "townId": 60093,
-        "provinceId": 12
+        "countyId": 61072,
+        "consName": "刘**",
+        "consMobilePhone": "1******5931",
+        "consAddress": "上海静安区江宁路街道**********",
+        "cityId": 2817,
+        "townId": 0,
+        "provinceId": 2
       },
       "venderWareHouse": {
-        "wareHouseId": 0,
-        "wareHouseName": "商家全国仓"
+        "wareHouseId": 800014550,
+        "wareHouseName": "宿迁沭阳九问云仓1号库"
       },
       "orderStatusInfo": {
         "autoShipResult": false,
-        "orderStatusName": "已取消",
-        "orderStatusDesc": "订单已取消",
-        "orderStatus": 29,
+        "orderStatusName": "已出库",
+        "orderStatusDesc": "商品已出库，待买家确认",
+        "orderStatus": 16,
         "autoShipFlag": false
       },
-      "skuTotalNum": 5,
+      "skuTotalNum": 1,
+      "logisticsInfoList": [
+        {
+          "logiCoprId": "2087"
+        }
+      ],
       "orderFlagVo": {
         "guoBuOrderFlag": null,
         "bmallOrderFlag": null,
@@ -322,7 +419,7 @@
         "noStandardType": null,
         "fiveStarHKOrderFlag": null,
         "popConsignmentBorderFlag": null,
-        "delayDeliveryRemindFlag": null,
+        "delayDeliveryRemindFlag": "1",
         "jingHongOrderFlag": null,
         "tiktokOrderFlag": null,
         "icmpOrderFlag": "0",
@@ -379,233 +476,121 @@
         "globalDirectOrder": null
       },
       "orderPaymentInfo": {
-        "shouldPay": 3000,
-        "freight": 10,
+        "shouldPay": 134.92,
+        "freight": 0,
         "paymentTypeName": "在线支付",
-        "receivables": 3000,
+        "receivables": 134.92,
         "commission": 0,
-        "orderSum": 2990,
+        "orderSum": 134.92,
         "paymentType": 4
       }
     }
   ],
   "sampleOrders": [
     {
-      "orderId": "3483255007089793",
+      "orderId": "3488467011423650",
       "orderState": 8,
       "statusText": "待出库",
-      "orderTime": "2026-04-29 17:11:16",
-      "paymentTime": "2026-04-29 17:11:24",
+      "orderTime": "2026-05-04 21:24:59",
+      "paymentTime": "2026-05-04 21:25:12",
       "shipTime": "",
       "finishTime": "",
-      "totalAmount": 518,
-      "goodsAmount": 518,
+      "totalAmount": 106.02,
+      "goodsAmount": 106.02,
       "shippingFee": 0,
       "paymentMethod": "在线支付",
-      "buyerName": "邢**",
-      "buyerPhone": "1******5296",
-      "buyerAddress": "上海闵行区华漕镇**********",
-      "buyerAccount": "wdwsmfLsAhdzNC",
+      "buyerName": "姜**",
+      "buyerPhone": "1******1827",
+      "buyerAddress": "山东青岛市崂山区**********",
+      "buyerAccount": "jd_CYdjYtzOKOUu",
       "logisticsCompany": "",
       "logisticsNo": "",
-      "skuId": "10198582176948",
-      "productName": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
-      "unitPrice": 518,
+      "skuId": "10217121189697",
+      "productName": "太阳能车载香薰香水汽车内装饰品旋转中控台摆件持久淡香氛除异味 翡翠绿-摩天轮香薰+花香味香水",
+      "unitPrice": 106.02,
       "quantity": 1,
-      "productImage": "https://img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg",
+      "productImage": "https://img10.360buyimg.com/n1/jfs/t1/414349/38/19228/172655/69d9d3c3F3ea6da10/008332032028d551.jpg",
       "itemCount": 1,
       "allItems": [
         {
-          "skuId": "10198582176948",
-          "name": "不锈钢鸟笼画眉虎皮鹩哥八哥金属圆形鸟笼子鹦鹉特大号养殖 45（直径45cm）",
-          "price": 518,
+          "skuId": "10217121189697",
+          "name": "太阳能车载香薰香水汽车内装饰品旋转中控台摆件持久淡香氛除异味 翡翠绿-摩天轮香薰+花香味香水",
+          "price": 106.02,
           "quantity": 1,
-          "image": "https://img14.360buyimg.com/n1/jfs/t1/116695/23/33734/109524/64d6320bF3069c0c2/b9339664d9d3341e.jpg"
+          "image": "https://img10.360buyimg.com/n1/jfs/t1/414349/38/19228/172655/69d9d3c3F3ea6da10/008332032028d551.jpg"
         }
       ]
     },
     {
-      "orderId": "3470456002304828",
-      "orderState": 29,
-      "statusText": "已取消",
-      "orderTime": "2026-04-16 01:34:29",
-      "paymentTime": "2026-04-16 01:34:37",
+      "orderId": "3488480004158444",
+      "orderState": 8,
+      "statusText": "待出库",
+      "orderTime": "2026-05-04 11:41:26",
+      "paymentTime": "2026-05-04 11:41:40",
       "shipTime": "",
       "finishTime": "",
-      "totalAmount": 1196,
-      "goodsAmount": 1196,
+      "totalAmount": 89,
+      "goodsAmount": 89,
       "shippingFee": 0,
       "paymentMethod": "在线支付",
-      "buyerName": "苏**",
-      "buyerPhone": "1******7861",
-      "buyerAddress": "江苏宿迁市沭阳县**********",
-      "buyerAccount": "忧郁青年",
+      "buyerName": "吕**",
+      "buyerPhone": "1******8320",
+      "buyerAddress": "海南文昌市东郊镇**********",
+      "buyerAccount": "jd_IsbCzEfZGhcq",
       "logisticsCompany": "",
       "logisticsNo": "",
-      "skuId": "10169888029044",
-      "productName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-      "unitPrice": 598,
-      "quantity": 2,
-      "productImage": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+      "skuId": "10217617047812",
+      "productName": "徕本车载吸尘器无线手持家用车用两用超强吸力吹吸一体机新款 【合金黑无刷plus】AI智控+飓风强吸力+赠可水洗滤芯3",
+      "unitPrice": 89,
+      "quantity": 1,
+      "productImage": "https://img12.360buyimg.com/n1/jfs/t1/421349/13/868/104769/69df432fFdd455252/00833203204a6bb0.jpg",
       "itemCount": 1,
       "allItems": [
         {
-          "skuId": "10169888029044",
-          "name": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "price": 598,
-          "quantity": 2,
-          "image": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
+          "skuId": "10217617047812",
+          "name": "徕本车载吸尘器无线手持家用车用两用超强吸力吹吸一体机新款 【合金黑无刷plus】AI智控+飓风强吸力+赠可水洗滤芯3",
+          "price": 89,
+          "quantity": 1,
+          "image": "https://img12.360buyimg.com/n1/jfs/t1/421349/13/868/104769/69df432fFdd455252/00833203204a6bb0.jpg"
         }
       ]
     },
     {
-      "orderId": "3470456002305791",
-      "orderState": 29,
-      "statusText": "已取消",
-      "orderTime": "2026-04-16 01:33:30",
-      "paymentTime": "2026-04-16 01:34:57",
+      "orderId": "3487401006491129",
+      "orderState": 16,
+      "statusText": "已出库",
+      "orderTime": "2026-05-03 19:03:12",
+      "paymentTime": "2026-05-03 19:03:18",
       "shipTime": "",
       "finishTime": "",
-      "totalAmount": 3000,
-      "goodsAmount": 2990,
-      "shippingFee": 10,
+      "totalAmount": 134.92,
+      "goodsAmount": 134.92,
+      "shippingFee": 0,
       "paymentMethod": "在线支付",
-      "buyerName": "苏**",
-      "buyerPhone": "1******7861",
-      "buyerAddress": "江苏宿迁市沭阳县**********",
-      "buyerAccount": "忧郁青年",
+      "buyerName": "刘**",
+      "buyerPhone": "1******5931",
+      "buyerAddress": "上海静安区江宁路街道**********",
+      "buyerAccount": "tonyliulxj",
       "logisticsCompany": "",
       "logisticsNo": "",
-      "skuId": "10169888029044",
-      "productName": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-      "unitPrice": 598,
-      "quantity": 5,
-      "productImage": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg",
+      "skuId": "10217121219580",
+      "productName": "智能车载便携电子调温加热沉香熏香器送礼年会礼品老山檀车载熏香 【黑色】车载熏香炉（三挡控温、车熄自动断电） 木质调",
+      "unitPrice": 134.92,
+      "quantity": 1,
+      "productImage": "https://img13.360buyimg.com/n1/jfs/t1/415308/40/16104/124264/69d9d3beFf4fd4508/00833203207b973a.jpg",
       "itemCount": 1,
       "allItems": [
         {
-          "skuId": "10169888029044",
-          "name": "拉杆箱猫包外出便携藤编猫咪推车透气猫笼猫箱子外出箱宠物小 藤编猫头款拉杆包送毛绒垫",
-          "price": 598,
-          "quantity": 5,
-          "image": "https://img11.360buyimg.com/n1/jfs/t1/239973/40/6021/204495/6603d2fbFa495de87/ee8ed163bd765433.jpg"
+          "skuId": "10217121219580",
+          "name": "智能车载便携电子调温加热沉香熏香器送礼年会礼品老山檀车载熏香 【黑色】车载熏香炉（三挡控温、车熄自动断电） 木质调",
+          "price": 134.92,
+          "quantity": 1,
+          "image": "https://img13.360buyimg.com/n1/jfs/t1/415308/40/16104/124264/69d9d3beFf4fd4508/00833203207b973a.jpg"
         }
       ]
     }
   ],
   "allCapturedAPIs": [
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-picasso.esm.js.bb561754.js",
-      "status": 200,
-      "bodyLen": 105223
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-contract-floor.mjs.51bd92dc.js",
-      "status": 200,
-      "bodyLen": 109338
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-dc9883fb.498a0660.js",
-      "status": 200,
-      "bodyLen": 204323
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-runtime-core.esm-bundler.js.66a91c15.js",
-      "status": 200,
-      "bodyLen": 59083
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-index.mjs.add15034.js",
-      "status": 200,
-      "bodyLen": 308319
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vue.b55285a1.js",
-      "status": 200,
-      "bodyLen": 94217
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-08fdc020.3efcf08c.js",
-      "status": 200,
-      "bodyLen": 325333
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-06245e47.9506a6cc.js",
-      "status": 200,
-      "bodyLen": 414024
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-e14817b4.43fce0a0.js",
-      "status": 200,
-      "bodyLen": 82671
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/app-42f9d7e6.4da05aa1.js",
-      "status": 200,
-      "bodyLen": 147610
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/app-12245e1e.675faf14.js",
-      "status": 200,
-      "bodyLen": 105549
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-a1a9c712.45e796ea.js",
-      "status": 200,
-      "bodyLen": 215590
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/jd-desgin-b51a3ae1.20747f81.js",
-      "status": 200,
-      "bodyLen": 348362
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-9d47dc46.6993c166.js",
-      "status": 200,
-      "bodyLen": 145862
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/vendors-06245e47.39b45aba.js",
-      "status": 200,
-      "bodyLen": 311798
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "//js-nocaptcha.jd.com/statics/js/main.min.js",
-      "status": 200,
-      "bodyLen": 132659
-    },
     {
       "type": "xhr",
       "method": "POST",
@@ -630,14 +615,14 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.menu.MenuFacade.findFoldStatus",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.menu.toolMenuFacade.findList",
       "status": 200,
       "bodyLen": 72
     },
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.menu.toolMenuFacade.findList",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.menu.MenuFacade.findFoldStatus",
       "status": 200,
       "bodyLen": 72
     },
@@ -646,14 +631,14 @@
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.workbench.layout.layoutFacade.find",
       "status": 200,
-      "bodyLen": 2352
+      "bodyLen": 2235
     },
     {
       "type": "xhr",
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 85
+      "bodyLen": 84
     },
     {
       "type": "xhr",
@@ -665,9 +650,16 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.topMenu.topMenuFacade.findTopOverviewNew",
+      "status": 200,
+      "bodyLen": 10204
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.comm.grayFacade.isGray",
       "status": 200,
-      "bodyLen": 84
+      "bodyLen": 85
     },
     {
       "type": "xhr",
@@ -686,44 +678,16 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.topMenu.topMenuFacade.findTopOverviewNew",
-      "status": 200,
-      "bodyLen": 10204
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.home.menu.menuFacade.findCommon",
       "status": 200,
-      "bodyLen": 473
+      "bodyLen": 334
     },
     {
       "type": "xhr",
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.seller.menu.QueryPinMenusBySystemIdAndMenuTypeFacade.queryPinMenuTree",
       "status": 200,
-      "bodyLen": 345443
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.navigation.NavigationFacade.findShopInfo",
-      "status": 200,
-      "bodyLen": 294
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmweb.user.MyShopInfoProvider.getShopCardInfo",
-      "status": 200,
-      "bodyLen": 2824
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
-      "status": 200,
-      "bodyLen": 131
+      "bodyLen": 341571
     },
     {
       "type": "xhr",
@@ -735,9 +699,30 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.shop.center.pageframe.navigation.NavigationFacade.findShopInfo",
+      "status": 200,
+      "bodyLen": 293
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmweb.user.MyShopInfoProvider.getShopCardInfo",
+      "status": 200,
+      "bodyLen": 2632
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.jmserver.workflow.JmTaskSearchService.searchPendingTaskCount",
+      "status": 200,
+      "bodyLen": 132
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=ZSCUMIUH2ZNF8Z2PVU1J&api=dsm.pop.jm.msg.center.jsf.message.MessageListProxy.getMsgSetting",
       "status": 200,
-      "bodyLen": 33037
+      "bodyLen": 33103
     },
     {
       "type": "xhr",
@@ -762,13 +747,6 @@
     },
     {
       "type": "xhr",
-      "method": "GET",
-      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FSUBSYSTEMS%2Fprofiles%2Fprod%3FlongPolling%3D10000",
-      "status": 200,
-      "bodyLen": 42468
-    },
-    {
-      "type": "xhr",
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.dialog.LoginFacadeService.getLoginInfoByDomain",
       "status": 200,
@@ -779,7 +757,14 @@
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.dialog.guidance.GuidanceFacadeService.getGuidance",
       "status": 200,
-      "bodyLen": 135
+      "bodyLen": 150
+    },
+    {
+      "type": "xhr",
+      "method": "GET",
+      "url": "https://sff.jd.com/api?v=1.0&appId=1VLIXQT5B1IEYHXSVHRV&api=dsm.base.service.ducc.query&appendix=%2Fnamespace%2Fjdm_pedestal_v11%2Fconfig%2FSUBSYSTEMS%2Fprofiles%2Fprod%3FlongPolling%3D10000",
+      "status": 200,
+      "bodyLen": 42468
     },
     {
       "type": "xhr",
@@ -826,13 +811,6 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://api.m.jd.com",
-      "status": 200,
-      "bodyLen": 124
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://api.m.jd.com/api",
       "status": 200,
       "bodyLen": 89
@@ -840,9 +818,16 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://api.m.jd.com",
+      "status": 200,
+      "bodyLen": 124
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.venderInfoBffService.queryVenderBaseInfo",
       "status": 200,
-      "bodyLen": 242
+      "bodyLen": 245
     },
     {
       "type": "fetch",
@@ -850,20 +835,6 @@
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/lib-vuedraggable.umd.js.3b6a3c0a.js",
       "status": 200,
       "bodyLen": 50960
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/8160.e87e188a.js",
-      "status": 200,
-      "bodyLen": 80724
-    },
-    {
-      "type": "fetch",
-      "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/2448.75cc5367.js",
-      "status": 200,
-      "bodyLen": 121549
     },
     {
       "type": "fetch",
@@ -882,23 +853,23 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-017397ff.afea802d.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/2448.75cc5367.js",
       "status": 200,
-      "bodyLen": 209359
+      "bodyLen": 121549
     },
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-e4d91f62.8cb5b92a.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/8160.e87e188a.js",
       "status": 200,
-      "bodyLen": 63031
+      "bodyLen": 80724
     },
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/css/order-list-d87c119a.5f75ab85.css",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/5254.64c05e33.js",
       "status": 200,
-      "bodyLen": 124115
+      "bodyLen": 83196
     },
     {
       "type": "fetch",
@@ -910,9 +881,23 @@
     {
       "type": "fetch",
       "method": "GET",
-      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/5254.64c05e33.js",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-017397ff.afea802d.js",
       "status": 200,
-      "bodyLen": 83196
+      "bodyLen": 209359
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/css/order-list-d87c119a.5f75ab85.css",
+      "status": 200,
+      "bodyLen": 124115
+    },
+    {
+      "type": "fetch",
+      "method": "GET",
+      "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/order-list-e4d91f62.8cb5b92a.js",
+      "status": 200,
+      "bodyLen": 63031
     },
     {
       "type": "xhr",
@@ -931,9 +916,37 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=DEB3TVXQG94DTQODWFFH&api=dsm.support.superassist.SuperAssistantRecommendFacadeService.getAccompanying",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getVenderPromptInfo",
       "status": 200,
-      "bodyLen": 98
+      "bodyLen": 82
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getDefaultTab",
+      "status": 200,
+      "bodyLen": 556
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderFreightBffService.whiteVender",
+      "status": 200,
+      "bodyLen": 84
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.queryNoviceGuidance",
+      "status": 200,
+      "bodyLen": 517
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
+      "status": 200,
+      "bodyLen": 87
     },
     {
       "type": "xhr",
@@ -952,58 +965,9 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getVenderPromptInfo",
-      "status": 200,
-      "bodyLen": 82
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderFreightBffService.whiteVender",
-      "status": 200,
-      "bodyLen": 84
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
       "status": 200,
       "bodyLen": 87
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getDefaultTab",
-      "status": 200,
-      "bodyLen": 556
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.pop.jm.ads.PositionResourceFacade.getResourceByPositionId",
-      "status": 200,
-      "bodyLen": 87
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderTabs",
-      "status": 200,
-      "bodyLen": 396
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.queryNoviceGuidance",
-      "status": 200,
-      "bodyLen": 517
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.shop.vane.view.core.export.ohs.stars.service.VaneBasicFacade.queryVaneBasic",
-      "status": 200,
-      "bodyLen": 10002
     },
     {
       "type": "fetch",
@@ -1018,6 +982,20 @@
       "url": "https://storage.360buyimg.com/shop-pageframe/micro-app/order/prod/1.0.168-master.056df93/js/query-shipping-cost-dialog.99d87a5e.js",
       "status": 200,
       "bodyLen": 3860
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderTabs",
+      "status": 200,
+      "bodyLen": 396
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.shop.vane.view.core.export.ohs.stars.service.VaneBasicFacade.queryVaneBasic",
+      "status": 200,
+      "bodyLen": 8664
     },
     {
       "type": "fetch",
@@ -1043,20 +1021,6 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getCommonQueryCriteriaInfo",
-      "status": 200,
-      "bodyLen": 72
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getTableHeader",
-      "status": 200,
-      "bodyLen": 482
-    },
-    {
-      "type": "xhr",
-      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getQueryCriteriaConfig",
       "status": 200,
       "bodyLen": 2213
@@ -1071,9 +1035,23 @@
     {
       "type": "xhr",
       "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getCommonQueryCriteriaInfo",
+      "status": 200,
+      "bodyLen": 72
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.pageConfigBffService.getTableHeader",
+      "status": 200,
+      "bodyLen": 482
+    },
+    {
+      "type": "xhr",
+      "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSearchInfo",
       "status": 200,
-      "bodyLen": 3779
+      "bodyLen": 3477
     },
     {
       "type": "xhr",
@@ -1087,14 +1065,14 @@
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.seller.delivery.center.JdDeliveryPromotionService.querySceneInfo",
       "status": 200,
-      "bodyLen": 488
+      "bodyLen": 635
     },
     {
       "type": "xhr",
       "method": "POST",
       "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderPage",
       "status": 200,
-      "bodyLen": 170303
+      "bodyLen": 52247
     },
     {
       "type": "xhr",
@@ -1113,16 +1091,16 @@
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSkuComments",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.OrderOperateButtonControlBffService.checkOrderOperateSign",
       "status": 200,
-      "bodyLen": 213
+      "bodyLen": 3577
     },
     {
       "type": "xhr",
       "method": "POST",
-      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.OrderOperateButtonControlBffService.checkOrderOperateSign",
+      "url": "https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderListBffService.queryOrderSkuComments",
       "status": 200,
-      "bodyLen": 18115
+      "bodyLen": 147
     }
   ]
 }

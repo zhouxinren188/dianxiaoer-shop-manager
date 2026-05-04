@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.2.11",
+  "version": "1.3.2",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -13,6 +13,8 @@
     "hot-update": "node scripts/build-hot-update.js",
     "hot-update:publish": "node scripts/build-hot-update.js --upload",
     "publish:hot": "node scripts/build-hot-update.js --upload",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "publish:full": "node scripts/publish-full.js"
   },
   "build": {
@@ -25,6 +27,7 @@
       "out/**/*",
       "resources/**/*"
     ],
+    "afterPack": "./scripts/after-pack.js",
     "win": {
       "target": [
         {
@@ -45,6 +48,7 @@
       "language": 2052,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "runAfterFinish": true,
       "installerIcon": "resources/icon.ico",
       "uninstallerIcon": "resources/icon.ico",
       "installerHeaderIcon": "resources/icon.ico"
@@ -77,6 +81,9 @@
     "electron": "^41.3.0",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
-    "vite": "^8.0.10"
+    "png-to-ico": "^3.0.1",
+    "rcedit": "^5.0.1",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.5"
   }
 }

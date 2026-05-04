@@ -1,4 +1,5 @@
 const { app } = require('electron')
+const http = require('http')
 const https = require('https')
 const fs = require('fs')
 const path = require('path')
@@ -45,7 +46,9 @@ function clearHotUpdate() {
 // onProgress: 进度回调 (percent)
 function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
   return new Promise((resolve, reject) => {
-    https.get(url, { timeout: 60000, rejectUnauthorized: false }, (res) => {
+    // 根据URL协议选择正确的模块（http或https）
+    const requestModule = url.startsWith('https') ? https : http
+    requestModule.get(url, { timeout: 60000 }, (res) => {
       if (res.statusCode !== 200) {
         return reject(new Error('下载失败: HTTP ' + res.statusCode))
       }

@@ -241,11 +241,28 @@ async function initDB() {
         raw_data LONGTEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_store_order (store_id, order_id),
+        UNIQUE KEY uk_order_id (order_id),
         KEY idx_store_status (store_id, status_text),
         KEY idx_order_time (order_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    // 兼容已存在的 sales_orders 表：唯一键从 (store_id,order_id) 改为 order_id 单列唯一
+    try {
+      await connection.execute(`ALTER TABLE sales_orders DROP INDEX uk_store_order`)
+      console.log('[DB] 已删除旧唯一键 uk_store_order')
+    } catch (e) { /* 键不存在 */ }
+    try {
+      await connection.execute(`DELETE t1 FROM sales_orders t1 INNER JOIN sales_orders t2 ON t1.order_id = t2.order_id AND t1.id > t2.id`)
+      console.log('[DB] 已清理重复订单数据')
+      await connection.execute(`ALTER TABLE sales_orders ADD UNIQUE KEY uk_order_id (order_id)`)
+      console.log('[DB] 已添加新唯一键 uk_order_id')
+    } catch (e) { /* 键已存在 */ }
+
+    // 兼容已存在的 sales_orders 表：添加 purchase_status 字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN purchase_status VARCHAR(30) NOT NULL DEFAULT '未采购' COMMENT '采购状态：未采购/已采购（三方代发）/已采购（仓库转发）/已忽略' AFTER sys_remark`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
@@ -292,6 +309,109 @@ async function initDB() {
     // 已有店铺和仓库默认归属 id=1 的主账号
     await connection.execute(`UPDATE stores SET owner_id = 1 WHERE owner_id IS NULL`)
     await connection.execute(`UPDATE warehouses SET owner_id = 1 WHERE owner_id IS NULL`)
+
+    // ============ 仓库管理相关表 ============
+
+    // 库存表（当前库存）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS inventory (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        warehouse_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        product_name VARCHAR(300) NOT NULL DEFAULT '',
+        quantity INT NOT NULL DEFAULT 0,
+        warn_quantity INT NOT NULL DEFAULT 10,
+        batch_no VARCHAR(50) DEFAULT '',
+        supplier VARCHAR(100) DEFAULT '',
+        location VARCHAR(100) DEFAULT '',
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_wh_sku (warehouse_id, sku),
+        KEY idx_warehouse (warehouse_id),
+        KEY idx_owner (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 入库记录表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS stock_in_records (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        warehouse_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        product_name VARCHAR(300) NOT NULL DEFAULT '',
+        quantity INT NOT NULL,
+        batch_no VARCHAR(50) DEFAULT '',
+        supplier VARCHAR(100) DEFAULT '',
+        location VARCHAR(100) DEFAULT '',
+        remark VARCHAR(500) DEFAULT '',
+        operator_id INT DEFAULT NULL,
+        operator_name VARCHAR(50) DEFAULT '',
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_warehouse (warehouse_id),
+        KEY idx_sku (sku),
+        KEY idx_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 出库记录表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS stock_out_records (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        warehouse_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        product_name VARCHAR(300) NOT NULL DEFAULT '',
+        quantity INT NOT NULL,
+        type ENUM('sale', 'supply', 'transfer', 'other') DEFAULT 'sale',
+        related_order VARCHAR(100) DEFAULT '',
+        remark VARCHAR(500) DEFAULT '',
+        operator_id INT DEFAULT NULL,
+        operator_name VARCHAR(50) DEFAULT '',
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_warehouse (warehouse_id),
+        KEY idx_sku (sku),
+        KEY idx_created (created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 库存盘点表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS inventory_checks (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        check_no VARCHAR(20) NOT NULL,
+        warehouse_id INT NOT NULL,
+        total_items INT NOT NULL DEFAULT 0,
+        diff_count INT NOT NULL DEFAULT 0,
+        status ENUM('pending', 'checking', 'completed', 'cancelled') DEFAULT 'checking',
+        operator_id INT DEFAULT NULL,
+        operator_name VARCHAR(50) DEFAULT '',
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_check_no (check_no),
+        KEY idx_warehouse (warehouse_id),
+        KEY idx_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 盘点明细表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS inventory_check_items (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        check_id INT NOT NULL,
+        inventory_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        product_name VARCHAR(300) NOT NULL DEFAULT '',
+        system_quantity INT NOT NULL DEFAULT 0,
+        actual_quantity INT DEFAULT NULL,
+        diff_quantity INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_check (check_id),
+        FOREIGN KEY (check_id) REFERENCES inventory_checks(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
 
     console.log('[DB] 数据库初始化完成')
   } finally {

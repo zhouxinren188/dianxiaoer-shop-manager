@@ -5,9 +5,7 @@
     <div class="login-body">
       <div class="login-left">
         <div class="brand-area">
-          <div class="brand-icon">
-            <el-icon :size="28" color="#fff"><Shop /></el-icon>
-          </div>
+          <img src="/logo-large.png" alt="logo" class="brand-logo-img" />
           <h1 class="brand-title">店小二网店管家</h1>
           <p class="brand-desc">高效、智能的多店铺综合管理平台</p>
           <div class="brand-features">
@@ -160,7 +158,7 @@
 import { reactive, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Shop, User, Lock, Phone, TrendCharts, Box, Connection } from '@element-plus/icons-vue'
+import { User, Lock, Phone, TrendCharts, Box, Connection } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const loginFormRef = ref(null)
@@ -257,24 +255,26 @@ async function handleLogin() {
       
       console.log('[Login] 响应状态:', response.status, response.statusText)
       console.log('[Login] 响应头:', Object.fromEntries(response.headers.entries()))
-      
-      // 检查响应状态
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-      
-      // 检查响应内容类型
-      const contentType = response.headers.get('content-type') || ''
-      console.log('[Login] 内容类型:', contentType)
-      
-      if (!contentType.includes('application/json')) {
-        const text = await response.text()
-        console.error('[Login] 非 JSON 响应:', text.substring(0, 500))
+
+      // 先读取响应体（即使状态码非200，body中也可能有错误信息）
+      const responseText = await response.text()
+      let res = null
+      try {
+        res = JSON.parse(responseText)
+      } catch (e) {
+        // 非 JSON 响应
+        if (!response.ok) {
+          throw new Error(`服务器返回异常 (HTTP ${response.status})`)
+        }
         throw new Error('服务器返回格式错误')
       }
-      
-      const res = await response.json()
+
       console.log('[Login] 服务器响应:', JSON.stringify(res).substring(0, 200))
+
+      // 如果响应包含业务错误信息，优先使用
+      if (res && res.success === false && res.message) {
+        throw new Error(res.message)
+      }
       
       const isOldFormat = res && res.code === 0 && res.data && res.data.accessToken
       const isNewFormat = res && res.success === true && res.accessToken
@@ -373,7 +373,7 @@ if (rememberedUser) {
 }
 if (rememberedPassword) {
   try {
-    loginForm.password = atob(rememberedPassword)
+    loginForm.password = decodeURIComponent(atob(rememberedPassword))
   } catch {
     localStorage.removeItem('rememberedPassword')
   }
@@ -440,15 +440,12 @@ if (rememberedPassword) {
   max-width: 220px;
 }
 
-.brand-icon {
-  width: 42px;
-  height: 42px;
-  background: #2b5aed;
+.brand-logo-img {
+  width: 48px;
+  height: 48px;
   border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   margin-bottom: 16px;
+  object-fit: cover;
   box-shadow: 0 6px 16px rgba(24, 144, 255, 0.4);
 }
 

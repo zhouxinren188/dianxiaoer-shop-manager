@@ -62,8 +62,12 @@ async function request(url, options = {}) {
       if (json.code === 1 && json.message && json.message.includes('登录')) {
         return json
       }
-      throw new Error(json.message || '请求失败')
+      const err = new Error(json.message || '请求失败')
+      err.code = json.code
+      if (json.needsRelogin) err.needsRelogin = true
+      throw err
     }
+
     return json.data
   } catch (err) {
     clearTimeout(timer)
@@ -78,12 +82,12 @@ export function get(url, params) {
   return request(url, { method: 'GET', params })
 }
 
-export function post(url, data) {
-  return request(url, { method: 'POST', data })
+export function post(url, data, timeout) {
+  return request(url, { method: 'POST', data, timeout })
 }
 
-export function put(url, data) {
-  return request(url, { method: 'PUT', data })
+export function put(url, data, timeout) {
+  return request(url, { method: 'PUT', data, timeout })
 }
 
 export function del(url) {

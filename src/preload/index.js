@@ -11,9 +11,6 @@ const validInvokeChannels = [
   'window-set-login-size',
   'window-set-main-size',
   'get-app-version',
-  'user-get-all',
-  'user-register',
-  'user-login',
   'open-platform-window',
   'confirm-platform-login',
   'close-platform-window',
@@ -27,7 +24,11 @@ const validInvokeChannels = [
   'fetch-sales-orders',
   'set-auth-token',
   'open-purchase-order-window',
-  'close-purchase-order-window'
+  'close-purchase-order-window',
+  'refresh-purchase-cookies',
+  'sync-purchase-order-browser',
+  'sync-purchase-orders-browser',
+  'fetch-buyer-sensitive-info'
 ]
 
 const validOnChannels = [
@@ -43,7 +44,10 @@ const validOnChannels = [
   'purchase-window-closed',
   'purchase-address-filled',
   'purchase-address-setup-done',
-  'packet-capture-auto-stopped'
+  'purchase-address-setup-start',
+  'packet-capture-auto-stopped',
+  'auto-sync-start',
+  'auto-sync-result'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

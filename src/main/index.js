@@ -16,6 +16,7 @@ const { getHotUpdateRendererPath } = require('./hot-updater')
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
+const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync-browser')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
@@ -41,12 +42,19 @@ function createWindow() {
     title: '店小二网店管家',
     frame: false,
     center: true,
+    show: false,
+    icon: path.join(__dirname, '../../resources/icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
     }
+  })
+
+  // 页面加载完成后再显示窗口，避免白屏闪烁
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show()
   })
 
   // 生产模式隐藏菜单栏 & 禁用 DevTools 快捷键
@@ -218,6 +226,9 @@ app.whenReady().then(async () => {
 
   // 注册采购下单捕获 IPC
   registerPurchaseOrderCaptureIpc(mainWindow)
+
+  // 注册采购订单浏览器同步 IPC
+  registerPurchaseOrderSyncIpc(mainWindow)
 
   // 启动心跳检测
   startHeartbeat(mainWindow)
