@@ -99,6 +99,21 @@
             </div>
           </template>
         </el-table-column>
+        <el-table-column label="已分配采购账号" min-width="140">
+          <template #default="{ row }">
+            <div class="assign-tags">
+              <el-tag
+                v-for="acc in (row.assignedPurchaseAccounts || []).slice(0, 2)"
+                :key="acc.id"
+                size="small"
+                type="primary"
+                style="margin-right: 4px; margin-bottom: 2px;"
+              >{{ acc.account }}</el-tag>
+              <el-tag v-if="(row.assignedPurchaseAccounts || []).length > 2" size="small" type="info">+{{ row.assignedPurchaseAccounts.length - 2 }}</el-tag>
+              <span v-if="!(row.assignedPurchaseAccounts || []).length" style="color: #c0c4cc;">-</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="85" align="center">
           <template #default="{ row }">
             <el-switch
@@ -134,6 +149,15 @@
             >
               <el-icon><House /></el-icon>
               分配仓库
+            </el-button>
+            <el-button
+              v-if="row.userType === 'sub'"
+              link
+              type="primary"
+              @click="handleAssignPurchaseAccount(row)"
+            >
+              <el-icon><User /></el-icon>
+              分配采购账号
             </el-button>
             <el-button link type="danger" @click="handleDelete(row)">
               <el-icon><Delete /></el-icon>
@@ -177,17 +201,25 @@
       :user="selectedUser"
       @saved="loadUsers"
     />
+
+    <!-- 分配采购账号弹窗 -->
+    <AssignPurchaseAccountDialog
+      v-model:visible="assignPurchaseAccountVisible"
+      :user="selectedUser"
+      @saved="loadUsers"
+    />
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, onMounted } from 'vue'
-import { Search, Plus, Edit, Delete, Shop, House } from '@element-plus/icons-vue'
+import { Search, Plus, Edit, Delete, Shop, House, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchUsers, deleteUser, toggleUserStatus } from '@/api/user'
 import UserEditDialog from './components/UserEditDialog.vue'
 import AssignStoreDialog from './components/AssignStoreDialog.vue'
 import AssignWarehouseDialog from './components/AssignWarehouseDialog.vue'
+import AssignPurchaseAccountDialog from './components/AssignPurchaseAccountDialog.vue'
 
 const searchForm = reactive({
   username: '',
@@ -211,6 +243,7 @@ const editUserData = ref(null)
 
 const assignStoreVisible = ref(false)
 const assignWarehouseVisible = ref(false)
+const assignPurchaseAccountVisible = ref(false)
 const selectedUser = ref(null)
 
 // 当前登录用户（从 localStorage 中解析简单信息）
@@ -279,6 +312,11 @@ function handleAssignStore(row) {
 function handleAssignWarehouse(row) {
   selectedUser.value = row
   assignWarehouseVisible.value = true
+}
+
+function handleAssignPurchaseAccount(row) {
+  selectedUser.value = row
+  assignPurchaseAccountVisible.value = true
 }
 
 async function handleDelete(row) {

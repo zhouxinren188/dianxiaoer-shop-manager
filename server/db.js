@@ -123,6 +123,33 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 采购账号表（确保在关联表之前创建）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS purchase_accounts (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        account VARCHAR(100) DEFAULT '',
+        password VARCHAR(200) DEFAULT '',
+        platform VARCHAR(20) DEFAULT '',
+        online TINYINT DEFAULT 0,
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_account_owner (account, owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 用户-采购账号关联表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS user_purchase_accounts (
+        user_id INT NOT NULL,
+        account_id INT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, account_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (account_id) REFERENCES purchase_accounts(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 用户令牌表（登录 token 存储）
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS user_tokens (
@@ -263,6 +290,14 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN purchase_status VARCHAR(30) NOT NULL DEFAULT '未采购' COMMENT '采购状态：未采购/已采购（三方代发）/已采购（仓库转发）/已忽略' AFTER sys_remark`)
     } catch (e) { /* 字段已存在 */ }
+
+    // 兼容已存在的 purchase_accounts 表：添加 account+owner_id 唯一索引
+    try {
+      // 先清理同 account+owner_id 的重复数据，保留最新一条
+      await connection.execute(`DELETE t1 FROM purchase_accounts t1 INNER JOIN purchase_accounts t2 ON t1.account = t2.account AND t1.owner_id = t2.owner_id AND t1.id > t2.id`)
+      await connection.execute(`ALTER TABLE purchase_accounts ADD UNIQUE KEY uk_account_owner (account, owner_id)`)
+      console.log('[DB] 已添加 purchase_accounts.uk_account_owner 唯一索引')
+    } catch (e) { /* 索引已存在 */ }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")

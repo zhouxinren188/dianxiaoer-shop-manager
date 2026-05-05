@@ -200,8 +200,14 @@ app.get('/api/users', async (req, res) => {
          INNER JOIN user_warehouses uw ON w.id = uw.warehouse_id
          WHERE uw.user_id = ?`, [user.id]
       )
+      const [purchaseAccounts] = await pool.execute(
+        `SELECT pa.id, pa.account, pa.platform FROM purchase_accounts pa
+         INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
+         WHERE upa.user_id = ?`, [user.id]
+      )
       user.assignedStores = stores
       user.assignedWarehouses = warehouses
+      user.assignedPurchaseAccounts = purchaseAccounts
     }
 
     const list = rows.map(r => ({
@@ -214,7 +220,8 @@ app.get('/api/users', async (req, res) => {
       status: r.status,
       createdAt: r.created_at,
       assignedStores: r.assignedStores,
-      assignedWarehouses: r.assignedWarehouses
+      assignedWarehouses: r.assignedWarehouses,
+      assignedPurchaseAccounts: r.assignedPurchaseAccounts
     }))
 
     res.json(ok({ list, total }))
@@ -492,6 +499,74 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
       `SELECT w.* FROM warehouses w
        INNER JOIN user_warehouses uw ON w.id = uw.warehouse_id
        WHERE uw.user_id = ?`, [req.params.id]
+    )
+    res.json(ok(rows))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 分配采购账号（只有 master 可操作）
+app.put('/api/users/:id/purchase-accounts', async (req, res) => {
+  try {
+    if (req.user.user_type !== 'master') {
+      return res.status(403).json(fail('只有主账号才能分配采购账号'))
+    }
+    const userId = +req.params.id
+    const accountIds = req.body.accountIds || []
+    const ownerId = getOwnerId(req.user)
+
+    const [check] = await pool.execute(
+      'SELECT id FROM users WHERE id = ? AND parent_id = ?',
+      [userId, ownerId]
+    )
+    if (!check.length) return res.status(403).json(fail('只能给自己的子账号分配采购账号'))
+
+    if (accountIds.length > 0) {
+      const placeholders = accountIds.map(() => '?').join(',')
+      const [valid] = await pool.execute(
+        `SELECT id FROM purchase_accounts WHERE id IN (${placeholders}) AND owner_id = ?`,
+        [...accountIds, ownerId]
+      )
+      if (valid.length !== accountIds.length) {
+        return res.status(403).json(fail('包含不属于您的采购账号'))
+      }
+    }
+
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      await connection.execute('DELETE FROM user_purchase_accounts WHERE user_id = ?', [userId])
+      for (const accId of accountIds) {
+        await connection.execute('INSERT INTO user_purchase_accounts (user_id, account_id) VALUES (?, ?)', [userId, accId])
+      }
+      await connection.commit()
+      res.json(ok(true))
+    } catch (err) {
+      await connection.rollback()
+      throw err
+    } finally {
+      connection.release()
+    }
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取用户已分配采购账号
+app.get('/api/users/:id/purchase-accounts', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [check] = await pool.execute(
+      'SELECT id FROM users WHERE id = ? AND (id = ? OR parent_id = ?)',
+      [req.params.id, ownerId, ownerId]
+    )
+    if (!check.length) return res.status(403).json(fail('无权查看'))
+
+    const [rows] = await pool.execute(
+      `SELECT pa.id, pa.account, pa.platform, pa.online FROM purchase_accounts pa
+       INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
+       WHERE upa.user_id = ?`, [req.params.id]
     )
     res.json(ok(rows))
   } catch (err) {
@@ -1472,11 +1547,26 @@ app.put('/api/sku-purchase-config/update-price', async (req, res) => {
 
 app.get('/api/purchase-accounts', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const [rows] = await pool.execute(
-      'SELECT id, account, password, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
-      [ownerId]
-    )
+    let rows
+    if (req.user.user_type === 'sub') {
+      // 子账号：只返回被分配的采购账号
+      const [r] = await pool.execute(
+        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at
+         FROM purchase_accounts pa
+         INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
+         WHERE upa.user_id = ?
+         ORDER BY pa.id DESC`, [req.user.id]
+      )
+      rows = r
+    } else {
+      // 主账号：返回自己名下所有采购账号
+      const ownerId = getOwnerId(req.user)
+      const [r] = await pool.execute(
+        'SELECT id, account, password, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
+        [ownerId]
+      )
+      rows = r
+    }
     
     // 为每个账号检查Cookie是否有效（是否存在Cookie数据）
     const accountList = await Promise.all(rows.map(async (row) => {
@@ -1499,11 +1589,23 @@ app.post('/api/purchase-accounts', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const { account, password, platform } = req.body
     if (!platform) return res.json(fail('platform 不能为空'))
+    if (!account) return res.json(fail('账号不能为空'))
+    // upsert：同 account+owner_id 存在则更新，不存在则插入
     const [result] = await pool.execute(
-      'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
-      [account||'', password||'', platform, ownerId]
+      `INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)
+       ON DUPLICATE KEY UPDATE password=VALUES(password), platform=VALUES(platform), online=0`,
+      [account, password||'', platform, ownerId]
     )
-    res.json(ok({ id: result.insertId }))
+    // affectedRows: 1=新插入, 2=更新了已有行, 0=数据未变(值相同)
+    // insertId: 新插入时为自增ID, ON DUPLICATE KEY UPDATE 时为已有行的ID
+    const accountId = result.insertId
+    const isUpdate = result.affectedRows === 2
+    // 自动分配给创建者
+    await pool.execute(
+      'INSERT IGNORE INTO user_purchase_accounts (user_id, account_id) VALUES (?, ?)',
+      [req.user.id, accountId]
+    )
+    res.json(ok({ id: accountId, updated: isUpdate }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
@@ -1525,6 +1627,7 @@ app.put('/api/purchase-accounts/:id', async (req, res) => {
 app.delete('/api/purchase-accounts/:id', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
+    await pool.execute('DELETE FROM user_purchase_accounts WHERE account_id=?', [req.params.id])
     await pool.execute('DELETE FROM purchase_cookies WHERE account_id=?', [req.params.id])
     await pool.execute('DELETE FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
     res.json(ok(true))

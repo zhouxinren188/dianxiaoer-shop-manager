@@ -40,16 +40,16 @@
     <el-card class="filter-card" shadow="never">
       <el-form :model="filterForm" inline class="filter-form">
         <el-form-item label="采购编号">
-          <el-input v-model="filterForm.purchaseNo" placeholder="请输入采购编号" clearable style="width: 160px" />
+          <el-input v-model="filterForm.purchaseNo" placeholder="请输入采购编号" clearable style="width: 160px" @keyup.enter="handleSearch" />
         </el-form-item>
         <el-form-item label="物流单号">
-          <el-input v-model="filterForm.logisticsNo" placeholder="请输入物流单号" clearable style="width: 180px" />
+          <el-input v-model="filterForm.logisticsNo" placeholder="请输入物流单号" clearable style="width: 180px" @keyup.enter="handleSearch" />
         </el-form-item>
         <el-form-item label="采购订单号">
-          <el-input v-model="filterForm.platformOrderNo" placeholder="请输入采购订单号" clearable style="width: 180px" />
+          <el-input v-model="filterForm.platformOrderNo" placeholder="请输入采购订单号" clearable style="width: 180px" @keyup.enter="handleSearch" />
         </el-form-item>
         <el-form-item label="关联销售单号">
-          <el-input v-model="filterForm.salesOrderNo" placeholder="请输入销售单号" clearable style="width: 160px" />
+          <el-input v-model="filterForm.salesOrderNo" placeholder="请输入销售单号" clearable style="width: 160px" @keyup.enter="handleSearch" />
         </el-form-item>
         <el-form-item label="采购平台">
           <el-select v-model="filterForm.platform" placeholder="全部" clearable style="width: 130px">
@@ -366,7 +366,7 @@
       </el-form>
       <template #footer>
         <el-button @click="addAccountVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!addAccountForm.platform" @click="handleAddAccountSubmit">前往登录</el-button>
+        <el-button type="primary" :disabled="!addAccountForm.platform || !addAccountForm.account" @click="handleAddAccountSubmit">前往登录</el-button>
       </template>
     </el-dialog>
 
@@ -636,6 +636,10 @@ function handleAddAccount() {
 async function handleAddAccountSubmit() {
   if (!addAccountForm.platform) {
     ElMessage.warning('请选择平台')
+    return
+  }
+  if (!addAccountForm.account) {
+    ElMessage.warning('请输入登录账号')
     return
   }
 

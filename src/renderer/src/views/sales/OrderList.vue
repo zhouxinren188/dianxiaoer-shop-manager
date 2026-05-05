@@ -30,19 +30,19 @@
           </div>
           <div class="filter-item">
             <label class="filter-label">订单编号</label>
-            <el-input v-model="searchForm.orderNo" placeholder="请输入站外订单编号" clearable />
+            <el-input v-model="searchForm.orderNo" placeholder="请输入站外订单编号" clearable @keyup.enter="handleQueryOrders" />
           </div>
           <div class="filter-item">
             <label class="filter-label">商品名称</label>
-            <el-input v-model="searchForm.goodsName" placeholder="请输入关键词" clearable />
+            <el-input v-model="searchForm.goodsName" placeholder="请输入关键词" clearable @keyup.enter="handleQueryOrders" />
           </div>
           <div class="filter-item">
             <label class="filter-label">发货单号</label>
-            <el-input v-model="searchForm.outboundNo" placeholder="" clearable />
+            <el-input v-model="searchForm.outboundNo" placeholder="" clearable @keyup.enter="handleQueryOrders" />
           </div>
           <div class="filter-item">
             <label class="filter-label">客户姓名</label>
-            <el-input v-model="searchForm.customerName" placeholder="请输入关键词" clearable />
+            <el-input v-model="searchForm.customerName" placeholder="请输入关键词" clearable @keyup.enter="handleQueryOrders" />
           </div>
           <div class="filter-item">
             <label class="filter-label">采购状态</label>
@@ -545,28 +545,51 @@
             </div>
             
             <div class="config-form">
-              <div class="form-group">
-                <label class="form-label required">货源链接</label>
-                <div v-if="skuSources.length > 0" class="source-selector">
-                  <div v-for="(src, idx) in skuSources" :key="idx"
-                    class="source-option"
-                    :class="{ 'source-option-active': selectedSourceIndex === idx }"
-                    @click="applySourceToPurchase(idx)">
-                    <div class="source-option-header">
-                      <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
-                      <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
+              <div class="form-group source-and-detail">
+                <div class="source-area">
+                  <label class="form-label required">货源链接</label>
+                  <div v-if="skuSources.length > 0" class="source-selector">
+                    <div v-for="(src, idx) in skuSources" :key="idx"
+                      class="source-option"
+                      :class="{ 'source-option-active': selectedSourceIndex === idx }"
+                      @click="applySourceToPurchase(idx)">
+                      <div class="source-option-header">
+                        <div class="source-option-left">
+                          <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
+                          <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
+                        </div>
+                        <div class="source-option-actions">
+                          <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
+                          <el-button link type="danger" size="small" @click.stop="handleDeleteSource(src, idx)"><el-icon><Delete /></el-icon></el-button>
+                        </div>
+                      </div>
+                      <div class="source-option-link-row">
+                        <span class="source-option-link">{{ shortenUrl(src.purchase_link) }}</span>
+                        <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src.purchase_link)"><el-icon><Link /></el-icon></el-button>
+                      </div>
                     </div>
-                    <div class="source-option-link">{{ src.purchase_link }}</div>
+                  </div>
+                  <div v-else class="source-empty-state">
+                    <el-icon><Box /></el-icon>
+                    <span>暂无货源，请先添加</span>
+                  </div>
+                  <el-button type="primary" plain size="default" class="add-source-btn" @click="openAddSourceForm">
+                    <el-icon><Plus /></el-icon>
+                    <span>新增货源链接</span>
+                  </el-button>
+                </div>
+                <div class="detail-area">
+                  <div class="inline-detail-card">
+                    <div class="detail-row">
+                      <span class="detail-label">采购单价</span>
+                      <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" class="price-input" />
+                    </div>
+                    <div class="detail-row full-width">
+                      <span class="detail-label">备注信息</span>
+                      <el-input v-model="purchaseInfo.remark" type="textarea" :rows="3" placeholder="选填" class="remark-input" />
+                    </div>
                   </div>
                 </div>
-                <div v-else class="source-empty-state">
-                  <el-icon><Box /></el-icon>
-                  <span>暂无货源，请先添加</span>
-                </div>
-                <el-button type="primary" plain size="default" class="add-source-btn" @click="openAddSourceForm">
-                  <el-icon><Plus /></el-icon>
-                  <span>新增货源链接</span>
-                </el-button>
               </div>
 
               <div class="form-row">
@@ -620,8 +643,8 @@
               </div>
 
               <div class="form-group">
-                <label class="form-label required">选择仓库</label>
-                <el-select v-model="purchaseInfo.warehouseId" :placeholder="purchaseInfo.purchaseType === 'dropship' ? '请选择仓库（用于收货手机号）' : '请选择发货仓库'" class="full-width-select" @change="onWarehouseChange">
+                <label class="form-label" :class="{ required: purchaseInfo.purchaseType === 'warehouse' }">选择仓库</label>
+                <el-select v-model="purchaseInfo.warehouseId" :placeholder="purchaseInfo.purchaseType === 'dropship' ? '选填（用于获取收货手机号）' : '请选择发货仓库'" class="full-width-select" clearable @change="onWarehouseChange">
                   <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
                 </el-select>
                 <div v-if="warehouseList.length === 0" class="form-warning">
@@ -669,22 +692,6 @@
               </div>
             </div>
 
-            <div class="info-card purchase-detail-card">
-              <div class="card-header">
-                <el-icon><EditPen /></el-icon>
-                <span>采购明细</span>
-              </div>
-              <div class="card-body">
-                <div class="detail-row">
-                  <span class="detail-label">采购单价</span>
-                  <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" class="price-input" />
-                </div>
-                <div class="detail-row full-width">
-                  <span class="detail-label">备注信息</span>
-                  <el-input v-model="purchaseInfo.remark" type="textarea" :rows="3" placeholder="选填，方便下次采购时快速识别" class="remark-input" />
-                </div>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -825,7 +832,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
 import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
@@ -1663,7 +1670,7 @@ function updateDropshipShipping() {
   const nameCodeMatch = (purchaseInfo.buyerName || '').match(/\[(\d+)\]/)
   const nameCode = nameCodeMatch ? nameCodeMatch[1] : ''
   purchaseInfo.shippingName = (purchaseInfo.buyerName || '').replace(/\[\d+\]/, '').trim()
-  purchaseInfo.shippingPhone = purchaseInfo.warehousePhone || ''
+  purchaseInfo.shippingPhone = purchaseInfo.warehousePhone || purchaseInfo.buyerPhone || ''
   // 地址也去掉.[编号]或[编号]，再追加派件联系后缀
   let addr = (purchaseInfo.buyerAddress || '').replace(/\.?\[\d+\]/, '').trim()
   if (purchaseInfo.buyerPhone && nameCode) {
@@ -1688,11 +1695,18 @@ function onWarehouseChange(whId) {
   const wh = warehouseList.value.find(w => w.id === whId)
   if (wh) {
     applyWarehouseAddress(wh)
-    if (purchaseInfo.purchaseType === 'dropship') {
-      updateDropshipShipping()
-    } else if (purchaseInfo.purchaseType === 'warehouse') {
-      updateWarehouseShipping()
-    }
+  } else {
+    // 清空仓库信息
+    purchaseInfo.warehouseId = null
+    purchaseInfo.warehouseName = ''
+    purchaseInfo.warehouseContact = ''
+    purchaseInfo.warehousePhone = ''
+    purchaseInfo.warehouseAddress = ''
+  }
+  if (purchaseInfo.purchaseType === 'dropship') {
+    updateDropshipShipping()
+  } else if (purchaseInfo.purchaseType === 'warehouse') {
+    updateWarehouseShipping()
   }
 }
 
@@ -1746,6 +1760,51 @@ function platformTagType(val) {
   return map[val] || 'info'
 }
 
+// 精简URL显示：提取核心链接，去除追踪参数
+function shortenUrl(url) {
+  if (!url) return ''
+  try {
+    const u = new URL(url)
+    // 淘宝/天猫：只保留 id 参数
+    if (u.hostname.includes('taobao.com') || u.hostname.includes('tmall.com')) {
+      const id = u.searchParams.get('id')
+      return id ? `${u.origin}${u.pathname}?id=${id}` : url
+    }
+    // 1688：只保留 offerId
+    if (u.hostname.includes('1688.com')) {
+      const offerId = u.searchParams.get('offerId')
+      if (offerId) return `${u.origin}${u.pathname}?offerId=${offerId}`
+      const match = u.pathname.match(/\/offer\/(\d+)/)
+      if (match) return `${u.origin}/offer/${match[1]}.html`
+      return url
+    }
+    // 拼多多：只保留 goods_id
+    if (u.hostname.includes('yangkeduo') || u.hostname.includes('pinduoduo')) {
+      const gid = u.searchParams.get('goods_id') || u.searchParams.get('goodsId')
+      return gid ? `${u.origin}${u.pathname}?goods_id=${gid}` : url
+    }
+    // 其他：去除常见追踪参数
+    const trackParams = ['spm', 'from', 'utm_source', 'utm_medium', 'utm_campaign', 'ref', 'source', 'cm_key', 'alitrackid', 'abucket', 'acm', 'scm']
+    const newParams = new URLSearchParams()
+    for (const [k, v] of u.searchParams) {
+      if (!trackParams.includes(k.toLowerCase())) newParams.set(k, v)
+    }
+    const qs = newParams.toString()
+    return `${u.origin}${u.pathname}${qs ? '?' + qs : ''}`
+  } catch {
+    return url
+  }
+}
+
+// 打开货源链接
+function openSourceLink(url) {
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-external-url', { url })
+  } else {
+    window.open(url, '_blank')
+  }
+}
+
 // 去下单：打开内嵌BrowserWindow
 function handleGoOrder() {
   const url = purchaseInfo.sourceUrl.trim()
@@ -1757,8 +1816,8 @@ function handleGoOrder() {
     ElMessage.warning('请选择采购账号')
     return
   }
-  if (!purchaseInfo.warehouseId) {
-    ElMessage.warning('请选择仓库')
+  if (purchaseInfo.purchaseType === 'warehouse' && !purchaseInfo.warehouseId) {
+    ElMessage.warning('请选择发货仓库')
     return
   }
 
@@ -2653,7 +2712,7 @@ onUnmounted(() => {
 }
 
 .ot-col-remark {
-  width: 260px;
+  width: 340px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -4195,6 +4254,8 @@ onUnmounted(() => {
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s;
+  overflow: hidden;
+  min-width: 0;
 }
 
 .source-option:hover {
@@ -4214,18 +4275,101 @@ onUnmounted(() => {
   margin-bottom: 6px;
 }
 
+.source-option-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-option-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.source-option:hover .source-option-actions {
+  opacity: 1;
+}
+
 .source-option-price {
   font-size: 15px;
   color: #f56c6c;
   font-weight: 600;
 }
 
+.source-option-link-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 .source-option-link {
   font-size: 13px;
   color: #409eff;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-all;
+  line-height: 1.4;
+  flex: 1;
+  min-width: 0;
+}
+
+.source-link-open-btn {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.source-and-detail {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.source-area {
+  flex: 1;
+  min-width: 0;
+}
+
+.detail-area {
+  width: 200px;
+  flex-shrink: 0;
+  padding-top: 28px;
+}
+
+.inline-detail-card {
+  background: #f8f9fb;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inline-detail-card .detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline-detail-card .detail-row.full-width {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.inline-detail-card .detail-label {
+  font-size: 12px;
+  color: #909399;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.inline-detail-card .price-input {
+  width: 120px;
+}
+
+.inline-detail-card .remark-input {
+  width: 100%;
 }
 
 .source-empty-state {

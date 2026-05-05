@@ -44,6 +44,16 @@ export function fetchUserWarehouses(userId) {
   return get(`/api/users/${userId}/warehouses`)
 }
 
+// 分配采购账号
+export function assignUserPurchaseAccounts(userId, accountIds) {
+  return put(`/api/users/${userId}/purchase-accounts`, { accountIds })
+}
+
+// 获取用户已分配的采购账号
+export function fetchUserPurchaseAccounts(userId) {
+  return get(`/api/users/${userId}/purchase-accounts`)
+}
+
 // 退出登录（清除 token，但保留记住的账号密码）
 export function logout() {
   localStorage.removeItem('accessToken')
