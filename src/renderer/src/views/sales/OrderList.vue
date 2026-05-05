@@ -273,7 +273,13 @@
                 </div>
                 <div class="ot-col ot-col-purchase">
                   <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
-                    <el-button type="warning" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
+                    <el-tooltip v-if="order.purchaseLockedBy" :content="`该订单目前有${order.purchaseLockedName || '其他用户'}在采购`" placement="top">
+                      <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
+                        <el-icon><Lock /></el-icon>
+                        <span>采购中</span>
+                      </el-button>
+                    </el-tooltip>
+                    <el-button v-else type="warning" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
                       <el-icon><ShoppingCart /></el-icon>
                       <span>采购下单</span>
                     </el-button>
@@ -825,9 +831,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
-import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus } from '@/api/salesOrder'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
@@ -1119,7 +1125,9 @@ function mapServerOrder(row) {
     issueEvent: null,
     remark: row.remark || '',
     sysRemark: row.sys_remark || '',
-    timeoutStatus: 'normal'
+    timeoutStatus: 'normal',
+    purchaseLockedBy: row.purchase_locked_by || null,
+    purchaseLockedName: row.purchase_locked_name || null
   }
 }
 
@@ -1363,6 +1371,21 @@ async function handleRevealBuyerInfoInPurchase() {
 }
 
 async function handlePurchase(order, item, itemIdx) {
+  // 先锁定订单，防止其他用户同时采购
+  try {
+    await lockSalesOrderForPurchase(order.id)
+  } catch (e) {
+    // 锁定失败（已被其他人锁定），显示友情提醒
+    const msg = e.message || '该订单目前有其他用户在采购'
+    ElMessage.warning({ message: msg, duration: 3000 })
+    // 刷新列表以获取最新锁定状态
+    loadOrdersFromServer()
+    return
+  }
+  // 锁定成功，更新本地状态使其他按钮即时禁用
+  order.purchaseLockedBy = true
+  order.purchaseLockedName = '我'
+
   let purchaseNo
   try {
     const res = await fetchNextPurchaseNo()
@@ -1370,6 +1393,12 @@ async function handlePurchase(order, item, itemIdx) {
     if (!purchaseNo) throw new Error('empty')
   } catch (e) {
     ElMessage.error('获取采购编号失败')
+    // 获取编号失败，解锁订单并恢复本地状态
+    unlockSalesOrderPurchase(order.id).catch(err => {
+      console.warn('[采购解锁] 获取编号失败时解锁失败:', err.message)
+    })
+    order.purchaseLockedBy = null
+    order.purchaseLockedName = null
     return
   }
 
@@ -1878,12 +1907,14 @@ function handleGoOrder() {
   purchaseInfo.captureStatus = 'ordering'
 }
 
-// 取消下单：关闭采购窗口
+// 取消下单：关闭采购窗口并解锁订单
 function handleCancelOrder() {
   if (window.electronAPI) {
     window.electronAPI.invoke('close-purchase-order-window', { purchaseNo: purchaseInfo.purchaseNo })
   }
   purchaseInfo.captureStatus = 'idle'
+  // 注意：此处不解锁订单，因为用户仍在采购流程中（弹窗还开着）
+  // 解锁由 onPurchaseDialogClosed 统一处理
 }
 
 // IPC 事件监听
@@ -1920,6 +1951,9 @@ function setupPurchaseListeners() {
             // 根据采购类型更新采购状态
             order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
             order.hasInventory = false
+            // 采购完成，清除锁定状态
+            order.purchaseLockedBy = null
+            order.purchaseLockedName = null
           }
         }
         // 成功后自动关闭对话框（释放遮罩层，恢复侧边栏可点击）
@@ -1994,8 +2028,19 @@ function cleanupPurchaseListeners() {
 }
 
 function onPurchaseDialogClosed() {
-  // 对话框关闭回调，清理状态由 Element Plus 自身处理
-  // 侧边栏已通过 z-index: 2100 保证始终在 el-overlay 之上
+  // 对话框关闭时，如果采购未完成（非captured状态），需要解锁订单
+  // captured状态时后端创建采购单已自动解锁
+  if (purchaseInfo.captureStatus !== 'captured' && purchaseInfo.salesOrderId) {
+    unlockSalesOrderPurchase(purchaseInfo.salesOrderId).catch(e => {
+      console.warn('[采购解锁] 关闭弹窗时解锁失败:', e.message)
+    })
+    // 同时更新列表中的锁定状态
+    const order = tableData.value.find(o => o.id === purchaseInfo.salesOrderId)
+    if (order) {
+      order.purchaseLockedBy = null
+      order.purchaseLockedName = null
+    }
+  }
 }
 
 async function handlePurchaseSubmit() {
@@ -2036,11 +2081,15 @@ async function handlePurchaseSubmit() {
     })
 
     ElMessage.success('采购单创建并绑定成功')
+    // 标记为已捕获，防止 onPurchaseDialogClosed 重复解锁
+    purchaseInfo.captureStatus = 'captured'
     // 更新本地订单的采购状态
     const order = tableData.value.find(o => o.id === purchaseInfo.salesOrderId)
     if (order) {
       order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
       order.hasInventory = false
+      order.purchaseLockedBy = null
+      order.purchaseLockedName = null
     }
     purchaseDialogVisible.value = false
   } catch (err) {
@@ -2222,6 +2271,12 @@ async function handleIgnorePurchase(order) {
     await updateSalesOrderPurchaseStatus(order.id, '已忽略')
     order.purchaseStatus = '已忽略'
     order.hasInventory = false
+    order.purchaseLockedBy = null
+    order.purchaseLockedName = null
+    // 忽略采购时同步解锁后端数据库中的锁
+    unlockSalesOrderPurchase(order.id).catch(e => {
+      console.warn('[采购解锁] 忽略采购时解锁失败:', e.message)
+    })
   } catch (err) {
     ElMessage.error('操作失败: ' + err.message)
   }

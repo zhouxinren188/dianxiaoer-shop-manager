@@ -1,4 +1,4 @@
-import { get, post, put } from './request'
+import { get, post, put, del } from './request'
 
 export function fetchSalesOrders(params) {
   return get('/api/sales-orders', params)
@@ -27,4 +27,14 @@ export function updateBuyerInfo(storeId, orderId, buyerInfo) {
 
 export function updateSalesOrderPurchaseStatus(orderId, purchaseStatus) {
   return put(`/api/sales-orders/${orderId}/purchase-status`, { purchase_status: purchaseStatus })
+}
+
+// 采购锁定：锁定销售订单防止多人同时采购
+export function lockSalesOrderForPurchase(orderId) {
+  return post(`/api/sales-orders/${orderId}/purchase-lock`)
+}
+
+// 采购解锁：取消或完成采购时解锁
+export function unlockSalesOrderPurchase(orderId) {
+  return del(`/api/sales-orders/${orderId}/purchase-lock`)
 }

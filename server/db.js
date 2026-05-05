@@ -291,6 +291,14 @@ async function initDB() {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN purchase_status VARCHAR(30) NOT NULL DEFAULT '未采购' COMMENT '采购状态：未采购/已采购（三方代发）/已采购（仓库转发）/已忽略' AFTER sys_remark`)
     } catch (e) { /* 字段已存在 */ }
 
+    // 兼容已存在的 sales_orders 表：添加采购锁定字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN purchase_locked_by INT DEFAULT NULL COMMENT '采购锁定用户ID' AFTER purchase_status`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN purchase_locked_at DATETIME DEFAULT NULL COMMENT '采购锁定时间' AFTER purchase_locked_by`)
+    } catch (e) { /* 字段已存在 */ }
+
     // 兼容已存在的 purchase_accounts 表：添加 account+owner_id 唯一索引
     try {
       // 先清理同 account+owner_id 的重复数据，保留最新一条

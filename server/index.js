@@ -1218,20 +1218,100 @@ app.put('/api/sales-orders/:orderId/purchase-status', async (req, res) => {
     if (purchase_status !== '已忽略') return res.json(fail('仅允许设置为已忽略'))
 
     const storeIds = await getAccessibleStoreIds(req.user)
-    let result
-    if (storeIds.length > 0) {
-      const placeholders = storeIds.map(() => '?').join(',')
-      ;[result] = await pool.execute(
-        `UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
-        [purchase_status, orderId, ...storeIds]
-      )
-    } else {
-      ;[result] = await pool.execute(
-        'UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=?',
-        [purchase_status, orderId]
-      )
-    }
+    if (storeIds.length === 0) return res.json(fail('无权操作此订单'))
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [result] = await pool.execute(
+      `UPDATE sales_orders SET purchase_status=?, purchase_locked_by=NULL, purchase_locked_at=NULL, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+      [purchase_status, orderId, ...storeIds]
+    )
     res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 采购锁定：用户点击"采购下单"时锁定订单，防止多人同时采购同一订单
+app.post('/api/sales-orders/:orderId/purchase-lock', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const userId = req.user.id
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    // 先清理超过10分钟的过期锁（防止死锁）
+    await pool.execute(
+      `UPDATE sales_orders SET purchase_locked_by=NULL, purchase_locked_at=NULL WHERE purchase_locked_at IS NOT NULL AND purchase_locked_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)`
+    )
+
+    // 检查当前锁定状态（仅查询当前用户有权限的订单）
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (storeIds.length === 0) return res.json(fail('无权操作此订单'))
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT id, purchase_locked_by, purchase_status FROM sales_orders WHERE id=? AND store_id IN (${placeholders})`,
+      [orderId, ...storeIds]
+    )
+    if (rows.length === 0) return res.json(fail('订单不存在'))
+
+    const order = rows[0]
+    // 已采购的订单不需要锁定，直接返回成功放行
+    if (order.purchase_status && order.purchase_status !== '未采购') {
+      return res.json(ok({ locked: false, reason: 'already_purchased' }))
+    }
+
+    // 如果已被其他用户锁定，返回锁定者信息
+    if (order.purchase_locked_by && order.purchase_locked_by !== userId) {
+      // 查询锁定者用户名
+      const [lockUsers] = await pool.execute(
+        'SELECT id, username, real_name FROM users WHERE id=?',
+        [order.purchase_locked_by]
+      )
+      const lockerName = lockUsers.length > 0 ? (lockUsers[0].real_name || lockUsers[0].username) : '其他用户'
+      return res.json(fail(`该订单目前有${lockerName}在采购`))
+    }
+
+    // 加锁：如果已被自己锁定则刷新时间，否则新建锁
+    await pool.execute(
+      'UPDATE sales_orders SET purchase_locked_by=?, purchase_locked_at=NOW() WHERE id=?',
+      [userId, orderId]
+    )
+
+    res.json(ok({ locked: true }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 采购解锁：采购完成或取消时解锁订单
+app.delete('/api/sales-orders/:orderId/purchase-lock', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const userId = req.user.id
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    // 只允许锁定的用户本人或主账号解锁（且只能解锁有权限的订单）
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (storeIds.length === 0) return res.json(fail('无权操作此订单'))
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT purchase_locked_by FROM sales_orders WHERE id=? AND store_id IN (${placeholders})`,
+      [orderId, ...storeIds]
+    )
+    if (rows.length === 0) return res.json(fail('订单不存在'))
+
+    // 如果是本人锁定的，或者当前用户是主账号（主账号可以强制解锁子账号的锁）
+    if (rows[0].purchase_locked_by && rows[0].purchase_locked_by !== userId && req.user.user_type !== 'master') {
+      return res.json(fail('只能解锁自己锁定的订单'))
+    }
+
+    await pool.execute(
+      'UPDATE sales_orders SET purchase_locked_by=NULL, purchase_locked_at=NULL WHERE id=?',
+      [orderId]
+    )
+
+    res.json(ok({ unlocked: true }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -1365,6 +1445,29 @@ app.get('/api/sales-orders', async (req, res) => {
         }
       } else {
         rows.forEach(row => { row.has_inventory = false })
+      }
+    }
+
+    // 为采购锁定的订单附加锁定用户名
+    if (rows.length > 0) {
+      const lockedUserIds = [...new Set(rows.filter(r => r.purchase_locked_by).map(r => r.purchase_locked_by))]
+      if (lockedUserIds.length > 0) {
+        const idPlaceholders = lockedUserIds.map(() => '?').join(',')
+        const [lockUsers] = await pool.execute(
+          `SELECT id, username, real_name FROM users WHERE id IN (${idPlaceholders})`,
+          lockedUserIds
+        )
+        const lockUserMap = {}
+        lockUsers.forEach(u => { lockUserMap[u.id] = u.real_name || u.username })
+        rows.forEach(row => {
+          if (row.purchase_locked_by) {
+            row.purchase_locked_name = lockUserMap[row.purchase_locked_by] || '其他用户'
+          } else {
+            row.purchase_locked_name = null
+          }
+        })
+      } else {
+        rows.forEach(row => { row.purchase_locked_name = null })
       }
     }
 
@@ -1725,12 +1828,12 @@ app.post('/api/purchase-orders', async (req, res) => {
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
        ownerId, req.user.id]
     )
-    // 创建采购单成功后，自动更新关联销售订单的采购状态
+    // 创建采购单成功后，自动更新关联销售订单的采购状态并解锁
     if (sales_order_id) {
       try {
         const purchaseStatus = purchase_type === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
         await pool.execute(
-          'UPDATE sales_orders SET purchase_status=?, updated_at=NOW() WHERE id=?',
+          'UPDATE sales_orders SET purchase_status=?, purchase_locked_by=NULL, purchase_locked_at=NULL, updated_at=NOW() WHERE id=?',
           [purchaseStatus, sales_order_id]
         )
       } catch (e) {
