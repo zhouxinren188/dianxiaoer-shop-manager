@@ -1352,6 +1352,7 @@ async function handleRevealBuyerInfoInPurchase() {
         if (info.buyerAddress) order.address = info.buyerAddress
       }
       ElMessage.success('买家真实信息已获取')
+      purchaseInfo._buyerRevealed = true
 
       // 回写到服务器
       try {
@@ -1398,6 +1399,7 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.captureStatus = 'idle'
   purchaseInfo.capturedOrderNo = ''
   purchaseInfo.submitting = false
+  purchaseInfo._buyerRevealed = false
   // 采购类型 & 地址
   purchaseInfo.purchaseType = 'dropship'
   purchaseInfo.buyerName = order.customerName || ''
@@ -1631,7 +1633,8 @@ const purchaseInfo = reactive({
   warehouseContact: '',
   warehousePhone: '',
   warehouseAddress: '',
-  _sensitiveLoading: false
+  _sensitiveLoading: false,
+  _buyerRevealed: false
 })
 
 // 货源管理
@@ -1991,6 +1994,11 @@ async function handlePurchaseSubmit() {
     ElMessage.warning('请输入平台订单号')
     return
   }
+  // 三方代发必须先获取真实买家信息
+  if (purchaseInfo.purchaseType === 'dropship' && !purchaseInfo._buyerRevealed) {
+    ElMessage.warning('该订单尚未解密客户信息，请获取真实信息后再下单')
+    return
+  }
 
   purchaseInfo.submitting = true
   try {
@@ -2191,7 +2199,7 @@ function orderStatusTagType(status) {
 }
 
 function purchaseStatusTagType(status) {
-  const map = { '未采购': 'warning', '已采购（三方代发）': 'success', '已采购（仓库转发）': '', '仓库有货': '', '已忽略': 'info' }
+  const map = { '未采购': 'warning', '已采购（三方代发）': 'success', '已采购（仓库转发）': 'success', '仓库有货': '', '已忽略': 'info' }
   return map[status] || ''
 }
 
