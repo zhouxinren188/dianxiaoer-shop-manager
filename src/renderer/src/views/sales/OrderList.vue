@@ -46,7 +46,8 @@
           </div>
           <div class="filter-item">
             <label class="filter-label">采购状态</label>
-            <el-select v-model="searchForm.purchaseStatus" placeholder="全部状态" clearable>
+            <el-select v-model="searchForm.purchaseStatus" placeholder="全部状态" clearable @clear="searchForm.purchaseStatus = ''">
+              <el-option label="全部状态" value="" />
               <el-option label="未采购" value="未采购" />
               <el-option label="已采购（三方代发）" value="已采购（三方代发）" />
               <el-option label="已采购（仓库转发）" value="已采购（仓库转发）" />
@@ -2065,8 +2066,15 @@ function getStoreOnlineStatus(storeId) {
 const storeTagOptions = computed(() => {
   const tagSet = new Set()
   for (const s of storeOptions.value) {
-    if (Array.isArray(s.tags)) {
-      s.tags.forEach(t => t && tagSet.add(t))
+    let tags = s.tags
+    // 兼容 tags 为 JSON 字符串的情况
+    if (typeof tags === 'string') {
+      try { tags = JSON.parse(tags) } catch { tags = null }
+    }
+    if (Array.isArray(tags)) {
+      tags.forEach(t => {
+        if (t && typeof t === 'string') tagSet.add(t.trim())
+      })
     }
   }
   return [...tagSet].sort()
@@ -2075,7 +2083,13 @@ const storeTagOptions = computed(() => {
 // 按标签过滤的店铺列表（用于"选择店铺"下拉联动）
 const filteredStoreOptions = computed(() => {
   if (!searchForm.storeTag) return storeOptions.value
-  return storeOptions.value.filter(s => Array.isArray(s.tags) && s.tags.includes(searchForm.storeTag))
+  return storeOptions.value.filter(s => {
+    let tags = s.tags
+    if (typeof tags === 'string') {
+      try { tags = JSON.parse(tags) } catch { tags = null }
+    }
+    return Array.isArray(tags) && tags.some(t => t && t.trim() === searchForm.storeTag)
+  })
 })
 
 // 服务端分页，tableData 已经是当前页的数据
