@@ -520,6 +520,10 @@
             <h4 class="product-name">{{ purchaseInfo.goodsName }}</h4>
             <p v-if="purchaseInfo.sku" class="product-sku">SKU: {{ purchaseInfo.sku }}</p>
             <div class="product-meta-row">
+              <el-tag type="danger" effect="plain" size="default">
+                <el-icon><PriceTag /></el-icon>
+                单价: ¥{{ purchaseInfo.price.toFixed(2) }}
+              </el-tag>
               <el-tag type="info" effect="plain" size="default">
                 <el-icon><Tickets /></el-icon>
                 数量: {{ purchaseInfo.quantity }}
@@ -578,18 +582,6 @@
                     <el-icon><Plus /></el-icon>
                     <span>新增货源链接</span>
                   </el-button>
-                </div>
-                <div class="detail-area">
-                  <div class="inline-detail-card">
-                    <div class="detail-row">
-                      <span class="detail-label">采购单价</span>
-                      <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" class="price-input" />
-                    </div>
-                    <div class="detail-row full-width">
-                      <span class="detail-label">备注信息</span>
-                      <el-input v-model="purchaseInfo.remark" type="textarea" :rows="3" placeholder="选填" class="remark-input" />
-                    </div>
-                  </div>
                 </div>
               </div>
 
@@ -736,12 +728,6 @@
           <el-form-item label="平台订单号" required>
             <el-input v-model="purchaseInfo.platformOrderNo" placeholder="请输入在淘宝/拼多多购买后的订单号" clearable />
           </el-form-item>
-          <el-form-item label="实际采购单价">
-            <el-input-number v-model="purchaseInfo.purchasePrice" :min="0" :precision="2" :step="1" style="width: 180px" />
-          </el-form-item>
-          <el-form-item label="备注">
-            <el-input v-model="purchaseInfo.remark" type="textarea" :rows="2" placeholder="选填" />
-          </el-form-item>
         </el-form>
       </div>
 
@@ -821,6 +807,12 @@
         <el-form-item>
           <el-input v-model="sourceForm.purchase_link" placeholder="粘贴货源商品链接，系统自动识别平台" clearable size="large" @change="onSourceUrlChange" />
         </el-form-item>
+        <el-form-item>
+          <div style="display:flex;gap:8px;width:100%;">
+            <el-input-number v-model="sourceForm.purchase_price" :min="0" :precision="2" :step="1" placeholder="采购价" style="flex:1;" />
+            <el-input v-model="sourceForm.remark" placeholder="备注（选填）" style="flex:2;" clearable />
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="sourceFormVisible = false">取消</el-button>
@@ -833,7 +825,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
 import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
@@ -1389,6 +1381,7 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.sku = item.sku || ''
   purchaseInfo.skuId = item.skuId || item.sku_id || item.sku || ''
   purchaseInfo.quantity = item.quantity
+  purchaseInfo.price = item.price || 0
   purchaseInfo.image = item.image || ''
   purchaseInfo.sourceUrl = ''
   purchaseInfo.platform = 'taobao'
@@ -1461,8 +1454,19 @@ async function handlePurchase(order, item, itemIdx) {
     console.warn('[采购下单] 加载仓库失败:', e.message)
     ElMessage.warning('加载仓库失败: ' + e.message)
   }
-  // 如果只有一个仓库，自动选中并更新收货地址
-  if (warehouseList.value.length === 1) {
+  // 恢复上次选择的仓库，或只有一个仓库时自动选中
+  const lastWhId = localStorage.getItem('lastWarehouseId')
+  if (lastWhId) {
+    const whMatch = warehouseList.value.find(w => String(w.id) === lastWhId)
+    if (whMatch) {
+      applyWarehouseAddress(whMatch)
+      if (purchaseInfo.purchaseType === 'dropship') {
+        updateDropshipShipping()
+      } else if (purchaseInfo.purchaseType === 'warehouse') {
+        updateWarehouseShipping()
+      }
+    }
+  } else if (warehouseList.value.length === 1) {
     applyWarehouseAddress(warehouseList.value[0])
     if (purchaseInfo.purchaseType === 'dropship') {
       updateDropshipShipping()
@@ -1611,6 +1615,7 @@ const purchaseInfo = reactive({
   sku: '',
   skuId: '',
   quantity: 0,
+  price: 0,
   image: '',
   sourceUrl: '',
   platform: 'taobao',
@@ -1706,6 +1711,7 @@ function onWarehouseChange(whId) {
     purchaseInfo.warehouseContact = ''
     purchaseInfo.warehousePhone = ''
     purchaseInfo.warehouseAddress = ''
+    localStorage.removeItem('lastWarehouseId')
   }
   if (purchaseInfo.purchaseType === 'dropship') {
     updateDropshipShipping()
@@ -1830,8 +1836,11 @@ function handleGoOrder() {
     finalUrl = 'https://' + finalUrl
   }
 
-  // 记住使用的账号
+  // 记住使用的账号和仓库
   localStorage.setItem('lastPurchaseAccount_' + purchaseInfo.platform, String(purchaseInfo.selectedAccountId))
+  if (purchaseInfo.warehouseId) {
+    localStorage.setItem('lastWarehouseId', String(purchaseInfo.warehouseId))
+  }
 
   // 获取选中的采购账号名称和密码
   const selectedAccount = purchaseAccounts.value.find(acc => acc.id === purchaseInfo.selectedAccountId)
@@ -4350,48 +4359,6 @@ onUnmounted(() => {
 .source-area {
   flex: 1;
   min-width: 0;
-}
-
-.detail-area {
-  width: 200px;
-  flex-shrink: 0;
-  padding-top: 28px;
-}
-
-.inline-detail-card {
-  background: #f8f9fb;
-  border: 1px solid #e4e7ed;
-  border-radius: 8px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.inline-detail-card .detail-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.inline-detail-card .detail-row.full-width {
-  flex-direction: column;
-  align-items: flex-start;
-}
-
-.inline-detail-card .detail-label {
-  font-size: 12px;
-  color: #909399;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.inline-detail-card .price-input {
-  width: 120px;
-}
-
-.inline-detail-card .remark-input {
-  width: 100%;
 }
 
 .source-empty-state {

@@ -460,7 +460,11 @@ app.post('/api/update/notify-full', (req, res) => {
     return res.status(400).json({ code: 1, message: 'version 不能为空' })
   }
   const meta = readMeta()
-  meta.full = { version, changelog: changelog || '', updatedAt: new Date().toISOString() }
+  const fullInfo = { version, changelog: changelog || '', updatedAt: new Date().toISOString() }
+  meta.full = fullInfo
+  meta.fullUpdate = fullInfo
+  meta.latestVersion = version
+  meta.releaseDate = new Date().toISOString()
   writeMeta(meta)
   console.log(`[Update] 全量更新已登记: v${version}`)
   res.json({ code: 0, message: '全量更新登记成功', version })
