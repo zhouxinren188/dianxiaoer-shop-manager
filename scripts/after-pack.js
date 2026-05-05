@@ -5,9 +5,9 @@ const os = require('os')
 
 /**
  * electron-builder afterPack 钩子
- * 在 signAndEditExecutable:false 的情况下手动设置 exe 图标
+ * 兜底确保 exe 图标正确嵌入
  *
- * rcedit 不支持中文路径，需要先将文件复制到临时英文路径
+ * 如果 exe 路径含中文，rcedit 不支持，需要先复制到临时英文路径
  */
 module.exports = async function (context) {
   if (context.electronPlatformName !== 'win32') return
@@ -17,30 +17,37 @@ module.exports = async function (context) {
     `${context.packager.appInfo.productFilename}.exe`
   )
 
-  // 使用项目根目录的 icon.ico（复制到临时英文路径避免中文路径问题）
   const srcIcoPath = path.resolve(__dirname, '..', 'resources', 'icon.ico')
-  const tmpDir = path.join(os.tmpdir(), 'dxe-build')
-  const tmpIcoPath = path.join(tmpDir, 'icon.ico')
-  const tmpExePath = path.join(tmpDir, 'app.exe')
+
+  // 检测路径是否包含非 ASCII 字符
+  const hasNonAscii = /[^\x00-\x7F]/.test(exePath)
 
   try {
-    // 准备临时目录
-    fs.mkdirSync(tmpDir, { recursive: true })
-    fs.copyFileSync(srcIcoPath, tmpIcoPath)
-    fs.copyFileSync(exePath, tmpExePath)
+    if (hasNonAscii) {
+      // 路径含中文：复制到临时英文路径操作
+      const tmpDir = path.join(os.tmpdir(), 'dxe-build')
+      const tmpIcoPath = path.join(tmpDir, 'icon.ico')
+      const tmpExePath = path.join(tmpDir, 'app.exe')
 
-    console.log('[afterPack] Setting icon (via temp path)...')
-    await rcedit(tmpExePath, { icon: tmpIcoPath })
+      fs.mkdirSync(tmpDir, { recursive: true })
+      fs.copyFileSync(srcIcoPath, tmpIcoPath)
+      fs.copyFileSync(exePath, tmpExePath)
 
-    // 复制回原路径
-    fs.copyFileSync(tmpExePath, exePath)
-    console.log('[afterPack] Icon set successfully!')
+      console.log('[afterPack] Setting icon (via temp path for non-ASCII)...')
+      await rcedit(tmpExePath, { icon: tmpIcoPath })
 
-    // 清理临时文件
-    fs.rmSync(tmpDir, { recursive: true, force: true })
+      fs.copyFileSync(tmpExePath, exePath)
+      console.log('[afterPack] Icon set successfully!')
+
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    } else {
+      // 英文路径：直接操作
+      console.log('[afterPack] Setting icon (direct)...')
+      await rcedit(exePath, { icon: srcIcoPath })
+      console.log('[afterPack] Icon set successfully!')
+    }
   } catch (e) {
     console.error('[afterPack] Failed to set icon:', e.message)
-    // 清理临时文件
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch (_) {}
+    try { fs.rmSync(path.join(os.tmpdir(), 'dxe-build'), { recursive: true, force: true }) } catch (_) {}
   }
 }

@@ -19,7 +19,7 @@
   },
   "build": {
     "appId": "com.dianxiaoer.shop-manager",
-    "productName": "店小二网店管家",
+    "productName": "dianxiaoer",
     "directories": {
       "output": "dist"
     },
