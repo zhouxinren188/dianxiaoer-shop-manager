@@ -1700,8 +1700,8 @@ app.post('/api/purchase-orders', async (req, res) => {
         (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
          source_url, platform, purchase_price, remark,
          purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
-         status, owner_id)
-       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?)
+         status, owner_id, created_by)
+       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?, ?)
        ON DUPLICATE KEY UPDATE
          owner_id=VALUES(owner_id),
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
@@ -1716,7 +1716,7 @@ app.post('/api/purchase-orders', async (req, res) => {
       [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
-       ownerId]
+       ownerId, req.user.id]
     )
     // 创建采购单成功后，自动更新关联销售订单的采购状态
     if (sales_order_id) {
@@ -1752,27 +1752,49 @@ app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { page=1, pageSize=20, status, platform } = req.query
-    let sql = `
-      SELECT po.*, pa.account as account_name
-      FROM purchase_orders po
-      LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
-      WHERE po.owner_id=?
-    `
-    const params = [ownerId]
-    if (status) { sql += ' AND status=?'; params.push(status) }
-    if (platform) { sql += ' AND platform=?'; params.push(platform) }
-    
-    // 正确的COUNT查询
-    const countSql = `
-      SELECT COUNT(*) as total
-      FROM purchase_orders po
-      LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
-      WHERE po.owner_id=?
-    `
+    let sql, countSql, params
+
+    if (req.user.user_type === 'sub') {
+      // 子账号：只看自己被分配的采购账号创建的订单 + 自己手动创建的订单(account_id为空)
+      sql = `
+        SELECT po.*, pa.account as account_name
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        WHERE po.owner_id=?
+          AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
+               OR (po.account_id IS NULL AND po.created_by=?))
+      `
+      countSql = `
+        SELECT COUNT(*) as total
+        FROM purchase_orders po
+        WHERE po.owner_id=?
+          AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
+               OR (po.account_id IS NULL AND po.created_by=?))
+      `
+      params = [ownerId, req.user.id, req.user.id]
+    } else {
+      // 主账号：看自己名下所有订单
+      sql = `
+        SELECT po.*, pa.account as account_name
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        WHERE po.owner_id=?
+      `
+      countSql = `
+        SELECT COUNT(*) as total
+        FROM purchase_orders po
+        WHERE po.owner_id=?
+      `
+      params = [ownerId]
+    }
+
+    if (status) { sql += ' AND po.status=?'; countSql += ' AND po.status=?'; params.push(status) }
+    if (platform) { sql += ' AND po.platform=?'; countSql += ' AND po.platform=?'; params.push(platform) }
+
     const [[{ total }]] = await pool.execute(countSql, params)
     const limit = Math.max(1, parseInt(pageSize,10)||20)
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
-    sql += ' ORDER BY id DESC LIMIT ' + limit + ' OFFSET ' + offset
+    sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
     res.json(ok({ list: rows, total }))
   } catch (err) { res.status(500).json(fail(err.message)) }

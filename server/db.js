@@ -299,6 +299,12 @@ async function initDB() {
       console.log('[DB] 已添加 purchase_accounts.uk_account_owner 唯一索引')
     } catch (e) { /* 索引已存在 */ }
 
+    // 兼容已存在的 purchase_orders 表：添加 created_by 字段
+    try {
+      await connection.execute(`ALTER TABLE purchase_orders ADD COLUMN created_by INT DEFAULT NULL COMMENT '创建者用户ID' AFTER owner_id`)
+      console.log('[DB] 已添加 purchase_orders.created_by 字段')
+    } catch (e) { /* 字段已存在 */ }
+
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
     if (rows[0].count === 0) {
