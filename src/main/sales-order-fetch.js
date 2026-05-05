@@ -10,8 +10,14 @@ const DEBUG_LOG_PATH = path.join(
 
 function saveDebugLog(data) {
   try {
-    fs.writeFileSync(DEBUG_LOG_PATH, JSON.stringify(data, null, 2), 'utf-8')
-    console.log('[SalesFetch] debug log saved:', DEBUG_LOG_PATH)
+    let existing = []
+    try { existing = JSON.parse(fs.readFileSync(DEBUG_LOG_PATH, 'utf-8')) } catch (e) {}
+    if (!Array.isArray(existing)) existing = []
+    existing.push(data)
+    // 最多保留20条
+    if (existing.length > 20) existing = existing.slice(-20)
+    fs.writeFileSync(DEBUG_LOG_PATH, JSON.stringify(existing, null, 2), 'utf-8')
+    console.log('[SalesFetch] debug log saved:', DEBUG_LOG_PATH, 'entries:', existing.length)
   } catch (e) {
     console.log('[SalesFetch] save debug log failed:', e.message)
   }
@@ -899,6 +905,8 @@ function registerSalesOrderIpc() {
       }
 
       let tempWin = null
+      let bindVnResponseData = null  // Electron层面拦截到的bindVirtualNumber响应
+
       try {
         tempWin = new BrowserWindow({
           show: false,
@@ -911,6 +919,19 @@ function registerSalesOrderIpc() {
           }
         })
 
+        // 使用 Electron 的 webRequest API 在网络层监听 bindVirtualNumber 请求
+        // webRequest 不能读响应体，但可以监听请求完成，配合页面内拦截器双保险
+        const sesForWR = session.fromPartition(partitionName)
+        let bindVnRequestDetected = false
+        try {
+          sesForWR.webRequest.onCompleted({ urls: ['*://sff.jd.com/*bindVirtualNumber*'] }, (details) => {
+            console.log('[SalesFetch] [BuyerInfo] webRequest检测到bindVirtualNumber完成:', details.statusCode, details.url.substring(0, 150))
+            bindVnRequestDetected = true
+          })
+        } catch(e) {
+          console.log('[SalesFetch] [BuyerInfo] webRequest监听设置失败:', e.message)
+        }
+
         // 注入 API 拦截器（全量捕获模式：捕获所有API响应，后续从中筛选买家信息）
         tempWin.webContents.on('dom-ready', () => {
           if (tempWin.isDestroyed()) return
@@ -919,9 +940,11 @@ function registerSalesOrderIpc() {
               if (window.__sffInterceptorInstalled) return;
               window.__sffInterceptorInstalled = true;
               window.__sensitiveInfoResult = null;
+              window.__bindVirtualNumberResult = null;
               window.__sensitiveInfoLogs = [];
               window.__allCapturedResponses = [];
               window.__captureEnabled = false;
+              window.__orderListResult = null;
               window.__captureStartTime = 0;
               window.__postConfirmPhase = false;
 
@@ -933,7 +956,7 @@ function registerSalesOrderIpc() {
                 var stdPhone = /"(?:mobile|phone|consMobilePhone|consigneePhone|receiverMobile|contactPhone)"\\s*:\\s*"(1[3-9]\\d{9})"/;
                 if (stdPhone.test(text)) return true;
                 // 2. 匹配虚拟号/转接号字段（任何>=7位数字）
-                var virtualPhone = /"(?:virtualNumber|virtualPhone|forwardNumber|transferPhone|vnNumber)"\\s*:\\s*"(\\d{7,20})"/;
+                var virtualPhone = /"(?:virtualNumber|virtualPhone|forwardNumber|transferPhone|vnNumber)"\\s*:\\s*"(\\d{7,20}(?:-\\d{1,6})?)"/;
                 if (virtualPhone.test(text)) return true;
                 // 3. 匹配手机号字段有非脱敏值（>=7位数字，不含*）
                 var anyRealPhone = /"(?:mobile|phone|consMobilePhone|consigneePhone|receiverMobile)"\\s*:\\s*"(\\d{7,20})"/;
@@ -957,9 +980,45 @@ function registerSalesOrderIpc() {
                   || url.indexOf('pageConfigBffService') !== -1;
               }
 
+              // 判断是否为订单列表API（不直接设置 sensitiveInfoResult，而是单独存储）
+              // 订单列表API包含多个订单的买家信息，直接覆盖会取到错误订单
+              function isOrderListApi(url) {
+                return url.indexOf('queryOrderPage') !== -1
+                  || url.indexOf('queryOrderList') !== -1
+                  || url.indexOf('getOrderList') !== -1
+                  || url.indexOf('orderSearch') !== -1;
+              }
+
+              // 判断是否为绑定虚拟号API（点击确定后触发，包含完整买家信息+分机号+虚拟号）
+              function isBindVirtualNumberApi(url) {
+                return url.indexOf('bindVirtualNumber') !== -1;
+              }
+
               var origFetch = window.fetch;
               window.fetch = function(input, init) {
                 var url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+                // 捕获 getSensitiveInfo 的完整请求信息（URL、headers、body），用于直接调用 bindVirtualNumber
+                if (url.indexOf('getSensitiveInfo') !== -1 && init) {
+                  try {
+                    var reqBody = init.body ? (typeof init.body === 'string' ? init.body : (init.body.toString ? init.body.toString() : '')) : '';
+                    if (reqBody) window.__sensitiveInfoRequestBody = reqBody;
+                    // 捕获请求头（包括CSRF令牌等安全头）
+                    var headers = {};
+                    if (init.headers) {
+                      if (init.headers instanceof Headers) {
+                        init.headers.forEach(function(v, k) { headers[k] = v; });
+                      } else if (typeof init.headers === 'object') {
+                        for (var k in init.headers) {
+                          if (init.headers.hasOwnProperty(k)) headers[k] = init.headers[k];
+                        }
+                      }
+                    }
+                    window.__sensitiveInfoRequestHeaders = JSON.stringify(headers);
+                    window.__sensitiveInfoRequestUrl = url;
+                    window.__sensitiveInfoRequestMethod = init.method || 'POST';
+                    window.__sensitiveInfoLogs.push('CAPTURED-REQ: method=' + (init.method||'POST') + ' headers=' + Object.keys(headers).join(',') + ' body=' + reqBody.substring(0, 200));
+                  } catch(e) {}
+                }
                 return origFetch.apply(this, arguments).then(function(response) {
                   if (window.__captureEnabled) {
                     try {
@@ -967,10 +1026,26 @@ function registerSalesOrderIpc() {
                       cloned.text().then(function(text) {
                         window.__sensitiveInfoLogs.push('fetch[' + response.status + ']: ' + url.substring(0, 150) + ' len=' + text.length);
                         window.__allCapturedResponses.push({ url: url.substring(0, 300), body: text.substring(0, 50000), time: Date.now() });
-                        if (!isExcludedApi(url) && containsBuyerInfo(text)) {
-                          window.__sensitiveInfoLogs.push('MATCH fetch: ' + url.substring(0, 150));
-                          try { window.__sensitiveInfoResult = JSON.parse(text); }
-                          catch(e) { window.__sensitiveInfoResult = { raw: text.substring(0, 50000) }; }
+                        if (!isExcludedApi(url)) {
+                          if (isBindVirtualNumberApi(url)) {
+                            // bindVirtualNumber 响应包含完整信息：name[XXXX], address[XXXX], virtualNumber
+                            // 优先级最高，单独存储
+                            window.__sensitiveInfoLogs.push('BIND-VN-CAPTURED fetch: ' + url.substring(0, 150));
+                            try { window.__bindVirtualNumberResult = JSON.parse(text); }
+                            catch(e) {}
+                            // 同时也设置为 sensitiveInfoResult（向后兼容）
+                            try { window.__sensitiveInfoResult = JSON.parse(text); }
+                            catch(e) {}
+                          } else if (isOrderListApi(url)) {
+                            // 订单列表API始终捕获（即使脱敏，name/address可能仍有用）
+                            window.__sensitiveInfoLogs.push('ORDERLIST-CAPTURED fetch: ' + url.substring(0, 150));
+                            try { window.__orderListResult = JSON.parse(text); }
+                            catch(e) {}
+                          } else if (containsBuyerInfo(text)) {
+                            window.__sensitiveInfoLogs.push('MATCH fetch: ' + url.substring(0, 150));
+                            try { window.__sensitiveInfoResult = JSON.parse(text); }
+                            catch(e) { window.__sensitiveInfoResult = { raw: text.substring(0, 50000) }; }
+                          }
                         }
                       }).catch(function(){});
                     } catch(e) {}
@@ -981,12 +1056,38 @@ function registerSalesOrderIpc() {
 
               var origXhrOpen = XMLHttpRequest.prototype.open;
               var origXhrSend = XMLHttpRequest.prototype.send;
+              var origXhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+
               XMLHttpRequest.prototype.open = function(method, url) {
                 this.__sffUrl = (url || '').toString();
+                this.__sffHeaders = {};
                 return origXhrOpen.apply(this, arguments);
               };
+
+              // 拦截 setRequestHeader 以捕获请求头（含CSRF令牌等安全头）
+              XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+                if (this.__sffHeaders) {
+                  this.__sffHeaders[name] = value;
+                }
+                return origXhrSetHeader.apply(this, arguments);
+              };
+
               XMLHttpRequest.prototype.send = function(body) {
                 var xhr = this;
+                // 捕获 getSensitiveInfo 的完整请求信息（URL、headers、body）
+                var xhrUrl = xhr.__sffUrl || '';
+                if (xhrUrl.indexOf('getSensitiveInfo') !== -1) {
+                  try {
+                    var reqBody = body ? (typeof body === 'string' ? body : (body.toString ? body.toString() : '')) : '';
+                    if (reqBody) window.__sensitiveInfoRequestBody = reqBody;
+                    if (xhrUrl) window.__sensitiveInfoRequestUrl = xhrUrl;
+                    window.__sensitiveInfoRequestMethod = 'POST';
+                    // 捕获所有请求头
+                    var hdrs = xhr.__sffHeaders || {};
+                    window.__sensitiveInfoRequestHeaders = JSON.stringify(hdrs);
+                    window.__sensitiveInfoLogs.push('CAPTURED-XHR-REQ: url=' + xhrUrl.substring(0, 150) + ' headers=' + JSON.stringify(hdrs).substring(0, 300) + ' body=' + reqBody.substring(0, 200));
+                  } catch(e) {}
+                }
                 if (window.__captureEnabled) {
                   xhr.addEventListener('load', function() {
                     try {
@@ -994,10 +1095,23 @@ function registerSalesOrderIpc() {
                       var url = xhr.__sffUrl || '';
                       window.__sensitiveInfoLogs.push('xhr[' + xhr.status + ']: ' + url.substring(0, 150) + ' len=' + text.length);
                       window.__allCapturedResponses.push({ url: url.substring(0, 300), body: text.substring(0, 50000), time: Date.now() });
-                      if (!isExcludedApi(url) && containsBuyerInfo(text)) {
-                        window.__sensitiveInfoLogs.push('MATCH xhr: ' + url.substring(0, 150));
-                        try { window.__sensitiveInfoResult = JSON.parse(text); }
-                        catch(e) { window.__sensitiveInfoResult = { raw: text.substring(0, 50000) }; }
+                      if (!isExcludedApi(url)) {
+                        if (isBindVirtualNumberApi(url)) {
+                          // bindVirtualNumber 响应包含完整信息：name[XXXX], address[XXXX], virtualNumber
+                          window.__sensitiveInfoLogs.push('BIND-VN-CAPTURED xhr: ' + url.substring(0, 150));
+                          try { window.__bindVirtualNumberResult = JSON.parse(text); }
+                          catch(e) {}
+                          try { window.__sensitiveInfoResult = JSON.parse(text); }
+                          catch(e) {}
+                        } else if (isOrderListApi(url)) {
+                          window.__sensitiveInfoLogs.push('ORDERLIST-CAPTURED xhr: ' + url.substring(0, 150));
+                          try { window.__orderListResult = JSON.parse(text); }
+                          catch(e) {}
+                        } else if (containsBuyerInfo(text)) {
+                          window.__sensitiveInfoLogs.push('MATCH xhr: ' + url.substring(0, 150));
+                          try { window.__sensitiveInfoResult = JSON.parse(text); }
+                          catch(e) { window.__sensitiveInfoResult = { raw: text.substring(0, 50000) }; }
+                        }
                       }
                     } catch(e) {}
                   });
@@ -1139,13 +1253,24 @@ function registerSalesOrderIpc() {
             result.logs.push('找到订单号: ' + orderEl.tagName + '.' + gc(orderEl));
 
             var container = orderEl;
+            var bestContainer = null;
             for (var up = 0; up < 20; up++) {
               container = container.parentElement;
               if (!container || container === document.body) break;
               var r = container.getBoundingClientRect();
-              if (r.width > 500 && r.height > 100) break;
+              // 优先选择有card/order类名的元素
+              var cls = gc(container);
+              if ((cls.indexOf('card') !== -1 || cls.indexOf('order') !== -1 || cls.indexOf('item') !== -1) && r.width > 300 && r.height > 50 && r.height < 400) {
+                bestContainer = container;
+                result.logs.push('卡片级容器[' + up + ']: ' + cls.substring(0, 30) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height));
+                break;
+              }
+              // 通用条件：宽度够且高度合理（不超过500，避免选到页面级容器）
+              if (r.width > 500 && r.height > 100 && r.height < 500 && !bestContainer) {
+                bestContainer = container;
+              }
             }
-            var scope = container || document.body;
+            var scope = bestContainer || container || document.body;
             result.logs.push('容器[' + up + ']: ' + scope.tagName + '.' + gc(scope).substring(0, 30) + ' ' + Math.round(scope.getBoundingClientRect().width) + 'x' + Math.round(scope.getBoundingClientRect().height));
 
             var iconArea = scope;
@@ -1193,16 +1318,14 @@ function registerSalesOrderIpc() {
 
             result.logs.push('眼睛候选: ' + eyeIcons.length + '个');
 
-            // 优先选 consignee-info 眼睛（能获取手机号），否则选最后一个（通常包含更完整的信息）
-            if (consigneeEyeIcon) {
-              eyeEl = consigneeEyeIcon.el;
-              result.logs.push('选收货人信息眼睛(候选[' + consigneeEyeIcon.idx + ']) - 含手机号');
-            } else if (eyeIcons.length >= 2) {
-              eyeEl = eyeIcons[eyeIcons.length - 1].el;
-              result.logs.push('选最后一个眼睛(候选[' + eyeIcons[eyeIcons.length - 1].idx + ']) - 多个眼睛取后者');
-            } else if (eyeIcons.length === 1) {
+            // 优先选第一个眼睛（eyeIcons[0]，带ml-8的是"后台"眼睛，能触发完整信息API）
+            // consignee-info-pin-filt 眼睛只能获取手机号tooltip，不触发完整API
+            if (eyeIcons.length >= 1) {
               eyeEl = eyeIcons[0].el;
-              result.logs.push('选唯一眼睛(候选[' + eyeIcons[0].idx + '])');
+              result.logs.push('选第一个眼睛(候选[' + eyeIcons[0].idx + ']) - 触发完整信息API');
+            } else if (consigneeEyeIcon) {
+              eyeEl = consigneeEyeIcon.el;
+              result.logs.push('无shop-adv-icon眼睛，退而选收货人信息眼睛(候选[' + consigneeEyeIcon.idx + '])');
             } else if (candidates.length >= 1) {
               eyeEl = candidates[candidates.length - 1];
               result.logs.push('无眼睛候选，兜底选最后');
@@ -1226,38 +1349,104 @@ function registerSalesOrderIpc() {
         console.log('[SalesFetch] [BuyerInfo] DOM查找结果:', JSON.stringify(clickResult))
 
         let sensitiveData = null
+        let confirmResult = { confirmed: false, logs: [] }
+        let quickResult = { buyerName: '', buyerPhone: '', buyerAddress: '' }
 
         if (clickResult.clicked) {
-          // 轮询等待确认弹窗
+          // 轮询等待确认弹窗（加入京东自定义组件选择器，增加超时到8秒）
           const dialogReady = await pollUntil(
             () => tempWin.webContents.executeJavaScript(
-              "!!(document.querySelector('[class*=\"dialog\"] [class*=\"primary\"]') || document.querySelector('.ant-modal .ant-btn-primary') || (function(){var bs=document.querySelectorAll('button');for(var i=0;i<bs.length;i++){if(/^(确认|确定|同意|OK)$/.test(bs[i].textContent.trim()))return true;}return false;})())"
+              "!!(document.querySelector('[class*=\"dialog\"] [class*=\"primary\"]') || document.querySelector('.ant-modal .ant-btn-primary') || document.querySelector('[class*=\"Dialog\"] button') || document.querySelector('[class*=\"Msgbox\"] button') || (function(){var bs=document.querySelectorAll('button, [role=\"button\"]');for(var i=0;i<bs.length;i++){var t=bs[i].textContent.trim();var r=bs[i].getBoundingClientRect();if(t.length<=6&&r.width>0&&/^(确认|确定|同意|OK|绑定|获取|查看)$/.test(t))return true;}return false;})())"
             ),
-            { timeout: 5000, interval: 300, label: '确认弹窗' }
+            { timeout: 8000, interval: 400, label: '确认弹窗' }
           )
-          if (!dialogReady) await new Promise(r => setTimeout(r, 500))
+          if (!dialogReady) await new Promise(r => setTimeout(r, 1000))
 
           // 关键：在点击确认按钮之前，清空已有捕获并标记进入确认后阶段
           // 确认后阶段不排除任何API（queryOrderPage可能携带解密数据）
           await tempWin.webContents.executeJavaScript(`
             window.__sensitiveInfoResult = null;
+            window.__bindVirtualNumberResult = null;
+            window.__orderListResult = null;
             window.__sensitiveInfoLogs = [];
             window.__allCapturedResponses = [];
             window.__postConfirmPhase = true;
           `).catch(() => {})
 
           console.log('[SalesFetch] [BuyerInfo] 查找并点击确认弹窗...')
-          const confirmResult = await tempWin.webContents.executeJavaScript(`
+          confirmResult = await tempWin.webContents.executeJavaScript(`
             (function() {
               var result = { confirmed: false, logs: [] };
-              var selectors = [
+
+              // 先记录页面上所有可见弹窗/对话框元素
+              var modals = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="popover"], [class*="Popper"], [role="dialog"]');
+              result.logs.push('页面弹窗元素数: ' + modals.length);
+
+              // 优先策略：在包含"虚拟号"或"绑定"文字的弹窗中找"确定"按钮
+              // 这是最精准的——京东的虚拟号绑定弹窗包含"点击确定则绑定虚拟号"等文字
+              var allModals = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="Msgbox"], [class*="msgbox"], [role="dialog"]');
+              for (var m = 0; m < allModals.length; m++) {
+                var modal = allModals[m];
+                var mRect = modal.getBoundingClientRect();
+                if (mRect.width < 100 || mRect.height < 30) continue;
+                var modalText = (modal.innerText || '');
+                // 检查弹窗文本是否包含虚拟号绑定相关内容
+                if (modalText.indexOf('虚拟号') !== -1 || modalText.indexOf('绑定') !== -1 || modalText.indexOf('脱敏') !== -1) {
+                  result.logs.push('找到虚拟号绑定弹窗: ' + modal.className.substring(0, 80) + ' textLen=' + modalText.length);
+                  // 在弹窗内找"确定"按钮
+                  var modalBtns = modal.querySelectorAll('button, [role="button"], [class*="btn"], [class*="primary"]');
+                  for (var b = 0; b < modalBtns.length; b++) {
+                    var btn = modalBtns[b];
+                    var btnText = btn.textContent.trim();
+                    var btnRect = btn.getBoundingClientRect();
+                    if (btnRect.width > 0 && btnRect.height > 0) {
+                      result.logs.push('弹窗按钮[' + b + ']: "' + btnText + '" cls=' + btn.className.substring(0, 60) + ' rect=' + Math.round(btnRect.width) + 'x' + Math.round(btnRect.height));
+                      // 优先点击"确定"按钮
+                      if (/^(确定|确认|绑定|OK|Confirm)$/.test(btnText)) {
+                        result.logs.push('点击虚拟号弹窗确定按钮: "' + btnText + '"');
+                        btn.click();
+                        result.confirmed = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (result.confirmed) break;
+                  // 如果没找到"确定"文本按钮，点击弹窗内的primary按钮（第一个）
+                  var primaryBtns = modal.querySelectorAll('[class*="primary"]');
+                  for (var p = 0; p < primaryBtns.length; p++) {
+                    var pBtn = primaryBtns[p];
+                    var pRect = pBtn.getBoundingClientRect();
+                    if (pRect.width > 0 && pRect.height > 0) {
+                      var pText = pBtn.textContent.trim();
+                      if (!/^(取消|Cancel|关闭|Close|拒绝)$/.test(pText)) {
+                        result.logs.push('点击虚拟号弹窗primary按钮: "' + pText + '"');
+                        pBtn.click();
+                        result.confirmed = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (result.confirmed) break;
+                }
+              }
+
+              // 方法1a：标准UI库选择器（如果上面没找到虚拟号弹窗）
+              if (!result.confirmed) {
                 '.ant-modal .ant-btn-primary',
                 '.ant-modal-confirm-btns .ant-btn-primary',
                 '.el-message-box__btns .el-button--primary',
                 '.el-dialog .el-button--primary',
                 '[class*="modal"] [class*="primary"]',
                 '[class*="dialog"] [class*="primary"]',
-                '[class*="Dialog"] [class*="primary"]'
+                '[class*="Dialog"] [class*="primary"]',
+                // 京东自定义组件选择器
+                '.jd-modal .jd-btn--primary',
+                '.jd-dialog .jd-btn--primary',
+                '.jd-message-box .jd-btn--primary',
+                '[class*="jd-modal"] [class*="primary"]',
+                '[class*="jd-dialog"] [class*="primary"]',
+                '[class*="Msgbox"] button',
+                '[class*="msgbox"] button'
               ];
               for (var i = 0; i < selectors.length; i++) {
                 var btns = document.querySelectorAll(selectors[i]);
@@ -1270,18 +1459,52 @@ function registerSalesOrderIpc() {
                   break;
                 }
               }
+
+              // 方法2：通过按钮文本查找（最可靠的方式）
               if (!result.confirmed) {
-                var allBtns = document.querySelectorAll('button, [role="button"]');
+                var allBtns = document.querySelectorAll('button, [role="button"], [class*="btn"]');
+                var confirmTexts = /^(确认|确定|同意|OK|Confirm|我已阅读|绑定|获取|查看|立即)$/;
                 for (var i = 0; i < allBtns.length; i++) {
                   var text = allBtns[i].textContent.trim();
-                  if (/^(确认|确定|同意|OK|Confirm|我已阅读)$/.test(text)) {
-                    allBtns[i].click();
-                    result.confirmed = true;
-                    result.logs.push('通过文本确认: ' + text);
-                    break;
+                  // 只匹配短文本（避免匹配到包含这些字的导航按钮）
+                  if (text.length <= 6 && confirmTexts.test(text)) {
+                    var rect = allBtns[i].getBoundingClientRect();
+                    // 按钮必须可见
+                    if (rect.width > 0 && rect.height > 0) {
+                      result.logs.push('通过文本确认: "' + text + '" rect=' + Math.round(rect.width) + 'x' + Math.round(rect.height));
+                      allBtns[i].click();
+                      result.confirmed = true;
+                      break;
+                    }
                   }
                 }
               }
+
+              // 方法3：查找弹窗内的第一个可见按钮（兜底）
+              if (!result.confirmed && modals.length > 0) {
+                for (var m = 0; m < modals.length; m++) {
+                  var modal = modals[m];
+                  var rect = modal.getBoundingClientRect();
+                  if (rect.width < 100 || rect.height < 50) continue;
+                  var modalBtns = modal.querySelectorAll('button, [role="button"]');
+                  result.logs.push('弹窗[' + m + ']: ' + modal.className.substring(0, 60) + ' 按钮数=' + modalBtns.length);
+                  // 优先点击最后一个按钮（通常是"确认"）
+                  for (var b = modalBtns.length - 1; b >= 0; b--) {
+                    var btnRect = modalBtns[b].getBoundingClientRect();
+                    var btnText = modalBtns[b].textContent.trim();
+                    if (btnRect.width > 0 && btnRect.height > 0 && btnText.length <= 10) {
+                      // 跳过"取消"按钮
+                      if (/^(取消|Cancel|关闭|Close|拒绝)$/.test(btnText)) continue;
+                      result.logs.push('弹窗内点击: "' + btnText + '"');
+                      modalBtns[b].click();
+                      result.confirmed = true;
+                      break;
+                    }
+                  }
+                  if (result.confirmed) break;
+                }
+              }
+
               if (!result.confirmed) result.logs.push('未找到确认弹窗按钮');
               return result;
             })()
@@ -1289,13 +1512,507 @@ function registerSalesOrderIpc() {
 
           console.log('[SalesFetch] [BuyerInfo] 确认弹窗结果:', JSON.stringify(confirmResult))
 
-          // 确认后等待页面更新（京东会触发API或直接在DOM更新解密信息）
+          // ====== 核心策略：直接从页面上下文调用 bindVirtualNumber API ======
+          // 之前的点击确定按钮方式不可靠（webRequest检测确认请求未发出）
+          // 改为直接调用API：从已拦截的 getSensitiveInfo 请求中获取格式，直接 fetch bindVirtualNumber
+          console.log('[SalesFetch] [BuyerInfo] 直接调用bindVirtualNumber API...')
+
+          // 读取 getSensitiveInfo 的完整请求信息
+          const capturedReqInfo = await tempWin.webContents.executeJavaScript(`
+            (function() {
+              return {
+                body: window.__sensitiveInfoRequestBody || '',
+                headers: window.__sensitiveInfoRequestHeaders || '',
+                url: window.__sensitiveInfoRequestUrl || '',
+                method: window.__sensitiveInfoRequestMethod || 'POST'
+              };
+            })()
+          `).catch(() => ({ body: '', headers: '', url: '', method: 'POST' }))
+
+          if (capturedReqInfo.body) {
+            console.log('[SalesFetch] [BuyerInfo] 捕获到getSensitiveInfo请求: method=' + capturedReqInfo.method + ' url=' + capturedReqInfo.url.substring(0, 100) + ' headers=' + capturedReqInfo.headers.substring(0, 200))
+
+            // 从请求信息构造 bindVirtualNumber 的请求
+            // 使用与 getSensitiveInfo 完全相同的 URL、headers、method，只替换 API 名
+            const bindVnResult = await tempWin.webContents.executeJavaScript(`
+              (function() {
+                return new Promise(function(resolve) {
+                  var reqBody = ${JSON.stringify(capturedReqInfo.body)};
+                  var reqHeaders = ${JSON.stringify(capturedReqInfo.headers)};
+                  var reqMethod = ${JSON.stringify(capturedReqInfo.method)};
+                  var sffUrl = ${JSON.stringify(capturedReqInfo.url)};
+
+                  // 替换URL中的API名: getSensitiveInfo -> bindVirtualNumber
+                  var bindVnUrl = sffUrl ? sffUrl.replace('getSensitiveInfo', 'bindVirtualNumber') : '';
+
+                  // 如果URL中没有getSensitiveInfo（不太可能），构造默认URL
+                  if (!bindVnUrl || bindVnUrl === sffUrl) {
+                    bindVnUrl = 'https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderSensitiveInfoBffService.bindVirtualNumber';
+                  }
+
+                  // 构造请求选项：使用相同的method、headers、credentials
+                  var fetchOpts = {
+                    method: reqMethod || 'POST',
+                    credentials: 'include',
+                    headers: {}
+                  };
+
+                  // 复制原始请求头（包括CSRF令牌等安全头）
+                  try {
+                    var origHeaders = JSON.parse(reqHeaders);
+                    for (var k in origHeaders) {
+                      if (origHeaders.hasOwnProperty(k)) {
+                        fetchOpts.headers[k] = origHeaders[k];
+                      }
+                    }
+                  } catch(e) {}
+
+                  // 确保有Content-Type
+                  if (!fetchOpts.headers['Content-Type'] && !fetchOpts.headers['content-type']) {
+                    fetchOpts.headers['Content-Type'] = 'application/json';
+                  }
+
+                  // 使用相同的请求体格式
+                  try {
+                    var bodyObj = JSON.parse(reqBody);
+                    fetchOpts.body = JSON.stringify(bodyObj);
+                  } catch(e) {
+                    fetchOpts.body = reqBody;
+                  }
+
+                  console.log('[BuyerInfo] 直接调用bindVirtualNumber:', bindVnUrl.substring(0, 150));
+                  console.log('[BuyerInfo] 请求头:', JSON.stringify(fetchOpts.headers).substring(0, 300));
+                  fetch(bindVnUrl, fetchOpts).then(function(resp) {
+                    return resp.json();
+                  }).then(function(data) {
+                    console.log('[BuyerInfo] bindVirtualNumber响应:', JSON.stringify(data).substring(0, 500));
+                    resolve(data);
+                  }).catch(function(err) {
+                    console.log('[BuyerInfo] bindVirtualNumber调用失败:', err.message);
+                    resolve(null);
+                  });
+                });
+              })()
+            `).catch(() => null)
+
+            if (bindVnResult && bindVnResult.code === 200 && bindVnResult.data) {
+              const vnData = bindVnResult.data
+              console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber 直接调用成功:', JSON.stringify(vnData).substring(0, 500))
+              const vnName = vnData.name || ''
+              const vnAddress = vnData.address || ''
+              const vnPhone = vnData.virtualNumber || ''
+
+              // 从 name 中提取分机号
+              let extension = ''
+              let pureName = vnName
+              const nameExtMatch = vnName.match(/^(.+)\[(\d{3,6})\]$/)
+              if (nameExtMatch) {
+                pureName = nameExtMatch[1]
+                extension = nameExtMatch[2]
+              }
+              let pureAddress = vnAddress
+              const addrExtMatch = vnAddress.match(/^(.+)\[(\d{3,6})\]$/)
+              if (addrExtMatch) {
+                pureAddress = addrExtMatch[1]
+                if (!extension) extension = addrExtMatch[2]
+              }
+
+              let finalPhone = vnPhone
+              if (extension && finalPhone && finalPhone.indexOf('-') === -1) {
+                finalPhone = finalPhone + '-' + extension
+              }
+
+              quickResult = {
+                buyerName: pureName,
+                buyerPhone: finalPhone,
+                buyerAddress: pureAddress
+              }
+
+              console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber提取完成: name=' + pureName + ' phone=' + finalPhone + ' addr=' + pureAddress.substring(0, 30) + ' ext=' + extension)
+              saveDebugLog({
+                timestamp: new Date().toISOString(),
+                storeId, orderId,
+                phase: 'bindVirtualNumber-direct-success',
+                vnData: { name: vnName, address: vnAddress, virtualNumber: vnPhone, extension },
+                quickResult
+              })
+
+              // 如果首次绑定成功但没有分机号，等待1秒后再次调用获取分机号
+              // 京东流程：首次bindVirtualNumber只绑定虚拟号不含分机号，二次调用才有分机号
+              if (!extension && vnPhone) {
+                console.log('[SalesFetch] [BuyerInfo] 首次绑定无分机号，等待1秒后再次调用获取分机号...')
+                await new Promise(r => setTimeout(r, 1000))
+
+                const bindVnResult2 = await tempWin.webContents.executeJavaScript(`
+                  (function() {
+                    return new Promise(function(resolve) {
+                      var reqBody = ${JSON.stringify(capturedReqInfo.body)};
+                      var reqHeaders = ${JSON.stringify(capturedReqInfo.headers)};
+                      var reqMethod = ${JSON.stringify(capturedReqInfo.method)};
+                      var sffUrl = ${JSON.stringify(capturedReqInfo.url)};
+                      var bindVnUrl = sffUrl ? sffUrl.replace('getSensitiveInfo', 'bindVirtualNumber') : '';
+                      if (!bindVnUrl || bindVnUrl === sffUrl) {
+                        bindVnUrl = 'https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderSensitiveInfoBffService.bindVirtualNumber';
+                      }
+                      var fetchOpts = { method: reqMethod || 'POST', credentials: 'include', headers: {} };
+                      try { var h = JSON.parse(reqHeaders); for (var k in h) { if (h.hasOwnProperty(k)) fetchOpts.headers[k] = h[k]; } } catch(e) {}
+                      if (!fetchOpts.headers['Content-Type'] && !fetchOpts.headers['content-type']) fetchOpts.headers['Content-Type'] = 'application/json';
+                      try { fetchOpts.body = JSON.stringify(JSON.parse(reqBody)); } catch(e) { fetchOpts.body = reqBody; }
+                      fetch(bindVnUrl, fetchOpts).then(function(r) { return r.json(); }).then(resolve).catch(function() { resolve(null); });
+                    });
+                  })()
+                `).catch(() => null)
+
+                if (bindVnResult2 && bindVnResult2.code === 200 && bindVnResult2.data) {
+                  const vnData2 = bindVnResult2.data
+                  const vnName2 = vnData2.name || ''
+                  const vnAddr2 = vnData2.address || ''
+                  const vnPhone2 = vnData2.virtualNumber || vnPhone
+
+                  // 提取分机号
+                  let ext2 = ''
+                  let pureName2 = vnName2
+                  const m2 = vnName2.match(/^(.+)\[(\d{3,6})\]$/)
+                  if (m2) { pureName2 = m2[1]; ext2 = m2[2]; }
+                  let pureAddr2 = vnAddr2
+                  const a2 = vnAddr2.match(/^(.+)\[(\d{3,6})\]$/)
+                  if (a2) { pureAddr2 = a2[1]; if (!ext2) ext2 = a2[2]; }
+
+                  if (ext2) {
+                    extension = ext2
+                    let phone2 = vnPhone2 || vnPhone
+                    if (phone2 && phone2.indexOf('-') === -1) phone2 = phone2 + '-' + ext2
+                    quickResult = {
+                      buyerName: pureName2 || pureName,
+                      buyerPhone: phone2,
+                      buyerAddress: pureAddr2 || pureAddress
+                    }
+                    console.log('[SalesFetch] [BuyerInfo] 二次调用获取分机号成功: ext=' + ext2 + ' phone=' + phone2)
+                    saveDebugLog({
+                      timestamp: new Date().toISOString(),
+                      storeId, orderId,
+                      phase: 'bindVirtualNumber-2nd-success',
+                      vnData2: { name: vnName2, address: vnAddr2, virtualNumber: vnPhone2, extension: ext2 },
+                      quickResult
+                    })
+                  }
+                }
+              }
+
+              if (quickResult.buyerName && quickResult.buyerPhone && quickResult.buyerAddress) {
+                return { success: true, data: quickResult }
+              }
+            } else {
+              console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber直接调用失败:', JSON.stringify(bindVnResult || 'null').substring(0, 300))
+              saveDebugLog({
+                timestamp: new Date().toISOString(),
+                storeId, orderId,
+                phase: 'bindVirtualNumber-direct-failed',
+                capturedReqInfo: {
+                  method: capturedReqInfo.method,
+                  url: capturedReqInfo.url.substring(0, 300),
+                  headers: capturedReqInfo.headers.substring(0, 500),
+                  body: capturedReqInfo.body.substring(0, 500)
+                },
+                bindVnResult: bindVnResult ? JSON.stringify(bindVnResult).substring(0, 500) : 'null'
+              })
+            }
+          } else {
+            console.log('[SalesFetch] [BuyerInfo] 未捕获到getSensitiveInfo请求体，无法直接调用bindVirtualNumber')
+          }
+
+          // 确认后等待页面更新（京东虚拟号绑定需要时间）
           await new Promise(r => setTimeout(r, 1500))
 
-          // 方案1：API拦截（等待解密API响应）
+          // ====== 优先等待 bindVirtualNumber API 响应 ======
+          // 点击确认后，京东会调用 bindVirtualNumber API，返回完整信息：
+          //   name: "苏宝宝[4740]", address: "江苏宿迁市沭阳县...[4740]", virtualNumber: "17804435187"
+          // 这是最可靠的数据来源，优先于DOM提取
+          console.log('[SalesFetch] [BuyerInfo] 等待 bindVirtualNumber API响应...')
+          let bindVnResult = await pollUntil(
+            () => tempWin.webContents.executeJavaScript('window.__bindVirtualNumberResult').catch(() => null),
+            { timeout: 10000, interval: 500, label: 'bindVirtualNumber' }
+          )
+          if (!bindVnResult) {
+            bindVnResult = await tempWin.webContents.executeJavaScript('window.__bindVirtualNumberResult').catch(() => null)
+          }
+
+          if (bindVnResult && bindVnResult.data) {
+            const vnData = bindVnResult.data
+            console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber 响应获取成功:', JSON.stringify(vnData).substring(0, 500))
+            // 直接从 bindVirtualNumber 响应提取完整信息
+            const vnName = vnData.name || ''        // "苏宝宝[4740]"
+            const vnAddress = vnData.address || ''  // "江苏宿迁市沭阳县南湖街道-皇冠·世纪花园2-1-2701号.[4740]"
+            const vnPhone = vnData.virtualNumber || ''  // "17804435187"
+
+            // 从 name 中提取分机号
+            let extension = ''
+            let pureName = vnName
+            const nameExtMatch = vnName.match(/^(.+)\[(\d{3,6})\]$/)
+            if (nameExtMatch) {
+              pureName = nameExtMatch[1]
+              extension = nameExtMatch[2]
+            }
+            // 从 address 中提取分机号（如果 name 中没提取到）
+            let pureAddress = vnAddress
+            if (!extension) {
+              const addrExtMatch = vnAddress.match(/^(.+)\[(\d{3,6})\]$/)
+              if (addrExtMatch) {
+                pureAddress = addrExtMatch[1]
+                extension = addrExtMatch[2]
+              }
+            } else {
+              // 地址中的分机号也要剥离
+              const addrExtMatch = vnAddress.match(/^(.+)\[(\d{3,6})\]$/)
+              if (addrExtMatch) {
+                pureAddress = addrExtMatch[1]
+              }
+            }
+
+            // 组装结果：手机号格式为 "虚拟号-分机号"
+            let finalPhone = vnPhone
+            if (extension && finalPhone && finalPhone.indexOf('-') === -1) {
+              finalPhone = finalPhone + '-' + extension
+            }
+
+            quickResult = {
+              buyerName: pureName,
+              buyerPhone: finalPhone,
+              buyerAddress: pureAddress
+            }
+
+            console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber 直接提取完成: name=' + pureName + ' phone=' + finalPhone + ' addr=' + pureAddress.substring(0, 30) + ' ext=' + extension)
+            saveDebugLog({
+              timestamp: new Date().toISOString(),
+              storeId, orderId,
+              phase: 'bindVirtualNumber-success',
+              vnData: { name: vnName, address: vnAddress, virtualNumber: vnPhone, extension },
+              quickResult
+            })
+
+            // 如果三个字段齐全，直接返回
+            if (quickResult.buyerName && quickResult.buyerPhone && quickResult.buyerAddress) {
+              return { success: true, data: quickResult }
+            }
+            // 否则继续后续提取作为补充
+          } else {
+            console.log('[SalesFetch] [BuyerInfo] bindVirtualNumber 未拦截到，继续其他方式提取')
+            // 诊断：捕获拦截器状态，了解为什么 bindVirtualNumber 没被拦截
+            const interceptDiag = await tempWin.webContents.executeJavaScript(`
+              (function() {
+                return {
+                  captureEnabled: window.__captureEnabled,
+                  postConfirmPhase: window.__postConfirmPhase,
+                  sensitiveInfoResult: window.__sensitiveInfoResult ? 'exists' : 'null',
+                  bindVirtualNumberResult: window.__bindVirtualNumberResult ? 'exists' : 'null',
+                  interceptorInstalled: window.__sffInterceptorInstalled,
+                  logs: (window.__sensitiveInfoLogs || []).slice(-30),
+                  capturedUrls: (window.__allCapturedResponses || []).map(function(r) {
+                    return r.url.substring(0, 200) + ' len=' + (r.body || '').length;
+                  })
+                };
+              })()
+            `).catch(() => ({}))
+            saveDebugLog({
+              timestamp: new Date().toISOString(),
+              storeId, orderId,
+              phase: 'bindVirtualNumber-missing',
+              webRequestDetected: bindVnRequestDetected,
+              interceptDiag
+            })
+          }
+
+          // ====== 快速提取阶段（在tooltip消失前立即读取） ======
+          console.log('[SalesFetch] [BuyerInfo] 快速提取阶段...')
+
+          // 快速DOM读取：立即查找tooltip/popover中的买家信息
+          const quickDomResult = await tempWin.webContents.executeJavaScript(`
+            (function() {
+              var result = { name: '', phone: '', address: '', logs: [] };
+              var orderId = ${JSON.stringify(String(orderId))};
+
+              // 查找所有弹出层/tooltip
+              var popovers = document.querySelectorAll('[class*="popover"], [class*="tooltip"], [class*="popper"], [class*="modal"], [class*="dialog"], [class*="consignee"], [class*="sensitive"], [class*="decrypt"], [class*="buyer"], [class*="contact"]');
+              var extension = '';
+              for (var i = 0; i < popovers.length; i++) {
+                var el = popovers[i];
+                var rect = el.getBoundingClientRect();
+                if (rect.width < 10 || rect.height < 10) continue;
+                var text = (el.innerText || '').trim();
+                if (text.length < 5) continue;
+                // 匹配手机号（含虚拟号格式 主号-分机号），排除订单号子串
+                var phoneMatch = text.match(/(1[3-9]\\d{9}(?:-\\d{1,6})?)/);
+                if (phoneMatch && orderId.indexOf(phoneMatch[1]) !== -1) {
+                  result.logs.push('跳过订单号子串: ' + phoneMatch[1]);
+                  phoneMatch = null;
+                }
+                if (phoneMatch) {
+                  result.phone = phoneMatch[1];
+                  result.logs.push('快速命中: ' + el.className.substring(0, 60) + ' text=' + text.substring(0, 200));
+                  var lines = text.split(/[\\n\\r]+/);
+                  for (var j = 0; j < lines.length; j++) {
+                    var line = lines[j].trim();
+                    // 提取[XXXX]分机号（虚拟号格式，姓名/地址后面会带）
+                    if (!extension) {
+                      var extMatch = line.match(/\\[(\\d{3,6})\\]$/);
+                      if (extMatch) {
+                        extension = extMatch[1];
+                        result.logs.push('提取到分机号: [' + extension + ']');
+                      }
+                    }
+                    // 姓名：支持带分机号格式如"苏宝宝[5008]"
+                    if (!result.name && line.length >= 2 && line.length <= 14) {
+                      var nameExtMatch = line.match(/^([\\u4e00-\\u9fa5·\\*]+)\\[(\\d{3,6})\\]$/);
+                      if (nameExtMatch) {
+                        result.name = nameExtMatch[1];
+                        if (!extension) extension = nameExtMatch[2];
+                        result.logs.push('姓名(含分机号): ' + result.name + ' ext=' + nameExtMatch[2]);
+                      } else if (line.length <= 8 && /^[\\u4e00-\\u9fa5·]+$/.test(line)) {
+                        if (!/^(确认|取消|查看|虚拟|收货|地址|手机|电话|说明|绑定|点击|使用|有效|收件|联系|复制|订单|快递|录入|短信|模板|分机|保护|安全)$/.test(line)) {
+                          result.name = line;
+                        }
+                      }
+                    }
+                    // 地址：支持带分机号格式，包含省/市关键词，剥离[XXXX]
+                    if (!result.address && line.length >= 8) {
+                      var addrClean = line.replace(/\\[\\d{3,6}\\]$/, '').trim();
+                      if (/(?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)/.test(addrClean) && addrClean.indexOf('*') === -1 && addrClean.indexOf('截流') === -1) {
+                        result.address = addrClean;
+                      }
+                    }
+                  }
+                  // 如果有分机号且手机号还没带分机号，追加
+                  if (extension && result.phone && result.phone.indexOf('-') === -1) {
+                    result.phone = result.phone + '-' + extension;
+                    result.logs.push('手机号追加分机号: ' + result.phone);
+                  }
+                  break;
+                }
+              }
+
+              // 查找订单卡片容器中的信息
+              if (!result.name || !result.address || !result.phone) {
+                var allEls = document.querySelectorAll('*');
+                var orderEl = null;
+                for (var i = 0; i < allEls.length; i++) {
+                  if (allEls[i].children.length === 0 && allEls[i].textContent.trim() === orderId) {
+                    orderEl = allEls[i]; break;
+                  }
+                }
+                if (orderEl) {
+                  var container = orderEl;
+                  for (var up = 0; up < 15; up++) {
+                    container = container.parentElement;
+                    if (!container || container === document.body) break;
+                    var r = container.getBoundingClientRect();
+                    if (r.width > 500 && r.height > 80) break;
+                  }
+                  if (container && container !== document.body) {
+                    var containerText = container.innerText || '';
+                    result.logs.push('容器文本长度: ' + containerText.length);
+                    if (!result.phone) {
+                      var p = containerText.match(/(1[3-9]\\d{9}(?:-\\d{1,6})?)/);
+                      if (p && orderId.indexOf(p[1]) === -1) result.phone = p[1];
+                    }
+                    if (!result.address) {
+                      var a = containerText.match(/((?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)[^\\n*]{5,80}?)(?:\\n|$)/);
+                      if (a && a[1].indexOf('*') === -1 && a[1].indexOf('截流') === -1) result.address = a[1].trim();
+                    }
+                    if (!result.name) {
+                      var n = containerText.match(/(?:收货人|姓名|买家|收件人)[:：\\s]*([\\u4e00-\\u9fa5a-zA-Z·]{2,10})/);
+                      if (n) result.name = n[1];
+                    }
+                  }
+                }
+              }
+
+              // 全页面搜索手机号文本节点
+              if (!result.phone) {
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                var node;
+                while (node = walker.nextNode()) {
+                  var t = node.textContent.trim();
+                  if (t.length >= 7 && t.length <= 20) {
+                    var pm = t.match(/^(1[3-9]\\d{9}(?:-\\d{1,6})?)$/);
+                    if (pm) {
+                      result.phone = pm[1];
+                      result.logs.push('文本节点命中: ' + pm[1]);
+                      break;
+                    }
+                  }
+                }
+              }
+
+              // 去除手机号 _p 后缀
+              if (result.phone && result.phone.indexOf('_') !== -1) {
+                result.phone = result.phone.replace(/_[a-zA-Z]+$/, '');
+              }
+              result.logs.push('快速DOM: name=' + (result.name||'空') + ' phone=' + (result.phone||'空') + ' addr=' + (result.address ? result.address.substring(0,30) : '空'));
+              return result;
+            })()
+          `).catch(e => ({ name: '', phone: '', address: '', logs: ['error: ' + e.message] }))
+          console.log('[SalesFetch] [BuyerInfo] 快速DOM结果:', JSON.stringify(quickDomResult))
+
+          // 读取 __orderListResult（拦截器始终捕获queryOrderPage）
+          let quickApiResult = null
+          const orderListResult = await tempWin.webContents.executeJavaScript('window.__orderListResult || null').catch(() => null)
+          if (orderListResult) {
+            console.log('[SalesFetch] [BuyerInfo] 从__orderListResult提取...')
+            const parsed = parseSensitiveInfo(orderListResult, orderId)
+            if (parsed) {
+              quickApiResult = parsed
+              console.log('[SalesFetch] [BuyerInfo] __orderListResult: name=' + (parsed.buyerName||'(空)') + ' phone=' + (parsed.buyerPhone||'(空)') + ' addr=' + (parsed.buyerAddress||'(空)').substring(0,30))
+            }
+          }
+
+          // 读取 __capturedResponses（主页拦截器）中的queryOrderPage
+          if (!quickApiResult || (!quickApiResult.buyerName && !quickApiResult.buyerAddress)) {
+            const mainResponses = await tempWin.webContents.executeJavaScript('window.__capturedResponses || []').catch(() => [])
+            for (const resp of mainResponses) {
+              const url = (resp.url || '')
+              if (url.indexOf('queryOrderPage') !== -1 || url.indexOf('queryOrderList') !== -1) {
+                const body = resp.body || ''
+                if (body.indexOf(String(orderId)) !== -1) {
+                  try {
+                    const json = JSON.parse(body)
+                    const parsed = parseSensitiveInfo(json, orderId)
+                    if (parsed && (parsed.buyerName || parsed.buyerAddress)) {
+                      quickApiResult = parsed
+                      console.log('[SalesFetch] [BuyerInfo] 从主页拦截器提取: name=' + (parsed.buyerName||'(空)') + ' phone=' + (parsed.buyerPhone||'(空)'))
+                      break
+                    }
+                  } catch (e) {}
+                }
+              }
+            }
+          }
+
+          // 合并快速结果（bindVirtualNumber优先，DOM提取补充，API最后补充）
+          // 注意：如果 bindVirtualNumber 已经提供了完整数据，quickResult 已有值，不应被覆盖
+          var mergedName = quickResult.buyerName || (quickDomResult.name) || (quickApiResult && quickApiResult.buyerName) || '';
+          var mergedPhone = quickResult.buyerPhone || (quickDomResult.phone) || (quickApiResult && quickApiResult.buyerPhone && quickApiResult.buyerPhone.indexOf('*') === -1 ? quickApiResult.buyerPhone : '') || '';
+          var mergedAddress = quickResult.buyerAddress || (quickDomResult.address) || (quickApiResult && quickApiResult.buyerAddress) || '';
+          quickResult = {
+            buyerName: mergedName,
+            buyerPhone: mergedPhone,
+            buyerAddress: mergedAddress
+          }
+          console.log('[SalesFetch] [BuyerInfo] 快速合并: name=' + quickResult.buyerName + ' phone=' + quickResult.buyerPhone + ' addr=' + (quickResult.buyerAddress||'').substring(0,30))
+
+          // 如果快速提取三个字段齐全，直接返回
+          if (quickResult.buyerName && quickResult.buyerPhone && quickResult.buyerAddress) {
+            console.log('[SalesFetch] [BuyerInfo] 快速提取完成，三个字段齐全')
+            saveDebugLog({ timestamp: new Date().toISOString(), storeId, orderId, phase: 'buyer-info-quick-success', quickDomResult, quickApiResult, quickResult })
+            return { success: true, data: quickResult }
+          }
+
+          // 继续API拦截（等待更完整的API响应）
+          await new Promise(r => setTimeout(r, 500))
+
+          // 方案1a：API拦截（等待专用买家信息API响应）
           const apiReady = await pollUntil(
             () => tempWin.webContents.executeJavaScript('window.__sensitiveInfoResult').catch(() => null),
-            { timeout: 6000, interval: 300, label: 'API响应' }
+            { timeout: 8000, interval: 500, label: 'API响应' }
           )
 
           const interceptedResult = apiReady || await tempWin.webContents.executeJavaScript('window.__sensitiveInfoResult').catch(() => null)
@@ -1310,6 +2027,180 @@ function registerSalesOrderIpc() {
             sensitiveData = interceptedResult
           }
 
+          // API拦截成功后，轮询DOM等待订单卡片更新（含虚拟号+分机号）
+          // 截图显示：获取后卡片收货人信息变为 "苏宝宝[5785]"、"地址[5785]"、"17851740971"
+          if (sensitiveData) {
+            console.log('[SalesFetch] [BuyerInfo] API拦截成功，轮询DOM等待虚拟号+分机号更新...')
+
+            // 来源1：重新读取 __orderListResult（绑定虚拟号后前端可能刷新了订单列表）
+            const updatedOrderList = await tempWin.webContents.executeJavaScript('window.__orderListResult || null').catch(() => null)
+            if (updatedOrderList) {
+              const updatedParsed = parseSensitiveInfo(updatedOrderList, orderId)
+              if (updatedParsed && updatedParsed.buyerPhone && updatedParsed.buyerPhone.indexOf('*') === -1) {
+                console.log('[SalesFetch] [BuyerInfo] 更新后订单列表: phone=' + updatedParsed.buyerPhone)
+                quickResult.buyerPhone = updatedParsed.buyerPhone
+              }
+            }
+
+            // 来源2：轮询DOM提取（最多5次，每次间隔2秒，等待前端更新订单卡片）
+            for (let pollIdx = 0; pollIdx < 5; pollIdx++) {
+              await new Promise(r => setTimeout(r, 2000))
+              const domResult = await tempWin.webContents.executeJavaScript(`
+                (function() {
+                  var result = { name: '', phone: '', extension: '', address: '', logs: [] };
+                  var orderId = ${JSON.stringify(String(orderId))};
+
+                  // 找到包含此订单号的订单卡片容器
+                  var allEls = document.querySelectorAll('*');
+                  var cardEl = null;
+                  for (var i = 0; i < allEls.length; i++) {
+                    if (allEls[i].children.length === 0 && allEls[i].textContent.trim() === orderId) {
+                      var c = allEls[i];
+                      for (var up = 0; up < 20; up++) {
+                        c = c.parentElement;
+                        if (!c || c === document.body) break;
+                        var r = c.getBoundingClientRect();
+                        if (r.width > 300 && r.height > 80) { cardEl = c; break; }
+                      }
+                      if (cardEl) break;
+                    }
+                  }
+
+                  if (!cardEl) {
+                    result.logs.push('未找到订单卡片');
+                    return result;
+                  }
+
+                  var cardText = (cardEl.innerText || '').trim();
+                  result.logs.push('卡片文本长度: ' + cardText.length);
+
+                  // 提取虚拟号手机号（11位完整号码，非脱敏，排除订单号子串）
+                  var phoneM = cardText.match(/(1[3-9]\\d{9})/);
+                  if (phoneM && orderId.indexOf(phoneM[1]) !== -1) {
+                    result.logs.push('跳过订单号子串: ' + phoneM[1]);
+                    phoneM = null;
+                  }
+                  if (phoneM) {
+                    result.phone = phoneM[1];
+                    result.logs.push('虚拟号: ' + phoneM[1]);
+                  }
+
+                  // 提取分机号：匹配 姓名[XXXX] 或 地址[XXXX] 格式（4位数字）
+                  // 搜索卡片内所有文本节点
+                  var walker = document.createTreeWalker(cardEl, NodeFilter.SHOW_TEXT, null, false);
+                  var node;
+                  var allTextParts = [];
+                  while (node = walker.nextNode()) {
+                    var t = node.textContent.trim();
+                    if (t) allTextParts.push(t);
+                  }
+                  var fullText = allTextParts.join(' ');
+                  result.logs.push('文本节点数: ' + allTextParts.length);
+
+                  // 从文本节点中匹配 姓名[XXXX] 格式
+                  for (var i = 0; i < allTextParts.length; i++) {
+                    var part = allTextParts[i];
+                    // 匹配 "苏宝宝[5785]" 格式
+                    var nameExtM = part.match(/([\\u4e00-\\u9fa5·\\*]+)\\[(\\d{4})\\]/);
+                    if (nameExtM) {
+                      result.name = nameExtM[1];
+                      result.extension = nameExtM[2];
+                      result.logs.push('姓名+分机号: ' + nameExtM[1] + ' [' + nameExtM[2] + ']');
+                    }
+                    // 匹配纯 [XXXX] 格式（4位数字，排除0618示例）
+                    if (!result.extension) {
+                      var extM = part.match(/^\\[(\\d{4})\\]$/);
+                      if (extM && extM[1] !== '0618') {
+                        result.extension = extM[1];
+                        result.logs.push('纯分机号: [' + extM[1] + ']');
+                      }
+                    }
+                    // 匹配地址[XXXX]格式
+                    if (!result.address) {
+                      var addrExtM = part.match(/(.{5,}?)\\[(\\d{4})\\]$/);
+                      if (addrExtM && /(?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)/.test(addrExtM[1])) {
+                        result.address = addrExtM[1];
+                        if (!result.extension) result.extension = addrExtM[2];
+                        result.logs.push('地址+分机号: ' + addrExtM[1].substring(0, 30) + ' [' + addrExtM[2] + ']');
+                      }
+                    }
+                  }
+
+                  // 也用fullText整段匹配
+                  if (!result.extension) {
+                    // 匹配 "姓名[XXXX]" 在完整文本中
+                    var ftNameExt = fullText.match(/[\\u4e00-\\u9fa5·\\*]{2,10}\\[(\\d{4})\\]/);
+                    if (ftNameExt && ftNameExt[1] !== '0618') {
+                      result.extension = ftNameExt[1];
+                      result.logs.push('整段匹配分机号: [' + ftNameExt[1] + ']');
+                    }
+                  }
+                  if (!result.name && result.extension) {
+                    var ftName = fullText.match(/([\\u4e00-\\u9fa5·]+)\\[\\d{4}\\]/);
+                    if (ftName) result.name = ftName[1];
+                  }
+                  if (!result.address && result.extension) {
+                    var ftAddr = fullText.match(/((?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)[^\\[]*?)\\[\\d{4}\\]/);
+                    if (ftAddr) result.address = ftAddr[1].trim();
+                  }
+
+                  result.logs.push('结果: name=' + (result.name||'空') + ' phone=' + (result.phone||'空') + ' ext=[' + (result.extension||'空') + '] addr=' + (result.address ? result.address.substring(0,20) : '空'));
+                  // 调试文本（前3000字符）
+                  result._debugText = cardText.substring(0, 3000);
+                  return result;
+                })()
+              `).catch(e => ({ name: '', phone: '', extension: '', address: '', logs: ['error: ' + e.message], _debugText: '' }))
+
+              console.log('[SalesFetch] [BuyerInfo] DOM轮询第' + (pollIdx + 1) + '次:', JSON.stringify(domResult).substring(0, 800))
+
+              if (domResult.extension || (domResult.phone && domResult.phone.indexOf('*') === -1)) {
+                // 找到了虚拟号或分机号
+                if (domResult.phone && domResult.phone.indexOf('*') === -1) {
+                  quickResult.buyerPhone = domResult.phone
+                }
+                if (domResult.name) quickResult.buyerName = domResult.name
+                if (domResult.address) quickResult.buyerAddress = domResult.address
+                if (domResult.extension) quickResult._extension = domResult.extension
+                // 保存调试日志
+                saveDebugLog({
+                  timestamp: new Date().toISOString(),
+                  storeId, orderId,
+                  phase: 'extension-found-poll' + (pollIdx + 1),
+                  domResult: { name: domResult.name, phone: domResult.phone, extension: domResult.extension, logs: domResult.logs },
+                  debugTextPreview: (domResult._debugText || '').substring(0, 3000)
+                })
+                break
+              }
+
+              // 最后一轮也保存调试日志
+              if (pollIdx === 4) {
+                saveDebugLog({
+                  timestamp: new Date().toISOString(),
+                  storeId, orderId,
+                  phase: 'extension-not-found',
+                  domResult: { name: domResult.name, phone: domResult.phone, extension: domResult.extension, logs: domResult.logs },
+                  debugTextPreview: (domResult._debugText || '').substring(0, 3000)
+                })
+              }
+            }
+          }
+
+          // 方案1b：如果专用API没拦截到，检查订单列表API（按orderId提取目标订单）
+          if (!sensitiveData) {
+            const latestOrderListResult = await tempWin.webContents.executeJavaScript('window.__orderListResult || null').catch(() => null)
+            if (latestOrderListResult) {
+              console.log('[SalesFetch] [BuyerInfo] 尝试从订单列表API按orderId提取...')
+              const parsed = parseSensitiveInfo(latestOrderListResult, orderId)
+              if (parsed && (parsed.buyerPhone || parsed.buyerAddress)) {
+                console.log('[SalesFetch] [BuyerInfo] 从订单列表API提取成功: phone=' + (parsed.buyerPhone || '(空)') + ' addr=' + (parsed.buyerAddress || '(空)').substring(0, 30))
+                // 补充到quickResult而不是直接返回
+                if (!quickResult.buyerName && parsed.buyerName) quickResult.buyerName = parsed.buyerName
+                if (!quickResult.buyerPhone && parsed.buyerPhone && parsed.buyerPhone.indexOf('*') === -1) quickResult.buyerPhone = parsed.buyerPhone
+                if (!quickResult.buyerAddress && parsed.buyerAddress) quickResult.buyerAddress = parsed.buyerAddress
+              }
+            }
+          }
+
           // 方案2：DOM提取（轮询模式 - 京东可能直接在页面展示解密信息）
           if (!sensitiveData) {
             console.log('[SalesFetch] [BuyerInfo] API未拦截到，轮询DOM提取解密信息...')
@@ -1318,7 +2209,7 @@ function registerSalesOrderIpc() {
                 var result = { name: '', phone: '', address: '', logs: [] };
                 var orderId = ${JSON.stringify(String(orderId))};
 
-                // 策略1：查找弹出层/tooltip/popover中的解密信息
+                // 策略1：查找弹出层/tooltip中的买家信息（点击眼睛图标后出现的提示）
                 var popoverSelectors = [
                   '.jd-popover', '.jd-tooltip__popper', '.jd-drawer', '.jd-dialog',
                   '[class*="popover"]', '[class*="tooltip"]', '[class*="popper"]',
@@ -1327,46 +2218,133 @@ function registerSalesOrderIpc() {
                   '[class*="sensitive"]', '[class*="decrypt"]', '[class*="detail-info"]',
                   '[class*="buyer"]', '[class*="contact"]'
                 ];
-                
+
+                function isValidAddress(text) {
+                  if (!text || text.length < 8) return false;
+                  // 必须以省/市/区/县开头或包含完整地址关键词
+                  if (/^(?:省|市|区|县|镇|村|街|路)/.test(text)) return true;
+                  if (/(?:省|市|自治区|特别行政区)/.test(text) && text.length > 10) return true;
+                  if (/(?:省|市)[^\\n]{5,}/.test(text) && text.indexOf('截流') === -1 && text.indexOf('#') === -1) return true;
+                  return false;
+                }
+
+                function isValidName(text) {
+                  if (!text || text.length < 1 || text.length > 20) return false;
+                  // 姓名应该是中文字符或英文字母，不含数字和特殊符号
+                  if (/^[\\u4e00-\\u9fa5a-zA-Z\\s·]+$/.test(text)) return true;
+                  return false;
+                }
+
                 for (var s = 0; s < popoverSelectors.length; s++) {
                   var els = document.querySelectorAll(popoverSelectors[s]);
                   for (var e = 0; e < els.length; e++) {
                     var el = els[e];
+                    var rect = el.getBoundingClientRect();
+                    // 必须是可见的
+                    if (rect.width < 10 || rect.height < 10) continue;
                     var text = (el.innerText || '').trim();
                     if (text.length < 5 || text.length > 2000) continue;
-                    
-                    // 查找手机号（标准11位 或 虚拟号如95xxx/400xxx）
-                    var phoneMatch = text.match(/(?:1[3-9]\\d{9}|95\\d{8,12}|400\\d{7}|\\d{3,4}-\\d{7,8})/);
+
+                    // 查找手机号（标准11位 或 虚拟号格式 18600001111-0618）
+                    var phoneMatch = text.match(/(1[3-9]\\d{9}(?:-\\d{1,6})?|95\\d{8,12}|400\\d{7})/);
                     if (phoneMatch) {
-                      result.logs.push('弹出层命中: ' + popoverSelectors[s] + ' text=' + text.substring(0, 100));
+                      result.logs.push('弹出层命中: ' + popoverSelectors[s] + ' text=' + text.substring(0, 200));
                       result.phone = phoneMatch[0];
-                      // 提取姓名和地址
+                      var extension = '';
+                      // 按行解析姓名和地址
                       var lines = text.split(/[\\n\\r]+/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
                       for (var li = 0; li < lines.length; li++) {
                         var line = lines[li];
-                        if (line.match(/收货人|姓名|consignee|买家/i) && !result.name) {
-                          var nameVal = line.replace(/.*[:：]\\s*/, '').trim();
-                          if (nameVal.length >= 1 && nameVal.length <= 30) result.name = nameVal;
+                        // 提取[XXXX]分机号（虚拟号格式）
+                        if (!extension) {
+                          var extM = line.match(/\\[(\\d{3,6})\\]$/);
+                          if (extM) extension = extM[1];
                         }
-                        if (line.match(/地址|address|收货地址/i) && !result.address) {
-                          var addrVal = line.replace(/.*[:：]\\s*/, '').trim();
-                          if (addrVal.length >= 5) result.address = addrVal;
+                        // 匹配"收货人：XXX[XXXX]"格式（含分机号）
+                        var nameKV = line.match(/(?:收货人|姓名|consignee|买家|收件人)[:：\\s]*([\\u4e00-\\u9fa5a-zA-Z·\\s]{1,20})/);
+                        if (nameKV && !result.name) {
+                          var kvName = nameKV[1].trim().replace(/\\s*\\[\\d{3,6}\\]\\s*$/, '');
+                          if (isValidName(kvName)) {
+                            result.name = kvName;
+                            result.logs.push('弹出层姓名: ' + result.name);
+                          }
                         }
+                        // 匹配"地址：XXX[XXXX]"格式（含分机号，需剥离）
+                        var addrKV = line.match(/(?:地址|收货地址|address)[:：\\s]*(.+)/i);
+                        if (addrKV && !result.address) {
+                          var kvAddr = addrKV[1].trim().replace(/\\s*\\[\\d{3,6}\\]\\s*$/, '');
+                          if (isValidAddress(kvAddr)) {
+                            result.address = kvAddr;
+                            result.logs.push('弹出层地址: ' + result.address.substring(0, 30));
+                          }
+                        }
+                        // 匹配"电话/手机"格式（可能含-分机号）
                         if (line.match(/电话|手机|mobile|phone|联系|虚拟号/i)) {
                           var phoneVal = line.replace(/.*[:：]\\s*/, '').trim();
-                          var pMatch = phoneVal.match(/(?:1[3-9]\\d{9}|95\\d{8,12}|400\\d{7}|\\d{3,4}-\\d{7,8})/);
+                          var pMatch = phoneVal.match(/(1[3-9]\\d{9}(?:-\\d{1,6})?|95\\d{8,12}|400\\d{7})/);
                           if (pMatch) result.phone = pMatch[0];
                         }
                       }
-                      // 如果只找到电话没找到姓名/地址，尝试从相邻文本行提取
-                      if (!result.name && lines.length >= 1) {
+
+                      // 如果还没找到姓名，尝试从tooltip中找短中文字符串（支持带[XXXX]分机号）
+                      if (!result.name) {
                         for (var li2 = 0; li2 < lines.length; li2++) {
-                          var l2 = lines[li2];
-                          if (l2.length >= 2 && l2.length <= 10 && !l2.match(/[0-9]/) && !l2.match(/确定|取消|查看|虚拟/)) {
-                            result.name = l2;
+                          var l2 = lines[li2].trim();
+                          // 支持带分机号的姓名格式：苏宝宝[5008]
+                          var nameExtMatch = l2.match(/^([\\u4e00-\\u9fa5·\\*]+)\\[(\\d{3,6})\\]$/);
+                          if (nameExtMatch) {
+                            result.name = nameExtMatch[1];
+                            if (!extension) extension = nameExtMatch[2];
+                            result.logs.push('弹出层姓名(含分机号): ' + result.name + ' ext=' + nameExtMatch[2]);
+                            break;
+                          }
+                          // 纯中文名
+                          if (l2.length >= 2 && l2.length <= 8 && /^[\\u4e00-\\u9fa5·]+$/.test(l2)) {
+                            if (!/^(确认|取消|查看|虚拟|收货|地址|手机|电话|说明|绑定|点击|使用|有效|收件|联系|复制|取消|订单|快递|录入|短信|模板|分机|保护|安全)$/.test(l2)) {
+                              result.name = l2;
+                              result.logs.push('弹出层短名: ' + l2);
+                              break;
+                            }
+                          }
+                        }
+                      }
+
+                      // 如果还没找到地址，尝试从含省关键词的行提取（剥离[XXXX]）
+                      if (!result.address) {
+                        for (var li3 = 0; li3 < lines.length; li3++) {
+                          var l3 = lines[li3].trim();
+                          var addrClean = l3.replace(/\\s*\\[\\d{3,6}\\]\\s*$/, '').trim();
+                          if (addrClean.length >= 8 && isValidAddress(addrClean) && addrClean.indexOf('截流') === -1) {
+                            result.address = addrClean;
+                            result.logs.push('弹出层地址(剥离分机号): ' + addrClean.substring(0, 30));
                             break;
                           }
                         }
+                      }
+
+                      // 特殊格式：第一行可能是 "姓名，地址" 格式（如 "马**，浙江嘉兴市桐乡市**********"）
+                      if ((!result.name || !result.address) && lines.length > 0) {
+                        var firstLine = lines[0].trim();
+                        var commaIdx = firstLine.indexOf('，');
+                        if (commaIdx === -1) commaIdx = firstLine.indexOf(',');
+                        if (commaIdx > 0) {
+                          var namePart = firstLine.substring(0, commaIdx).trim();
+                          var addrPart = firstLine.substring(commaIdx + 1).trim();
+                          if (!result.name && namePart.length >= 2 && namePart.length <= 10 && /^[\\u4e00-\\u9fa5·\\*]+$/.test(namePart)) {
+                            result.name = namePart;
+                            result.logs.push('弹出层姓名(含脱敏): ' + namePart);
+                          }
+                          if (!result.address && addrPart.length >= 5 && /(?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)/.test(addrPart)) {
+                            result.address = addrPart;
+                            result.logs.push('弹出层地址(含脱敏): ' + addrPart.substring(0, 30));
+                          }
+                        }
+                      }
+
+                      // 如果有分机号且手机号还没带分机号，追加
+                      if (extension && result.phone && result.phone.indexOf('-') === -1) {
+                        result.phone = result.phone + '-' + extension;
+                        result.logs.push('手机号追加分机号: ' + result.phone);
                       }
                       break;
                     }
@@ -1374,8 +2352,8 @@ function registerSalesOrderIpc() {
                   if (result.phone) break;
                 }
 
-                // 策略2：在订单所在行/卡片中补充提取信息（姓名、地址、手机号）
-                if (!result.phone || !result.name || !result.address) {
+                // 策略2：在订单所在行/卡片中提取信息
+                if (!result.name || !result.address) {
                   var allEls = document.querySelectorAll('*');
                   var orderEl = null;
                   for (var i = 0; i < allEls.length; i++) {
@@ -1396,24 +2374,24 @@ function registerSalesOrderIpc() {
                       result.logs.push('订单容器文本长度: ' + containerText.length);
                       // 查找手机号（仅在未拿到时）
                       if (!result.phone) {
-                        var containerPhones = containerText.match(/(?:1[3-9]\\d{9}|95\\d{8,12}|400\\d{7})/g);
+                        var containerPhones = containerText.match(/(1[3-9]\\d{9}(?:-\\d{1,6})?)/g);
                         if (containerPhones && containerPhones.length > 0) {
                           result.phone = containerPhones[0];
                           result.logs.push('容器中找到手机号: ' + result.phone);
                         }
                       }
-                      // 查找不含星号的地址
+                      // 查找地址（更严格：必须包含省/市级关键词）
                       if (!result.address) {
-                        var addrMatch = containerText.match(/(?:省|市|区|县|镇|街|路|号|栋|楼|室|村|组)[^\\n*]{5,80}/);
-                        if (addrMatch && addrMatch[0].indexOf('*') === -1) {
-                          result.address = addrMatch[0];
+                        var addrMatch = containerText.match(/((?:北京|天津|上海|重庆|河北|山西|辽宁|吉林|黑龙江|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|海南|四川|贵州|云南|陕西|甘肃|青海|台湾|内蒙古|广西|西藏|宁夏|新疆|香港|澳门)[^\\n*]{5,80}?)(?:\\n|$)/);
+                        if (addrMatch && addrMatch[1].indexOf('*') === -1) {
+                          result.address = addrMatch[1].trim();
                           result.logs.push('容器中找到地址: ' + result.address.substring(0, 30));
                         }
                       }
-                      // 查找姓名（"买家：XXX" 或 "收货人：XXX" 格式）
+                      // 查找姓名
                       if (!result.name) {
-                        var nameMatch = containerText.match(/(?:收货人|姓名|买家)[:：\\s]*([\\u4e00-\\u9fa5a-zA-Z]{2,10})/);
-                        if (nameMatch) {
+                        var nameMatch = containerText.match(/(?:收货人|姓名|买家|收件人)[:：\\s]*([\\u4e00-\\u9fa5a-zA-Z·]{2,10})/);
+                        if (nameMatch && isValidName(nameMatch[1])) {
                           result.name = nameMatch[1];
                           result.logs.push('容器中找到姓名: ' + result.name);
                         }
@@ -1422,19 +2400,18 @@ function registerSalesOrderIpc() {
                   }
                 }
 
-                // 策略3：全页面搜索含有手机号的文本节点（放宽匹配条件）
+                // 策略3：全页面搜索含有手机号的文本节点
                 if (!result.phone) {
                   var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                   var node;
                   while (node = walker.nextNode()) {
                     var t = node.textContent.trim();
                     if (t.length >= 7 && t.length <= 50) {
-                      // 匹配标准手机号或虚拟号
                       var pm = t.match(/^(1[3-9]\\d{9}|95\\d{8,12}|400\\d{7})$/);
                       if (pm) {
                         var parent = node.parentElement;
                         var ctx = parent ? (parent.previousElementSibling ? parent.previousElementSibling.textContent : '') + parent.textContent : '';
-                        if (ctx.match(/电话|手机|联系|mobile|phone|tel|虚拟/i) || parent.className.match(/phone|mobile|contact/i)) {
+                        if (ctx.match(/电话|手机|联系|mobile|phone|tel|虚拟/i) || (parent.className && parent.className.match(/phone|mobile|contact/i))) {
                           result.phone = pm[1];
                           result.logs.push('文本节点命中: ' + pm[1] + ' ctx=' + ctx.substring(0, 40));
                           break;
@@ -1442,6 +2419,11 @@ function registerSalesOrderIpc() {
                       }
                     }
                   }
+                }
+
+                // 去除手机号 _p 后缀（京东虚拟号显示格式）
+                if (result.phone && result.phone.indexOf('_') !== -1) {
+                  result.phone = result.phone.replace(/_[a-zA-Z]+$/, '');
                 }
 
                 result.logs.push('DOM提取结果: name=' + (result.name || '空') + ' phone=' + (result.phone || '空') + ' addr=' + (result.address ? result.address.substring(0, 30) : '空'));
@@ -1471,12 +2453,16 @@ function registerSalesOrderIpc() {
                 }
               }
               console.log('[SalesFetch] [BuyerInfo] DOM提取成功: phone=' + domResult.phone)
+              // 补充到quickResult
+              if (domResult.name && !quickResult.buyerName) quickResult.buyerName = domResult.name
+              if (domResult.phone && !quickResult.buyerPhone) quickResult.buyerPhone = domResult.phone
+              if (domResult.address && !quickResult.buyerAddress) quickResult.buyerAddress = domResult.address
             } else {
               console.log('[SalesFetch] [BuyerInfo] DOM提取失败:', JSON.stringify(domResult))
             }
           }
 
-          // 方案3：全量API响应搜索（最后兜底 - 放宽匹配规则）
+          // 方案3：全量API响应搜索（最后兜底 - 优先搜索非订单列表API，再搜索订单列表API按orderId筛选）
           if (!sensitiveData) {
             console.log('[SalesFetch] [BuyerInfo] DOM也未提取到，尝试从全量API捕获中搜索...')
             const allResponses = await tempWin.webContents.executeJavaScript('window.__allCapturedResponses || []').catch(() => [])
@@ -1485,15 +2471,20 @@ function registerSalesOrderIpc() {
               console.log('[SalesFetch] [BuyerInfo]   响应URL:', (resp.url || '').substring(0, 200), 'len:', (resp.body || '').length)
             }
 
+            // 3a: 优先搜索非订单列表API（买家信息专用API）
             for (const resp of allResponses) {
               const body = resp.body || ''
+              const url = resp.url || ''
               if (body.length < 30) continue
-              // 匹配标准手机号或虚拟号字段（regex已确保值为纯数字，无需额外*检查）
+              // 跳过订单列表API（已在上游处理或需要按orderId筛选）
+              if (url.indexOf('queryOrderPage') !== -1 || url.indexOf('queryOrderList') !== -1
+                || url.indexOf('getOrderList') !== -1 || url.indexOf('orderSearch') !== -1) continue
+              // 匹配标准手机号或虚拟号字段
               const phoneMatch = body.match(/"(?:mobile|phone|consMobilePhone|consigneePhone|virtualNumber|receiverMobile|virtualPhone|forwardNumber)"\s*:\s*"(\d{7,20})"/)
               if (phoneMatch) {
                 try {
                   const json = JSON.parse(body)
-                  console.log('[SalesFetch] [BuyerInfo] 全量搜索命中:', (resp.url || '').substring(0, 150), 'phone:', phoneMatch[1])
+                  console.log('[SalesFetch] [BuyerInfo] 全量搜索命中(非订单列表):', url.substring(0, 150), 'phone:', phoneMatch[1])
                   sensitiveData = json
                   break
                 } catch (e) { /* not JSON, skip */ }
@@ -1504,13 +2495,44 @@ function registerSalesOrderIpc() {
                 if (addrMatch) {
                   try {
                     const json = JSON.parse(body)
-                    console.log('[SalesFetch] [BuyerInfo] 全量搜索命中(地址):', (resp.url || '').substring(0, 150))
-                    sensitiveData = json
-                    break
+                    // 确保不是订单列表响应（检查是否有orderList数组）
+                    const data = json.data || json.result || json
+                    const hasOrderList = (data.orderList && Array.isArray(data.orderList))
+                      || (data.list && Array.isArray(data.list) && data.list[0] && data.list[0].orderId)
+                    if (!hasOrderList) {
+                      console.log('[SalesFetch] [BuyerInfo] 全量搜索命中(地址,非订单列表):', url.substring(0, 150))
+                      sensitiveData = json
+                      break
+                    }
                   } catch (e) { /* not JSON, skip */ }
                 }
               }
             }
+
+            // 3b: 如果还没找到，搜索订单列表API，按orderId提取目标订单
+            if (!sensitiveData) {
+              for (const resp of allResponses) {
+                const body = resp.body || ''
+                const url = resp.url || ''
+                if (body.length < 30) continue
+                if (url.indexOf('queryOrderPage') === -1 && url.indexOf('queryOrderList') === -1
+                  && url.indexOf('getOrderList') === -1 && url.indexOf('orderSearch') === -1) continue
+                // 检查响应中是否包含目标orderId
+                if (body.indexOf(orderId) !== -1) {
+                  try {
+                    const json = JSON.parse(body)
+                    const parsed = parseSensitiveInfo(json, orderId)
+                    if (parsed && (parsed.buyerPhone || parsed.buyerAddress)) {
+                      console.log('[SalesFetch] [BuyerInfo] 从订单列表API中提取到目标订单买家信息:', url.substring(0, 150))
+                      sensitiveData = json
+                      // 直接返回按orderId提取的结果，不再走parseSensitiveInfo
+                      return { success: true, data: parsed }
+                    }
+                  } catch (e) { /* not JSON, skip */ }
+                }
+              }
+            }
+
             if (!sensitiveData) {
               // 最终兜底：打印所有响应体的前200字符用于调试
               for (const resp of allResponses) {
@@ -1522,20 +2544,97 @@ function registerSalesOrderIpc() {
         }
 
         if (!sensitiveData) {
+          // 即使没有sensitiveData，检查quickResult是否有部分数据
+          if (quickResult.buyerName || quickResult.buyerPhone || quickResult.buyerAddress) {
+            // 去除脱敏手机号
+            if (quickResult.buyerPhone && quickResult.buyerPhone.indexOf('*') !== -1) {
+              quickResult.buyerPhone = ''
+            }
+            if (quickResult.buyerName || quickResult.buyerPhone || quickResult.buyerAddress) {
+              console.log('[SalesFetch] [BuyerInfo] 仅quickResult有数据: name=' + quickResult.buyerName + ' phone=' + quickResult.buyerPhone + ' addr=' + (quickResult.buyerAddress||'').substring(0,30))
+              saveDebugLog({
+                timestamp: new Date().toISOString(),
+                storeId, orderId,
+                phase: 'buyer-info-partial',
+                quickResult, clickResult, confirmResult
+              })
+              return { success: true, data: quickResult }
+            }
+          }
+          // 保存诊断日志
+          saveDebugLog({
+            timestamp: new Date().toISOString(),
+            storeId, orderId,
+            phase: 'buyer-info-failed',
+            clickResult, confirmResult, quickResult
+          })
           return { success: false, message: '获取买家信息失败，请确保店铺已在京麦后台登录' }
         }
 
         const rawJson = JSON.stringify(sensitiveData)
         console.log('[SalesFetch] getSensitiveInfo result:', rawJson.substring(0, 500))
 
+        // 保存诊断日志（包含完整API响应数据，方便排查）
+        saveDebugLog({
+          timestamp: new Date().toISOString(),
+          storeId, orderId,
+          phase: 'buyer-info-success',
+          clickResult,
+          confirmResult,
+          quickResult,
+          apiResponsePreview: rawJson.substring(0, 2000)
+        })
+
         if (sensitiveData.code && sensitiveData.code !== 0 && sensitiveData.code !== 200) {
           return { success: false, message: sensitiveData.msg || 'API错误(code=' + sensitiveData.code + ')' }
         }
 
-        const buyerInfo = parseSensitiveInfo(sensitiveData)
+        const buyerInfo = parseSensitiveInfo(sensitiveData, orderId)
         if (buyerInfo) {
+          // 合并quickResult和buyerInfo（quickResult补充buyerInfo缺失的字段）
+          if (!buyerInfo.buyerName && quickResult.buyerName) buyerInfo.buyerName = quickResult.buyerName
+          if (!buyerInfo.buyerPhone && quickResult.buyerPhone) buyerInfo.buyerPhone = quickResult.buyerPhone
+          // 如果buyerInfo的手机号是脱敏的，用quickResult替换
+          if (buyerInfo.buyerPhone && buyerInfo.buyerPhone.indexOf('*') !== -1 && quickResult.buyerPhone && quickResult.buyerPhone.indexOf('*') === -1) {
+            buyerInfo.buyerPhone = quickResult.buyerPhone
+          }
+          // 如果buyerInfo的手机号没有分机号，但quickResult有分机号（虚拟号-分机号格式），优先用quickResult
+          if (buyerInfo.buyerPhone && buyerInfo.buyerPhone.indexOf('-') === -1 && quickResult.buyerPhone && quickResult.buyerPhone.indexOf('-') !== -1) {
+            buyerInfo.buyerPhone = quickResult.buyerPhone
+          }
+          if (!buyerInfo.buyerAddress && quickResult.buyerAddress) buyerInfo.buyerAddress = quickResult.buyerAddress
+          // 如果姓名中带[XXXX]分机号，剥离保留纯姓名，分机号追加到手机号
+          if (buyerInfo.buyerName) {
+            var nameExtM = buyerInfo.buyerName.match(/^(.+)\[(\d{3,6})\]$/);
+            if (nameExtM) {
+              buyerInfo.buyerName = nameExtM[1];
+              if (buyerInfo.buyerPhone && buyerInfo.buyerPhone.indexOf('-') === -1) {
+                buyerInfo.buyerPhone = buyerInfo.buyerPhone + '-' + nameExtM[2];
+              }
+            }
+          }
+          // 如果地址中带[XXXX]分机号，剥离保留纯地址
+          if (buyerInfo.buyerAddress) {
+            var addrExtM = buyerInfo.buyerAddress.match(/^(.+)\[(\d{3,6})\]$/);
+            if (addrExtM) {
+              buyerInfo.buyerAddress = addrExtM[1];
+              if (buyerInfo.buyerPhone && buyerInfo.buyerPhone.indexOf('-') === -1) {
+                buyerInfo.buyerPhone = buyerInfo.buyerPhone + '-' + addrExtM[2];
+              }
+            }
+          }
+          // DOM提取到了分机号但不在手机号中，追加到手机号
+          if (quickResult._extension && buyerInfo.buyerPhone && buyerInfo.buyerPhone.indexOf('-') === -1) {
+            buyerInfo.buyerPhone = buyerInfo.buyerPhone + '-' + quickResult._extension
+            console.log('[SalesFetch] [BuyerInfo] 从DOM分机号追加: ' + quickResult._extension)
+          }
+          console.log('[SalesFetch] [BuyerInfo] 最终合并结果: name=' + buyerInfo.buyerName + ' phone=' + buyerInfo.buyerPhone + ' addr=' + (buyerInfo.buyerAddress||'').substring(0,30))
           return { success: true, data: buyerInfo }
         } else {
+          // parseSensitiveInfo失败，尝试用quickResult
+          if (quickResult.buyerName || quickResult.buyerPhone || quickResult.buyerAddress) {
+            return { success: true, data: quickResult }
+          }
           return { success: false, message: '解析买家信息失败', rawResponse: rawJson.substring(0, 2000) }
         }
       } catch (e) {
@@ -1554,14 +2653,54 @@ function registerSalesOrderIpc() {
 }
 
 // ============ 解析敏感信息 ============
-function parseSensitiveInfo(json) {
+function parseSensitiveInfo(json, orderId) {
   try {
-    console.log('[SalesFetch] [parseSensitiveInfo] 顶层keys:', Object.keys(json))
+    console.log('[SalesFetch] [parseSensitiveInfo] 顶层keys:', Object.keys(json), 'orderId:', orderId || '无')
     const data = json.data || json.result || json
     if (!data) return null
     if (typeof data === 'object' && data !== null) {
       console.log('[SalesFetch] [parseSensitiveInfo] data层keys:', Object.keys(data))
     }
+
+    // 检查是否为订单列表响应（包含多个订单，需要按orderId筛选）
+    const orderListFields = ['orderList', 'list', 'result', 'results', 'orderInfoList']
+    let orderListArray = null
+    for (const field of orderListFields) {
+      if (data[field] && Array.isArray(data[field]) && data[field].length > 0) {
+        // 检查数组元素是否包含 orderId 字段（说明是订单列表而非单一买家信息）
+        if (data[field][0] && (data[field][0].orderId || data[field][0].order_id)) {
+          orderListArray = data[field]
+          console.log('[SalesFetch] [parseSensitiveInfo] 检测到订单列表响应, 字段:', field, '数量:', orderListArray.length)
+          break
+        }
+      }
+    }
+
+    if (orderListArray && orderId) {
+      // 从订单列表中找到目标订单
+      const targetOrder = orderListArray.find(o =>
+        String(o.orderId || o.order_id || '') === String(orderId)
+      )
+      if (targetOrder) {
+        console.log('[SalesFetch] [parseSensitiveInfo] 从订单列表中找到目标订单:', orderId)
+        // 提取该订单的收货人信息
+        const consInfo = targetOrder.orderConsigneeInfo || targetOrder.consigneeInfo || targetOrder.orderConsigneeDto || {}
+        const result = {}
+        result.buyerName = consInfo.consName || consInfo.fullname || consInfo.name || targetOrder.userPin || ''
+        result.buyerPhone = consInfo.consMobilePhone || consInfo.mobile || consInfo.phone || ''
+        result.buyerAddress = consInfo.consAddress || consInfo.fullAddress || consInfo.address || ''
+        // virtualNumber
+        if (consInfo.virtualNumber && typeof consInfo.virtualNumber === 'string' && consInfo.virtualNumber.length >= 7) {
+          result.buyerPhone = consInfo.virtualNumber
+        }
+        console.log('[SalesFetch] [parseSensitiveInfo] 订单列表提取结果: name=' + (result.buyerName || '(空)') + ', phone=' + (result.buyerPhone || '(空)') + ', addr=' + (result.buyerAddress || '(空)').substring(0, 30))
+        if (result.buyerName || result.buyerPhone || result.buyerAddress) return result
+      } else {
+        console.log('[SalesFetch] [parseSensitiveInfo] 订单列表中未找到目标订单:', orderId)
+      }
+      return null
+    }
+
     const info = data.data || data.result || data
     if (!info) return null
 
@@ -1619,7 +2758,7 @@ function parseSensitiveInfo(json) {
         }
       }
 
-      // 深度递归搜索缺失字段
+      // 深度递归搜索缺失字段（限制：只在单一买家信息对象中搜索，不跨订单混搭）
       if (!result.buyerName || !result.buyerPhone || !result.buyerAddress) {
         const nameKeys = ['consName', 'consigneeName', 'fullname', 'name', 'receiverName', 'buyerName']
         const phoneKeys = ['consMobilePhone', 'consigneePhone', 'mobile', 'phone', 'receiverMobile', 'buyerPhone', 'virtualNumber', 'virtualPhone', 'forwardNumber', 'transferPhone', 'vnNumber', 'contactPhone']
@@ -1627,6 +2766,8 @@ function parseSensitiveInfo(json) {
 
         function deepSearch(obj, depth) {
           if (!obj || typeof obj !== 'object' || depth > 4) return
+          // 如果遇到订单数组，跳过（避免从不同订单混搭数据）
+          if (Array.isArray(obj) && obj.length > 0 && obj[0] && (obj[0].orderId || obj[0].order_id)) return
           const keys = Array.isArray(obj) ? obj.map((_, i) => i) : Object.keys(obj)
           for (let i = 0; i < keys.length; i++) {
             const val = obj[keys[i]]
