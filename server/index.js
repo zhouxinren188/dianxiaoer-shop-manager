@@ -1596,10 +1596,14 @@ app.post('/api/purchase-accounts', async (req, res) => {
        ON DUPLICATE KEY UPDATE password=VALUES(password), platform=VALUES(platform), online=0`,
       [account, password||'', platform, ownerId]
     )
-    // affectedRows: 1=新插入, 2=更新了已有行, 0=数据未变(值相同)
-    // insertId: 新插入时为自增ID, ON DUPLICATE KEY UPDATE 时为已有行的ID
-    const accountId = result.insertId
-    const isUpdate = result.affectedRows === 2
+    // insertId 在 ON DUPLICATE KEY UPDATE 时可能不可靠，用 SELECT 确保获取正确的 ID
+    const [rows] = await pool.execute(
+      'SELECT id FROM purchase_accounts WHERE account = ? AND owner_id = ?',
+      [account, ownerId]
+    )
+    const accountId = rows[0]?.id
+    if (!accountId) return res.status(500).json(fail('账号创建/更新失败'))
+    const isUpdate = result.affectedRows >= 2
     // 自动分配给创建者
     await pool.execute(
       'INSERT IGNORE INTO user_purchase_accounts (user_id, account_id) VALUES (?, ?)',
@@ -1627,6 +1631,9 @@ app.put('/api/purchase-accounts/:id', async (req, res) => {
 app.delete('/api/purchase-accounts/:id', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
+    // 先验证所有权
+    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权删除此账号'))
     await pool.execute('DELETE FROM user_purchase_accounts WHERE account_id=?', [req.params.id])
     await pool.execute('DELETE FROM purchase_cookies WHERE account_id=?', [req.params.id])
     await pool.execute('DELETE FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
@@ -1756,20 +1763,21 @@ app.get('/api/purchase-orders', async (req, res) => {
 
     if (req.user.user_type === 'sub') {
       // 子账号：只看自己被分配的采购账号创建的订单 + 自己手动创建的订单(account_id为空)
+      // created_by IS NULL 表示迁移前的老订单，对同owner下所有用户可见
       sql = `
         SELECT po.*, pa.account as account_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         WHERE po.owner_id=?
           AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
-               OR (po.account_id IS NULL AND po.created_by=?))
+               OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
       countSql = `
         SELECT COUNT(*) as total
         FROM purchase_orders po
         WHERE po.owner_id=?
           AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
-               OR (po.account_id IS NULL AND po.created_by=?))
+               OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
       params = [ownerId, req.user.id, req.user.id]
     } else {

@@ -18,10 +18,11 @@
         stripe
         border
         height="320"
+        row-key="id"
         @selection-change="handleSelectionChange"
         ref="tableRef"
       >
-        <el-table-column type="selection" width="55" align="center" />
+        <el-table-column type="selection" width="55" align="center" :reserve-selection="true" />
         <el-table-column prop="account" label="账号" min-width="140" />
         <el-table-column label="平台" width="120" align="center">
           <template #default="{ row }">
