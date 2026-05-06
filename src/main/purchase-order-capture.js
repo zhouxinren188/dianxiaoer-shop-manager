@@ -3327,7 +3327,57 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               capturedAmount = amount
               console.log(`[PurchaseCapture] Payment amount captured: ¥${amount}`)
             } else {
-              console.log('[PurchaseCapture] No payment amount captured')
+              console.log('[PurchaseCapture] No payment amount captured from page/API cache')
+
+              // 淘宝/天猫：参照DL系统，直接调用 asyncBought.htm API 获取支付金额
+              // DL做法：在confirm_order页面提取b2c_orid后，立即POST asyncBought获取actualFee
+              if ((platform === 'taobao' || platform === 'tmall') && platformOrderNo && win && !win.isDestroyed()) {
+                try {
+                  console.log(`[PurchaseCapture] 淘宝：尝试调用asyncBought API获取支付金额, orderID=${platformOrderNo}`)
+                  const tbAmountScript = `
+                    (function() {
+                      return fetch('https://buyertrade.taobao.com/trade/itemlist/asyncBought.htm?action=itemlist/BoughtQueryAction&event_submit_do_query=1&_input_charset=utf8', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'buyerNick=&dateBegin=0&dateEnd=0&itemTitle=${encodeURIComponent(platformOrderNo)}&lastStartRow=&logisticsService=&options=0&orderStatus=&pageNum=1&pageSize=15&queryBizType=&queryOrder=desc&rateStatus=&refund=&sellerNick=&auctionTitle=${encodeURIComponent(platformOrderNo)}&prePageNo=1'
+                      }).then(function(r) { return r.text() }).then(function(text) {
+                        try {
+                          var data = JSON.parse(text);
+                          var mainOrders = data.mainOrders;
+                          if (!mainOrders || mainOrders.length === 0) return JSON.stringify({error: 'no_orders'});
+                          var orderItem = mainOrders[0];
+                          var actualFee = orderItem.payInfo && orderItem.payInfo.actualFee;
+                          if (actualFee && parseFloat(actualFee) > 0) {
+                            return JSON.stringify({actualFee: parseFloat(actualFee)});
+                          }
+                          return JSON.stringify({error: 'no_fee', payInfo: JSON.stringify(orderItem.payInfo || {})});
+                        } catch(e) {
+                          return JSON.stringify({error: e.message});
+                        }
+                      }).catch(function(e) {
+                        return JSON.stringify({error: e.message});
+                      });
+                    })()
+                  `
+                  const tbAmountResult = await win.webContents.executeJavaScript(tbAmountScript).catch(() => null)
+                  if (tbAmountResult) {
+                    try {
+                      const tbData = JSON.parse(tbAmountResult)
+                      if (tbData.actualFee && tbData.actualFee > 0) {
+                        capturedAmount = tbData.actualFee
+                        console.log(`[PurchaseCapture] 淘宝asyncBought获取支付金额: ¥${capturedAmount}`)
+                      } else {
+                        console.log(`[PurchaseCapture] 淘宝asyncBought未获取到金额: ${tbAmountResult.substring(0, 200)}`)
+                      }
+                    } catch (e) {
+                      console.log(`[PurchaseCapture] 淘宝asyncBought解析失败: ${e.message}`)
+                    }
+                  }
+                } catch (e) {
+                  console.log(`[PurchaseCapture] 淘宝asyncBought调用失败: ${e.message}`)
+                }
+              }
             }
 
             // 应用商品信息缓存（已有主进程缓存 或 渲染进程API缓存）
