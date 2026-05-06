@@ -2843,6 +2843,34 @@ function httpGetJson(url) {
   })
 }
 
+// 带认证的 HTTP GET JSON（用于请求远程服务器）
+function httpGetJsonAuth(url, token) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      headers: {
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.end()
+  })
+}
+
 // 主进程直接保存订单到服务器（避免通过 IPC 传递订单导致双重保存）
 async function saveOrdersToServer(storeId, orders) {
   const http = require('http')
@@ -2979,15 +3007,30 @@ async function autoSyncAllStores(mainWindow) {
   console.log('[AutoSync] === 开始自动同步订单 ===')
 
   try {
-    // 获取所有启用且有 Cookie 的店铺
-    const json = await httpGetJson(`${LOCAL_SERVER}/api/cookies`)
-    if (!json || json.code !== 0 || !json.data) {
-      console.log('[AutoSync] 获取店铺列表失败')
+    // 从远程服务器获取所有启用店铺（本地 server.js 的 /api/cookies 无数据）
+    const token = getAuthToken()
+    const storeJson = await httpGetJsonAuth('http://150.158.54.108:3002/api/stores?pageSize=1000', token)
+    if (!storeJson || storeJson.code !== 0 || !storeJson.data?.list) {
+      console.log('[AutoSync] 获取店铺列表失败:', JSON.stringify(storeJson)?.substring(0, 200))
       return
     }
 
-    // 筛选京东平台店铺（目前 fetchSalesOrders 只支持 JD）
-    const jdStores = json.data.filter(s => s.platform === 'jd' && s.cookie_data)
+    // 筛选京东平台店铺，并检查 Electron session 中是否有 Cookie
+    const allStores = storeJson.data.list
+    const jdStores = []
+    for (const s of allStores) {
+      if (s.platform !== 'jd' || s.status !== 'enabled') continue
+      // 检查 Electron session partition 中是否有 JD Cookie
+      const partitionName = `persist:platform-${s.id}`
+      const ses = session.fromPartition(partitionName)
+      const cookies = await ses.cookies.get({ domain: '.jd.com' })
+      if (cookies.length > 0) {
+        jdStores.push({ store_id: s.id, store_name: s.name })
+      } else {
+        console.log(`[AutoSync] 跳过店铺 ${s.name} (ID:${s.id}): 无京东Cookie`)
+      }
+    }
+
     if (jdStores.length === 0) {
       console.log('[AutoSync] 无可同步的京东店铺')
       return
