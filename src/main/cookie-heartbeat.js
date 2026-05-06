@@ -386,4 +386,4 @@ function stopHeartbeat() {
   }
 }
 
-module.exports = { startHeartbeat, stopHeartbeat }
+module.exports = { startHeartbeat, stopHeartbeat, restoreCookiesFromDB }

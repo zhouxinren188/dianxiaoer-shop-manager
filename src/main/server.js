@@ -559,6 +559,8 @@ app.get('/api/store-sales-stats', async (req, res) => {
     const params = new URLSearchParams()
     if (req.query.store_id) params.append('store_id', req.query.store_id)
     if (req.query.period) params.append('period', req.query.period)
+    if (req.query.start_date) params.append('start_date', req.query.start_date)
+    if (req.query.end_date) params.append('end_date', req.query.end_date)
     const qs = params.toString()
     const fullUrl = qs ? `${remoteUrl}?${qs}` : remoteUrl
 
@@ -586,6 +588,102 @@ app.get('/api/store-sales-stats', async (req, res) => {
     res.status(500).json(fail('获取店铺销售统计失败: ' + err.message))
   }
 })
+
+// ============ 商品销售报表（代理到远程服务器） ============
+
+// 通用代理函数：转发GET请求到远程服务器
+async function proxyGetRequest(req, res, remotePath) {
+  try {
+    const remoteUrl = `http://150.158.54.108:3002${remotePath}`
+    const params = new URLSearchParams()
+    for (const [key, val] of Object.entries(req.query)) {
+      if (val !== '' && val !== null && val !== undefined) params.append(key, val)
+    }
+    const qs = params.toString()
+    const fullUrl = qs ? `${remoteUrl}?${qs}` : remoteUrl
+
+    const headers = { 'Content-Type': 'application/json' }
+    const authHeader = req.headers['authorization']
+    if (authHeader) headers['Authorization'] = authHeader
+
+    const response = await fetch(fullUrl, { headers })
+    res.status(response.status)
+
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await response.json()
+      res.json(data)
+    } else {
+      console.error(`[代理 ${remotePath}] 远程返回非 JSON, status:`, response.status)
+      res.json(fail(`远程服务返回异常 (HTTP ${response.status})`))
+    }
+  } catch (err) {
+    console.error(`[代理 ${remotePath}] 错误:`, err.message)
+    res.status(500).json(fail('请求失败: ' + err.message))
+  }
+}
+
+// 通用代理函数：转发POST/DELETE请求到远程服务器
+async function proxyBodyRequest(req, res, remotePath, method = 'POST') {
+  try {
+    const remoteUrl = `http://150.158.54.108:3002${remotePath}`
+
+    const headers = { 'Content-Type': 'application/json' }
+    const authHeader = req.headers['authorization']
+    if (authHeader) headers['Authorization'] = authHeader
+
+    const fetchOptions = { method, headers }
+    if (method !== 'DELETE' || (method === 'DELETE' && req.body && Object.keys(req.body).length > 0)) {
+      // 对于DELETE，如果有body参数则传递
+      if (method === 'DELETE' && req.body) {
+        // DELETE with query params from body
+        const params = new URLSearchParams()
+        for (const [key, val] of Object.entries(req.body)) {
+          if (val !== '' && val !== null && val !== undefined) params.append(key, val)
+        }
+        const qs = params.toString()
+        const fullUrl = qs ? `${remoteUrl}?${qs}` : remoteUrl
+        const response = await fetch(fullUrl, { method, headers })
+        res.status(response.status)
+        const contentType = response.headers.get('content-type') || ''
+        if (contentType.includes('application/json')) {
+          const data = await response.json()
+          res.json(data)
+        } else {
+          res.json(fail(`远程服务返回异常 (HTTP ${response.status})`))
+        }
+        return
+      }
+      fetchOptions.body = JSON.stringify(req.body)
+    }
+
+    const response = await fetch(remoteUrl, fetchOptions)
+    res.status(response.status)
+
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await response.json()
+      res.json(data)
+    } else {
+      console.error(`[代理 ${remotePath}] 远程返回非 JSON, status:`, response.status)
+      res.json(fail(`远程服务返回异常 (HTTP ${response.status})`))
+    }
+  } catch (err) {
+    console.error(`[代理 ${remotePath}] 错误:`, err.message)
+    res.status(500).json(fail('请求失败: ' + err.message))
+  }
+}
+
+app.get('/api/product-sales-stats', (req, res) => proxyGetRequest(req, res, '/api/product-sales-stats'))
+app.get('/api/inventory', (req, res) => proxyGetRequest(req, res, '/api/inventory'))
+app.post('/api/inventory', (req, res) => proxyBodyRequest(req, res, '/api/inventory', 'POST'))
+app.put('/api/inventory/:id', (req, res) => proxyBodyRequest(req, res, `/api/inventory/${req.params.id}`, 'PUT'))
+app.get('/api/inventory/search', (req, res) => proxyGetRequest(req, res, '/api/inventory/search'))
+app.get('/api/inventory/:id/bound-products', (req, res) => proxyGetRequest(req, res, `/api/inventory/${req.params.id}/bound-products`))
+app.get('/api/sales-skus/unbound', (req, res) => proxyGetRequest(req, res, '/api/sales-skus/unbound'))
+app.post('/api/sku-bindings', (req, res) => proxyBodyRequest(req, res, '/api/sku-bindings', 'POST'))
+app.delete('/api/sku-bindings', (req, res) => proxyBodyRequest(req, res, '/api/sku-bindings', 'DELETE'))
+app.post('/api/inventory/quick-create', (req, res) => proxyBodyRequest(req, res, '/api/inventory/quick-create', 'POST'))
 
 // ============ 启动 ============
 

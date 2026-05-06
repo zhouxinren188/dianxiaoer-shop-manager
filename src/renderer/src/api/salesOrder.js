@@ -47,3 +47,8 @@ export function unlockSalesOrderPurchase(orderId) {
 export function fetchStoreSalesStats(params) {
   return get('/api/store-sales-stats', params)
 }
+
+// 商品销售报表
+export function fetchProductSalesStats(params) {
+  return get('/api/product-sales-stats', params)
+}

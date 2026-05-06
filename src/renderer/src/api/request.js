@@ -90,6 +90,6 @@ export function put(url, data, timeout) {
   return request(url, { method: 'PUT', data, timeout })
 }
 
-export function del(url) {
-  return request(url, { method: 'DELETE' })
+export function del(url, params) {
+  return request(url, { method: 'DELETE', params })
 }

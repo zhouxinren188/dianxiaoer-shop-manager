@@ -7,7 +7,7 @@
           <el-icon :size="22" color="#fff"><TrendCharts /></el-icon>
         </div>
         <div class="header-info">
-          <h2 class="header-title">店铺报表</h2>
+          <h2 class="header-title">店铺销售报表</h2>
           <p class="header-desc">按店铺维度统计销售数据、订单量（已剔除待付款和已取消订单）</p>
         </div>
       </div>

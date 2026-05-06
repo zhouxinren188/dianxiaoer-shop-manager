@@ -46,7 +46,7 @@ function checkServerForUpdate() {
 
 // 检查更新（manual=true 时为手动触发，失败会通知前端）
 async function checkForUpdates(manual = false) {
-  if (state === 'downloading') return // 正在下载中不重复检查
+  if (state === 'downloading' || state === 'ready') return // 下载中或已就绪不重复检查
 
   state = 'checking'
   try {
@@ -175,8 +175,11 @@ function installAndRestart() {
     const autoUpdater = getAutoUpdater()
     autoUpdater.quitAndInstall(true, true)
   } else if (currentUpdateType === 'hot') {
+    // 先启动新实例，延迟退出当前实例，确保新进程成功启动
     app.relaunch()
-    app.exit(0)
+    setTimeout(() => {
+      app.exit(0)
+    }, 500)
   }
 }
 

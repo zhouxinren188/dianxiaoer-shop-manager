@@ -27,6 +27,15 @@ const args = process.argv.slice(2).filter(arg => !arg.startsWith('--'))
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'))
 let version = args[0] || pkg.version
 
+// baseVersion: 热更新所依赖的最低基础版本，支持 --base=1.3.11 指定
+// 默认取 pkg.version，但发布给旧版本客户端时应通过 --base 指定为最低兼容版本
+let baseVersion = pkg.version
+const baseArg = process.argv.find(arg => arg.startsWith('--base='))
+if (baseArg) {
+  baseVersion = baseArg.split('=')[1]
+  console.log('baseVersion override:', baseVersion)
+}
+
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
   console.error('版本号格式错误，应为 x.y.z，当前:', version)
   process.exit(1)
@@ -52,10 +61,10 @@ if (!fs.existsSync(DIST_DIR)) fs.mkdirSync(DIST_DIR, { recursive: true })
 
 const zip = new AdmZip()
 zip.addLocalFolder(rendererDir, 'renderer')
-// baseVersion: 热更新所依赖的基础版本（即 appVersion/package.json 中的版本）
+// baseVersion: 热更新所依赖的最低基础版本
 zip.addFile('version.json', Buffer.from(JSON.stringify({
   version,
-  baseVersion: pkg.version,
+  baseVersion,
   buildTime: new Date().toISOString()
 }, null, 2)))
 
@@ -100,7 +109,7 @@ function uploadToServer(filePath, ver, sha256) {
   // sha256 字段
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="sha256"\r\n\r\n${sha256}`)
   // baseVersion 字段
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="baseVersion"\r\n\r\n${pkg.version}`)
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="baseVersion"\r\n\r\n${baseVersion}`)
   // file 字段
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/zip\r\n\r\n`)
 

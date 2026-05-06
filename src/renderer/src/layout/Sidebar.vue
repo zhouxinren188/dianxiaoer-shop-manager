@@ -25,16 +25,6 @@
         <el-icon><List /></el-icon>
         <span>订单列表</span>
       </el-menu-item>
-      <el-sub-menu index="aftersale">
-        <template #title>
-          <el-icon><Service /></el-icon>
-          <span>售后管理</span>
-        </template>
-        <el-menu-item index="/aftersale/returns">
-          <el-icon><RefreshLeft /></el-icon>
-          <span>退换货管理</span>
-        </el-menu-item>
-      </el-sub-menu>
 
       <!-- 采购管理 分组 -->
       <div class="menu-group-title">采购管理</div>
@@ -63,10 +53,34 @@
 
       <!-- 报表 分组 -->
       <div class="menu-group-title">报表</div>
-      <el-menu-item index="/supplier/store-sales-stats">
-        <el-icon><TrendCharts /></el-icon>
-        <span>店铺销售统计</span>
-      </el-menu-item>
+      <el-sub-menu index="store-report">
+        <template #title>
+          <el-icon><TrendCharts /></el-icon>
+          <span>店铺报表</span>
+        </template>
+        <el-menu-item index="/report/store-sales">
+          <el-icon><TrendCharts /></el-icon>
+          <span>店铺销售报表</span>
+        </el-menu-item>
+        <el-menu-item index="/report/product-sales">
+          <el-icon><Goods /></el-icon>
+          <span>商品销售报表</span>
+        </el-menu-item>
+      </el-sub-menu>
+      <el-sub-menu index="aftersale">
+        <template #title>
+          <el-icon><Service /></el-icon>
+          <span>售后管理</span>
+        </template>
+        <el-menu-item index="/aftersale/returns">
+          <el-icon><RefreshLeft /></el-icon>
+          <span>商家售后纠纷</span>
+        </el-menu-item>
+        <el-menu-item index="/aftersale/purchase-refund">
+          <el-icon><Money /></el-icon>
+          <span>采购单退货退款</span>
+        </el-menu-item>
+      </el-sub-menu>
 
       <!-- 任务中心 分组 -->
       <div class="menu-group-title">任务中心</div>
@@ -168,7 +182,8 @@ import {
   Link,
   Monitor,
   Setting,
-  TrendCharts
+  TrendCharts,
+  Money
 } from '@element-plus/icons-vue'
 import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 

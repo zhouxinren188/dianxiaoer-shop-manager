@@ -632,6 +632,11 @@
         </el-alert>
         <el-table :data="importDataWithValidation" border size="small" max-height="400" :row-class-name="importRowClassName">
           <el-table-column type="index" label="#" width="50" />
+          <el-table-column prop="purchase_no" label="采购编号" width="100">
+            <template #default="{ row }">
+              {{ row.purchase_no || '自动生成' }}
+            </template>
+          </el-table-column>
           <el-table-column prop="sales_order_no" label="销售关联单号" min-width="120" />
           <el-table-column prop="platform_order_no" label="采购订单号" min-width="140" />
           <el-table-column prop="account_name" label="采购账号" width="120" />
@@ -712,6 +717,7 @@ const statusOptions = [
 
 // 批量导入 — 模版列定义
 const importTemplateFields = [
+  { header: '采购编号', required: false, desc: '采购编号，不填则系统自动生成' },
   { header: '销售关联单号', required: true, desc: '关联的销售订单号' },
   { header: '采购订单号', required: true, desc: '平台采购订单号' },
   { header: '采购账号', required: true, desc: '系统中已存在的采购账号名称' },
@@ -729,6 +735,7 @@ const importTemplateFields = [
 
 // 中文表头 → 字段 key 映射
 const HEADER_KEY_MAP = {
+  '采购编号': 'purchase_no',
   '销售关联单号': 'sales_order_no',
   '采购订单号': 'platform_order_no',
   '采购账号': 'account_name',
@@ -1522,8 +1529,8 @@ async function handleDownloadTemplate() {
   const XLSX = await import('xlsx')
   const wb = XLSX.utils.book_new()
 
-  // Sheet1: 数据模版
-  const headers = importTemplateFields.map(f => f.header)
+  // Sheet1: 数据模版 — 表头带必填/选填标注
+  const headers = importTemplateFields.map(f => `${f.header}（${f.required ? '必填' : '选填'}）`)
   const ws1 = XLSX.utils.aoa_to_sheet([headers])
   // 设置列宽
   ws1['!cols'] = headers.map(() => ({ wch: 18 }))
@@ -1532,6 +1539,7 @@ async function handleDownloadTemplate() {
   // Sheet2: 填写说明
   const instructions = [
     ['字段', '必填', '说明'],
+    ['采购编号', '否', '采购编号，不填则系统自动生成'],
     ['销售关联单号', '是', '关联的销售订单号'],
     ['采购订单号', '是', '平台上的采购订单号'],
     ['采购账号', '是', '必须与系统中已有采购账号名称完全一致'],
@@ -1572,10 +1580,13 @@ async function handleImportFileChange(file) {
     }
 
     // 首行作为表头，建立列索引映射
+    // 兼容带标注的表头，如 "销售关联单号（必填）" → 去掉括号标注后再匹配
     const headerRow = rows[0].map(h => String(h || '').trim())
     const colMap = {}
     for (let i = 0; i < headerRow.length; i++) {
-      const key = HEADER_KEY_MAP[headerRow[i]]
+      // 去掉表头中的（必填）/（选填）标注
+      const cleaned = headerRow[i].replace(/（必填）|（选填）|\(必填\)|\(选填\)/g, '').trim()
+      const key = HEADER_KEY_MAP[cleaned] || HEADER_KEY_MAP[headerRow[i]]
       if (key) colMap[key] = i
     }
 

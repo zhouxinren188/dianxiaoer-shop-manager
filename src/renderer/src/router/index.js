@@ -29,7 +29,13 @@ const routes = [
         path: '/aftersale/returns',
         name: 'AftersaleReturns',
         component: () => import('@/views/aftersale/ReturnExchange.vue'),
-        meta: { title: '退换货管理' }
+        meta: { title: '商家售后纠纷' }
+      },
+      {
+        path: '/aftersale/purchase-refund',
+        name: 'PurchaseRefund',
+        component: () => import('@/views/aftersale/PurchaseRefund.vue'),
+        meta: { title: '采购单退货退款' }
       },
       {
         path: '/purchase/orders',
@@ -69,9 +75,19 @@ const routes = [
       },
       {
         path: '/supplier/store-sales-stats',
-        name: 'StoreSalesStats',
-        component: () => import('@/views/supplier/StoreSalesStats.vue'),
-        meta: { title: '店铺销售统计' }
+        redirect: '/report/store-sales'
+      },
+      {
+        path: '/report/store-sales',
+        name: 'StoreSalesReport',
+        component: () => import('@/views/report/StoreSalesReport.vue'),
+        meta: { title: '店铺销售报表' }
+      },
+      {
+        path: '/report/product-sales',
+        name: 'ProductSalesReport',
+        component: () => import('@/views/report/ProductSalesReport.vue'),
+        meta: { title: '商品销售报表' }
       },
       {
         path: '/user/center',

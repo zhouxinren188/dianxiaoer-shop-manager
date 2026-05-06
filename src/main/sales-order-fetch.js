@@ -294,12 +294,12 @@ function fetchSalesOrders(storeId) {
 
     const partitionName = `persist:platform-${storeId}`
     const ses = session.fromPartition(partitionName)
-    const cookies = await ses.cookies.get({})
-    const jdCookies = cookies.filter(c => c.domain && c.domain.includes('jd.com'))
+    let cookies = await ses.cookies.get({})
+    let jdCookies = cookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
 
     console.log('[SalesFetch] storeId:', storeId, 'partition:', partitionName)
     console.log('[SalesFetch] Cookies:', cookies.length, 'JD:', jdCookies.length)
-    
+
     // 详细Cookie诊断
     if (cookies.length > 0) {
       console.log('[SalesFetch] Cookie详情:')
@@ -307,7 +307,24 @@ function fetchSalesOrders(storeId) {
         console.log(`  ${i+1}. ${c.name}=${c.value?.substring(0, 15)}... domain:${c.domain} expires:${c.expirationDate ? new Date(c.expirationDate * 1000).toISOString() : 'session'}`)
       })
     }
-    
+
+    // 如果Session没有京东Cookie，尝试从数据库恢复（与心跳逻辑一致）
+    if (jdCookies.length === 0) {
+      console.log('[SalesFetch] Session无京东Cookie，尝试从数据库恢复...')
+      try {
+        const { restoreCookiesFromDB } = require('./cookie-heartbeat')
+        const restored = await restoreCookiesFromDB(storeId)
+        if (restored) {
+          // 恢复后重新获取Cookie
+          cookies = await ses.cookies.get({})
+          jdCookies = cookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+          console.log('[SalesFetch] 从数据库恢复后Cookie:', cookies.length, 'JD:', jdCookies.length)
+        }
+      } catch (e) {
+        console.error('[SalesFetch] 从数据库恢复Cookie失败:', e.message)
+      }
+    }
+
     if (jdCookies.length === 0) {
       console.log('[SalesFetch] 没有找到京东Cookie！')
       return resolve({ success: false, message: '店铺没有京东Cookie，请先在「店铺管理」中登录京东后台' })
@@ -330,7 +347,11 @@ function fetchSalesOrders(storeId) {
     function finish(result) {
       if (resolved) return
       resolved = true
-      cleanup()
+      try {
+        cleanup()
+      } catch (e) {
+        console.error('[SalesFetch] cleanup error:', e.message)
+      }
       resolve(result)
     }
 
@@ -3040,8 +3061,23 @@ async function autoSyncAllStores(mainWindow) {
       // 检查 Electron session partition 中是否有 JD Cookie
       const partitionName = `persist:platform-${s.id}`
       const ses = session.fromPartition(partitionName)
-      const cookies = await ses.cookies.get({ domain: '.jd.com' })
-      if (cookies.length > 0) {
+      const allCookies = await ses.cookies.get({})
+      let jdCookies = allCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+      // 如果Session无京东Cookie，尝试从数据库恢复（与心跳逻辑一致）
+      if (jdCookies.length === 0) {
+        console.log(`[AutoSync] 店铺 ${s.name} (ID:${s.id}) Session无京东Cookie，尝试从数据库恢复...`)
+        try {
+          const { restoreCookiesFromDB } = require('./cookie-heartbeat')
+          const restored = await restoreCookiesFromDB(s.id)
+          if (restored) {
+            const restoredCookies = await ses.cookies.get({})
+            jdCookies = restoredCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+          }
+        } catch (e) {
+          console.error(`[AutoSync] 从数据库恢复Cookie失败: ${e.message}`)
+        }
+      }
+      if (jdCookies.length > 0) {
         jdStores.push({ store_id: s.id, store_name: s.name })
       } else {
         console.log(`[AutoSync] 跳过店铺 ${s.name} (ID:${s.id}): 无京东Cookie`)

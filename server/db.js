@@ -316,6 +316,68 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 库存表添加 price 列（兼容已有表）
+    try {
+      await connection.execute('ALTER TABLE inventory ADD COLUMN price DECIMAL(12,2) DEFAULT 0.00 AFTER product_name')
+      console.log('[DB] inventory 表已添加 price 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] inventory.price 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 inventory.price 列失败:', e.message)
+      }
+    }
+
+    // 库存表添加 image 列（兼容已有表）
+    try {
+      await connection.execute('ALTER TABLE inventory ADD COLUMN image VARCHAR(500) DEFAULT \'\'')
+      console.log('[DB] inventory 表已添加 image 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] inventory.image 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 inventory.image 列失败:', e.message)
+      }
+    }
+
+    // 采购订单表添加 inventory_id 列（仓库采购关联库存项）
+    try {
+      await connection.execute('ALTER TABLE purchase_orders ADD COLUMN inventory_id INT DEFAULT NULL AFTER sku')
+      console.log('[DB] purchase_orders 表已添加 inventory_id 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] purchase_orders.inventory_id 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 purchase_orders.inventory_id 列失败:', e.message)
+      }
+    }
+    try {
+      await connection.execute('ALTER TABLE purchase_orders ADD KEY idx_inventory_id (inventory_id)')
+      console.log('[DB] purchase_orders 表已添加 inventory_id 索引')
+    } catch (e) {
+      if (e.code === 'ER_DUP_KEYNAME') {
+        console.log('[DB] purchase_orders.inventory_id 索引已存在，跳过')
+      } else {
+        console.error('[DB] 添加 purchase_orders.inventory_id 索引失败:', e.message)
+      }
+    }
+
+    // SKU绑定映射表（销售SKU → 仓库库存）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS sku_bindings (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        sku_id VARCHAR(50) NOT NULL,
+        inventory_id INT NOT NULL,
+        warehouse_id INT NOT NULL,
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_sku (store_id, sku_id),
+        KEY idx_inventory (inventory_id),
+        KEY idx_owner (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 入库记录表
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS stock_in_records (

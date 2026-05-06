@@ -7,6 +7,7 @@ const conn = new Client();
 // 需要部署的文件（注意：远程目录是 C:\dianxiaoer-server，SFTP用正斜杠）
 const filesToDeploy = [
   { local: 'server/index.js', remote: 'C:/dianxiaoer-server/index.js' },
+  { local: 'server/db.js', remote: 'C:/dianxiaoer-server/db.js' },
   { local: 'server/package.json', remote: 'C:/dianxiaoer-server/package.json' }
 ];
 
@@ -33,7 +34,7 @@ conn.on('ready', () => {
         
         if (errors === 0) {
           console.log('\n正在安装依赖并重启服务...');
-          conn.exec('cd /d C:\\dianxiaoer-server && npm install', (err, stream) => {
+          conn.exec('cd /d C:\\dianxiaoer-server && npm install && sc stop dianxiaoer-server && ping -n 4 127.0.0.1 >nul && sc start dianxiaoer-server', (err, stream) => {
             let out = '', errOut = '';
             stream.on('data', d => out += d);
             stream.stderr.on('data', d => errOut += d);

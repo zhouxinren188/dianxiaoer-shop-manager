@@ -1609,7 +1609,7 @@ app.get('/api/store-sales-stats', async (req, res) => {
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
-      return res.json(ok({ summary: { totalSales: 0, totalOrders: 0, avgOrderValue: 0 }, list: [] }))
+      return res.json(ok({ summary: { totalSales: 0, totalOrders: 0, avgOrderValue: 0, totalVisitorCount: 0, totalOverdueOrders: 0, totalPendingFollowUps: 0 }, list: [] }))
     }
 
     // 排除的状态：待付款、等待付款、已取消
@@ -1673,7 +1673,20 @@ app.get('/api/store-sales-stats', async (req, res) => {
       salesAmount: Number(r.salesAmount),
       orderCount: Number(r.orderCount),
       avgOrderValue: Number(r.orderCount) > 0 ? Math.round(Number(r.salesAmount) / Number(r.orderCount) * 100) / 100 : 0,
-      ratio: totalSales > 0 ? Math.round(Number(r.salesAmount) / totalSales * 1000) / 10 : 0
+      ratio: totalSales > 0 ? Math.round(Number(r.salesAmount) / totalSales * 1000) / 10 : 0,
+      // 运营指标（暂从平台API获取，目前默认0）
+      shopRating: 0,
+      visitorCount: 0,
+      activeProductCount: 0,
+      overdueOrders: 0,
+      pendingFollowUps: 0,
+      cancelledOrders: 0,
+      pendingReviewAftersales: 0,
+      pendingProcessAftersales: 0,
+      pendingReplyDisputes: 0,
+      pendingEvidenceDisputes: 0,
+      pendingWarnings: 0,
+      pendingViolations: 0
     }))
 
     const summaryTotalSales = list.reduce((sum, r) => sum + r.salesAmount, 0)
@@ -1683,12 +1696,500 @@ app.get('/api/store-sales-stats', async (req, res) => {
       summary: {
         totalSales: Math.round(summaryTotalSales * 100) / 100,
         totalOrders: summaryTotalOrders,
-        avgOrderValue: summaryTotalOrders > 0 ? Math.round(summaryTotalSales / summaryTotalOrders * 100) / 100 : 0
+        avgOrderValue: summaryTotalOrders > 0 ? Math.round(summaryTotalSales / summaryTotalOrders * 100) / 100 : 0,
+        totalVisitorCount: 0,
+        totalOverdueOrders: 0,
+        totalPendingFollowUps: 0
       },
       list
     }))
   } catch (err) {
     console.error('[店铺销售统计] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 商品销售报表 ============
+
+app.get('/api/product-sales-stats', async (req, res) => {
+  try {
+    const { store_id, period, start_date, end_date, page = 1, pageSize = 20, bind_status } = req.query
+    const storeIds = await getAccessibleStoreIds(req.user)
+    const ownerId = getOwnerId(req.user)
+
+    if (!storeIds.length) {
+      return res.json(ok({ summary: { totalSkus: 0, totalSalesCount: 0, totalSalesQuantity: 0, totalAmount: 0 }, list: [], total: 0 }))
+    }
+
+    const excludeStatuses = ['待付款', '等待付款', '已取消']
+    const excludePlaceholders = excludeStatuses.map(() => '?').join(',')
+
+    // 店铺筛选
+    let targetStoreIds = storeIds
+    if (store_id) {
+      if (!storeIds.includes(+store_id)) {
+        return res.status(403).json(fail('无权查看此店铺'))
+      }
+      targetStoreIds = [+store_id]
+    }
+
+    // 时间筛选
+    let dateJoin = ''
+    const dateParams = []
+    if (start_date && end_date) {
+      dateJoin = "AND so.order_time >= ? AND so.order_time < DATE_ADD(?, INTERVAL 1 DAY)"
+      dateParams.push(start_date, end_date)
+    } else if (period) {
+      switch (period) {
+        case 'today':
+          dateJoin = "AND DATE(so.order_time) = CURDATE()"
+          break
+        case 'week':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
+          break
+        case 'month':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)"
+          break
+        case 'quarter':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+          break
+      }
+    }
+
+    const storePlaceholders = targetStoreIds.map(() => '?').join(',')
+
+    // 按SKU+店铺分组统计
+    const [skuRows] = await pool.execute(
+      `SELECT so.store_id, s.name AS storeName, so.sku_id,
+              MAX(so.product_name) AS productName,
+              MAX(so.product_image) AS productImage,
+              ROUND(AVG(so.unit_price), 2) AS avgUnitPrice,
+              COUNT(DISTINCT so.order_id) AS salesCount,
+              SUM(so.quantity) AS salesQuantity,
+              COALESCE(SUM(so.goods_amount), 0) AS totalAmount
+       FROM sales_orders so
+       INNER JOIN stores s ON so.store_id = s.id
+       WHERE so.status_text NOT IN (${excludePlaceholders})
+         AND so.sku_id != ''
+         AND so.store_id IN (${storePlaceholders})
+         ${dateJoin}
+       GROUP BY so.store_id, so.sku_id, s.name
+       ORDER BY salesQuantity DESC`,
+      [...excludeStatuses, ...targetStoreIds, ...dateParams]
+    )
+
+    // 查询绑定信息
+    const bindingsMap = {}
+    if (skuRows.length > 0) {
+      const [bindings] = await pool.execute(
+        `SELECT sb.store_id, sb.sku_id, sb.inventory_id, sb.warehouse_id, w.name AS warehouseName
+         FROM sku_bindings sb
+         LEFT JOIN warehouses w ON sb.warehouse_id = w.id
+         WHERE sb.owner_id = ?`,
+        [ownerId]
+      )
+      for (const b of bindings) {
+        bindingsMap[`${b.store_id}_${b.sku_id}`] = {
+          boundInventoryId: b.inventory_id,
+          boundWarehouseName: b.warehouseName
+        }
+      }
+    }
+
+    // 汇总统计（绑定过滤前）
+    const totalSkus = skuRows.length
+    const totalSalesCount = skuRows.reduce((sum, r) => sum + Number(r.salesCount), 0)
+    const totalSalesQuantity = skuRows.reduce((sum, r) => sum + Number(r.salesQuantity), 0)
+    const totalAmount = skuRows.reduce((sum, r) => sum + Number(r.totalAmount), 0)
+
+    // 绑定状态过滤
+    let filteredRows = skuRows
+    if (bind_status === 'unbind') {
+      filteredRows = skuRows.filter(r => !bindingsMap[`${r.store_id}_${r.sku_id}`])
+    } else if (bind_status === 'bound') {
+      filteredRows = skuRows.filter(r => !!bindingsMap[`${r.store_id}_${r.sku_id}`])
+    }
+
+    const filteredTotal = filteredRows.length
+
+    // 分页
+    const offset = (Math.max(1, +page) - 1) * Math.max(1, +pageSize)
+    const pagedRows = filteredRows.slice(offset, offset + Math.max(1, +pageSize))
+
+    const list = pagedRows.map(r => {
+      const binding = bindingsMap[`${r.store_id}_${r.sku_id}`] || {}
+      return {
+        storeId: r.store_id,
+        storeName: r.storeName,
+        skuId: r.sku_id,
+        productName: r.productName,
+        productImage: r.productImage,
+        avgUnitPrice: Number(r.avgUnitPrice),
+        salesCount: Number(r.salesCount),
+        salesQuantity: Number(r.salesQuantity),
+        totalAmount: Number(r.totalAmount),
+        boundInventoryId: binding.boundInventoryId || null,
+        boundWarehouseName: binding.boundWarehouseName || null
+      }
+    })
+
+    res.json(ok({
+      summary: {
+        totalSkus,
+        totalSalesCount,
+        totalSalesQuantity,
+        totalAmount: Math.round(totalAmount * 100) / 100
+      },
+      list,
+      total: filteredTotal
+    }))
+  } catch (err) {
+    console.error('[商品销售报表] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 库存管理接口 ============
+
+// 获取库存列表（含计算字段）
+app.get('/api/inventory', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    if (!ownerId) return res.json(ok({ list: [], total: 0 }))
+    const { page = 1, pageSize = 20, warehouse_id, product_name, sku, location, warning_only } = req.query
+    const limitVal = parseInt(pageSize) || 20
+    const offsetVal = (parseInt(page) - 1) * limitVal
+
+    let where = 'WHERE i.owner_id = ?'
+    const params = [ownerId]
+
+    if (warehouse_id) { where += ' AND i.warehouse_id = ?'; params.push(parseInt(warehouse_id)) }
+    if (product_name) { where += ' AND i.product_name LIKE ?'; params.push(`%${product_name}%`) }
+    if (sku) { where += ' AND i.sku LIKE ?'; params.push(`%${sku}%`) }
+    if (location) { where += ' AND i.location LIKE ?'; params.push(`%${location}%`) }
+    if (warning_only === 'true' || warning_only === '1') { where += ' AND i.quantity <= i.warn_quantity' }
+
+    const countParams = [...params]
+    const [[countRow]] = await pool.query(
+      `SELECT COUNT(*) as total FROM inventory i ${where}`, countParams
+    )
+
+    const queryParams = [...params, limitVal, offsetVal]
+    const [rows] = await pool.query(
+      `SELECT i.*, w.name AS warehouse_name,
+        (SELECT COALESCE(SUM(po.quantity),0) FROM purchase_orders po
+         WHERE po.inventory_id=i.id AND po.purchase_type='warehouse'
+         AND po.status NOT IN ('stocked','cancelled')) AS in_transit_qty,
+        (SELECT COALESCE(SUM(so.quantity),0) FROM sku_bindings sb
+         INNER JOIN sales_orders so ON so.store_id=sb.store_id AND so.sku_id=sb.sku_id
+         WHERE sb.inventory_id=i.id AND so.purchase_status='未采购') AS unpurchased_qty,
+        (SELECT COALESCE(SUM(so.quantity),0) FROM sku_bindings sb
+         INNER JOIN sales_orders so ON so.store_id=sb.store_id AND so.sku_id=sb.sku_id
+         WHERE sb.inventory_id=i.id AND so.status_text NOT IN ('待付款','等待付款','已取消')
+         AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)) AS week_sales,
+        (SELECT COUNT(*) FROM sku_bindings sb WHERE sb.inventory_id=i.id) AS bound_count
+      FROM inventory i
+      INNER JOIN warehouses w ON i.warehouse_id=w.id
+      ${where}
+      ORDER BY i.id DESC
+      LIMIT ? OFFSET ?`,
+      queryParams
+    )
+
+    res.json(ok({ list: rows, total: countRow.total }))
+  } catch (err) {
+    console.error('[Inventory] 获取库存列表失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 创建库存项
+app.post('/api/inventory', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { warehouse_id, sku, product_name, price, image, warn_quantity, quantity, location, batch_no, supplier } = req.body
+
+    if (!warehouse_id || !sku) {
+      return res.json(fail('仓库和SKU不能为空'))
+    }
+
+    await pool.query(
+      `INSERT INTO inventory (warehouse_id, sku, product_name, price, image, warn_quantity, quantity, location, batch_no, supplier, owner_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [parseInt(warehouse_id), sku, product_name || '', price || 0, image || '', parseInt(warn_quantity) || 10, parseInt(quantity) || 0, location || '', batch_no || '', supplier || '', ownerId]
+    )
+
+    res.json(ok({ success: true }))
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.json(fail('该仓库下已存在相同SKU的商品'))
+    }
+    console.error('[Inventory] 创建库存项失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 更新库存项
+app.put('/api/inventory/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { product_name, price, image, warn_quantity, quantity, location, batch_no, supplier, warehouse_id, sku } = req.body
+
+    const fields = []
+    const values = []
+
+    if (product_name !== undefined) { fields.push('product_name=?'); values.push(product_name) }
+    if (price !== undefined) { fields.push('price=?'); values.push(price) }
+    if (image !== undefined) { fields.push('image=?'); values.push(image) }
+    if (warn_quantity !== undefined) { fields.push('warn_quantity=?'); values.push(warn_quantity) }
+    if (quantity !== undefined) { fields.push('quantity=?'); values.push(quantity) }
+    if (location !== undefined) { fields.push('location=?'); values.push(location) }
+    if (batch_no !== undefined) { fields.push('batch_no=?'); values.push(batch_no) }
+    if (supplier !== undefined) { fields.push('supplier=?'); values.push(supplier) }
+    if (warehouse_id !== undefined) { fields.push('warehouse_id=?'); values.push(warehouse_id) }
+    if (sku !== undefined) { fields.push('sku=?'); values.push(sku) }
+
+    if (!fields.length) return res.json(fail('没有要修改的字段'))
+
+    fields.push('updated_at=NOW()')
+    values.push(req.params.id, ownerId)
+
+    await pool.execute(
+      `UPDATE inventory SET ${fields.join(', ')} WHERE id=? AND owner_id=?`,
+      values
+    )
+
+    res.json(ok({ success: true }))
+  } catch (err) {
+    console.error('[Inventory] 更新库存项失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取库存项绑定的销售商品
+app.get('/api/inventory/:id/bound-products', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const inventoryId = req.params.id
+
+    const [rows] = await pool.query(
+      `SELECT sb.store_id, sb.sku_id, s.name AS store_name,
+        MAX(so.product_name) AS product_name, MAX(so.product_image) AS product_image,
+        SUM(so.quantity) AS total_quantity,
+        SUM(CASE WHEN so.purchase_status='未采购' THEN so.quantity ELSE 0 END) AS unpurchased_qty
+      FROM sku_bindings sb
+      INNER JOIN stores s ON sb.store_id=s.id
+      INNER JOIN sales_orders so ON so.store_id=sb.store_id AND so.sku_id=sb.sku_id
+      WHERE sb.inventory_id=? AND sb.owner_id=?
+      GROUP BY sb.store_id, sb.sku_id, s.name`,
+      [parseInt(inventoryId), ownerId]
+    )
+
+    res.json(ok(rows))
+  } catch (err) {
+    console.error('[Inventory] 获取绑定商品失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 搜索未绑定的销售 SKU
+app.get('/api/sales-skus/unbound', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { keyword, store_id, limit = 20 } = req.query
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) return res.json(ok([]))
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    let where = `so.store_id IN (${placeholders})`
+    const params = [...storeIds]
+
+    if (store_id) { where += ' AND so.store_id = ?'; params.push(store_id) }
+    if (keyword) {
+      where += ' AND (so.product_name LIKE ? OR so.sku_id LIKE ?)'
+      params.push(`%${keyword}%`, `%${keyword}%`)
+    }
+    where += " AND so.status_text NOT IN ('待付款','等待付款','已取消') AND so.sku_id != ''"
+
+    const [rows] = await pool.query(
+      `SELECT so.store_id, s.name AS store_name, so.sku_id,
+        MAX(so.product_name) AS product_name, MAX(so.product_image) AS product_image,
+        ROUND(AVG(so.unit_price), 2) AS avg_unit_price,
+        COUNT(DISTINCT so.order_id) AS sales_count,
+        SUM(so.quantity) AS total_quantity
+      FROM sales_orders so
+      INNER JOIN stores s ON so.store_id=s.id
+      LEFT JOIN sku_bindings sb ON sb.store_id=so.store_id AND sb.sku_id=so.sku_id
+      WHERE ${where} AND sb.id IS NULL
+      GROUP BY so.store_id, so.sku_id, s.name
+      ORDER BY total_quantity DESC
+      LIMIT ${parseInt(limit)}`,
+      params
+    )
+
+    res.json(ok(rows))
+  } catch (err) {
+    console.error('[SalesSkus] 搜索未绑定SKU失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 库存搜索（绑定用） ============
+
+app.get('/api/inventory/search', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { keyword, warehouse_id } = req.query
+
+    if (!keyword || keyword.trim() === '') {
+      return res.json(ok([]))
+    }
+
+    const likeKeyword = `%${keyword.trim()}%`
+    let sql = `SELECT i.id, i.sku, i.product_name, i.warehouse_id, w.name AS warehouseName, i.quantity, i.image
+               FROM inventory i
+               INNER JOIN warehouses w ON i.warehouse_id = w.id
+               WHERE i.owner_id = ? AND (i.sku LIKE ? OR i.product_name LIKE ?)`
+    const params = [ownerId, likeKeyword, likeKeyword]
+
+    if (warehouse_id) {
+      sql += ' AND i.warehouse_id = ?'
+      params.push(+warehouse_id)
+    }
+
+    sql += ' ORDER BY i.quantity DESC LIMIT 20'
+
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok(rows.map(r => ({
+      id: r.id,
+      sku: r.sku,
+      productName: r.product_name,
+      warehouseId: r.warehouse_id,
+      warehouseName: r.warehouseName,
+      quantity: r.quantity,
+      image: r.image
+    }))))
+  } catch (err) {
+    console.error('[库存搜索] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ SKU绑定 ============
+
+app.post('/api/sku-bindings', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { store_id, sku_id, inventory_id, warehouse_id } = req.body
+
+    if (!store_id || !sku_id || !inventory_id) {
+      return res.status(400).json(fail('缺少必要参数'))
+    }
+
+    // 验证 inventory 存在
+    const [invRows] = await pool.execute(
+      'SELECT id, warehouse_id FROM inventory WHERE id = ? AND owner_id = ?',
+      [inventory_id, ownerId]
+    )
+    if (invRows.length === 0) {
+      return res.status(404).json(fail('库存记录不存在'))
+    }
+
+    const whId = warehouse_id || invRows[0].warehouse_id
+
+    await pool.execute(
+      `INSERT INTO sku_bindings (store_id, sku_id, inventory_id, warehouse_id, owner_id)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE inventory_id = VALUES(inventory_id), warehouse_id = VALUES(warehouse_id)`,
+      [store_id, sku_id, inventory_id, whId, ownerId]
+    )
+
+    res.json(ok({ message: '绑定成功' }))
+  } catch (err) {
+    console.error('[SKU绑定] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+app.delete('/api/sku-bindings', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { store_id, sku_id } = req.query
+
+    if (!store_id || !sku_id) {
+      return res.status(400).json(fail('缺少必要参数'))
+    }
+
+    await pool.execute(
+      'DELETE FROM sku_bindings WHERE store_id = ? AND sku_id = ? AND owner_id = ?',
+      [store_id, sku_id, ownerId]
+    )
+
+    res.json(ok({ message: '解绑成功' }))
+  } catch (err) {
+    console.error('[SKU解绑] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 快速新建库存并绑定 ============
+
+app.post('/api/inventory/quick-create', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { warehouse_id, sku, product_name, image, store_id, location, batch_no, supplier } = req.body
+
+    if (!warehouse_id || !sku) {
+      return res.status(400).json(fail('缺少仓库或SKU'))
+    }
+
+    // 检查仓库权限
+    const [whRows] = await pool.execute(
+      'SELECT id FROM warehouses WHERE id = ? AND owner_id = ?',
+      [warehouse_id, ownerId]
+    )
+    if (whRows.length === 0) {
+      return res.status(403).json(fail('无权操作此仓库'))
+    }
+
+    // 检查SKU是否已存在于该仓库
+    const [existing] = await pool.execute(
+      'SELECT id FROM inventory WHERE warehouse_id = ? AND sku = ?',
+      [warehouse_id, sku]
+    )
+
+    let inventoryId
+    if (existing.length > 0) {
+      // 已存在，更新信息
+      inventoryId = existing[0].id
+      await pool.execute(
+        `UPDATE inventory SET product_name = ?, image = ?, location = COALESCE(?, location), batch_no = COALESCE(?, batch_no), supplier = COALESCE(?, supplier) WHERE id = ?`,
+        [product_name || '', image || '', location || null, batch_no || null, supplier || null, inventoryId]
+      )
+    } else {
+      // 新建
+      const [result] = await pool.execute(
+        `INSERT INTO inventory (warehouse_id, sku, product_name, quantity, image, location, batch_no, supplier, owner_id)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+        [warehouse_id, sku, product_name || '', image || '', location || '', batch_no || '', supplier || '', ownerId]
+      )
+      inventoryId = result.insertId
+    }
+
+    // 自动绑定
+    if (store_id && sku) {
+      await pool.execute(
+        `INSERT INTO sku_bindings (store_id, sku_id, inventory_id, warehouse_id, owner_id)
+         VALUES (?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE inventory_id = VALUES(inventory_id), warehouse_id = VALUES(warehouse_id)`,
+        [store_id, sku, inventoryId, warehouse_id, ownerId]
+      )
+    }
+
+    res.json(ok({ inventoryId, message: '新建并绑定成功' }))
+  } catch (err) {
+    console.error('[快速新建库存] 错误:', err.message)
     res.status(500).json(fail(err.message))
   }
 })
@@ -1921,19 +2422,20 @@ app.post('/api/purchase-orders', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const { purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
             source_url, platform, purchase_price, remark,
-            purchase_type, shipping_name, shipping_phone, shipping_address, account_id } = req.body
+            purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
+            inventory_id } = req.body
     if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
     await pool.execute(
       `INSERT INTO purchase_orders
-        (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
+        (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, inventory_id, quantity,
          source_url, platform, purchase_price, remark,
          purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
          status, owner_id, created_by)
-       VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?, ?)
+       VALUES (?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?, ?)
        ON DUPLICATE KEY UPDATE
          owner_id=VALUES(owner_id),
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
-         goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), quantity=VALUES(quantity),
+         goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), inventory_id=VALUES(inventory_id), quantity=VALUES(quantity),
          source_url=VALUES(source_url), platform=VALUES(platform),
          purchase_price=VALUES(purchase_price), remark=VALUES(remark),
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
@@ -1941,7 +2443,7 @@ app.post('/api/purchase-orders', async (req, res) => {
          account_id=VALUES(account_id),
          status='pending',
          updated_at=NOW()`,
-      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', quantity||0,
+      [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', inventory_id||null, quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
        ownerId, req.user.id]
@@ -2022,7 +2524,9 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
         errors.push({ row: rowNum, message: `采购平台"${platform}"无效，支持: taobao/pinduoduo/1688/douyin` }); failCount++; continue
       }
 
-      const purchaseNo = String(nextNum++).padStart(4, '0')
+      // 采购编号：用户填写则用用户的，否则自动生成
+      const userPurchaseNo = String(row.purchase_no || '').trim()
+      const purchaseNo = userPurchaseNo || String(nextNum++).padStart(4, '0')
       const quantity = parseInt(row.quantity) || 1
       const purchasePrice = parseFloat(row.purchase_price) || 0
 
@@ -2130,6 +2634,26 @@ app.put('/api/purchase-orders/:id/status', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const { status } = req.body
     await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+
+    // 仓库采购单入库时，自动增加库存数量
+    if (status === 'stocked') {
+      try {
+        const [poRows] = await pool.execute(
+          'SELECT inventory_id, quantity, purchase_type FROM purchase_orders WHERE id=? AND owner_id=?',
+          [req.params.id, ownerId]
+        )
+        if (poRows.length > 0 && poRows[0].inventory_id && poRows[0].purchase_type === 'warehouse') {
+          await pool.execute(
+            'UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND owner_id = ?',
+            [poRows[0].quantity, poRows[0].inventory_id, ownerId]
+          )
+          console.log(`[PurchaseOrders] 仓库采购入库: inventory_id=${poRows[0].inventory_id}, +${poRows[0].quantity}`)
+        }
+      } catch (e) {
+        console.warn('[PurchaseOrders] 入库更新库存失败(非关键):', e.message)
+      }
+    }
+
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
