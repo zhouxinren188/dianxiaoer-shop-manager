@@ -8,7 +8,7 @@
         </div>
         <div class="header-info">
           <h2 class="header-title">店铺销售统计</h2>
-          <p class="header-desc">按店铺维度统计销售数据、订单量及趋势分析</p>
+          <p class="header-desc">按店铺维度统计销售数据、订单量（已剔除待付款和已取消订单）</p>
         </div>
       </div>
     </div>
@@ -27,21 +27,19 @@
         <div class="stat-value" style="color: #e6a23c">¥{{ summary.avgOrderValue.toFixed(2) }}</div>
         <div class="stat-label">平均客单价</div>
       </el-card>
-      <el-card class="stat-card" shadow="never">
-        <div class="stat-value" style="color: #f56c6c">{{ summary.returnRate }}%</div>
-        <div class="stat-label">退货率</div>
-      </el-card>
     </div>
 
     <!-- 筛选区 -->
     <el-card class="filter-card" shadow="never">
       <el-form :model="filterForm" inline class="filter-form">
         <el-form-item label="店铺">
-          <el-select v-model="filterForm.store" placeholder="全部店铺" clearable style="width: 180px">
-            <el-option label="优选好物旗舰店" value="store1" />
-            <el-option label="数码潮流小店" value="store2" />
-            <el-option label="家居生活馆" value="store3" />
-            <el-option label="潮流服饰店" value="store4" />
+          <el-select v-model="filterForm.storeId" placeholder="全部店铺" clearable style="width: 200px">
+            <el-option
+              v-for="store in storeOptions"
+              :key="store.id"
+              :label="store.name"
+              :value="store.id"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="统计周期">
@@ -86,7 +84,12 @@
       >
         <el-table-column type="index" label="排名" width="70" align="center" />
 
-        <el-table-column prop="storeName" label="店铺名称" min-width="180" />
+        <el-table-column prop="storeName" label="店铺名称" min-width="180">
+          <template #default="{ row }">
+            <span>{{ row.storeName }}</span>
+            <el-tag v-if="row.platform" size="small" style="margin-left: 6px">{{ row.platform }}</el-tag>
+          </template>
+        </el-table-column>
 
         <el-table-column prop="salesAmount" label="销售额" width="140" align="right">
           <template #default="{ row }">
@@ -102,34 +105,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="soldQty" label="售出件数" width="100" align="center" />
-
-        <el-table-column prop="returnCount" label="退货数" width="90" align="center">
-          <template #default="{ row }">
-            <span :style="{ color: row.returnCount > 0 ? '#f56c6c' : '#909399' }">{{ row.returnCount }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="returnRate" label="退货率" width="90" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.returnRate > 5 ? 'danger' : 'success'" size="small">{{ row.returnRate }}%</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="trend" label="环比趋势" width="110" align="center">
-          <template #default="{ row }">
-            <div class="trend-cell">
-              <el-icon :size="14" :color="row.trend >= 0 ? '#67c23a' : '#f56c6c'">
-                <component :is="row.trend >= 0 ? 'ArrowUp' : 'ArrowDown'" />
-              </el-icon>
-              <span :style="{ color: row.trend >= 0 ? '#67c23a' : '#f56c6c', fontWeight: 500 }">
-                {{ Math.abs(row.trend) }}%
-              </span>
-            </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="销售占比" width="160" align="center">
+        <el-table-column label="销售占比" width="200" align="center">
           <template #default="{ row }">
             <el-progress :percentage="row.ratio" :color="progressColor" :stroke-width="10" />
           </template>
@@ -140,37 +116,33 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import {
   TrendCharts,
   Search,
-  Refresh,
-  ArrowUp,
-  ArrowDown
+  Refresh
 } from '@element-plus/icons-vue'
+import { fetchStoreSalesStats } from '@/api/salesOrder'
+import { fetchStores } from '@/api/store'
 
 const loading = ref(false)
+const storeOptions = ref([])
 
 const summary = reactive({
-  totalSales: 256890.60,
-  totalOrders: 1865,
-  avgOrderValue: 137.74,
-  returnRate: 2.8
+  totalSales: 0,
+  totalOrders: 0,
+  avgOrderValue: 0
 })
 
 const filterForm = reactive({
-  store: '',
+  storeId: '',
   period: 'week'
 })
 
 const sortBy = ref('sales')
 
-const tableData = ref([
-  { storeName: '优选好物旗舰店', salesAmount: 98560.00, orderCount: 720, avgOrderValue: 136.89, soldQty: 1250, returnCount: 18, returnRate: 2.5, trend: 12.5, ratio: 38.4 },
-  { storeName: '数码潮流小店', salesAmount: 67890.50, orderCount: 510, avgOrderValue: 133.12, soldQty: 890, returnCount: 22, returnRate: 4.3, trend: 8.2, ratio: 26.4 },
-  { storeName: '家居生活馆', salesAmount: 52340.00, orderCount: 380, avgOrderValue: 137.74, soldQty: 620, returnCount: 8, returnRate: 2.1, trend: -3.5, ratio: 20.4 },
-  { storeName: '潮流服饰店', salesAmount: 38100.10, orderCount: 255, avgOrderValue: 149.41, soldQty: 480, returnCount: 12, returnRate: 4.7, trend: 5.6, ratio: 14.8 }
-])
+const tableData = ref([])
 
 const progressColor = [
   { color: '#f56c6c', percentage: 20 },
@@ -190,16 +162,54 @@ const sortedTableData = computed(() => {
   return data
 })
 
-function handleSearch() {
+async function loadData() {
   loading.value = true
-  setTimeout(() => { loading.value = false }, 300)
+  try {
+    const params = {}
+    if (filterForm.storeId) params.store_id = filterForm.storeId
+    if (filterForm.period) params.period = filterForm.period
+
+    const res = await fetchStoreSalesStats(params)
+    if (res) {
+      const { summary: s, list } = res
+      summary.totalSales = s?.totalSales || 0
+      summary.totalOrders = s?.totalOrders || 0
+      summary.avgOrderValue = s?.avgOrderValue || 0
+      tableData.value = list || []
+    }
+  } catch (err) {
+    console.error('[店铺销售统计] 加载失败:', err.message, err)
+    ElMessage.error('加载数据失败：' + (err.message || '未知错误'))
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadStoreOptions() {
+  try {
+    const res = await fetchStores({ pageSize: 1000 })
+    if (res) {
+      storeOptions.value = res.list || []
+    }
+  } catch (err) {
+    console.error('[店铺销售统计] 加载店铺列表失败:', err.message)
+  }
+}
+
+function handleSearch() {
+  loadData()
 }
 
 function handleReset() {
-  filterForm.store = ''
+  filterForm.storeId = ''
   filterForm.period = 'week'
-  handleSearch()
+  loadData()
 }
+
+onMounted(() => {
+  loadStoreOptions()
+  loadData()
+})
 </script>
 
 <style scoped>
@@ -252,7 +262,7 @@ function handleReset() {
 /* 统计卡片 */
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
 
@@ -301,12 +311,5 @@ function handleReset() {
   justify-content: space-between;
   align-items: center;
   font-weight: 600;
-}
-
-.trend-cell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
 }
 </style>

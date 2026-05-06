@@ -551,6 +551,30 @@ app.get('/api/sync-lock/:storeId', (req, res) => {
   }
 })
 
+// ============ 店铺销售统计（代理到远程服务器） ============
+
+app.get('/api/store-sales-stats', async (req, res) => {
+  try {
+    const remoteUrl = `http://150.158.54.108:3002/api/store-sales-stats`
+    const params = new URLSearchParams()
+    if (req.query.store_id) params.append('store_id', req.query.store_id)
+    if (req.query.period) params.append('period', req.query.period)
+    const qs = params.toString()
+    const fullUrl = qs ? `${remoteUrl}?${qs}` : remoteUrl
+
+    const headers = { 'Content-Type': 'application/json' }
+    const authHeader = req.headers['authorization']
+    if (authHeader) headers['Authorization'] = authHeader
+
+    const response = await fetch(fullUrl, { headers })
+    const data = await response.json()
+    res.json(data)
+  } catch (err) {
+    console.error('[店铺销售统计代理] 错误:', err.message)
+    res.status(500).json(fail('获取店铺销售统计失败: ' + err.message))
+  }
+})
+
 // ============ 启动 ============
 
 function startServer(port = 3002) {

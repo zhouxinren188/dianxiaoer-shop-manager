@@ -1162,6 +1162,93 @@ app.get('/api/sales-orders/:orderId', async (req, res) => {
 
 
 
+// ============ 店铺销售统计 ============
+
+app.get('/api/store-sales-stats', async (req, res) => {
+  try {
+    const { store_id, period } = req.query
+    const storeIds = await getAccessibleStoreIds(req.user)
+
+    if (!storeIds.length) {
+      return res.json(ok({ summary: { totalSales: 0, totalOrders: 0, avgOrderValue: 0 }, list: [] }))
+    }
+
+    // 排除的状态：待付款、等待付款、已取消
+    const excludeStatuses = ['待付款', '等待付款', '已取消']
+    const excludePlaceholders = excludeStatuses.map(() => '?').join(',')
+
+    // 店铺筛选
+    let targetStoreIds = storeIds
+    if (store_id) {
+      if (!storeIds.includes(+store_id)) {
+        return res.status(403).json(fail('无权查看此店铺'))
+      }
+      targetStoreIds = [+store_id]
+    }
+
+    // 时间筛选
+    let dateJoin = ''
+    if (period) {
+      switch (period) {
+        case 'today':
+          dateJoin = "AND DATE(so.order_time) = CURDATE()"
+          break
+        case 'week':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
+          break
+        case 'month':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)"
+          break
+        case 'quarter':
+          dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+          break
+      }
+    }
+
+    // 按店铺分组统计
+    const storePlaceholders = targetStoreIds.map(() => '?').join(',')
+    const [storeRows] = await pool.execute(
+      `SELECT s.id as storeId, s.name as storeName, s.platform,
+              COALESCE(SUM(so.goods_amount), 0) as salesAmount,
+              COUNT(so.id) as orderCount
+       FROM stores s
+       LEFT JOIN sales_orders so ON s.id = so.store_id AND so.status_text NOT IN (${excludePlaceholders}) ${dateJoin}
+       WHERE s.id IN (${storePlaceholders})
+       GROUP BY s.id, s.name, s.platform
+       ORDER BY salesAmount DESC`,
+      [...excludeStatuses, ...targetStoreIds]
+    )
+
+    // 计算总销售额（用于占比）
+    const totalSales = storeRows.reduce((sum, r) => sum + Number(r.salesAmount), 0)
+
+    const list = storeRows.map(r => ({
+      storeId: r.storeId,
+      storeName: r.storeName,
+      platform: r.platform,
+      salesAmount: Number(r.salesAmount),
+      orderCount: Number(r.orderCount),
+      avgOrderValue: Number(r.orderCount) > 0 ? Math.round(Number(r.salesAmount) / Number(r.orderCount) * 100) / 100 : 0,
+      ratio: totalSales > 0 ? Math.round(Number(r.salesAmount) / totalSales * 1000) / 10 : 0
+    }))
+
+    const summaryTotalSales = list.reduce((sum, r) => sum + r.salesAmount, 0)
+    const summaryTotalOrders = list.reduce((sum, r) => sum + r.orderCount, 0)
+
+    res.json(ok({
+      summary: {
+        totalSales: Math.round(summaryTotalSales * 100) / 100,
+        totalOrders: summaryTotalOrders,
+        avgOrderValue: summaryTotalOrders > 0 ? Math.round(summaryTotalSales / summaryTotalOrders * 100) / 100 : 0
+      },
+      list
+    }))
+  } catch (err) {
+    console.error('[店铺销售统计] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // ============ SKU 采购配置 ============
 
 app.get('/api/sku-purchase-config', async (req, res) => {

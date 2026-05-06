@@ -42,3 +42,8 @@ export function lockSalesOrderForPurchase(orderId) {
 export function unlockSalesOrderPurchase(orderId) {
   return del(`/api/sales-orders/${orderId}/purchase-lock`)
 }
+
+// 店铺销售统计
+export function fetchStoreSalesStats(params) {
+  return get('/api/store-sales-stats', params)
+}
