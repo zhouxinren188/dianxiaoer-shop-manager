@@ -1605,7 +1605,7 @@ app.get('/api/sales-orders/:orderId', async (req, res) => {
 
 app.get('/api/store-sales-stats', async (req, res) => {
   try {
-    const { store_id, period } = req.query
+    const { store_id, period, start_date, end_date } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
@@ -1627,7 +1627,11 @@ app.get('/api/store-sales-stats', async (req, res) => {
 
     // 时间筛选
     let dateJoin = ''
-    if (period) {
+    const dateParams = []
+    if (start_date && end_date) {
+      dateJoin = "AND so.order_time >= ? AND so.order_time < DATE_ADD(?, INTERVAL 1 DAY)"
+      dateParams.push(start_date, end_date)
+    } else if (period) {
       switch (period) {
         case 'today':
           dateJoin = "AND DATE(so.order_time) = CURDATE()"
@@ -1655,7 +1659,7 @@ app.get('/api/store-sales-stats', async (req, res) => {
        WHERE s.id IN (${storePlaceholders})
        GROUP BY s.id, s.name, s.platform, s.tags
        ORDER BY salesAmount DESC`,
-      [...excludeStatuses, ...targetStoreIds]
+      [...excludeStatuses, ...dateParams, ...targetStoreIds]
     )
 
     // 计算总销售额（用于占比）

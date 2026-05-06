@@ -3101,10 +3101,10 @@ async function autoSyncAllStores(mainWindow) {
         await releaseSyncLock(store.store_id, 'sales', result?.success ?? false)
       }
 
-      // 多店铺之间间隔 30 秒，避免频繁操作
+      // 多店铺之间间隔 5 秒
       if (i < jdStores.length - 1) {
-        console.log('[AutoSync] 等待 30 秒后同步下一个店铺...')
-        await new Promise(resolve => setTimeout(resolve, 30000))
+        console.log('[AutoSync] 等待 5 秒后同步下一个店铺...')
+        await new Promise(resolve => setTimeout(resolve, 5000))
       }
     }
   } catch (err) {

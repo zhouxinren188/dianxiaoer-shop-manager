@@ -29,9 +29,6 @@
         <el-button type="danger" size="small" @click="handleAccountManage">账号管理</el-button>
         <el-button type="primary" size="small" @click="handleAddAccount">新增账号</el-button>
         <el-button size="small" @click="handleImportAccount">导入账号</el-button>
-        <el-button type="warning" size="small" @click="handleBatchImport">
-          <el-icon><Upload /></el-icon> 批量导入
-        </el-button>
         <el-button type="primary" @click="handleSync" :loading="syncing">
           <el-icon><Refresh /></el-icon>
           同步采购订单
@@ -91,6 +88,10 @@
           <el-button type="success" @click="handleAddPurchase">
             <el-icon><Plus /></el-icon>
             手动添加采购单
+          </el-button>
+          <el-button type="warning" @click="handleBatchImport">
+            <el-icon><Upload /></el-icon>
+            批量导入
           </el-button>
         </el-form-item>
       </el-form>

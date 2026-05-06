@@ -43,12 +43,24 @@
           </el-select>
         </el-form-item>
         <el-form-item label="统计周期">
-          <el-select v-model="filterForm.period" placeholder="选择周期" style="width: 140px">
+          <el-select v-model="filterForm.period" placeholder="选择周期" style="width: 140px" @change="handlePeriodChange">
             <el-option label="今日" value="today" />
             <el-option label="近7天" value="week" />
             <el-option label="近30天" value="month" />
             <el-option label="本季度" value="quarter" />
+            <el-option label="自定义" value="custom" />
           </el-select>
+          <el-date-picker
+            v-if="filterForm.period === 'custom'"
+            v-model="filterForm.dateRange"
+            type="daterange"
+            range-separator="至"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            style="width: 260px; margin-left: 8px"
+            value-format="YYYY-MM-DD"
+            :clearable="false"
+          />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSearch">
@@ -137,9 +149,11 @@ const summary = reactive({
   avgOrderValue: 0
 })
 
+const today = new Date().toISOString().slice(0, 10)
 const filterForm = reactive({
   storeId: '',
-  period: 'week'
+  period: 'today',
+  dateRange: [today, today]
 })
 
 const sortBy = ref('sales')
@@ -169,7 +183,12 @@ async function loadData() {
   try {
     const params = {}
     if (filterForm.storeId) params.store_id = filterForm.storeId
-    if (filterForm.period) params.period = filterForm.period
+    if (filterForm.period === 'custom' && filterForm.dateRange) {
+      params.start_date = filterForm.dateRange[0]
+      params.end_date = filterForm.dateRange[1]
+    } else if (filterForm.period) {
+      params.period = filterForm.period
+    }
 
     const res = await fetchStoreSalesStats(params)
     if (res) {
@@ -198,13 +217,20 @@ async function loadStoreOptions() {
   }
 }
 
+function handlePeriodChange(val) {
+  if (val === 'custom' && !filterForm.dateRange) {
+    filterForm.dateRange = [today, today]
+  }
+}
+
 function handleSearch() {
   loadData()
 }
 
 function handleReset() {
   filterForm.storeId = ''
-  filterForm.period = 'week'
+  filterForm.period = 'today'
+  filterForm.dateRange = [today, today]
   loadData()
 }
 
