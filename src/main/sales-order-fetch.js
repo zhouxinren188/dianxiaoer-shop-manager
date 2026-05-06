@@ -2890,8 +2890,25 @@ async function saveOrdersToServer(storeId, orders) {
       let body = ''
       res.on('data', chunk => { body += chunk })
       res.on('end', () => {
-        console.log(`[AutoSync] 保存订单响应: ${res.statusCode}`)
-        resolve(res.statusCode === 200)
+        console.log(`[AutoSync] 保存订单响应: ${res.statusCode}, body: ${body.substring(0, 200)}`)
+        if (res.statusCode === 200) {
+          try {
+            const json = JSON.parse(body)
+            if (json.code === 0) {
+              console.log(`[AutoSync] 保存成功: ${json.data?.saved || '?'} 条`)
+              resolve(true)
+            } else {
+              console.error(`[AutoSync] 保存订单业务失败: ${json.message}`)
+              resolve(false)
+            }
+          } catch (e) {
+            console.error(`[AutoSync] 保存订单解析响应失败: ${body.substring(0, 200)}`)
+            resolve(false)
+          }
+        } else {
+          console.error(`[AutoSync] 保存订单HTTP失败: ${res.statusCode}`)
+          resolve(false)
+        }
       })
     })
     req.on('error', (e) => { console.error('[AutoSync] 保存订单失败:', e.message); resolve(false) })
@@ -3076,7 +3093,10 @@ async function autoSyncAllStores(mainWindow) {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${orders.length} 条订单`)
           // 主进程直接保存订单到服务器，避免通过 IPC 传递导致双重保存
           if (orders.length > 0) {
-            await saveOrdersToServer(store.store_id, orders)
+            const saved = await saveOrdersToServer(store.store_id, orders)
+            if (!saved) {
+              console.error(`[AutoSync] [${i + 1}/${jdStores.length}] 保存订单到服务器失败！`)
+            }
           }
           // 更新同步时间
           await updateSyncTimeOnServer(store.store_id)
