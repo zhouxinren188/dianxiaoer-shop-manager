@@ -2229,8 +2229,15 @@ onMounted(async () => {
     })
     unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', async (data) => {
       mainProcessSyncStatus.value = ''
-      // 订单已由主进程直接保存到服务器，此处只做刷新
-      if (data.success) {
+      if (data.skipped) {
+        // 店铺被跳过（10分钟内已同步）
+        syncSkipStatus.value = `${data.storeName}：${data.message}`
+        // 5秒后自动清除跳过提示
+        setTimeout(() => {
+          syncSkipStatus.value = ''
+        }, 5000)
+      } else if (data.success) {
+        // 订单已由主进程直接保存到服务器，此处只做刷新
         loadOrdersFromServer()
         loadStatusCounts()
       }

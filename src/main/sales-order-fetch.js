@@ -3046,7 +3046,17 @@ async function autoSyncAllStores(mainWindow) {
       // 请求同步锁，避免多设备重复同步
       const lock = await requestSyncLock(store.store_id, 'sales')
       if (!lock.granted) {
-        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 跳过: 已被其他设备同步 (by:${lock.lockedBy}, at:${lock.lastSyncAt})`)
+        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 跳过: ${lock.message}`)
+        // 通知渲染进程该店铺被跳过
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('auto-sync-result', {
+            storeId: store.store_id,
+            storeName: store.store_name,
+            success: false,
+            skipped: true,
+            message: lock.message || '10分钟内已同步，跳过'
+          })
+        }
         continue
       }
 
