@@ -29,6 +29,9 @@
         <el-button type="danger" size="small" @click="handleAccountManage">账号管理</el-button>
         <el-button type="primary" size="small" @click="handleAddAccount">新增账号</el-button>
         <el-button size="small" @click="handleImportAccount">导入账号</el-button>
+        <el-button type="warning" size="small" @click="handleBatchImport">
+          <el-icon><Upload /></el-icon> 批量导入
+        </el-button>
         <el-button type="primary" @click="handleSync" :loading="syncing">
           <el-icon><Refresh /></el-icon>
           同步采购订单
@@ -558,6 +561,126 @@
         <el-button type="primary" @click="handleAddPurchaseSubmit">确认添加</el-button>
       </template>
     </el-dialog>
+
+    <!-- 批量导入对话框 -->
+    <el-dialog v-model="importDialogVisible" title="批量导入采购订单" width="800px" :close-on-click-modal="false" @close="handleImportDialogClose">
+      <el-steps :active="importStep - 1" align-center style="margin-bottom: 24px">
+        <el-step title="下载模版" />
+        <el-step title="上传文件" />
+        <el-step title="预览校验" />
+        <el-step title="导入结果" />
+      </el-steps>
+
+      <!-- 步骤1：下载模版 -->
+      <div v-if="importStep === 1">
+        <el-alert type="info" :closable="false" style="margin-bottom: 16px">
+          <p>1. 下载导入模版，按格式填写采购订单数据</p>
+          <p>2. 标 <span style="color:#f56c6c">*</span> 的列为必填项，其他为选填</p>
+          <p>3. 采购账号必须填写系统中已存在的账号名称</p>
+          <p>4. 采购平台支持中文：淘宝/天猫、拼多多、1688、抖音</p>
+        </el-alert>
+        <el-table :data="importTemplateFields" border size="small" style="margin-bottom: 16px">
+          <el-table-column prop="header" label="列名" width="140" />
+          <el-table-column prop="required" label="必填" width="60" align="center">
+            <template #default="{ row }">
+              <span v-if="row.required" style="color:#f56c6c">*</span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="desc" label="说明" />
+        </el-table>
+        <div style="text-align: center">
+          <el-button type="primary" @click="handleDownloadTemplate">
+            <el-icon><Download /></el-icon> 下载导入模版
+          </el-button>
+          <el-button @click="importStep = 2">我已有模版，下一步</el-button>
+        </div>
+      </div>
+
+      <!-- 步骤2：上传文件 -->
+      <div v-if="importStep === 2">
+        <el-upload
+          ref="importUploadRef"
+          drag
+          :auto-upload="false"
+          :limit="1"
+          accept=".xlsx,.xls"
+          :on-change="handleImportFileChange"
+          :on-exceed="() => ElMessage.warning('只能上传一个文件')"
+        >
+          <el-icon :size="48" style="color: #c0c4cc"><Upload /></el-icon>
+          <div style="margin-top: 8px">将 Excel 文件拖到此处，或 <em>点击上传</em></div>
+          <template #tip>
+            <div style="color: #909399; font-size: 12px">仅支持 .xlsx / .xls 文件，最多 200 条数据</div>
+          </template>
+        </el-upload>
+        <div v-if="importParsing" style="text-align: center; margin-top: 16px">
+          <el-icon class="is-loading"><Refresh /></el-icon> 正在解析文件...
+        </div>
+        <div style="text-align: center; margin-top: 16px">
+          <el-button @click="importStep = 1">上一步</el-button>
+        </div>
+      </div>
+
+      <!-- 步骤3：预览校验 -->
+      <div v-if="importStep === 3">
+        <el-alert :closable="false" style="margin-bottom: 12px">
+          <span>共 <b>{{ importData.length }}</b> 条，</span>
+          <span style="color: #67c23a">有效 <b>{{ importValidCount }}</b> 条，</span>
+          <span style="color: #f56c6c">无效 <b>{{ importInvalidCount }}</b> 条</span>
+        </el-alert>
+        <el-table :data="importDataWithValidation" border size="small" max-height="400" :row-class-name="importRowClassName">
+          <el-table-column type="index" label="#" width="50" />
+          <el-table-column prop="sales_order_no" label="销售关联单号" min-width="120" />
+          <el-table-column prop="platform_order_no" label="采购订单号" min-width="140" />
+          <el-table-column prop="account_name" label="采购账号" width="120" />
+          <el-table-column prop="goods_name" label="商品名称" min-width="120" show-overflow-tooltip />
+          <el-table-column prop="quantity" label="数量" width="60" align="center" />
+          <el-table-column prop="purchase_price" label="采购单价" width="80" align="center" />
+          <el-table-column prop="platform" label="平台" width="80" align="center" />
+          <el-table-column label="校验" width="80" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row._valid" type="success" size="small">通过</el-tag>
+              <el-tag v-else type="danger" size="small">无效</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="_errors" label="错误原因" min-width="160">
+            <template #default="{ row }">
+              <span v-if="row._errors.length" style="color: #f56c6c; font-size: 12px">{{ row._errors.join('；') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="60" align="center">
+            <template #default="{ $index }">
+              <el-button type="danger" size="small" link @click="removeImportRow($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div style="text-align: center; margin-top: 16px">
+          <el-button @click="importStep = 2">上一步</el-button>
+          <el-button type="primary" :disabled="importValidCount === 0" @click="handleConfirmImport">确认导入（{{ importValidCount }} 条）</el-button>
+        </div>
+      </div>
+
+      <!-- 步骤4：导入结果 -->
+      <div v-if="importStep === 4">
+        <el-result v-if="importResult" :icon="importResult.fail_count === 0 ? 'success' : 'warning'" :title="importResult.fail_count === 0 ? '导入完成' : '导入完成（部分失败）'">
+          <template #sub-title>
+            <p>成功导入 <b style="color: #67c23a">{{ importResult.success_count }}</b> 条</p>
+            <p v-if="importResult.fail_count > 0">失败 <b style="color: #f56c6c">{{ importResult.fail_count }}</b> 条</p>
+          </template>
+          <template #extra>
+            <div v-if="importResult.errors && importResult.errors.length" style="text-align: left; max-height: 200px; overflow-y: auto; margin-bottom: 12px">
+              <p v-for="(e, idx) in importResult.errors" :key="idx" style="font-size: 12px; color: #f56c6c">第 {{ e.row }} 行：{{ e.message }}</p>
+            </div>
+            <el-button type="primary" @click="handleImportDialogClose">关闭</el-button>
+          </template>
+        </el-result>
+        <div v-if="importLoading" style="text-align: center; padding: 40px">
+          <el-icon class="is-loading" :size="32"><Refresh /></el-icon>
+          <p style="margin-top: 12px; color: #909399">正在导入，请稍候...</p>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -569,9 +692,11 @@ import {
   Search,
   Refresh,
   RefreshRight,
-  Plus
+  Plus,
+  Upload,
+  Download
 } from '@element-plus/icons-vue'
-import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder } from '@/api/purchaseOrder'
+import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 
 // ==================== 常量配置 ====================
@@ -584,12 +709,85 @@ const statusOptions = [
   { label: '已入库', value: 'stocked' }
 ]
 
+// 批量导入 — 模版列定义
+const importTemplateFields = [
+  { header: '销售关联单号', required: true, desc: '关联的销售订单号' },
+  { header: '采购订单号', required: true, desc: '平台采购订单号' },
+  { header: '采购账号', required: true, desc: '系统中已存在的采购账号名称' },
+  { header: '商品名称', required: false, desc: '商品名称' },
+  { header: '数量', required: false, desc: '采购数量，默认1' },
+  { header: '采购单价', required: false, desc: '采购单价，默认0' },
+  { header: '采购平台', required: false, desc: 'taobao/pinduoduo/1688/douyin 或中文：淘宝/拼多多/1688/抖音' },
+  { header: 'SKU', required: false, desc: '商品SKU' },
+  { header: '来源链接', required: false, desc: '商品采购链接' },
+  { header: '备注', required: false, desc: '备注信息' },
+  { header: '收货人', required: false, desc: '收货人姓名' },
+  { header: '收货电话', required: false, desc: '收货人电话' },
+  { header: '收货地址', required: false, desc: '收货地址' }
+]
+
+// 中文表头 → 字段 key 映射
+const HEADER_KEY_MAP = {
+  '销售关联单号': 'sales_order_no',
+  '采购订单号': 'platform_order_no',
+  '采购账号': 'account_name',
+  '商品名称': 'goods_name',
+  '数量': 'quantity',
+  '采购单价': 'purchase_price',
+  '采购平台': 'platform',
+  'SKU': 'sku',
+  '来源链接': 'source_url',
+  '备注': 'remark',
+  '收货人': 'shipping_name',
+  '收货电话': 'shipping_phone',
+  '收货地址': 'shipping_address'
+}
+
+// 平台中文名映射
+const PLATFORM_ALIAS = {
+  '淘宝': 'taobao', '天猫': 'taobao', '淘宝/天猫': 'taobao',
+  '拼多多': 'pinduoduo', '阿里巴巴': '1688', '抖音': 'douyin'
+}
+const VALID_PLATFORMS = ['taobao', 'pinduoduo', '1688', 'douyin']
+
 // ==================== 状态 ====================
 
 const loading = ref(false)
 const syncing = ref(false)
 const tableData = ref([])
 const selectedAccount = ref('')
+
+// ==================== 批量导入 ====================
+
+const importDialogVisible = ref(false)
+const importStep = ref(1)
+const importData = ref([])
+const importParsing = ref(false)
+const importLoading = ref(false)
+const importResult = ref(null)
+const importUploadRef = ref(null)
+
+// 校验后的数据（computed）
+const importDataWithValidation = computed(() => {
+  const validAccountNames = new Set(accountList.value.map(a => (a.username || '').trim().toLowerCase()))
+  return importData.value.map(row => {
+    const errors = []
+    if (!String(row.sales_order_no || '').trim()) errors.push('销售关联单号不能为空')
+    if (!String(row.platform_order_no || '').trim()) errors.push('采购订单号不能为空')
+    const accName = String(row.account_name || '').trim()
+    if (!accName) errors.push('采购账号不能为空')
+    else if (!validAccountNames.has(accName.toLowerCase())) errors.push(`采购账号"${accName}"不存在`)
+    if (row.platform) {
+      const p = String(row.platform).trim()
+      const mapped = PLATFORM_ALIAS[p] || p
+      if (!VALID_PLATFORMS.includes(mapped)) errors.push(`采购平台"${p}"无效`)
+    }
+    return { ...row, _valid: errors.length === 0, _errors: errors }
+  })
+})
+const importValidCount = computed(() => importDataWithValidation.value.filter(r => r._valid).length)
+const importInvalidCount = computed(() => importDataWithValidation.value.filter(r => !r._valid).length)
+function importRowClassName({ row }) { return row._valid ? '' : 'import-row-invalid' }
 
 // ==================== 账号管理 ====================
 
@@ -1307,9 +1505,169 @@ onUnmounted(() => {
     unsubOrderCaptured = null
   }
 })
+
+// ==================== 批量导入功能 ====================
+
+function handleBatchImport() {
+  importDialogVisible.value = true
+  importStep.value = 1
+  importData.value = []
+  importParsing.value = false
+  importLoading.value = false
+  importResult.value = null
+}
+
+async function handleDownloadTemplate() {
+  const XLSX = await import('xlsx')
+  const wb = XLSX.utils.book_new()
+
+  // Sheet1: 数据模版
+  const headers = importTemplateFields.map(f => f.header)
+  const ws1 = XLSX.utils.aoa_to_sheet([headers])
+  // 设置列宽
+  ws1['!cols'] = headers.map(() => ({ wch: 18 }))
+  XLSX.utils.book_append_sheet(wb, ws1, '采购订单导入')
+
+  // Sheet2: 填写说明
+  const instructions = [
+    ['字段', '必填', '说明'],
+    ['销售关联单号', '是', '关联的销售订单号'],
+    ['采购订单号', '是', '平台上的采购订单号'],
+    ['采购账号', '是', '必须与系统中已有采购账号名称完全一致'],
+    ['商品名称', '否', '商品名称'],
+    ['数量', '否', '整数，默认1'],
+    ['采购单价', '否', '数字，默认0'],
+    ['采购平台', '否', '支持：taobao / pinduoduo / 1688 / douyin 或中文：淘宝/拼多多/1688/抖音'],
+    ['SKU', '否', '商品SKU规格'],
+    ['来源链接', '否', '商品采购链接'],
+    ['备注', '否', '备注信息'],
+    ['收货人', '否', '收货人姓名'],
+    ['收货电话', '否', '收货人电话'],
+    ['收货地址', '否', '收货地址']
+  ]
+  const ws2 = XLSX.utils.aoa_to_sheet(instructions)
+  ws2['!cols'] = [{ wch: 16 }, { wch: 6 }, { wch: 50 }]
+  XLSX.utils.book_append_sheet(wb, ws2, '填写说明')
+
+  XLSX.writeFile(wb, '采购订单导入模版.xlsx')
+  ElMessage.success('模版已下载')
+}
+
+async function handleImportFileChange(file) {
+  if (!file || !file.raw) return
+  importParsing.value = true
+  try {
+    const XLSX = await import('xlsx')
+    const data = await file.raw.arrayBuffer()
+    const workbook = XLSX.read(data, { type: 'array' })
+    const sheetName = workbook.SheetNames[0]
+    const sheet = workbook.Sheets[sheetName]
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 })
+
+    if (rows.length < 2) {
+      ElMessage.warning('文件中没有数据行')
+      importParsing.value = false
+      return
+    }
+
+    // 首行作为表头，建立列索引映射
+    const headerRow = rows[0].map(h => String(h || '').trim())
+    const colMap = {}
+    for (let i = 0; i < headerRow.length; i++) {
+      const key = HEADER_KEY_MAP[headerRow[i]]
+      if (key) colMap[key] = i
+    }
+
+    // 检查必填列是否存在
+    const missingCols = []
+    if (colMap.sales_order_no === undefined) missingCols.push('销售关联单号')
+    if (colMap.platform_order_no === undefined) missingCols.push('采购订单号')
+    if (colMap.account_name === undefined) missingCols.push('采购账号')
+    if (missingCols.length) {
+      ElMessage.error(`模版缺少必填列：${missingCols.join('、')}`)
+      importParsing.value = false
+      return
+    }
+
+    // 解析数据行
+    const parsed = []
+    for (let i = 1; i < rows.length && parsed.length < 200; i++) {
+      const row = rows[i]
+      if (!row || row.every(c => c === undefined || c === null || String(c).trim() === '')) continue
+      const obj = {}
+      for (const [key, colIdx] of Object.entries(colMap)) {
+        obj[key] = row[colIdx] !== undefined && row[colIdx] !== null ? row[colIdx] : ''
+      }
+      parsed.push(obj)
+    }
+
+    if (parsed.length === 0) {
+      ElMessage.warning('文件中没有有效数据行')
+      importParsing.value = false
+      return
+    }
+
+    importData.value = parsed
+    importParsing.value = false
+    importStep.value = 3
+  } catch (err) {
+    console.error('解析文件失败:', err)
+    ElMessage.error('解析文件失败: ' + err.message)
+    importParsing.value = false
+  }
+}
+
+function removeImportRow(index) {
+  importData.value.splice(index, 1)
+}
+
+async function handleConfirmImport() {
+  const validRows = importDataWithValidation.value.filter(r => r._valid).map(r => {
+    // 清理内部字段，映射平台中文名
+    const obj = {}
+    for (const [key, val] of Object.entries(r)) {
+      if (!key.startsWith('_')) obj[key] = val
+    }
+    // 平台映射
+    if (obj.platform) {
+      const p = String(obj.platform).trim()
+      if (PLATFORM_ALIAS[p]) obj.platform = PLATFORM_ALIAS[p]
+    }
+    return obj
+  })
+
+  if (validRows.length === 0) return
+
+  importLoading.value = true
+  importStep.value = 4
+  importResult.value = null
+
+  try {
+    const data = await batchImportPurchaseOrders(validRows)
+    importResult.value = data
+  } catch (err) {
+    importResult.value = { success_count: 0, fail_count: validRows.length, errors: [{ row: '-', message: err.message }] }
+  } finally {
+    importLoading.value = false
+  }
+}
+
+function handleImportDialogClose() {
+  importDialogVisible.value = false
+  // 如果有成功导入的数据，刷新列表
+  if (importResult.value && importResult.value.success_count > 0) {
+    loadData()
+  }
+}
 </script>
 
 <style scoped>
+.import-row-invalid {
+  --el-table-tr-bg-color: #fef0f0;
+}
+.import-row-invalid:hover > td {
+  --el-table-tr-bg-color: #fde2e2 !important;
+}
 .purchase-page {
   min-height: 100%;
   padding: 0;

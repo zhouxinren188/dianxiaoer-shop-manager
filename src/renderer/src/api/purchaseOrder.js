@@ -49,3 +49,8 @@ export function fetchNextPurchaseNo() {
 export function fetchLogisticsTracking(id) {
   return get(`/api/purchase-orders/${id}/logistics`)
 }
+
+// 批量导入采购订单
+export function batchImportPurchaseOrders(orders) {
+  return post('/api/purchase-orders/batch-import', { orders }, 30000)
+}

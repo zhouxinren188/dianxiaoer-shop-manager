@@ -1959,6 +1959,102 @@ app.post('/api/purchase-orders', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// 批量导入采购订单
+app.post('/api/purchase-orders/batch-import', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { orders } = req.body
+    if (!Array.isArray(orders) || orders.length === 0) return res.json(fail('导入数据不能为空'))
+    if (orders.length > 200) return res.json(fail('单次最多导入 200 条'))
+
+    // 构建采购账号名 → ID 映射
+    const [accRows] = await pool.execute('SELECT id, account FROM purchase_accounts WHERE owner_id = ?', [ownerId])
+    const accountMap = new Map()
+    for (const a of accRows) {
+      accountMap.set(a.account.trim(), a.id)
+      accountMap.set(a.account.trim().toLowerCase(), a.id)
+    }
+
+    // 平台中文名映射
+    const PLATFORM_ALIAS = { '淘宝': 'taobao', '天猫': 'taobao', '淘宝/天猫': 'taobao', '拼多多': 'pinduoduo', '阿里巴巴': '1688', '抖音': 'douyin' }
+    const VALID_PLATFORMS = ['taobao', 'pinduoduo', '1688', 'douyin']
+
+    // 获取当前最大 purchase_no
+    const [maxRows] = await pool.execute("SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^[0-9]+$' ORDER BY id DESC LIMIT 1")
+    let nextNum = 1
+    if (maxRows.length > 0 && maxRows[0].purchase_no) {
+      const num = parseInt(maxRows[0].purchase_no, 10)
+      if (!isNaN(num)) nextNum = num + 1
+    }
+
+    let successCount = 0
+    let failCount = 0
+    const errors = []
+
+    for (let i = 0; i < orders.length; i++) {
+      const row = orders[i]
+      const rowNum = i + 2 // Excel 行号（1表头+1起）
+
+      // 校验必填
+      if (!row.sales_order_no || !String(row.sales_order_no).trim()) {
+        errors.push({ row: rowNum, message: '销售关联单号不能为空' }); failCount++; continue
+      }
+      if (!row.platform_order_no || !String(row.platform_order_no).trim()) {
+        errors.push({ row: rowNum, message: '采购订单号不能为空' }); failCount++; continue
+      }
+      const accName = String(row.account_name || '').trim()
+      if (!accName) {
+        errors.push({ row: rowNum, message: '采购账号不能为空' }); failCount++; continue
+      }
+      const accountId = accountMap.get(accName) || accountMap.get(accName.toLowerCase())
+      if (!accountId) {
+        errors.push({ row: rowNum, message: `采购账号"${accName}"不存在` }); failCount++; continue
+      }
+
+      // 平台映射
+      let platform = String(row.platform || '').trim()
+      if (PLATFORM_ALIAS[platform]) platform = PLATFORM_ALIAS[platform]
+      if (platform && !VALID_PLATFORMS.includes(platform)) {
+        errors.push({ row: rowNum, message: `采购平台"${platform}"无效，支持: taobao/pinduoduo/1688/douyin` }); failCount++; continue
+      }
+
+      const purchaseNo = String(nextNum++).padStart(4, '0')
+      const quantity = parseInt(row.quantity) || 1
+      const purchasePrice = parseFloat(row.purchase_price) || 0
+
+      try {
+        await pool.execute(
+          `INSERT INTO purchase_orders
+            (purchase_no, sales_order_no, platform_order_no, goods_name, sku, quantity,
+             source_url, platform, purchase_price, remark,
+             shipping_name, shipping_phone, shipping_address, account_id,
+             status, owner_id, created_by)
+           VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?, ?)
+           ON DUPLICATE KEY UPDATE
+             owner_id=VALUES(owner_id),
+             sales_order_no=VALUES(sales_order_no), platform_order_no=VALUES(platform_order_no),
+             goods_name=VALUES(goods_name), sku=VALUES(sku), quantity=VALUES(quantity),
+             source_url=VALUES(source_url), platform=VALUES(platform),
+             purchase_price=VALUES(purchase_price), remark=VALUES(remark),
+             shipping_name=VALUES(shipping_name), shipping_phone=VALUES(shipping_phone),
+             shipping_address=VALUES(shipping_address), account_id=VALUES(account_id),
+             status='pending', updated_at=NOW()`,
+          [purchaseNo, String(row.sales_order_no).trim(), String(row.platform_order_no).trim(),
+           row.goods_name || '', row.sku || '', quantity,
+           row.source_url || '', platform, purchasePrice, row.remark || '',
+           row.shipping_name || '', row.shipping_phone || '', row.shipping_address || '', accountId,
+           ownerId, req.user.id]
+        )
+        successCount++
+      } catch (e) {
+        errors.push({ row: rowNum, message: e.message }); failCount++
+      }
+    }
+
+    res.json(ok({ success_count: successCount, fail_count: failCount, errors }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)

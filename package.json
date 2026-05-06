@@ -75,7 +75,8 @@
     "puppeteer-core": "^24.42.0",
     "ssh2": "^1.17.0",
     "vue": "^3.5.33",
-    "vue-router": "^5.0.6"
+    "vue-router": "^5.0.6",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.6",
