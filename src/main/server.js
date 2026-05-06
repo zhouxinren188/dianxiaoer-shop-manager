@@ -567,8 +567,20 @@ app.get('/api/store-sales-stats', async (req, res) => {
     if (authHeader) headers['Authorization'] = authHeader
 
     const response = await fetch(fullUrl, { headers })
-    const data = await response.json()
-    res.json(data)
+
+    // 原样转发远程状态码
+    res.status(response.status)
+
+    // 如果远程返回 JSON，原样转发
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) {
+      const data = await response.json()
+      res.json(data)
+    } else {
+      // 远程返回非 JSON（如 404 HTML），返回标准错误 JSON
+      console.error('[店铺销售统计代理] 远程返回非 JSON 响应, status:', response.status, 'content-type:', contentType)
+      res.json(fail(`远程服务返回异常 (HTTP ${response.status})，请确认后端已部署最新代码`))
+    }
   } catch (err) {
     console.error('[店铺销售统计代理] 错误:', err.message)
     res.status(500).json(fail('获取店铺销售统计失败: ' + err.message))

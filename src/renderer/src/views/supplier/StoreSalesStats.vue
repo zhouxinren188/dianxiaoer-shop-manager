@@ -84,10 +84,12 @@
       >
         <el-table-column type="index" label="排名" width="70" align="center" />
 
-        <el-table-column prop="storeName" label="店铺名称" min-width="180">
+        <el-table-column prop="storeName" label="店铺名称" min-width="180" />
+
+        <el-table-column label="店铺标签" width="160" align="center">
           <template #default="{ row }">
-            <span>{{ row.storeName }}</span>
-            <el-tag v-if="row.platform" size="small" style="margin-left: 6px">{{ row.platform }}</el-tag>
+            <el-tag v-if="row.platform" size="small" style="margin-right: 4px">{{ row.platform }}</el-tag>
+            <el-tag v-for="tag in (row.tags || [])" :key="tag" size="small" type="info" style="margin-right: 4px">{{ tag }}</el-tag>
           </template>
         </el-table-column>
 

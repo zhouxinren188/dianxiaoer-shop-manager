@@ -11,7 +11,7 @@ const NSSM = 'C:/nssm/nssm.exe'
 
 const ROOT = __dirname
 const DIST_DIR = path.join(ROOT, 'dist')
-const VERSION = '1.3.5'
+const VERSION = '1.3.6'
 const REMOTE_UPDATE_DIR = 'C:/Users/Administrator/dianxiaoer-api/updates'
 
 const conn = new Client()

@@ -51,7 +51,7 @@ async function deploy() {
       console.log('[Deploy] Waiting 3s for service startup...')
       await new Promise(r => setTimeout(r, 3000))
 
-      const health = await execCommand(conn, `curl -s http://localhost:3001/health`)
+      const health = await execCommand(conn, `curl -s http://localhost:3002/health`)
       console.log('[Deploy] Health check:', health.stdout)
 
       console.log('[Deploy] Done.')

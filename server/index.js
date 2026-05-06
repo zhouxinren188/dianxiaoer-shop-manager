@@ -1647,13 +1647,13 @@ app.get('/api/store-sales-stats', async (req, res) => {
     // 按店铺分组统计
     const storePlaceholders = targetStoreIds.map(() => '?').join(',')
     const [storeRows] = await pool.execute(
-      `SELECT s.id as storeId, s.name as storeName, s.platform,
+      `SELECT s.id as storeId, s.name as storeName, s.platform, s.tags,
               COALESCE(SUM(so.goods_amount), 0) as salesAmount,
               COUNT(so.id) as orderCount
        FROM stores s
        LEFT JOIN sales_orders so ON s.id = so.store_id AND so.status_text NOT IN (${excludePlaceholders}) ${dateJoin}
        WHERE s.id IN (${storePlaceholders})
-       GROUP BY s.id, s.name, s.platform
+       GROUP BY s.id, s.name, s.platform, s.tags
        ORDER BY salesAmount DESC`,
       [...excludeStatuses, ...targetStoreIds]
     )
@@ -1665,6 +1665,7 @@ app.get('/api/store-sales-stats', async (req, res) => {
       storeId: r.storeId,
       storeName: r.storeName,
       platform: r.platform,
+      tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : (r.tags || []),
       salesAmount: Number(r.salesAmount),
       orderCount: Number(r.orderCount),
       avgOrderValue: Number(r.orderCount) > 0 ? Math.round(Number(r.salesAmount) / Number(r.orderCount) * 100) / 100 : 0,

@@ -51,10 +51,10 @@ async function deploy() {
 
       // Health check
       await new Promise(r => setTimeout(r, 4000))
-      const health = await execCommand(conn, 'curl -s http://localhost:3001/health')
+      const health = await execCommand(conn, 'curl -s http://localhost:3002/health')
       console.log('[Deploy] Health:', health.stdout)
 
-      // Check update API
+      // Check update API (port 3001, dianxiaoer-api)
       const updateCheck = await execCommand(conn, 'curl -s http://localhost:3001/api/update/check?version=0.0.0')
       console.log('[Deploy] Update API:', updateCheck.stdout)
 
