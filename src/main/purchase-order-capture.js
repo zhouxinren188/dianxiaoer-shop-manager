@@ -1,4 +1,5 @@
 const { BrowserWindow, ipcMain, session } = require('electron')
+const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
@@ -12,7 +13,10 @@ const activePurchaseWindows = new Map()
 function isValidProductTitle(title) {
   if (!title || title.length < 2) return false
   const invalidPatterns = /^(登录|支付宝|收银台|安全验证|付款|验证码|ALIPAY|LOGIN|PAYMENT|CAPTCHA)/i
-  return !invalidPatterns.test(title)
+  if (invalidPatterns.test(title)) return false
+  // 标题过短（<=3字符）且不含连续中文，不太可能是真实商品名
+  if (title.length <= 3 && !/[\u4e00-\u9fff]{2,}/.test(title)) return false
+  return true
 }
 
 // 验证商品图片：拒绝来自支付/登录页的图片
@@ -51,6 +55,135 @@ function httpRequest(url, options = {}) {
   })
 }
 
+// ============ 反检测指纹伪装脚本（注入到页面主世界） ============
+// contextIsolation=true 下 preload 的 window 修改对页面不可见
+// ★ 已废弃：反检测现在由 purchase-preload.js 在页面 JS 之前注入（contextIsolation=false）
+// 此常量保留但不再在 dom-ready 中使用
+const ANTI_DETECT_SCRIPT = `
+(function() {
+  if (window.__antiDetectInstalled) return;
+  window.__antiDetectInstalled = true;
+
+  // 1. 隐藏 webdriver
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+
+  // 2. 伪造 plugins
+  var fakePlugins = [
+    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
+  ];
+  var pluginArray = [];
+  pluginArray.item = function(i) { return this[i] };
+  pluginArray.namedItem = function(name) { for (var i = 0; i < this.length; i++) { if (this[i].name === name) return this[i] } return null };
+  pluginArray.refresh = function() {};
+  pluginArray.length = fakePlugins.length;
+  for (var i = 0; i < fakePlugins.length; i++) {
+    var p = { name: fakePlugins[i].name, filename: fakePlugins[i].filename, description: fakePlugins[i].description, length: 0, item: function() { return null }, namedItem: function() { return null } };
+    Object.defineProperty(p, 'length', { value: 0, configurable: false });
+    pluginArray[i] = p;
+  }
+  Object.defineProperty(navigator, 'plugins', { get: function() { return pluginArray }, configurable: true });
+
+  // 3. 伪造 mimeTypes
+  var fakeMimes = [
+    { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+    { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+    { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable' },
+    { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable' }
+  ];
+  var mimeArray = [];
+  mimeArray.item = function(i) { return this[i] };
+  mimeArray.namedItem = function(name) { for (var i = 0; i < this.length; i++) { if (this[i].type === name) return this[i] } return null };
+  mimeArray.length = fakeMimes.length;
+  for (var i = 0; i < fakeMimes.length; i++) {
+    var m = { type: fakeMimes[i].type, suffixes: fakeMimes[i].suffixes, description: fakeMimes[i].description, enabledPlugin: pluginArray[0] };
+    mimeArray[i] = m;
+  }
+  Object.defineProperty(navigator, 'mimeTypes', { get: function() { return mimeArray }, configurable: true });
+
+  // 4. 伪造 hardwareConcurrency / deviceMemory
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: function() { return 8 }, configurable: true });
+  Object.defineProperty(navigator, 'deviceMemory', { get: function() { return 8 }, configurable: true });
+
+  // 5. 伪造 languages
+  Object.defineProperty(navigator, 'languages', { get: function() { return ['zh-CN', 'zh', 'en-US', 'en'] }, configurable: true });
+
+  // 6. 伪造 platform
+  Object.defineProperty(navigator, 'platform', { get: function() { return 'Win32' }, configurable: true });
+
+  // 7. Canvas 指纹噪声
+  var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  HTMLCanvasElement.prototype.toDataURL = function() {
+    var ctx = this.getContext('2d');
+    if (ctx && this.width > 0 && this.height > 0) { var imgData = ctx.getImageData(0, 0, 1, 1); imgData.data[3] = imgData.data[3] ^ 1; ctx.putImageData(imgData, 0, 0); }
+    return origToDataURL.apply(this, arguments);
+  };
+  var origToBlob = HTMLCanvasElement.prototype.toBlob;
+  HTMLCanvasElement.prototype.toBlob = function() {
+    var ctx = this.getContext('2d');
+    if (ctx && this.width > 0 && this.height > 0) { var imgData = ctx.getImageData(0, 0, 1, 1); imgData.data[3] = imgData.data[3] ^ 1; ctx.putImageData(imgData, 0, 0); }
+    return origToBlob.apply(this, arguments);
+  };
+
+  // 8. WebGL 指纹伪装
+  var origGetParam = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Intel Inc.';
+    if (param === 37446) return 'Intel Iris OpenGL Engine';
+    return origGetParam.call(this, param);
+  };
+  if (typeof WebGL2RenderingContext !== 'undefined') {
+    var origGetParam2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(param) {
+      if (param === 37445) return 'Intel Inc.';
+      if (param === 37446) return 'Intel Iris OpenGL Engine';
+      return origGetParam2.call(this, param);
+    };
+  }
+
+  // 9. AudioContext 指纹噪声
+  var origGetFloatFreq = AnalyserNode.prototype.getFloatFrequencyData;
+  AnalyserNode.prototype.getFloatFrequencyData = function(arr) {
+    origGetFloatFreq.call(this, arr);
+    for (var i = 0; i < arr.length; i++) { arr[i] += Math.random() * 0.0001; }
+  };
+
+  // 10. 隐藏 Automation 属性
+  delete window.__nightmare; delete window._phantom; delete window.__phantomas;
+  delete window.callPhantom; delete window._selenium; delete window._Selenium_IDE_Recorder;
+  delete window.__webdriver_evaluate; delete window.__selenium_evaluate; delete window.__fxdriver_evaluate;
+  delete window.__driver_unwrapped; delete window.__webdriver_unwrapped;
+  delete window.__driver_evaluate; delete window.__selenium_unwrapped; delete window.__fxdriver_unwrapped;
+
+  // 11. permissions API
+  if (navigator.permissions && navigator.permissions.query) {
+    var origQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = function(params) {
+      if (params.name === 'notifications') return Promise.resolve({ state: 'default', onchange: null });
+      return origQuery(params);
+    };
+  }
+
+  // 12. chrome.runtime
+  if (window.chrome && !window.chrome.runtime) {
+    window.chrome.runtime = { connect: function() { return { onMessage: { addListener: function() {} }, postMessage: function() {}, disconnect: function() {} } }, sendMessage: function() {}, onMessage: { addListener: function() {} }, id: undefined };
+  }
+
+  // 13. chrome.csi / loadTimes
+  if (!window.chrome) window.chrome = {};
+  if (!window.chrome.csi) window.chrome.csi = function() {};
+  if (!window.chrome.loadTimes) window.chrome.loadTimes = function() {
+    var now = Date.now() / 1000;
+    return { commitLoadTime: now, connectionInfo: 'h2', finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintAfterLoadTime: 0, firstPaintTime: 0, navigationType: 'Other', npnNegotiatedProtocol: 'h2', requestTime: now - 0.5, startLoadTime: now - 0.5, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: true, wasNpnNegotiated: true };
+  };
+
+  // 14. outerWidth/outerHeight
+  if (window.outerWidth === 0) Object.defineProperty(window, 'outerWidth', { get: function() { return window.innerWidth }, configurable: true });
+  if (window.outerHeight === 0) Object.defineProperty(window, 'outerHeight', { get: function() { return window.innerHeight + 85 }, configurable: true });
+})()
+`
+
 // ============ API 拦截器脚本（捕获 + 实时订单号检测） ============
 // 核心改进：当API响应到达时，立即检测是否包含订单号
 // 通过 console.log 特殊前缀 [PURCHASE_ORDER_FOUND] 即时通知主进程
@@ -61,12 +194,13 @@ const PURCHASE_INTERCEPTOR = `
   window.__purchaseInterceptorInstalled = true;
   window.__capturedPurchaseResponses = [];
 
-  // 实时检测响应中的淘宝订单号（DL系统核心方案扩展）
-  // 优先级：b2c_orid > bizOrderId > orderId
+  // 实时检测响应中的订单号（淘宝DL系统方案 + 拼多多扩展）
+  // 淘宝优先级：b2c_orid > bizOrderId > orderId（最小15位，避免误抓trade_no）
+  // 拼多多优先级：order_sn > orderSn（最小10位，对齐DL系统）
   function checkForOrderNo(body) {
     if (!body || body.length < 10) return;
 
-    // 1. b2c_orid（DL系统核心，最可靠）
+    // 1. b2c_orid（淘宝DL系统核心，最可靠）
     var pos = body.indexOf('b2c_orid=');
     if (pos >= 0) {
       var start = pos + 9;
@@ -83,41 +217,57 @@ const PURCHASE_INTERCEPTOR = `
       }
     }
 
-    // 2. JSON字段检测（bizOrderId, orderId等）
+    // 2. JSON字段检测
     try {
       var json = JSON.parse(body);
-      var fields = ['b2c_orid', 'bizOrderId', 'biz_order_id', 'orderId', 'order_id'];
-      function searchObj(obj, depth) {
+
+      // 通用搜索函数（支持不同最小长度和正则，避免动态构造正则）
+      function searchFields(obj, targetFields, minLen, depth, pattern) {
         if (depth > 4 || !obj || typeof obj !== 'object') return null;
         for (var key of Object.keys(obj)) {
           var val = obj[key];
-          if (fields.indexOf(key) >= 0) {
-            if (typeof val === 'string' && /^\\d{15,}$/.test(val)) return val;
-            if (typeof val === 'number' && String(val).length >= 15) return String(val);
+          if (targetFields.indexOf(key) >= 0) {
+            if (typeof val === 'string' && pattern.test(val) && val.length >= minLen) return val;
+            if (typeof val === 'number' && String(val).length >= minLen) return String(val);
             if (Array.isArray(val) && val.length > 0) {
               var first = val[0];
-              if (typeof first === 'string' && /^\\d{15,}$/.test(first)) return first;
-              if (typeof first === 'number' && String(first).length >= 15) return String(first);
+              if (typeof first === 'string' && pattern.test(first) && first.length >= minLen) return first;
+              if (typeof first === 'number' && String(first).length >= minLen) return String(first);
             }
           }
           if (typeof val === 'object' && val !== null) {
-            var found = searchObj(val, depth + 1);
+            var found = searchFields(val, targetFields, minLen, depth + 1, pattern);
             if (found) return found;
           }
         }
         return null;
       }
-      var orderNo = searchObj(json, 0);
-      if (orderNo) {
-        console.log('[PURCHASE_ORDER_FOUND]' + orderNo);
+
+      // 2a. 淘宝/天猫字段（最小15位，纯数字，避免误抓trade_no）
+      var tbFields = ['b2c_orid', 'bizOrderId', 'biz_order_id', 'orderId', 'order_id'];
+      var tbOrder = searchFields(json, tbFields, 15, 0, /^\\d+$/);
+      if (tbOrder) {
+        console.log('[PURCHASE_ORDER_FOUND]' + tbOrder);
+        return;
+      }
+
+      // 2b. 拼多多字段（最小10位，字母数字+连字符，如"260506-070338506260381"）
+      var pddFields = ['order_sn', 'orderSn'];
+      var pddOrder = searchFields(json, pddFields, 10, 0, /^[A-Za-z0-9\-]+$/);
+      if (pddOrder) {
+        console.log('[PURCHASE_ORDER_FOUND]' + pddOrder);
         return;
       }
     } catch(e) {}
   }
 
   // 实时从API响应中提取商品信息并缓存（关键！订单号捕获时页面可能已跳转到支付宝）
-  function cacheProductInfoFromBody(body) {
+  // ★ PDD页面跳过此函数：PDD的API响应（如faas-leo）会返回"商城"等错误数据
+  //   PDD商品信息改由结算页DOM提取 + 订单搜索API获取
+  function cacheProductInfoFromBody(body, url) {
     if (!body || body.length < 50 || window.__cachedProductInfo) return;
+    // ★ PDD页面跳过：yangkeduo/pinduoduo域名的API响应不含可靠商品信息
+    if (url && (url.indexOf('yangkeduo') >= 0 || url.indexOf('pinduoduo') >= 0)) return;
     try {
       var json = JSON.parse(body);
       // 淘宝/天猫订单确认/提交接口
@@ -159,10 +309,18 @@ const PURCHASE_INTERCEPTOR = `
               body: body.substring(0, 100000),
               time: Date.now()
             });
+            // PDD域名响应日志：搞清楚PDD实际API路径
+            if (urlStr.indexOf('yangkeduo') >= 0 || urlStr.indexOf('pinduoduo') >= 0) {
+              console.log('[PDD_API_CAPTURED]fetch ' + urlStr.substring(0, 150) + ' bodyLen=' + body.length);
+              // ★ PDD订单相关API：打印响应体前500字符，确认order_sn和商品信息
+              if (urlStr.indexOf('/proxy/api/order') >= 0 || urlStr.indexOf('order/prepay') >= 0) {
+                console.log('[PDD_ORDER_API]fetch ' + urlStr.substring(0, 100) + ' body=' + body.substring(0, 500));
+              }
+            }
             // 实时检测订单号（关键！不等轮询）
             checkForOrderNo(body);
-            // 实时缓存商品信息（关键！页面跳转后提取不到）
-            cacheProductInfoFromBody(body);
+            // 实时缓存商品信息（传入URL，PDD页面跳过）
+            cacheProductInfoFromBody(body, urlStr);
           }
         }).catch(function(){});
       } catch(e) {}
@@ -188,10 +346,18 @@ const PURCHASE_INTERCEPTOR = `
             body: resp.substring(0, 100000),
             time: Date.now()
           });
+          // PDD域名响应日志：搞清楚PDD实际API路径
+          if (xhr.__capUrl && (xhr.__capUrl.indexOf('yangkeduo') >= 0 || xhr.__capUrl.indexOf('pinduoduo') >= 0)) {
+            console.log('[PDD_API_CAPTURED]xhr ' + xhr.__capUrl.substring(0, 150) + ' bodyLen=' + resp.length);
+            // ★ PDD订单相关API：打印完整响应体，确认order_sn和商品信息字段
+            if (xhr.__capUrl.indexOf('/proxy/api/order') >= 0 || xhr.__capUrl.indexOf('order/prepay') >= 0) {
+              console.log('[PDD_ORDER_API] ' + xhr.__capUrl.substring(0, 100) + ' body=' + resp);
+            }
+          }
           // 实时检测订单号（关键！不等轮询）
           checkForOrderNo(resp);
-          // 实时缓存商品信息（关键！页面跳转后提取不到）
-          cacheProductInfoFromBody(resp);
+          // 实时缓存商品信息（传入URL，PDD页面跳过）
+          cacheProductInfoFromBody(resp, xhr.__capUrl);
         }
       } catch(e) {}
     });
@@ -214,7 +380,8 @@ const READ_CAPTURED_PURCHASES = `
 // 各平台地址管理页URL
 const ADDRESS_MANAGE_URLS = {
   taobao: 'https://member1.taobao.com/member/fresh/deliver_address.htm',
-  '1688': 'https://wuliu.1688.com/foundation/receive_address_manager.htm'
+  '1688': 'https://wuliu.1688.com/foundation/receive_address_manager.htm',
+  pinduoduo: 'https://mobile.yangkeduo.com/addresses.html'
 }
 
 /**
@@ -555,6 +722,334 @@ function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
     }, 100);
 
   }, 500);
+})()
+`
+}
+
+/**
+ * 拼多多地址管理页脚本 (mobile.yangkeduo.com/addresses.html)
+ * 参考dl系统：在拼多多地址页面自动填写收货地址
+ * 流程：检查地址列表→删除溢出→点击新增→填写表单→省市区级联→保存
+ */
+function buildPddAddressScript(receiverName, receiverPhone, parsedAddr) {
+  if (!parsedAddr) return null  // 地址解析失败则不注入脚本
+  const name = JSON.stringify(receiverName || '')
+  const phone = JSON.stringify(receiverPhone || '')
+  const province = JSON.stringify(parsedAddr.province || '')
+  const city = JSON.stringify(parsedAddr.city || parsedAddr.province || '')
+  const area = JSON.stringify(parsedAddr.area || '')
+  const other = JSON.stringify(parsedAddr.other || '')
+
+  // ★ 对齐 dl.js 5838-5929 行实现，逐行对应，不做创新
+  return `
+(function() {
+  if (window.__pddAddrDone) return;
+  window.__pddAddrDone = true;
+  console.log('[PddAddress] Pinduoduo addresses page loaded');
+
+  var targetName = ${name};
+  var targetPhone = ${phone};
+  var targetProvince = ${province};
+  var targetCity = ${city};
+  var targetArea = ${area};
+  var targetOther = ${other};
+
+  if (!targetName && !targetPhone && !targetOther) {
+    console.log('[PddAddress] No receiver info provided, skipping');
+    return;
+  }
+
+  // ★ 对齐 dl：清除 ua 和 transac_batch_cart cookie（防止风控追踪）
+  function delCookie(name, domain) {
+    document.cookie = name + '=;path=/;' + (domain ? 'domain=' + domain + ';' : '') + 'expires=Thu, 01 Jan 1970 00:00:00 GMT';
+  }
+  delCookie('ua', 'mobile.yangkeduo.com');
+  delCookie('transac_batch_cart', 'mobile.yangkeduo.com');
+  delCookie('ua', '');
+  delCookie('transac_batch_cart', '');
+
+  // 检查是否需要登录
+  if (document.querySelector('.login-container') && !document.querySelector('#name')) {
+    console.log('[PddAddress] Need login, showing window');
+    window.__pddAddrResult = 'need_login';
+    return;
+  }
+
+  // ★ 对齐 dl：从 rawData 获取地址列表
+  var addressList = null;
+  try {
+    if (window.rawData && window.rawData["stores"] && window.rawData["stores"]["store"]) {
+      addressList = window.rawData["stores"]["store"]["addressList"];
+    } else if (window.rawData && window.rawData["store"]) {
+      addressList = window.rawData["store"]["addressList"];
+    }
+  } catch(e) {}
+
+  var addrCount = addressList ? addressList.length : 0;
+  console.log('[PddAddress] Current address count: ' + addrCount);
+
+  // ★ 对齐 dl：地址>=20 先删除第一个
+  // 关键修复：删除操作会触发DOM变化（确认弹窗、"删除成功"提示等），
+  // 这些DOM变化会干扰省市区级联的DOMNodeInserted监听器，
+  // 所以必须等删除完成后再执行新增+填写+级联操作
+  if (addrCount >= 20) {
+    console.log('[PddAddress] Addresses >= 20, deleting first one');
+    try {
+      var span = document.querySelector("li").querySelectorAll(":scope > div")[0].querySelectorAll(":scope > div")[2].querySelectorAll(":scope > div")[1];
+      if (span) {
+        span.click();
+        // 等删除确认弹窗出现后点确认
+        setTimeout(function() {
+          var sureDiv = document.querySelector("body").lastChild.querySelectorAll("div");
+          if (sureDiv.length > 0) {
+            sureDiv[sureDiv.length - 1].click();
+          }
+          // 等删除完成后（弹窗消失、"删除成功"提示消失），再执行新增+填写
+          setTimeout(function() { addAndFillAddress(); }, 2000);
+        }, 500);
+      } else {
+        // 没找到删除按钮，直接新增
+        addAndFillAddress();
+      }
+    } catch(e) {
+      console.log('[PddAddress] Delete address failed: ' + e.message);
+      addAndFillAddress();
+    }
+  } else {
+    addAndFillAddress();
+  }
+
+  function addAndFillAddress() {
+
+  // ★ 对齐 dl：点击"新增收货地址"按钮后立即填写表单，无延时
+  var clickDiv = document.querySelector("#main").querySelector("div").lastChild.previousSibling;
+  if (clickDiv && clickDiv.childNodes.length != 1) {
+    clickDiv = clickDiv.previousSibling;
+  }
+  if (clickDiv) {
+    clickDiv.querySelector("div").click();
+    console.log('[PddAddress] Clicked add address button');
+  }
+
+  // ★ 对齐 dl 5843-5852：填写顺序 address → name → phone，只用 input 事件
+  var evInput = document.createEvent("HTMLEvents");
+  evInput.initEvent("input", true, true);
+
+  // 1. 详细地址（innerHTML，和 dl 一致）
+  if (targetOther) {
+    document.querySelector("#address").innerHTML = targetOther;
+    document.querySelector("#address").dispatchEvent(evInput);
+    console.log('[PddAddress] Filled address: ' + targetOther);
+  }
+
+  // 2. 收货人（setAttribute，和 dl 一致）
+  if (targetName) {
+    document.querySelector("#name").setAttribute('value', targetName);
+    document.querySelector("#name").dispatchEvent(evInput);
+    console.log('[PddAddress] Filled name: ' + targetName);
+  }
+
+  // 3. 手机号（setAttribute，和 dl 一致）
+  if (targetPhone) {
+    document.querySelector("#mobile").setAttribute('value', targetPhone);
+    document.querySelector("#mobile").dispatchEvent(evInput);
+    console.log('[PddAddress] Filled phone: ' + targetPhone);
+  }
+
+  // ★ 省市区级联选择：使用轮询方式
+  // DL 用 DOMNodeInserted，但我们的 Electron 环境下 DOMNodeInserted 对 region-selector-list-2/3
+  // 事件经常丢失（PDD 某些版本复用 list-1 容器、或事件未冒泡），导致省选完后市/区卡住。
+  // 改用 setInterval 轮询，每 300ms 检查当前步骤的列表是否出现，更可靠。
+  document.querySelector(".m-addr-select").click();
+  console.log('[PddAddress] Opened region selector, starting cascade polling');
+
+  var cascadeStep = 0; // 0=省, 1=市, 2=区
+  var cascadeDone = false;
+  var cascadeAttempts = 0;
+  var cascadeTimer = setInterval(function() {
+    if (cascadeDone) { clearInterval(cascadeTimer); return; }
+    cascadeAttempts++;
+
+    // 根据步骤确定目标值
+    var target;
+    if (cascadeStep == 0) target = targetProvince;
+    else if (cascadeStep == 1) target = targetCity;
+    else target = targetArea;
+
+    // 依次尝试多种选择器查找列表项
+    var list = [];
+    var selectors = [];
+    if (cascadeStep == 0) {
+      selectors = ['#region-selector-list-1 li'];
+    } else if (cascadeStep == 1) {
+      selectors = ['#region-selector-list-2 li', '#region-selector-list-1 li', 'div.mars-regions li'];
+    } else {
+      selectors = ['#region-selector-list-3 li', '#region-selector-list-1 li', 'div.mars-regions li'];
+    }
+    for (var s = 0; s < selectors.length && list.length == 0; s++) {
+      list = document.querySelectorAll(selectors[s]);
+    }
+
+    // 省份步骤且列表为空时，尝试点击 .mars-ph-province 占位符
+    if (list.length == 0 && cascadeStep == 0) {
+      var ph = document.querySelector('.mars-ph-province');
+      if (ph) ph.click();
+      if (cascadeAttempts % 5 == 1) {
+        console.log('[PddAddress] Cascade step ' + cascadeStep + ': no list yet, tried .mars-ph-province');
+      }
+      return;
+    }
+
+    if (list.length == 0) {
+      if (cascadeAttempts % 5 == 1) {
+        console.log('[PddAddress] Cascade step ' + cascadeStep + ': no list items found (attempt ' + cascadeAttempts + ')');
+      }
+      return;
+    }
+
+    // 首次找到列表时打印前几项，方便调试
+    if (cascadeAttempts <= 2) {
+      var sample = [];
+      for (var k = 0; k < Math.min(3, list.length); k++) sample.push(list[k].innerText);
+      console.log('[PddAddress] Cascade step ' + cascadeStep + ': found ' + list.length + ' items, target="' + target + '", sample=' + JSON.stringify(sample));
+    }
+
+    for (var i = 0; i < list.length; i++) {
+      var matched = false;
+      if (cascadeStep == 2 && (!target || target == '')) {
+        matched = targetOther.indexOf(list[i].innerText) == 0;
+      } else {
+        matched = list[i].innerText.indexOf(target) == 0 || target.indexOf(list[i].innerText) == 0;
+      }
+
+      if (matched) {
+        console.log('[PddAddress] Cascade step ' + cascadeStep + ': MATCHED "' + list[i].innerText + '" for target "' + target + '"');
+
+        if (cascadeStep == 2) {
+          // 区选择：点击后处理子列表（街道/小区），然后保存
+          try {
+            document.querySelector("ul").addEventListener("DOMNodeInserted", function(event) {
+              var subTarget = event.target;
+              setTimeout(function() {
+                try { subTarget.querySelector("div").querySelector("div").click(); } catch(e) {}
+              }, 0);
+            });
+          } catch(e) {}
+          list[i].click();
+          setTimeout(function() {
+            document.querySelector(".m-addr-save-new").click();
+            window.__pddAddrResult = 'success';
+            console.log('[PddAddress] Address saved, navigating back to checkout in 2s');
+            // 保存成功后返回结算页（PDD不会自动跳回，需要手动history.back）
+            setTimeout(function() {
+              window.history.back();
+            }, 2000);
+          }, 300);
+          cascadeDone = true;
+          clearInterval(cascadeTimer);
+        } else {
+          list[i].click();
+          console.log('[PddAddress] Cascade: advancing to step ' + (cascadeStep + 1));
+          cascadeStep++;
+          cascadeAttempts = 0;
+        }
+        return;
+      }
+    }
+
+    // 没有匹配项：每10次轮询打印一次调试信息
+    if (cascadeAttempts % 10 == 0) {
+      var first3 = [];
+      for (var k = 0; k < Math.min(3, list.length); k++) first3.push(list[k].innerText);
+      console.log('[PddAddress] Cascade step ' + cascadeStep + ': no match in ' + list.length + ' items after ' + cascadeAttempts + ' attempts, first3=' + JSON.stringify(first3));
+    }
+  }, 300);
+
+  // 15秒超时
+  setTimeout(function() {
+    if (!cascadeDone) {
+      clearInterval(cascadeTimer);
+      console.log('[PddAddress] Cascade timed out after 15s, step=' + cascadeStep + ', attempts=' + cascadeAttempts);
+    }
+  }, 15000);
+  } // end of addAndFillAddress
+
+})()
+`
+}
+
+/**
+ * 拼多多结算页地址选择脚本
+ * 在 order_checkout.html 页面点击地址区域，选择匹配的收货地址
+ * 参考 dl 系统：结算页点击 .oc-address-info 打开地址选择，选择匹配地址
+ */
+function buildPddCheckoutAddressSelectScript(shippingName, shippingPhone) {
+  const name = JSON.stringify(shippingName || '')
+  const phone = JSON.stringify(shippingPhone || '')
+  return `
+(function() {
+  var targetName = ${name};
+  var targetPhone = ${phone};
+  if (!targetName && !targetPhone) return;
+  if (window.__pddCheckoutAddrDone) return;
+  window.__pddCheckoutAddrDone = true;
+
+  console.log('[PddCheckout] Starting address selection, name=' + targetName + ', phone=' + targetPhone);
+
+  // 点击地址区域打开地址选择器
+  function clickAddressSection() {
+    var addrInfo = document.querySelector(".oc-address-info");
+    if (addrInfo) {
+      console.log('[PddCheckout] Clicking .oc-address-info');
+      addrInfo.click();
+      return true;
+    }
+    var ocAddr = document.querySelector(".oc-address");
+    if (ocAddr) {
+      var divs = ocAddr.querySelectorAll("div");
+      if (divs.length > 1) {
+        console.log('[PddCheckout] Clicking .oc-address div[1]');
+        divs[1].click();
+        return true;
+      }
+    }
+    console.log('[PddCheckout] Address section not found');
+    return false;
+  }
+
+  // 在地址列表中查找匹配的地址并点击
+  function selectMatchingAddress() {
+    var items = document.querySelectorAll("li");
+    for (var i = 0; i < items.length; i++) {
+      var text = items[i].innerText || '';
+      var nameMatch = !targetName || text.indexOf(targetName) >= 0;
+      var phoneMatch = !targetPhone || text.indexOf(targetPhone) >= 0;
+      if (nameMatch && phoneMatch) {
+        console.log('[PddCheckout] Found matching address, clicking');
+        items[i].click();
+        return true;
+      }
+    }
+    console.log('[PddCheckout] No matching address found in list');
+    return false;
+  }
+
+  // 执行步骤：先点击地址区域，等地址列表出现后选择
+  clickAddressSection();
+
+  // 轮询等待地址列表出现（最多5秒）
+  var tries = 0;
+  var timer = setInterval(function() {
+    tries++;
+    var items = document.querySelectorAll("li");
+    if (items.length > 0) {
+      clearInterval(timer);
+      selectMatchingAddress();
+    } else if (tries > 25) {
+      clearInterval(timer);
+      console.log('[PddCheckout] Address list did not appear');
+    }
+  }, 200);
 })()
 `
 }
@@ -1019,7 +1514,7 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 // 结算页面URL关键词（各平台）
 const CHECKOUT_URL_PATTERNS = {
   taobao: ['buy.taobao.com', 'buyertrade.taobao.com', 'buy.tmall.com'],
-  pinduoduo: ['yangkeduo.com/order', 'mobile.yangkeduo.com/order', 'mms.pinduoduo.com/order'],
+  pinduoduo: ['yangkeduo.com/order', 'yangkeduo.com/checkout', 'mobile.yangkeduo.com/order', 'mms.pinduoduo.com/order'],
   '1688': ['trade.1688.com', 'buyer.trade.1688.com']
 }
 
@@ -1450,8 +1945,12 @@ const PLATFORM_DETECTION = {
   // 淘宝/天猫：不使用API拦截检测订单号，改用DL方法（confirm_order页提取b2c_orid）
   // 原因：API响应中容易误抓trade_no（支付宝交易号），DL方法更可靠
   pinduoduo: {
-    urlKeywords: ['order/submit', 'order_confirm', 'create_order', 'order/create', 'bg_order'],
-    fields: ['order_sn', 'order_id', 'orderSn', 'orderId'],
+    // PDD 下单 API 路径：checkout 提交、订单创建、支付回调等
+    // 关键：加入 yangkeduo/pinduoduo 宽泛匹配，因为不知道 PDD 实际 API 路径
+    // deepSearch 会按 fields 精确搜索 order_sn，宽泛 URL 匹配不会导致误判
+    urlKeywords: ['yangkeduo', 'pinduoduo', 'order/submit', 'order_confirm', 'create_order', 'order/create', 'bg_order',
+                  'origenes/order', 'origenes/checkout', 'transac_order', 'order_pre'],
+    fields: ['order_sn', 'order_id', 'orderSn', 'orderId', 'orderNo'],
     minLength: 10
   },
   '1688': {
@@ -1501,11 +2000,31 @@ function extractOrderNoFromUrl(url, platform) {
     }
 
     if (platform === 'pinduoduo') {
+      // PDD支付回调URL中的order_sn（含连字符，如260506-070338506260381）
       const pddParams = ['order_sn', 'orderSn', 'order_id', 'orderId']
       for (const name of pddParams) {
         const val = params.get(name)
-        if (val && /^\d{10,}$/.test(val)) return val
+        if (val && /^[A-Za-z0-9\-]{10,}$/.test(val)) {
+          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: found ${name}=${val} in URL params`)
+          return val
+        } else if (val) {
+          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: ${name}=${val} but doesn't match /^[A-Za-z0-9\\-]{10,}$/`)
+        }
       }
+      // ★ 支付宝页面out_trade_no（仅作兜底，不是PDD订单号）
+      // 注意：out_trade_no是支付宝商户单号（如"XP..."），不是PDD的order_sn
+      // 优先从API拦截器获取order_sn，这里仅当API未捕获时使用
+      const isAlipayPage = host.includes('alipay.com')
+      if (isAlipayPage) {
+        const outTradeNo = params.get('out_trade_no') || params.get('outTradeNo')
+        if (outTradeNo && /^[A-Za-z0-9]{10,}$/.test(outTradeNo)) {
+          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: found out_trade_no=${outTradeNo} on Alipay page (FALLBACK - not PDD order_sn)`)
+          return outTradeNo
+        } else if (outTradeNo) {
+          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: out_trade_no=${outTradeNo} but doesn't match /^[A-Za-z0-9]{10,}$/`)
+        }
+      }
+      console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: no valid order param in URL, all params: ${[...params.keys()].join(',')}`)
     }
 
     if (platform === '1688') {
@@ -1524,10 +2043,10 @@ function extractOrderNoFromUrl(url, platform) {
 /**
  * 从页面内容中提取订单号的脚本（DL系统方案）
  * 淘宝/天猫：仅从HTML源码提取 b2c_orid=xxx（DL系统核心方案，最可靠）
- * 支付宝：仅从URL参数提取 out_trade_no（商户外部订单号）
+ * 支付宝：从URL参数+DOM+hidden input提取 out_trade_no（商户外部订单号）
+ *         淘宝为纯数字，拼多多为字母数字混合（如"XP..."），等价于DL的dlBindPddOrder()
  * 拼多多：从URL参数提取 order_sn
  * 1688：从URL参数提取 orderId
- * 不使用：API响应拦截（容易误抓trade_no）、页面文本匹配（不可靠）、通用URL参数（太泛）
  */
 const EXTRACT_ORDER_FROM_PAGE = `
 (function() {
@@ -1536,17 +2055,45 @@ const EXTRACT_ORDER_FROM_PAGE = `
   var host = window.location.hostname.toLowerCase();
   console.log('[PurchaseCapture] Extracting order from page: ' + url.substring(0, 120));
 
-  // === 支付宝页面: out_trade_no 是商户外部订单号（淘宝订单号） ===
+  // === 支付宝页面: out_trade_no 是商户外部订单号 ===
+  // 淘宝out_trade_no为纯数字（≥10位），拼多多为字母数字混合（如"XP..."，≥10位）
+  // 对齐DL：DL在检测到mclient.alipay.com后调用dlBindPddOrder()提取订单号
   if (host.indexOf('alipay.com') >= 0) {
+    // 1. 从URL参数提取out_trade_no
     try {
       var params = new URLSearchParams(window.location.search);
       var outTradeNo = params.get('out_trade_no') || params.get('outTradeNo');
-      if (outTradeNo && /^\\d{10,}$/.test(outTradeNo)) {
+      if (outTradeNo && /^[A-Za-z0-9]{10,}$/.test(outTradeNo)) {
         console.log('[PurchaseCapture] Found Alipay out_trade_no=' + outTradeNo);
         return outTradeNo;
+      } else if (outTradeNo) {
+        console.log('[PurchaseCapture] Alipay out_trade_no=' + outTradeNo + ' but not valid format');
       }
     } catch(e) {}
-    console.log('[PurchaseCapture] Alipay page but no valid out_trade_no found');
+    // 2. 从DOM提取"商户单号"（PDD支付宝页面可能在DOM中显示）
+    try {
+      var bodyText = document.body ? document.body.innerText : '';
+      var merchantMatch = bodyText.match(/商户单号[：:\\s]*([A-Za-z0-9]{10,})/);
+      if (merchantMatch && merchantMatch[1]) {
+        console.log('[PurchaseCapture] Found merchant order from Alipay DOM: ' + merchantMatch[1]);
+        return merchantMatch[1];
+      }
+    } catch(e) {}
+    // 3. 从hidden input提取out_trade_no（form POST方式可能将参数放在hidden字段）
+    try {
+      var inputs = document.querySelectorAll('input[type="hidden"]');
+      for (var i = 0; i < inputs.length; i++) {
+        var name = (inputs[i].name || '').toLowerCase();
+        if (name === 'out_trade_no' || name === 'outtradeno') {
+          var val = (inputs[i].value || '').trim();
+          if (val && /^[A-Za-z0-9]{10,}$/.test(val)) {
+            console.log('[PurchaseCapture] Found out_trade_no from hidden input: ' + val);
+            return val;
+          }
+        }
+      }
+    } catch(e) {}
+    console.log('[PurchaseCapture] Alipay page but no valid out_trade_no found (URL/DOM/hidden)');
     return null;
   }
 
@@ -1569,12 +2116,12 @@ const EXTRACT_ORDER_FROM_PAGE = `
     }
   }
 
-  // === 拼多多: URL 参数 order_sn ===
+  // === 拼多多: URL 参数 order_sn（含连字符，如260506-070338506260381）===
   if (url.indexOf('yangkeduo.com') >= 0 || url.indexOf('pinduoduo.com') >= 0) {
     try {
       var params = new URLSearchParams(window.location.search);
       var sn = params.get('order_sn') || params.get('orderSn') || params.get('order_id');
-      if (sn && /^\\d{10,}$/.test(sn)) {
+      if (sn && /^[A-Za-z0-9\\-]{10,}$/.test(sn)) {
         console.log('[PurchaseCapture] Found PDD order_sn=' + sn);
         return sn;
       }
@@ -1789,11 +2336,66 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
     if (img1688) image = img1688.src || img1688.dataset.src || '';
   }
 
-  // 拼多多商品页
-  if (!title) {
-    var titlePdd = document.querySelector('[class*="goods-name"]')
-                || document.querySelector('[class*="productName"]');
+  // 拼多多结算页（order_checkout.html，oc-前缀的DOM类名）
+  var isPddCheckout = window.location.href.indexOf('order_checkout') >= 0;
+  if (!title && isPddCheckout) {
+    // 诊断：输出#main下直接子元素的class，帮助定位选择器
+    var mainEl = document.querySelector('#main');
+    if (mainEl) {
+      var childClasses = [];
+      var children = mainEl.querySelectorAll(':scope > div > div');
+      for (var ci = 0; ci < Math.min(children.length, 10); ci++) {
+        childClasses.push(children[ci].className ? children[ci].className.substring(0, 60) : '(no-class)');
+      }
+      console.log('[PurchaseCapture] PDD结算页DOM诊断: children=' + childClasses.join(' | '));
+    }
+    // 标题选择器
+    var titlePdd = document.querySelector('[class*="oc-goods"] [class*="name"]')
+                || document.querySelector('[class*="oc-item"] [class*="name"]')
+                || document.querySelector('[class*="goods-name"]')
+                || document.querySelector('[class*="productName"]')
+                || document.querySelector('[class*="goodsName"]');
     if (titlePdd) title = (titlePdd.textContent || '').trim().substring(0, 200);
+    // 诊断：输出goods区域的所有文本
+    var goodsArea = document.querySelector('[class*="oc-goods"]') || document.querySelector('[class*="oc-item"]');
+    if (goodsArea && !title) {
+      console.log('[PurchaseCapture] PDD结算页goods区文本: ' + (goodsArea.innerText || '').substring(0, 200));
+    }
+  }
+  if (!image && isPddCheckout) {
+    var imgPdd = document.querySelector('[class*="oc-goods"] img')
+              || document.querySelector('[class*="oc-item"] img')
+              || document.querySelector('[class*="goods-img"] img')
+              || document.querySelector('[class*="goodsImage"] img');
+    if (imgPdd) image = imgPdd.src || imgPdd.dataset.src || '';
+    // 兜底：从#main中查找第一个商品图
+    if (!image && mainEl) {
+      var mainImgs = mainEl.querySelectorAll('img');
+      for (var mi = 0; mi < mainImgs.length; mi++) {
+        var src = mainImgs[mi].src || mainImgs[mi].dataset.src || '';
+        if (src && src.indexOf('http') === 0 && mainImgs[mi].width > 50) {
+          image = src;
+          break;
+        }
+      }
+    }
+  }
+  // PDD结算页数量提取
+  var quantity = '';
+  if (isPddCheckout) {
+    var qtyEl = document.querySelector('[class*="oc-goods"] [class*="num"]')
+             || document.querySelector('[class*="oc-goods"] [class*="count"]')
+             || document.querySelector('[class*="oc-item"] [class*="num"]')
+             || document.querySelector('[class*="oc-item"] [class*="count"]')
+             || document.querySelector('[class*="goods-number"]')
+             || document.querySelector('[class*="goodsNumber"]');
+    if (qtyEl) quantity = (qtyEl.textContent || '').trim().replace(/[^0-9]/g, '');
+    if (!quantity && goodsArea) {
+      // 尝试从goods区域文本中提取 x2、×3 等数量模式
+      var goodsText = goodsArea.innerText || '';
+      var qtyMatch = goodsText.match(/[x×X]\s*(\d+)/);
+      if (qtyMatch) quantity = qtyMatch[1];
+    }
   }
 
   // 通用兜底：页面标题
@@ -1819,9 +2421,9 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
     if (sizeMatch && parseInt(sizeMatch[1]) < 100) image = '';
   }
 
-  console.log('[PurchaseCapture] Product info extracted: title=' + (title || 'EMPTY') + ', image=' + (image ? 'YES' : 'EMPTY') + ', sku=' + (sku || 'EMPTY'));
+  console.log('[PurchaseCapture] Product info extracted: title=' + (title || 'EMPTY') + ', image=' + (image ? 'YES' : 'EMPTY') + ', sku=' + (sku || 'EMPTY') + ', qty=' + (quantity || 'EMPTY'));
 
-  return JSON.stringify({ title: title || '', image: image || '', sku: sku || '' });
+  return JSON.stringify({ title: title || '', image: image || '', sku: sku || '', quantity: quantity || '' });
 })()
 `
 
@@ -1857,8 +2459,9 @@ const ORDER_CONFIRM_PATTERNS = {
  * @param {number} depth - 当前深度
  * @returns {string|null} 找到的订单号
  */
-function deepSearch(obj, targetFields, minLen, depth) {
+function deepSearch(obj, targetFields, minLen, depth, pattern) {
   if (depth > 4 || !obj || typeof obj !== 'object') return null
+  var regex = pattern || /^\d+$/
 
   for (const key of Object.keys(obj)) {
     const val = obj[key]
@@ -1866,7 +2469,7 @@ function deepSearch(obj, targetFields, minLen, depth) {
     // 检查是否是目标字段
     if (targetFields.includes(key)) {
       // 值是字符串或数字
-      if (typeof val === 'string' && /^\d+$/.test(val) && val.length >= minLen) {
+      if (typeof val === 'string' && regex.test(val) && val.length >= minLen) {
         return val
       }
       if (typeof val === 'number' && String(val).length >= minLen) {
@@ -1875,7 +2478,7 @@ function deepSearch(obj, targetFields, minLen, depth) {
       // 值是数组（如 orderIds）
       if (Array.isArray(val) && val.length > 0) {
         const first = val[0]
-        if (typeof first === 'string' && /^\d+$/.test(first) && first.length >= minLen) {
+        if (typeof first === 'string' && regex.test(first) && first.length >= minLen) {
           return first
         }
         if (typeof first === 'number' && String(first).length >= minLen) {
@@ -1886,7 +2489,7 @@ function deepSearch(obj, targetFields, minLen, depth) {
 
     // 递归搜索子对象
     if (typeof val === 'object' && val !== null) {
-      const found = deepSearch(val, targetFields, minLen, depth + 1)
+      const found = deepSearch(val, targetFields, minLen, depth + 1, pattern)
       if (found) return found
     }
   }
@@ -1900,23 +2503,36 @@ function detectOrderNo(responses, platform) {
   const config = PLATFORM_DETECTION[platform]
   if (!config) return null
 
+  // PDD order_sn格式含连字符（如260506-070338506260381），需专用正则
+  const pddPattern = /^[A-Za-z0-9\-]+$/
+
+  let matchedUrls = 0
   for (const r of responses) {
     // 先检查 URL 是否匹配关键词（收窄范围，减少误判）
     const urlLower = (r.url || '').toLowerCase()
     const urlMatch = config.urlKeywords.some(kw => urlLower.includes(kw.toLowerCase()))
     if (!urlMatch) continue
 
+    matchedUrls++
     // 尝试解析 JSON
     try {
       const json = JSON.parse(r.body)
-      const orderNo = deepSearch(json, config.fields, config.minLength, 0)
+      const pattern = platform === 'pinduoduo' ? pddPattern : undefined
+      const orderNo = deepSearch(json, config.fields, config.minLength, 0, pattern)
       if (orderNo) {
         console.log(`[PurchaseCapture] Order detected! platform=${platform}, orderNo=${orderNo}, url=${r.url.substring(0, 100)}`)
         return orderNo
+      } else if (platform === 'pinduoduo') {
+        console.log(`[PurchaseCapture] PDD detectOrderNo: URL matched but no order_sn found, url=${r.url.substring(0, 80)}`)
       }
     } catch (e) {
-      // 非 JSON 响应，跳过
+      if (platform === 'pinduoduo') {
+        console.log(`[PurchaseCapture] PDD detectOrderNo: URL matched but response not JSON, url=${r.url.substring(0, 80)}`)
+      }
     }
+  }
+  if (platform === 'pinduoduo') {
+    console.log(`[PurchaseCapture] PDD detectOrderNo: scanned ${responses.length} responses, ${matchedUrls} URL-matched, no order found`)
   }
   return null
 }
@@ -2158,6 +2774,10 @@ function buildLoginAutoFillScript(accountName, password) {
 `
 }
 
+// ============ 拼多多登录：不自动填充（和 dl 一致，用户手动登录） ============
+// dl 不会自动填充 PDD 登录页的手机号，用户手动输入即可
+// 自动填充可能被 PDD 反爬系统检测到
+
 // ============ 后台地址设置窗口（独立隐藏窗口，共享session） ============
 
 /**
@@ -2181,7 +2801,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   const addrWin = new BrowserWindow({
     width: 1280,
     height: 860,
-    show: false,  // 默认隐藏，仅需要登录/验证时才显示
+    show: true,  // 测试期间可见，方便调试地址填充流程
     title: `设置收货地址 - ${platform}`,
     webPreferences: {
       partition: partitionName,
@@ -2190,6 +2810,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       sandbox: true
     }
   })
+  // 注意：dl 不做 UA 伪装，Electron 默认 UA 对各平台正常工作
 
   // 120秒最大生存期，防止窗口泄漏
   const maxLifetime = setTimeout(() => {
@@ -2248,6 +2869,19 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       }
       return
     }
+
+    // 拼多多地址管理页 - 自动填写收货地址+省市区级联
+    if (urlLower.includes('mobile.yangkeduo.com/addresses')) {
+      console.log('[AddrSetupWin] Pinduoduo addresses page detected')
+      if (parsedAddr) {
+        setTimeout(() => {
+          if (addrWin.isDestroyed() || addrDone) return
+          const script = buildPddAddressScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr || parseAddress(purchaseInfo.shippingAddress))
+          addrWin.webContents.executeJavaScript(script).catch(() => {})
+        }, 1000)
+      }
+      return
+    }
   }
 
   addrWin.webContents.on('dom-ready', () => {
@@ -2262,11 +2896,13 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
                         urlLower.includes('login.1688.com') ||
                         urlLower.includes('login.tmall.com') ||
                         (urlLower.includes('passport') && urlLower.includes('1688.com')) ||
-                        (urlLower.includes('passport') && urlLower.includes('taobao.com'))
-    if (isLoginPage && (purchaseInfo.accountName || purchaseInfo.accountPassword)) {
+                        (urlLower.includes('passport') && urlLower.includes('taobao.com')) ||
+                        urlLower.includes('yangkeduo.com/login')
+    if (isLoginPage && purchaseInfo.accountPassword) {
       addrWin.show()  // 显示窗口让用户看到登录过程
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
+        // 和 dl 一致：所有平台使用通用登录脚本
         const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
         if (script) {
           addrWin.webContents.executeJavaScript(script).catch(() => {})
@@ -2287,11 +2923,13 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
                         urlLower.includes('login.1688.com') ||
                         urlLower.includes('login.tmall.com') ||
                         (urlLower.includes('passport') && urlLower.includes('1688.com')) ||
-                        (urlLower.includes('passport') && urlLower.includes('taobao.com'))
-    if (isLoginPage && (purchaseInfo.accountName || purchaseInfo.accountPassword)) {
+                        (urlLower.includes('passport') && urlLower.includes('taobao.com')) ||
+                        urlLower.includes('yangkeduo.com/login')
+    if (isLoginPage && purchaseInfo.accountPassword) {
       addrWin.show()  // 显示窗口让用户看到登录过程
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
+        // 和 dl 一致：所有平台使用通用登录脚本
         const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
         if (script) {
           addrWin.webContents.executeJavaScript(script).catch(() => {})
@@ -2323,7 +2961,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       return
     }
 
-    const checkScript = 'window.__addrManagerResult || window.__addrDialogResult || window.__tbAddrResult || null'
+    const checkScript = 'window.__addrManagerResult || window.__addrDialogResult || window.__tbAddrResult || window.__pddAddrResult || null'
     addrWin.webContents.executeJavaScript(checkScript)
       .then(result => {
         if (!result || addrDone) return
@@ -2403,13 +3041,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         return { success: true, message: '窗口已打开' }
       }
     }
-
+    // ========== 所有平台：使用内嵌真实 Chrome（和 dl 内嵌 Chromium 一致） ==========
     const partitionName = `persist:purchase-${accountId}`
     console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${purchaseUrl}`)
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
-    // 从服务器加载Cookie并注入到session
-    const ses = session.fromPartition(partitionName)
+    // 从服务器加载 Cookie
+    let serverCookies = []
     try {
       const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
         method: 'GET'
@@ -2417,74 +3055,100 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (cookieRes.statusCode === 200 && cookieRes.data) {
         const json = JSON.parse(cookieRes.data)
         if (json.code === 0 && json.data && json.data.cookie_data) {
-          const cookies = typeof json.data.cookie_data === 'string'
+          const raw = typeof json.data.cookie_data === 'string'
             ? JSON.parse(json.data.cookie_data)
             : json.data.cookie_data
-          if (Array.isArray(cookies) && cookies.length > 0) {
-            let injected = 0
-            let skipped = 0
+          if (Array.isArray(raw) && raw.length > 0) {
             const now = Date.now() / 1000
-            for (const ck of cookies) {
-              try {
-                // 跳过已过期的Cookie
-                if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
-                  skipped++
-                  continue
-                }
-                const cookieDetails = {
-                  url: `https://${ck.domain ? ck.domain.replace(/^\./, '') : 'taobao.com'}${ck.path || '/'}`,
-                  name: ck.name,
-                  value: ck.value,
-                  domain: ck.domain,
-                  path: ck.path || '/',
-                  secure: ck.secure || false,
-                  httpOnly: ck.httpOnly || false,
-                  sameSite: ck.sameSite || 'no_restriction'
-                }
-                if (ck.expirationDate && ck.expirationDate > 0) {
-                  cookieDetails.expirationDate = ck.expirationDate
-                }
-                await ses.cookies.set(cookieDetails)
-                injected++
-              } catch (e) { /* skip invalid cookies */ }
-            }
-            console.log(`[PurchaseCapture] Cookie restored: ${injected}/${cookies.length} from server (${skipped} expired, skipped)`)
+            let skipped = 0
+            serverCookies = raw.filter(ck => {
+              if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
+                skipped++
+                return false
+              }
+              return true
+            })
+            console.log(`[PurchaseCapture] Cookies loaded from server: ${serverCookies.length}/${raw.length} (${skipped} expired, skipped)`)
           }
         }
       }
     } catch (e) {
-      console.warn('[PurchaseCapture] Cookie restore failed:', e.message)
+      console.warn('[PurchaseCapture] Cookie load failed:', e.message)
     }
 
-    // 提前计算地址设置需求（用于决定窗口是否隐藏）
+    // 将服务器加载的 Cookie 写入 partition session（确保跨窗口/重启后 cookie 可用）
+    if (serverCookies.length > 0) {
+      try {
+        const ses = session.fromPartition(partitionName)
+        let setOk = 0, setFail = 0
+        for (const ck of serverCookies) {
+          try {
+            await ses.cookies.set({
+              url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+              name: ck.name,
+              value: ck.value || '',
+              domain: ck.domain,
+              path: ck.path || '/',
+              secure: ck.secure || false,
+              httpOnly: ck.httpOnly || false,
+              expirationDate: ck.expirationDate || undefined,
+              sameSite: ck.sameSite || undefined
+            })
+            setOk++
+          } catch (e2) {
+            setFail++
+          }
+        }
+        console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
+      } catch (e) {
+        console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
+      }
+    }
+
+    // 提前计算地址设置需求
     const hasShippingInfo = purchaseInfo.shippingName || purchaseInfo.shippingPhone || purchaseInfo.shippingAddress
-    const needAddrSetup = hasShippingInfo && (platform === '1688' || platform === 'taobao')
+    const needAddrSetup = hasShippingInfo && (platform === '1688' || platform === 'taobao' || platform === 'pinduoduo')
     const parsedAddr = needAddrSetup ? parseAddress(purchaseInfo.shippingAddress) : null
 
     const win = new BrowserWindow({
       width: 1280,
       height: 860,
-      show: true,  // 主窗口始终立即显示，地址设置在独立后台窗口完成
+      show: true,
       title: `采购下单 - ${platform}`,
       webPreferences: {
         partition: partitionName,
-        contextIsolation: true,
+        // ★ contextIsolation 必须为 false：反检测脚本需要在页面 JS 之前修改 navigator/webgl 等
+        // contextIsolation=true 下 preload 修改的是隔离上下文，页面不可见，反检测完全无效
+        // dl 的 CEF ExecuteJavaScript 在页面 JS 之前执行，我们通过 preload 实现同等效果
+        contextIsolation: false,
         nodeIntegration: false,
-        sandbox: true
+        sandbox: true,
+        preload: path.join(__dirname, 'purchase-preload.js')
       }
     })
 
-    // 转发采购窗口内的console.log到主进程（用于调试注入脚本）
-    win.webContents.on('console-message', (event, level, message) => {
-      if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]') || message.includes('[LoginAutoFill]') || message.includes('[AddressRefresh]')) {
-        console.log(`[PurchaseWin] ${message}`)
+    // ========== 反爬指纹伪装 ==========
+    const ses = session.fromPartition(partitionName)
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    win.webContents.setUserAgent(cleanUA)
+    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
+      if (details.requestHeaders) {
+        details.requestHeaders['Sec-CH-UA'] = secChUa
+        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        details.requestHeaders['User-Agent'] = cleanUA
       }
+      callback({ requestHeaders: details.requestHeaders })
     })
 
     let resolved = false
     let pollTimer = null
     let backgroundAddrWin = null  // 后台地址设置窗口引用，用于cleanup联动
     let cachedProductInfo = null  // 缓存采购商品信息（从商品详情页提前提取）
+    let pddAddrDone = false       // PDD地址是否已处理（参考dl的dlSetReceiver机制，防止结算页无限循环点击地址）
+    let pddPayClicked = false     // PDD结算页是否已选择支付宝支付（防止dom-ready和did-navigate重复触发）
+    let pddAddrAreaClicked = false // PDD结算页是否已点击地址区域（防止dom-ready和did-navigate重复触发）
     const windowState = { win, pollTimer, resolved }
     activePurchaseWindows.set(purchaseNo, windowState)
 
@@ -2502,8 +3166,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 保存采购窗口的Cookie到服务器（用户可能在窗口内登录了）
     async function savePurchaseWindowCookies() {
       try {
+        let cookies
         const ses = session.fromPartition(partitionName)
-        const cookies = await ses.cookies.get({})
+        cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
@@ -2512,7 +3177,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           })
           console.log(`[PurchaseCapture] Cookie saved on window close: ${cookies.length} cookies`)
 
-          // 同步更新采购账号在线状态（Cookie 有效说明账号在线）
+          // 同步更新采购账号在线状态
           try {
             await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
               method: 'PUT',
@@ -2657,25 +3322,132 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 purchaseInfo.sku = cachedProductInfo.sku
                 console.log(`[PurchaseCapture] SKU已覆盖(缓存): ${cachedProductInfo.sku}`)
               }
-            } else {
-              // 最后兜底：从当前页面DOM提取
+              if (cachedProductInfo.quantity && !purchaseInfo.quantity) {
+                purchaseInfo.quantity = parseInt(cachedProductInfo.quantity) || 0
+                console.log(`[PurchaseCapture] 数量已覆盖(缓存): ${cachedProductInfo.quantity}`)
+              }
+            }
+
+            // ★ 如果缓存标题无效，尝试DOM提取兜底
+            // ★★ PDD特殊：优先使用PDD订单搜索API获取商品信息（跟DL一样）
+            const hasGoodTitle = purchaseInfo.goodsName && purchaseInfo.goodsName.length > 4
+            const hasGoodImage = purchaseInfo.image && isValidProductImage(purchaseInfo.image)
+            if ((!hasGoodTitle || !hasGoodImage) && platform === 'pinduoduo' && platformOrderNo) {
+              // PDD订单搜索API：跟DL一样，加载搜索结果页面，解析window.rawData中的orderGoods
+              try {
+                console.log(`[PurchaseCapture] PDD缓存标题无效，尝试订单搜索API: orderSn=${platformOrderNo}`)
+                const pddSearchResult = await win.webContents.executeJavaScript(`
+                  (function() {
+                    return fetch('https://mobile.yangkeduo.com/transac_orders_search_results.html?keyWord=${encodeURIComponent(platformOrderNo)}&type=1&refer_page_name=transac_orders_search_results', {
+                      credentials: 'include'
+                    }).then(function(r) { return r.text() }).then(function(html) {
+                      // 从SSR HTML中提取window.rawData（跟DL一样的方式）
+                      var start = html.indexOf('window.rawData=');
+                      if (start < 0) return JSON.stringify({error: 'no_rawData'});
+                      var dataStr = html.substring(start + 'window.rawData='.length);
+                      // DL方式：找到"}};"截止，然后补回"}}"
+                      var endIdx = dataStr.indexOf('}};');
+                      if (endIdx < 0) return JSON.stringify({error: 'no_end'});
+                      dataStr = dataStr.substring(0, endIdx + 2);
+                      // DL方式：去掉嵌套JSON字符串（,"msg":"{...},"style":）避免解析失败
+                      var pos1 = dataStr.indexOf(',"msg":"{');
+                      var pos2 = dataStr.indexOf('},"style":');
+                      if (pos1 >= 0 && pos2 >= 0 && pos2 > pos1) {
+                        dataStr = dataStr.substring(0, pos1) + dataStr.substring(pos2);
+                      }
+                      try {
+                        var data = JSON.parse(dataStr);
+                        var orders = data.resultStore && data.resultStore.orders;
+                        if (!orders || orders.length === 0) return JSON.stringify({error: 'no_orders', rawKeys: Object.keys(data)});
+                        var order = orders[0];
+                        var goods = order.orderGoods && order.orderGoods[0];
+                        if (!goods) return JSON.stringify({error: 'no_orderGoods', orderKeys: orderKeys});
+                        return JSON.stringify({
+                          goodsName: goods.goodsName || '',
+                          goodsPrice: goods.goodsPrice || '',
+                          goodsNumber: goods.goodsNumber || 1,
+                          spec: goods.spec || '',
+                          goodsImage: goods.thumbUrl || goods.goodsImage || goods.imageUrl || '',
+                          orderAmount: order.orderAmount || '',
+                          orderSn: order.orderSn || '',
+                          trackingNumber: order.trackingNumber || '',
+                          combinedOrderStatus: order.combinedOrderStatus || 0,
+                          shippingTime: order.shippingTime || 0,
+                          receiveTime: order.receiveTime || 0
+                        });
+                      } catch(e) {
+                        return JSON.stringify({error: 'parse_error', msg: e.message, sample: dataStr.substring(0, 300)});
+                      }
+                    }).catch(function(e) {
+                      return JSON.stringify({error: 'fetch_error', msg: e.message});
+                    });
+                  })()
+                `).catch(() => null)
+
+                if (pddSearchResult) {
+                  console.log(`[PurchaseCapture] PDD订单搜索API结果: ${pddSearchResult.substring(0, 300)}`)
+                  try {
+                    const pddInfo = JSON.parse(pddSearchResult)
+                    if (pddInfo.goodsName) {
+                      purchaseInfo.goodsName = pddInfo.goodsName
+                      console.log(`[PurchaseCapture] 商品名已覆盖(PDD订单搜索API): ${pddInfo.goodsName}`)
+                    }
+                    if (pddInfo.goodsImage && isValidProductImage(pddInfo.goodsImage)) {
+                      purchaseInfo.image = pddInfo.goodsImage
+                      console.log(`[PurchaseCapture] 商品图片已覆盖(PDD订单搜索API): ${pddInfo.goodsImage.substring(0, 80)}`)
+                    }
+                    if (pddInfo.spec) {
+                      purchaseInfo.sku = pddInfo.spec
+                      console.log(`[PurchaseCapture] SKU已覆盖(PDD订单搜索API): ${pddInfo.spec}`)
+                    }
+                    if (pddInfo.goodsNumber) {
+                      purchaseInfo.quantity = pddInfo.goodsNumber
+                      console.log(`[PurchaseCapture] 数量已覆盖(PDD订单搜索API): ${pddInfo.goodsNumber}`)
+                    }
+                    if (pddInfo.goodsPrice) {
+                      purchaseInfo.unitPrice = pddInfo.goodsPrice
+                      console.log(`[PurchaseCapture] 单价已覆盖(PDD订单搜索API): ${pddInfo.goodsPrice}`)
+                    }
+                    if (pddInfo.trackingNumber) {
+                      purchaseInfo.trackingNumber = pddInfo.trackingNumber
+                      console.log(`[PurchaseCapture] 快递单号已提取(PDD订单搜索API): ${pddInfo.trackingNumber}`)
+                    }
+                    if (pddInfo.shippingTime) {
+                      purchaseInfo.shippingTime = pddInfo.shippingTime
+                      console.log(`[PurchaseCapture] 发货时间已提取(PDD订单搜索API): ${pddInfo.shippingTime}`)
+                    }
+                    if (pddInfo.error) {
+                      console.warn(`[PurchaseCapture] PDD订单搜索API错误: ${pddInfo.error}`, pddInfo.msg || pddInfo.rawKeys || '')
+                    }
+                  } catch (e) {
+                    console.warn('[PurchaseCapture] PDD订单搜索API解析失败:', e.message)
+                  }
+                }
+              } catch (e) {
+                console.warn('[PurchaseCapture] PDD订单搜索API调用失败:', e.message)
+              }
+            } else if (!hasGoodTitle) {
               try {
                 const domResult = await win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO).catch(() => null)
                 if (domResult) {
                   const productInfo = JSON.parse(domResult)
-                  if (productInfo.title && isValidProductTitle(productInfo.title)) {
+                  if (productInfo.title && isValidProductTitle(productInfo.title) && productInfo.title.length > (purchaseInfo.goodsName || '').length) {
                     purchaseInfo.goodsName = productInfo.title
-                    console.log(`[PurchaseCapture] 商品名已覆盖(实时DOM): ${productInfo.title}`)
+                    console.log(`[PurchaseCapture] 商品名已覆盖(实时DOM,覆盖弱缓存): ${productInfo.title}`)
                   } else if (productInfo.title) {
-                    console.warn(`[PurchaseCapture] 商品名验证失败(实时DOM), 忽略: ${productInfo.title}`)
+                    console.log(`[PurchaseCapture] 实时DOM标题不优于缓存: DOM=${productInfo.title}, 缓存=${purchaseInfo.goodsName || '空'}`)
                   }
-                  if (productInfo.image && isValidProductImage(productInfo.image)) {
+                  if (productInfo.image && isValidProductImage(productInfo.image) && !purchaseInfo.image) {
                     purchaseInfo.image = productInfo.image
                     console.log(`[PurchaseCapture] 商品图片已覆盖(实时DOM)`)
                   }
-                  if (productInfo.sku) {
+                  if (productInfo.sku && !purchaseInfo.sku) {
                     purchaseInfo.sku = productInfo.sku
                     console.log(`[PurchaseCapture] SKU已覆盖(实时DOM): ${productInfo.sku}`)
+                  }
+                  if (productInfo.quantity && !purchaseInfo.quantity) {
+                    purchaseInfo.quantity = parseInt(productInfo.quantity) || 0
+                    console.log(`[PurchaseCapture] 数量已覆盖(实时DOM): ${productInfo.quantity}`)
                   }
                 }
               } catch (e) {
@@ -2733,21 +3505,35 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (!message || resolved) return
       if (message.startsWith('[PURCHASE_ORDER_FOUND]')) {
         const orderNo = message.substring('[PURCHASE_ORDER_FOUND]'.length).trim()
-        if (orderNo && /^\d{10,}$/.test(orderNo)) {
-          console.log(`[PurchaseCapture] Order found via real-time interceptor: ${orderNo}`)
+        // 淘宝纯数字（≥10位），拼多多字母数字+连字符（如260506-070338506260381）
+        if (orderNo && /^[A-Za-z0-9\-]{10,}$/.test(orderNo)) {
+          console.log(`[PurchaseCapture] Order found via real-time interceptor: ${orderNo} (platform=${platform})`)
           onOrderCaptured(orderNo)
+        } else {
+          console.log(`[PurchaseCapture] Interceptor found candidate but invalid: "${orderNo}"`)
         }
       }
+      // PDD API 响应日志转发（搞清楚 PDD 实际 API 路径）
+      if (platform === 'pinduoduo' && message.startsWith('[PDD_API_CAPTURED]')) {
+        console.log(`[PurchaseCapture] ${message}`)
+      }
+      // PDD订单API响应体内容（确认order_sn字段格式）
+      if (platform === 'pinduoduo' && message.startsWith('[PDD_ORDER_API]')) {
+        console.log(`[PurchaseCapture] ${message}`)
+      }
       // API拦截器实时缓存的商品信息（比dom-ready更快、更可靠）
-      if (message.startsWith('[PURCHASE_PRODUCT_CACHED]')) {
+      // ★ PDD跳过：PDD的cacheProductInfoFromBody已被禁用，不应有此消息
+      if (message.startsWith('[PURCHASE_PRODUCT_CACHED]') && platform !== 'pinduoduo') {
         try {
           const info = JSON.parse(message.substring('[PURCHASE_PRODUCT_CACHED]'.length))
           if (info && (info.title || info.image)) {
             cachedProductInfo = info
             console.log(`[PurchaseCapture] 商品信息已缓存(API拦截): title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
 
-            // 商品信息成功提取 = 页面确认正常加载，此时启动后台地址设置窗口
-            if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
+            // 商品信息成功提取 = 页面确认正常加载
+            // PDD 不使用后台地址窗口：dl的流程是在结算页点击地址区域跳转到地址管理页，在同一窗口内完成
+            // 淘宝/1688 仍使用后台地址窗口（独立页面流程）
+            if (needAddrSetup && parsedAddr && !backgroundAddrWin && platform !== 'pinduoduo') {
               backgroundAddrWin = startBackgroundAddressSetup({
                 purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
               })
@@ -2769,9 +3555,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       const currentUrl = win.webContents.getURL()
       console.log(`[PurchaseCapture] dom-ready: ${currentUrl.substring(0, 120)}`)
 
-      // 主窗口始终注入订单拦截器（地址设置已在独立后台窗口完成）
+      // ★ 反检测由 preload 在页面 JS 之前注入（contextIsolation=false 下 preload 直接修改页面 navigator 等）
+      // 不再需要 executeJavaScript 注入 ANTI_DETECT_SCRIPT
+
+      // 主窗口始终注入订单拦截器（和 dl 一致）
       win.webContents.executeJavaScript(PURCHASE_INTERCEPTOR).catch(() => {})
-      console.log('[PurchaseCapture] Interceptor injected')
+      console.log('[PurchaseCapture] Interceptor injected (anti-detect handled by preload)')
 
       // === 登录页自动填充 ===
       const urlLower = currentUrl.toLowerCase()
@@ -2785,6 +3574,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (isLoginPage && purchaseInfo.accountPassword && !resolved) {
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
+          // 和 dl 一致：所有平台使用通用登录脚本
           const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
           if (script) {
             win.webContents.executeJavaScript(script).catch(() => {})
@@ -2793,15 +3583,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }, 1000)
       }
 
+      // 注意：不再注入 PDD 排队页自动重载脚本
+      // 原因：dl 没有此逻辑，说明清理 partition 后不应出现"排队中"
+      // 且每次 dom-ready 注入额外 JS 脚本可能被 PDD 反爬系统检测到
+      // 如果仍然出现排队，用户可以手动刷新页面
+
       // === 关键：在商品详情页/结算页提前缓存商品信息 ===
       // 订单号捕获时页面可能已跳转到支付宝，此时再提取就拿到"登录中心-支付宝"了
       // 所以必须在商品详情页/结算页时就把商品信息缓存住
+      // ★ PDD不用DOM提取：PDD的商品信息完全由订单搜索API提供（goodsName/goodsPrice/goodsNumber/spec）
+      //   结算页DOM提取标题不准（如"商城"），反而干扰。PDD的图片暂缺也不影响核心功能。
       const isProductPage = urlLower.includes('item.taobao.com') ||
                             urlLower.includes('detail.tmall.com') ||
                             urlLower.includes('detail.1688.com') ||
-                            urlLower.includes('item.jd.com') ||
-                            urlLower.includes('yangkeduo') ||
-                            urlLower.includes('mobile.yangkeduo')
+                            urlLower.includes('item.jd.com')
       const isCheckoutUrl = urlLower.includes('buy.taobao.com') ||
                              urlLower.includes('buy.tmall.com') ||
                              urlLower.includes('order.1688.com') ||
@@ -2810,7 +3605,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if ((isProductPage || isCheckoutUrl) && !cachedProductInfo) {
         // 延迟提取，等页面渲染完成
         setTimeout(() => {
-          if (win.isDestroyed() || resolved || cachedProductInfo) return
+          if (win.isDestroyed() || resolved) return
+          if (cachedProductInfo) return
           win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
             .then(result => {
               if (!result || resolved) return
@@ -2820,8 +3616,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                   cachedProductInfo = info
                   console.log(`[PurchaseCapture] 商品信息已缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
 
-                  // 商品信息成功提取 = 页面确认正常加载，此时启动后台地址设置窗口
-                  if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
+                  // 商品信息成功提取 = 页面确认正常加载
+                  // PDD 不使用后台地址窗口：dl的流程是在结算页点击地址区域跳转到地址管理页
+                  if (needAddrSetup && parsedAddr && !backgroundAddrWin && platform !== 'pinduoduo') {
                     backgroundAddrWin = startBackgroundAddressSetup({
                       purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
                     })
@@ -2837,10 +3634,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         // 二次提取尝试（针对慢加载页面）
         if (isProductPage) {
           setTimeout(() => {
-            if (win.isDestroyed() || resolved || cachedProductInfo) return
+            if (win.isDestroyed() || resolved) return
+            if (cachedProductInfo) return
             win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
               .then(result => {
-                if (!result || resolved || cachedProductInfo) return
+                if (!result || resolved) return
+                if (cachedProductInfo) return
                 try {
                   const info = JSON.parse(result)
                   if ((info.title && isValidProductTitle(info.title)) || info.image) {
@@ -2859,8 +3658,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         setTimeout(async () => {
           if (win.isDestroyed() || resolved) return
           try {
+            let cookies
             const ses = session.fromPartition(partitionName)
-            const cookies = await ses.cookies.get({})
+            cookies = await ses.cookies.get({})
             if (cookies && cookies.length > 0) {
               const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
               if (hasH5Tk) {
@@ -2880,17 +3680,98 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }, 6000)
       }
 
-      // === 结算页地址面板 fallback（仅在未通过专用地址管理页设置时） ===
+      // === 结算页地址处理 ===
       const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
-      if (platform !== '1688' && (shippingName || shippingPhone || shippingAddress)) {
+      if ((shippingName || shippingPhone || shippingAddress)) {
         if (isCheckoutPage(currentUrl, platform)) {
-          const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
-          win.webContents.executeJavaScript(fillScript).catch(() => {})
-          console.log(`[PurchaseCapture] Address auto-fill injected for checkout page`)
+          if (platform === 'pinduoduo') {
+            // PDD 结算页：参考 dl 的 dlSetReceiver 机制
+            // pddAddrDone=false → 需要设置地址，点击地址区域
+            // pddAddrDone=true  → 地址已设置完成，选择支付宝支付方式（对齐 dl：默认微信，切支付宝才能抓订单号）
+            if (!pddAddrDone && !pddAddrAreaClicked) {
+              pddAddrAreaClicked = true
+              setTimeout(() => {
+                if (win.isDestroyed() || resolved || pddAddrDone) return
+                const clickAddrScript = `
+                  (function() {
+                    if (document.querySelector(".oc-address-info")) {
+                      document.querySelector(".oc-address-info").click();
+                    } else if (document.querySelector(".oc-address")) {
+                      document.querySelector(".oc-address").querySelectorAll("div")[1].click();
+                    }
+                  })()
+                `
+                win.webContents.executeJavaScript(clickAddrScript).catch(() => {})
+                console.log('[PurchaseCapture] PDD: clicked address selector on checkout page (dom-ready)')
+              }, 1500)
+            } else if (pddAddrDone && !pddPayClicked) {
+              // ★ 对齐DL：点击支付宝支付（DL line 5755-5756）
+              // PDD默认微信支付，DL自动切支付宝，支付宝页面检测到后提取订单号绑定
+              pddPayClicked = true
+              setTimeout(() => {
+                if (win.isDestroyed() || resolved) return
+                const clickAlipayScript = `
+                  (function() {
+                    function simClick(el) {
+                      var rect = el.getBoundingClientRect();
+                      var x = rect.left + rect.width / 2;
+                      var y = rect.top + rect.height / 2;
+                      ['mousedown','mouseup','click'].forEach(function(type) {
+                        var evt = document.createEvent('MouseEvents');
+                        evt.initMouseEvent(type, true, true, window, 1, x, y, x, y, false, false, false, false, 0, null);
+                        el.dispatchEvent(evt);
+                      });
+                    }
+                    var mainEl = document.querySelector("#main");
+                    if (!mainEl) return '#main not found';
+                    var mainDiv = mainEl.querySelector("div");
+                    if (!mainDiv) return '#main > div not found';
+                    var divs = mainDiv.querySelectorAll(":scope > div");
+                    for (var d = 0; d < divs.length; d++) {
+                      var sectionText = divs[d].innerText || '';
+                      if (sectionText.indexOf('微信') >= 0 && sectionText.indexOf('支付宝') >= 0) {
+                        var subDivs = divs[d].querySelectorAll(':scope > div');
+                        for (var s = 0; s < subDivs.length; s++) {
+                          var subText = subDivs[s].innerText || '';
+                          if (subText.indexOf('支付宝') >= 0 && subText.indexOf('微信') < 0) {
+                            simClick(subDivs[s]);
+                            return 'simClicked section[' + d + ']>div[' + s + ']: ' + subText.substring(0, 20);
+                          }
+                        }
+                        var candidates = divs[d].querySelectorAll('*');
+                        for (var i = 0; i < candidates.length; i++) {
+                          if (candidates[i].innerText === '支付宝' || candidates[i].textContent.trim() === '支付宝') {
+                            var target = candidates[i];
+                            for (var j = 0; j < 2; j++) {
+                              if (target.parentElement && target.parentElement.children.length <= 3) {
+                                target = target.parentElement;
+                              }
+                            }
+                            simClick(target);
+                            return 'simClicked text-match in section[' + d + ']';
+                          }
+                        }
+                      }
+                    }
+                    return 'alipay not found at all';
+                  })()
+                `
+                win.webContents.executeJavaScript(clickAlipayScript).then(result => {
+                  console.log(`[PurchaseCapture] PDD Alipay result: ${result}`)
+                }).catch(() => {})
+              }, 2000)
+            }
+          } else if (platform !== '1688') {
+            const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
+            win.webContents.executeJavaScript(fillScript).catch(() => {})
+            console.log(`[PurchaseCapture] Address auto-fill injected for checkout page`)
+          }
         }
+        // 拼多多：地址管理页自动填写只在 did-navigate 中注入（避免双重注入）
+        // dom-ready 和 did-navigate 事件时序可能导致同一脚本执行两次
       }
 
-      // 检测是否为订单确认/支付回调页面，尝试提取订单号
+      // 检测是否为订单确认/支付回调页面，尝试提取订单号（和 dl 一致）
       tryExtractOrderFromPage(currentUrl)
     })
 
@@ -2963,7 +3844,146 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         return
       }
 
-      // === 非淘宝平台：保持原有逻辑 ===
+      // === 拼多多：DL系统方案 ===
+      // 核心思路：对齐DL，多层订单号捕获
+      // 1. 支付宝支付页（mclient.alipay.com）：提取out_trade_no，等价于DL的dlBindPddOrder()
+      // 2. 支付回调页（transac_wechat/alipay_wapcallback）：从URL参数提取order_sn
+      // 3. 订单结果页（pay_success, order_result）：从URL和页面内容提取
+      // 4. 结算页：API拦截器实时检测 + 轮询备用
+      if (platform === 'pinduoduo') {
+        const isAlipayPage = urlLower.includes('mclient.alipay.com') ||
+                             urlLower.includes('alipay.com/h5pay') ||
+                             urlLower.includes('alipay.com/home/exterfaceAssign')
+        const isPaymentCallback = urlLower.includes('transac_wechat_wapcallback') ||
+                                  urlLower.includes('transac_alipay_wapcallback')
+        const isOrderResult = urlLower.includes('pay_success') ||
+                              urlLower.includes('order_result')
+        const isPddCheckout = urlLower.includes('yangkeduo.com/checkout') ||
+                              urlLower.includes('yangkeduo.com/order')
+
+        console.log(`[PurchaseCapture] PDD tryExtractOrderFromPage: url=${url.substring(0, 150)}, alipay=${isAlipayPage}, callback=${isPaymentCallback}, result=${isOrderResult}, checkout=${isPddCheckout}`)
+
+        if (!isAlipayPage && !isPaymentCallback && !isOrderResult && !isPddCheckout) return
+
+        // 1. 支付宝支付页：out_trade_no仅作兜底（对齐DL的dlBindPddOrder思路）
+        // 注意：out_trade_no是支付宝商户单号（如"XP..."），不是PDD的order_sn
+        // 优先让API拦截器从/proxy/api/order响应中捕获真正的order_sn
+        // 这里只在API拦截器未捕获时，延迟使用out_trade_no
+        if (isAlipayPage) {
+          console.log(`[PurchaseCapture] PDD Alipay payment page detected (DL method: dlBindPddOrder equivalent, out_trade_no as FALLBACK)`)
+          // 先从URL参数提取out_trade_no
+          const urlOrderNo = extractOrderNoFromUrl(url, platform)
+          if (urlOrderNo) {
+            // ★ 延迟使用out_trade_no，给API拦截器优先捕获order_sn的机会
+            console.log(`[PurchaseCapture] PDD Alipay: out_trade_no=${urlOrderNo} found, delaying 500ms for API interceptor order_sn...`)
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              console.log(`[PurchaseCapture] PDD Alipay fallback: using out_trade_no=${urlOrderNo} (no order_sn from API)`)
+              onOrderCaptured(urlOrderNo)
+            }, 500)
+            // 同时也尝试从DOM提取（可能找到order_sn）
+          }
+          // 从页面DOM提取（支付宝页面可能通过form POST加载，out_trade_no在DOM中）
+          console.log(`[PurchaseCapture] PDD Alipay: also extracting from page DOM...`)
+          const extractWithDelay = (delay) => {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
+                .then(orderNo => {
+                  if (orderNo && !resolved) {
+                    console.log(`[PurchaseCapture] PDD order extracted from Alipay DOM (delay=${delay}): ${orderNo}`)
+                    onOrderCaptured(orderNo)
+                  } else if (!resolved) {
+                    console.log(`[PurchaseCapture] PDD Alipay DOM extraction (delay=${delay}): no order found yet`)
+                  }
+                })
+                .catch(() => {})
+            }, delay)
+          }
+          // 支付宝页面需要加载时间，多次重试
+          extractWithDelay(1000)
+          extractWithDelay(3000)
+          extractWithDelay(6000)
+          return
+        }
+
+        // 2. 支付回调页：从URL提取order_sn（DL核心方案，最可靠）
+        if (isPaymentCallback) {
+          console.log(`[PurchaseCapture] PDD payment callback page detected (DL method)`)
+          const urlOrderNo = extractOrderNoFromUrl(url, platform)
+          if (urlOrderNo) {
+            console.log(`[PurchaseCapture] PDD order found in payment callback URL: ${urlOrderNo}`)
+            onOrderCaptured(urlOrderNo)
+            return
+          }
+          // URL中没有order_sn，从页面内容提取（兜底）
+          console.log(`[PurchaseCapture] PDD payment callback: no order_sn in URL params, extracting from page content...`)
+          win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
+            .then(orderNo => {
+              if (orderNo && !resolved) {
+                console.log(`[PurchaseCapture] PDD order extracted from callback page: ${orderNo}`)
+                onOrderCaptured(orderNo)
+              } else {
+                console.log(`[PurchaseCapture] PDD payment callback: page extraction returned ${orderNo}, no order found`)
+              }
+            })
+            .catch(() => {})
+          return
+        }
+
+        // 2. 订单结果/支付成功页：从URL和页面内容提取
+        if (isOrderResult) {
+          console.log(`[PurchaseCapture] PDD order result page detected`)
+          const urlOrderNo = extractOrderNoFromUrl(url, platform)
+          if (urlOrderNo) {
+            console.log(`[PurchaseCapture] PDD order found in result page URL: ${urlOrderNo}`)
+            onOrderCaptured(urlOrderNo)
+            return
+          }
+          console.log(`[PurchaseCapture] PDD order result: no order_sn in URL, extracting from page content...`)
+          // 从页面内容提取
+          const extractWithDelay = (delay) => {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
+                .then(orderNo => {
+                  if (orderNo && !resolved) {
+                    console.log(`[PurchaseCapture] PDD order extracted from result page: ${orderNo}`)
+                    onOrderCaptured(orderNo)
+                  }
+                })
+                .catch(() => {})
+            }, delay)
+          }
+          extractWithDelay(500)
+          extractWithDelay(2000)
+          return
+        }
+
+        // 3. 结算页：API拦截器已实时检测，这里用轮询作为备用
+        if (isPddCheckout) {
+          console.log(`[PurchaseCapture] PDD checkout page: checking captured API responses for order_sn...`)
+          win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
+            .then(responses => {
+              if (responses && responses.length > 0 && !resolved) {
+                console.log(`[PurchaseCapture] PDD: checking ${responses.length} captured API responses`)
+                const orderNo = detectOrderNo(responses, platform)
+                if (orderNo) {
+                  console.log(`[PurchaseCapture] PDD order found in captured responses: ${orderNo}`)
+                  onOrderCaptured(orderNo)
+                } else {
+                  console.log(`[PurchaseCapture] PDD: no order_sn found in ${responses.length} captured responses (will be caught by real-time interceptor or callback page)`)
+                }
+              } else {
+                console.log(`[PurchaseCapture] PDD checkout: no captured API responses yet`)
+              }
+            })
+            .catch(() => {})
+        }
+        return
+      }
+
+      // === 非淘宝/非拼多多平台：保持原有逻辑 ===
       const checkoutPatterns = CHECKOUT_URL_PATTERNS[platform] || []
       const confirmPatterns = ORDER_CONFIRM_PATTERNS[platform] || []
       const isRelevantPage = checkoutPatterns.some(p => urlLower.includes(p.toLowerCase())) ||
@@ -3011,7 +4031,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate: ${url.substring(0, 120)}`)
 
-      // 尝试从新页面提取订单号
+      // 尝试从新页面提取订单号（和 dl 一致）
       tryExtractOrderFromPage(url)
 
       // === 登录页自动填充（导航到登录页时注入） ===
@@ -3026,6 +4046,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (isLoginPageNav && purchaseInfo.accountPassword && !resolved) {
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
+          // 和 dl 一致：所有平台使用通用登录脚本
           const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
           if (script) {
             win.webContents.executeJavaScript(script).catch(() => {})
@@ -3034,16 +4055,110 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }, 1000)
       }
 
-      // === 结算页地址面板 fallback ===
+      // === 结算页地址处理 ===
       const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
-      if (platform !== '1688' && (shippingName || shippingPhone || shippingAddress)) {
+      if ((shippingName || shippingPhone || shippingAddress)) {
         if (isCheckoutPage(url, platform)) {
+          if (platform === 'pinduoduo') {
+            // PDD 结算页：参考 dl 的 dlSetReceiver 机制
+            // pddAddrDone=false → 需要设置地址，点击地址区域
+            // pddAddrDone=true  → 地址已设置完成，选择支付宝支付方式（对齐 dl：默认微信，切支付宝才能抓订单号）
+            if (!pddAddrDone && !pddAddrAreaClicked) {
+              pddAddrAreaClicked = true
+              setTimeout(() => {
+                if (win.isDestroyed() || resolved || pddAddrDone) return
+                const clickAddrScript = `
+                  (function() {
+                    if (document.querySelector(".oc-address-info")) {
+                      document.querySelector(".oc-address-info").click();
+                    } else if (document.querySelector(".oc-address")) {
+                      document.querySelector(".oc-address").querySelectorAll("div")[1].click();
+                    }
+                  })()
+                `
+                win.webContents.executeJavaScript(clickAddrScript).catch(() => {})
+                console.log('[PurchaseCapture] PDD: clicked address selector on checkout page')
+              }, 1500)
+            } else if (pddAddrDone && !pddPayClicked) {
+              // ★ 地址已设置完成，选择支付宝支付方式（对齐 dl：!dlSetReceiver → 点击支付宝）
+              // PDD 默认微信支付，但只有支付宝支付才能拦截到订单号
+              pddPayClicked = true
+              setTimeout(() => {
+                if (win.isDestroyed() || resolved) return
+                const clickAlipayScript = `
+                  (function() {
+                    function simClick(el) {
+                      var rect = el.getBoundingClientRect();
+                      var x = rect.left + rect.width / 2;
+                      var y = rect.top + rect.height / 2;
+                      ['mousedown','mouseup','click'].forEach(function(type) {
+                        var evt = document.createEvent('MouseEvents');
+                        evt.initMouseEvent(type, true, true, window, 1, x, y, x, y, false, false, false, false, 0, null);
+                        el.dispatchEvent(evt);
+                      });
+                    }
+                    var mainEl = document.querySelector("#main");
+                    if (!mainEl) return '#main not found';
+                    var mainDiv = mainEl.querySelector("div");
+                    if (!mainDiv) return '#main > div not found';
+                    var divs = mainDiv.querySelectorAll(":scope > div");
+                    for (var d = 0; d < divs.length; d++) {
+                      var sectionText = divs[d].innerText || '';
+                      if (sectionText.indexOf('微信') >= 0 && sectionText.indexOf('支付宝') >= 0) {
+                        var subDivs = divs[d].querySelectorAll(':scope > div');
+                        for (var s = 0; s < subDivs.length; s++) {
+                          var subText = subDivs[s].innerText || '';
+                          if (subText.indexOf('支付宝') >= 0 && subText.indexOf('微信') < 0) {
+                            simClick(subDivs[s]);
+                            return 'simClicked section[' + d + ']>div[' + s + ']';
+                          }
+                        }
+                        var candidates = divs[d].querySelectorAll('*');
+                        for (var i = 0; i < candidates.length; i++) {
+                          if (candidates[i].innerText === '支付宝' || candidates[i].textContent.trim() === '支付宝') {
+                            var target = candidates[i];
+                            for (var j = 0; j < 2; j++) {
+                              if (target.parentElement && target.parentElement.children.length <= 3) {
+                                target = target.parentElement;
+                              }
+                            }
+                            simClick(target);
+                            return 'simClicked text-match in section[' + d + ']';
+                          }
+                        }
+                      }
+                    }
+                    return 'alipay not found at all';
+                  })()
+                `
+                win.webContents.executeJavaScript(clickAlipayScript).then(result => {
+                  console.log(`[PurchaseCapture] PDD Alipay result: ${result}`)
+                }).catch(() => {})
+              }, 2000)
+            }
+          } else if (platform !== '1688') {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
+              win.webContents.executeJavaScript(fillScript).catch(() => {})
+              console.log(`[PurchaseCapture] Address auto-fill injected after navigation`)
+            }, 3000)
+          }
+        }
+        // 拼多多：地址管理页自动填写（参考 dl）
+        // ★ 关键：检测到地址页时设置 pddAddrDone=true（对齐 dl 的 delCookie("dlSetReceiver") 时机）
+        // 这意味着一旦进入地址页，回到结算页后就会自动点击支付
+        if (platform === 'pinduoduo' && url.toLowerCase().includes('yangkeduo.com/addresses')) {
+          pddAddrDone = true
+          console.log('[PurchaseCapture] PDD: entered address page, pddAddrDone=true (like dl delCookie)')
           setTimeout(() => {
             if (win.isDestroyed() || resolved) return
-            const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
-            win.webContents.executeJavaScript(fillScript).catch(() => {})
-            console.log(`[PurchaseCapture] Address auto-fill injected after navigation`)
-          }, 3000)
+            const addrScript = buildPddAddressScript(shippingName, shippingPhone, parsedAddr || parseAddress(shippingAddress))
+            if (addrScript) {
+              win.webContents.executeJavaScript(addrScript).catch(() => {})
+              console.log('[PurchaseCapture] PDD: address script injected')
+            }
+          }, 1000)
         }
       }
     })
@@ -3053,8 +4168,84 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate-in-page: ${url.substring(0, 120)}`)
 
-      // 尝试从新页面提取订单号
       tryExtractOrderFromPage(url)
+
+      // ★ PDD地址页SPA导航支持：如果PDD的结算页→地址页使用pushState，did-navigate不会触发
+      // 加 pddAddrDone 防护：避免页面已跳走后延迟事件仍触发误注入
+      if (platform === 'pinduoduo' && url.toLowerCase().includes('yangkeduo.com/addresses') && !pddAddrDone) {
+        pddAddrDone = true
+        console.log('[PurchaseCapture] PDD: entered address page (in-page nav), pddAddrDone=true')
+        const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
+        setTimeout(() => {
+          if (win.isDestroyed() || resolved) return
+          const addrScript = buildPddAddressScript(shippingName, shippingPhone, parsedAddr || parseAddress(shippingAddress))
+          if (addrScript) {
+            win.webContents.executeJavaScript(addrScript).catch(() => {})
+            console.log('[PurchaseCapture] PDD: address script injected (in-page nav)')
+          }
+        }, 1000)
+      }
+
+      // ★ PDD结算页SPA导航支持：history.back()返回结算页时可能触发did-navigate-in-page
+      // 需要在这里也处理支付宝选择，否则回到结算页后不会自动选支付宝
+      if (platform === 'pinduoduo' && isCheckoutPage(url, platform)) {
+        const { shippingName, shippingPhone, shippingAddress } = purchaseInfo
+        if ((shippingName || shippingPhone || shippingAddress) && pddAddrDone && !pddPayClicked) {
+          pddPayClicked = true
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) return
+            const clickAlipayScript = `
+              (function() {
+                function simClick(el) {
+                  var rect = el.getBoundingClientRect();
+                  var x = rect.left + rect.width / 2;
+                  var y = rect.top + rect.height / 2;
+                  ['mousedown','mouseup','click'].forEach(function(type) {
+                    var evt = document.createEvent('MouseEvents');
+                    evt.initMouseEvent(type, true, true, window, 1, x, y, x, y, false, false, false, false, 0, null);
+                    el.dispatchEvent(evt);
+                  });
+                }
+                var mainEl = document.querySelector("#main");
+                if (!mainEl) return '#main not found';
+                var mainDiv = mainEl.querySelector("div");
+                if (!mainDiv) return '#main > div not found';
+                var divs = mainDiv.querySelectorAll(":scope > div");
+                for (var d = 0; d < divs.length; d++) {
+                  var sectionText = divs[d].innerText || '';
+                  if (sectionText.indexOf('微信') >= 0 && sectionText.indexOf('支付宝') >= 0) {
+                    var subDivs = divs[d].querySelectorAll(':scope > div');
+                    for (var s = 0; s < subDivs.length; s++) {
+                      var subText = subDivs[s].innerText || '';
+                      if (subText.indexOf('支付宝') >= 0 && subText.indexOf('微信') < 0) {
+                        simClick(subDivs[s]);
+                        return 'simClicked section[' + d + ']>div[' + s + ']';
+                      }
+                    }
+                    var candidates = divs[d].querySelectorAll('*');
+                    for (var i = 0; i < candidates.length; i++) {
+                      if (candidates[i].innerText === '支付宝' || candidates[i].textContent.trim() === '支付宝') {
+                        var target = candidates[i];
+                        for (var j = 0; j < 2; j++) {
+                          if (target.parentElement && target.parentElement.children.length <= 3) {
+                            target = target.parentElement;
+                          }
+                        }
+                        simClick(target);
+                        return 'simClicked text-match in section[' + d + ']';
+                      }
+                    }
+                  }
+                }
+                return 'alipay not found at all';
+              })()
+            `
+            win.webContents.executeJavaScript(clickAlipayScript).then(result => {
+              console.log(`[PurchaseCapture] PDD Alipay result (in-page nav): ${result}`)
+            }).catch(() => {})
+          }, 2000)
+        }
+      }
     })
 
     // 页面即将导航前 — 关键时机！在跳走之前：
@@ -3089,18 +4280,72 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           })
           .catch(() => {})
       }
+
+      // 拼多多：页面跳转前刷新已拦截的API响应（PDD结算页→支付页跳转会销毁JS上下文）
+      if (platform === 'pinduoduo' && !resolved) {
+        console.log(`[PurchaseCapture] PDD will-navigate: leaving current page for ${url.substring(0, 120)}, flushing captured responses...`)
+        win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
+          .then(responses => {
+            if (responses && responses.length > 0 && !resolved) {
+              console.log(`[PurchaseCapture] PDD: Flushed ${responses.length} responses before navigation:`)
+              // 逐条打印响应URL，搞清楚PDD实际调了什么API
+              for (const r of responses) {
+                const rUrl = (r.url || '').substring(0, 120)
+                const isPdd = rUrl.includes('yangkeduo') || rUrl.includes('pinduoduo')
+                console.log(`[PurchaseCapture]   ${isPdd ? '★ PDD' : '   other'}: ${rUrl} bodyLen=${(r.body || '').length}`)
+              }
+              const orderNo = detectOrderNo(responses, platform)
+              if (orderNo) {
+                console.log(`[PurchaseCapture] PDD order found in flushed responses: ${orderNo}`)
+                onOrderCaptured(orderNo)
+              } else {
+                console.log(`[PurchaseCapture] PDD: no order_sn in flushed responses, will detect on target page`)
+              }
+            } else {
+              console.log(`[PurchaseCapture] PDD will-navigate: no captured responses to flush`)
+            }
+          })
+          .catch(() => {})
+      }
     })
 
-    // 监听重定向（支付宝URL中可能包含订单号）
+    // 监听重定向（支付宝URL中可能包含订单号 / PDD支付回调重定向）
     win.webContents.on('will-redirect', (event, url) => {
       if (win.isDestroyed() || resolved) return
-      console.log(`[PurchaseCapture] will-redirect: ${url.substring(0, 120)}`)
+      console.log(`[PurchaseCapture] will-redirect: ${url.substring(0, 150)}`)
+
+      // PDD专用：支付回调重定向中可能带order_sn，支付宝页面重定向中可能带out_trade_no
+      if (platform === 'pinduoduo') {
+        const urlLower = url.toLowerCase()
+        if (urlLower.includes('transac_wechat_wapcallback') || urlLower.includes('transac_alipay_wapcallback')) {
+          console.log(`[PurchaseCapture] PDD will-redirect: payment callback detected!`)
+        }
+        if (urlLower.includes('mclient.alipay.com') || urlLower.includes('alipay.com/h5pay')) {
+          console.log(`[PurchaseCapture] PDD will-redirect: Alipay page detected, will extract out_trade_no`)
+        }
+      }
 
       // 重定向URL中可能有订单号参数
       const urlOrderNo = extractOrderNoFromUrl(url, platform)
       if (urlOrderNo) {
-        console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
-        onOrderCaptured(urlOrderNo)
+        // ★ PDD+Alipay: out_trade_no仅作兜底（不是PDD订单号，是支付宝商户单号）
+        // 优先让API拦截器从/proxy/api/order响应中捕获真正的order_sn
+        // 延迟500ms，给console-message处理器时间处理[PURCHASE_ORDER_FOUND]
+        const isPddAlipayFallback = platform === 'pinduoduo' && url.toLowerCase().includes('alipay.com')
+        if (isPddAlipayFallback) {
+          console.log(`[PurchaseCapture] PDD Alipay out_trade_no found: ${urlOrderNo} (delaying 500ms, waiting for order_sn from API interceptor)`)
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) {
+              console.log(`[PurchaseCapture] PDD Alipay fallback skipped: resolved=${resolved}, destroyed=${win.isDestroyed()}`)
+              return
+            }
+            console.log(`[PurchaseCapture] PDD Alipay fallback: using out_trade_no=${urlOrderNo} (no order_sn from API)`)
+            onOrderCaptured(urlOrderNo)
+          }, 500)
+        } else {
+          console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
+          onOrderCaptured(urlOrderNo)
+        }
       }
 
       // 重定向到的新页面也可能是订单相关页面
@@ -3122,6 +4367,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）
     console.log(`[PurchaseCapture] Loading product page: ${purchaseUrl.substring(0, 120)}`)
 
+    // 拼多多：不再需要清除缓存（dl 不做缓存清理，Electron 默认 UA 正常工作）
+
     try {
       await win.loadURL(purchaseUrl)
     } catch (e) {
@@ -3131,7 +4378,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 地址设置延迟启动：等商品信息成功提取后再启动（避免cookie过期时两个窗口同时撞上登录页）
     // 触发点：console-message 中的 [PURCHASE_PRODUCT_CACHED] 和 dom-ready 中的商品信息提取
 
-    // 启动轮询检测订单号（1000ms频率，提高捕获率）
+    // 启动轮询检测订单号（1000ms频率，提高捕获率）（和 dl 一致）
     pollTimer = setInterval(() => {
       if (win.isDestroyed() || resolved) {
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }

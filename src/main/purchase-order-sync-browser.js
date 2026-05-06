@@ -431,6 +431,373 @@ try {
 } catch(e) {}
 `
 
+// ============ PDD 订单搜索 API ============
+
+/**
+ * PDD combinedOrderStatus 到系统状态的映射
+ */
+const PDD_STATUS_MAP = {
+  0: 'pending',  // 待确认
+  1: 'pending',  // 待付款
+  2: 'pending',  // 待发货
+  3: 'shipped',  // 已发货
+  4: 'received', // 已签收
+  5: 'received', // 已完成
+  6: 'cancelled', // 已取消
+  7: 'refunded', // 退款中
+  8: 'refunded'  // 退款成功
+}
+
+/**
+ * PDD 订单搜索 API 的 JS 提取脚本
+ * 通过 fetch 获取 SSR 页面 HTML，解析 window.rawData 提取订单详情
+ */
+const PDD_SEARCH_API_SCRIPT = (orderNo) => `
+(function() {
+  return fetch('https://mobile.yangkeduo.com/transac_orders_search_results.html?keyWord=${encodeURIComponent(orderNo)}&type=1&refer_page_name=transac_orders_search_results', {
+    credentials: 'include'
+  }).then(function(r) { return r.text() }).then(function(html) {
+    var start = html.indexOf('window.rawData=');
+    if (start < 0) return JSON.stringify({error: 'no_rawData'});
+    var dataStr = html.substring(start + 'window.rawData='.length);
+    var endIdx = dataStr.indexOf('}};');
+    if (endIdx < 0) return JSON.stringify({error: 'no_end'});
+    dataStr = dataStr.substring(0, endIdx + 2);
+    var pos1 = dataStr.indexOf(',"msg":"{');
+    var pos2 = dataStr.indexOf('},"style":');
+    if (pos1 >= 0 && pos2 >= 0 && pos2 > pos1) {
+      dataStr = dataStr.substring(0, pos1) + dataStr.substring(pos2);
+    }
+    try {
+      var data = JSON.parse(dataStr);
+      var orders = data.resultStore && data.resultStore.orders;
+      if (!orders || orders.length === 0) return JSON.stringify({error: 'no_orders'});
+      var order = orders[0];
+      var goods = order.orderGoods && order.orderGoods[0];
+      return JSON.stringify({
+        order_no: order.orderSn || '',
+        goods_name: goods ? (goods.goodsName || '') : '',
+        goods_image: goods ? (goods.thumbUrl || goods.goodsImage || goods.imageUrl || '') : '',
+        sku: goods ? (goods.spec || '') : '',
+        quantity: goods ? (goods.goodsNumber || 1) : 0,
+        purchase_price: goods ? (goods.goodsPrice || '') : '',
+        logistics_no: order.trackingNumber || '',
+        combined_status: order.combinedOrderStatus || 0,
+        shipping_time: order.shippingTime || 0,
+        receive_time: order.receiveTime || 0,
+        order_amount: order.orderAmount || ''
+      });
+    } catch(e) {
+      return JSON.stringify({error: 'parse_error', msg: e.message, sample: dataStr.substring(0, 300)});
+    }
+  }).catch(function(e) {
+    return JSON.stringify({error: 'fetch_error', msg: e.message});
+  });
+})()
+`
+
+/**
+ * 通过 PDD 订单搜索 API 同步单个采购订单
+ * 直接导航到搜索结果页，提取 window.rawData 中的订单详情（含物流信息）
+ */
+function syncSinglePddOrderBySearchApi(accountId, platformOrderNo) {
+  return new Promise(async (resolve) => {
+    const syncKey = `${accountId}-pinduoduo`
+    if (activeSyncs.has(syncKey)) {
+      return resolve({ success: false, message: '该账号正在同步中，请等待完成' })
+    }
+
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
+    const cookies = await ses.cookies.get({})
+
+    console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
+
+    if (cookies.length === 0) {
+      return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
+    }
+
+    let win = null
+    let resolved = false
+    let overallTimer = null
+
+    function cleanup() {
+      if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
+      activeSyncs.delete(syncKey)
+      if (win && !win.isDestroyed()) win.destroy()
+      win = null
+    }
+
+    function finish(result) {
+      if (resolved) return
+      resolved = true
+      cleanup()
+      resolve(result)
+    }
+
+    overallTimer = setTimeout(() => {
+      finish({ success: false, message: '同步超时，请稍后重试' })
+    }, 30000) // PDD搜索API 30秒足够
+
+    try {
+      win = new BrowserWindow({
+        show: false,
+        width: 800,
+        height: 600,
+        title: '[同步-PDD] 采购订单',
+        webPreferences: {
+          partition: partitionName,
+          contextIsolation: true,
+          nodeIntegration: false,
+          backgroundThrottling: false
+        }
+      })
+
+      win.webContents.setBackgroundThrottling(false)
+      activeSyncs.set(syncKey, win)
+
+      // 检测登录重定向
+      win.webContents.on('did-navigate', (event, url) => {
+        console.log('[PDD-SearchSync] navigate:', url.substring(0, 150))
+        if (url.includes('login.yangkeduo.com') || (url.includes('login') && url.includes('yangkeduo'))) {
+          finish({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
+        }
+      })
+
+      // 页面加载完成后提取数据
+      win.webContents.on('did-finish-load', async () => {
+        if (win.isDestroyed() || resolved) return
+        const currentUrl = win.webContents.getURL()
+        console.log('[PDD-SearchSync] loaded:', currentUrl.substring(0, 150))
+
+        // 等待 SSR 数据就绪
+        await new Promise(r => setTimeout(r, 2000))
+        if (win.isDestroyed() || resolved) return
+
+        try {
+          // 直接访问 window.rawData（已导航到搜索页面，数据已在 JS 全局变量中）
+          const searchResult = await win.webContents.executeJavaScript(`
+            (function() {
+              try {
+                if (!window.rawData || !window.rawData.resultStore || !window.rawData.resultStore.orders) {
+                  return JSON.stringify({error: 'no_rawData'});
+                }
+                var orders = window.rawData.resultStore.orders;
+                if (orders.length === 0) return JSON.stringify({error: 'no_orders'});
+                var order = orders[0];
+                var goods = order.orderGoods && order.orderGoods[0];
+                return JSON.stringify({
+                  order_no: order.orderSn || '',
+                  goods_name: goods ? (goods.goodsName || '') : '',
+                  goods_image: goods ? (goods.thumbUrl || goods.goodsImage || goods.imageUrl || '') : '',
+                  sku: goods ? (goods.spec || '') : '',
+                  quantity: goods ? (goods.goodsNumber || 1) : 0,
+                  purchase_price: goods ? (goods.goodsPrice || '') : '',
+                  logistics_no: order.trackingNumber || '',
+                  combined_status: order.combinedOrderStatus || 0,
+                  shipping_time: order.shippingTime || 0,
+                  receive_time: order.receiveTime || 0,
+                  order_amount: order.orderAmount || ''
+                });
+              } catch(e) {
+                return JSON.stringify({error: 'js_error', msg: e.message});
+              }
+            })()
+          `)
+
+          if (searchResult) {
+            console.log(`[PDD-SearchSync] API结果: ${searchResult.substring(0, 300)}`)
+            const info = JSON.parse(searchResult)
+
+            if (info.error) {
+              console.warn(`[PDD-SearchSync] 搜索API错误: ${info.error}`, info.msg || '')
+              finish({ success: false, message: `PDD订单搜索未找到结果: ${info.error}` })
+              return
+            }
+
+            const status = PDD_STATUS_MAP[info.combined_status] || ''
+            console.log(`[PDD-SearchSync] 找到订单: ${info.order_no}, 状态=${status}, 物流=${info.logistics_no}`)
+
+            finish({
+              success: true,
+              orderInfo: {
+                order_no: info.order_no || platformOrderNo,
+                status,
+                logistics_no: info.logistics_no || '',
+                logistics_company: '',
+                logistics_company_code: '',
+                logistics_status: '',
+                goods_name: info.goods_name || '',
+                goods_image: info.goods_image || '',
+                sku: info.sku || '',
+                quantity: info.quantity || 0,
+                purchase_price: info.purchase_price || '',
+                shipping_time: info.shipping_time || 0,
+                receive_time: info.receive_time || 0
+              }
+            })
+          } else {
+            finish({ success: false, message: 'PDD搜索结果为空' })
+          }
+        } catch (e) {
+          console.error('[PDD-SearchSync] 提取失败:', e.message)
+          finish({ success: false, message: 'PDD搜索结果提取失败: ' + e.message })
+        }
+      })
+
+      // 直接导航到搜索结果页
+      const searchUrl = `https://mobile.yangkeduo.com/transac_orders_search_results.html?keyWord=${encodeURIComponent(platformOrderNo)}&type=1&refer_page_name=transac_orders_search_results`
+      console.log(`[PDD-SearchSync] Loading: ${searchUrl}`)
+      win.loadURL(searchUrl)
+
+    } catch (err) {
+      finish({ success: false, message: '同步失败: ' + err.message })
+    }
+  })
+}
+
+/**
+ * 通过 PDD 订单搜索 API 批量同步采购订单
+ * 先获取该账号下的PDD订单列表，然后逐个调用搜索API获取物流详情
+ */
+function syncPddOrdersBySearchApi(accountId, platformOrderNos) {
+  return new Promise(async (resolve) => {
+    const syncKey = `${accountId}-pinduoduo`
+    if (activeSyncs.has(syncKey)) {
+      return resolve({ success: false, message: '该账号正在同步中，请等待完成' })
+    }
+
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
+    const cookies = await ses.cookies.get({})
+
+    console.log(`[PDD-SearchSync-All] accountId:${accountId} orderCount:${platformOrderNos.length} cookies:${cookies.length}`)
+
+    if (cookies.length === 0) {
+      return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
+    }
+
+    let win = null
+    let resolved = false
+    let overallTimer = null
+
+    function cleanup() {
+      if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
+      activeSyncs.delete(syncKey)
+      if (win && !win.isDestroyed()) win.destroy()
+      win = null
+    }
+
+    function finish(result) {
+      if (resolved) return
+      resolved = true
+      cleanup()
+      resolve(result)
+    }
+
+    overallTimer = setTimeout(() => {
+      const done = orders.length
+      console.log(`[PDD-SearchSync-All] 总超时，已完成 ${done}/${platformOrderNos.length}`)
+      if (done > 0) {
+        finish({ success: true, orders, message: `同步超时，已完成 ${done} 条订单` })
+      } else {
+        finish({ success: false, message: '同步超时，请稍后重试' })
+      }
+    }, 120000) // 批量 120 秒超时
+
+    const orders = []
+
+    try {
+      win = new BrowserWindow({
+        show: false,
+        width: 800,
+        height: 600,
+        title: '[批量同步-PDD] 采购订单',
+        webPreferences: {
+          partition: partitionName,
+          contextIsolation: true,
+          nodeIntegration: false,
+          backgroundThrottling: false
+        }
+      })
+
+      win.webContents.setBackgroundThrottling(false)
+      activeSyncs.set(syncKey, win)
+
+      // 检测登录重定向
+      win.webContents.on('did-navigate', (event, url) => {
+        console.log('[PDD-SearchSync-All] navigate:', url.substring(0, 150))
+        if (url.includes('login.yangkeduo.com') || (url.includes('login') && url.includes('yangkeduo'))) {
+          finish({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
+        }
+      })
+
+      // 页面加载完成后，逐个调用搜索 API
+      win.webContents.on('did-finish-load', async () => {
+        if (win.isDestroyed() || resolved) return
+        console.log('[PDD-SearchSync-All] 页面已加载，开始逐个查询订单')
+
+        await new Promise(r => setTimeout(r, 1500))
+
+        for (let i = 0; i < platformOrderNos.length; i++) {
+          if (win.isDestroyed() || resolved) break
+
+          const orderNo = platformOrderNos[i]
+          console.log(`[PDD-SearchSync-All] [${i + 1}/${platformOrderNos.length}] 查询: ${orderNo}`)
+
+          try {
+            const searchResult = await win.webContents.executeJavaScript(PDD_SEARCH_API_SCRIPT(orderNo))
+
+            if (searchResult) {
+              const info = JSON.parse(searchResult)
+              if (info.error) {
+                console.warn(`[PDD-SearchSync-All] 订单 ${orderNo} 查询失败: ${info.error}`)
+              } else {
+                const status = PDD_STATUS_MAP[info.combined_status] || ''
+                orders.push({
+                  order_no: info.order_no || orderNo,
+                  status,
+                  logistics_no: info.logistics_no || '',
+                  logistics_company: '',
+                  logistics_company_code: '',
+                  logistics_status: '',
+                  goods_name: info.goods_name || '',
+                  goods_image: info.goods_image || '',
+                  sku: info.sku || '',
+                  quantity: info.quantity || 0,
+                  purchase_price: info.purchase_price || ''
+                })
+                console.log(`[PDD-SearchSync-All] 订单 ${orderNo}: 状态=${status}, 物流=${info.logistics_no || '无'}`)
+              }
+            }
+          } catch (e) {
+            console.warn(`[PDD-SearchSync-All] 订单 ${orderNo} 提取失败:`, e.message)
+          }
+
+          // 每个订单查询间隔 1 秒，避免触发风控
+          if (i < platformOrderNos.length - 1) {
+            await new Promise(r => setTimeout(r, 1000))
+          }
+        }
+
+        console.log(`[PDD-SearchSync-All] 完成，共获取 ${orders.length} 条订单`)
+        if (orders.length > 0) {
+          finish({ success: true, orders })
+        } else {
+          finish({ success: false, message: '未获取到任何PDD订单数据' })
+        }
+      })
+
+      // 先导航到 PDD 订单页面建立 session，再用 fetch 调用搜索 API
+      console.log('[PDD-SearchSync-All] Loading PDD orders page...')
+      win.loadURL('https://mobile.yangkeduo.com/orders.html')
+
+    } catch (err) {
+      finish({ success: false, message: '同步失败: ' + err.message })
+    }
+  })
+}
+
 // ============ 核心同步函数 ============
 
 /**
@@ -810,7 +1177,13 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
       return { success: false, message: 'accountId、platformOrderNo 和 platform 不能为空' }
     }
 
-    const result = await syncSingleOrderByBrowser(accountId, platformOrderNo, platform)
+    // PDD 使用搜索 API 获取物流和商品详情
+    let result
+    if (platform === 'pinduoduo') {
+      result = await syncSinglePddOrderBySearchApi(accountId, platformOrderNo)
+    } else {
+      result = await syncSingleOrderByBrowser(accountId, platformOrderNo, platform)
+    }
     console.log(`[PurchaseSync IPC] 单个同步结果: ${result.success ? 'OK' : 'FAIL'}`)
 
     if (result.success && result.orderInfo) {
@@ -845,6 +1218,51 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
       return { success: false, message: 'accountId 和 platform 不能为空' }
     }
 
+    // PDD 批量同步：先获取该账号下的订单号列表，再用搜索 API 逐个查询
+    if (platform === 'pinduoduo') {
+      try {
+        // 从服务器获取该账号下的 PDD 订单号列表
+        const orderListResult = await httpPostJson(`${BUSINESS_SERVER}/api/purchase-orders/by-account-platform`, {
+          account_id: accountId,
+          platform: 'pinduoduo'
+        })
+        if (!orderListResult || orderListResult.code !== 0 || !orderListResult.data || orderListResult.data.length === 0) {
+          console.log('[PurchaseSync IPC] 该账号下无PDD采购订单')
+          return { success: false, message: '该账号下暂无已绑定订单号的PDD采购订单' }
+        }
+        const platformOrderNos = orderListResult.data.map(o => o.platform_order_no).filter(Boolean)
+        console.log(`[PurchaseSync IPC] 找到 ${platformOrderNos.length} 个PDD订单号，开始搜索API批量同步`)
+
+        const result = await syncPddOrdersBySearchApi(accountId, platformOrderNos)
+        console.log(`[PurchaseSync IPC] PDD批量同步结果: ${result.success ? 'OK' : 'FAIL'}, orders: ${result.orders?.length || 0}`)
+
+        if (result.success && result.orders && result.orders.length > 0) {
+          try {
+            const updateResult = await httpPostJson(`${BUSINESS_SERVER}/api/purchase-orders/browser-sync-batch`, {
+              account_id: accountId,
+              platform,
+              orders: result.orders
+            })
+            if (updateResult && updateResult.code === 0) {
+              console.log('[PurchaseSync IPC] PDD批量更新成功:', JSON.stringify(updateResult.data))
+              result.matchedCount = updateResult.data?.matched_count || 0
+            } else {
+              console.error('[PurchaseSync IPC] PDD批量更新失败:', updateResult?.message)
+              result.dbError = updateResult?.message || '数据库更新失败'
+            }
+          } catch (e) {
+            console.error('[PurchaseSync IPC] PDD批量更新异常:', e.message)
+            result.dbError = e.message
+          }
+        }
+        return result
+      } catch (e) {
+        console.error('[PurchaseSync IPC] PDD批量同步异常:', e.message)
+        return { success: false, message: 'PDD批量同步失败: ' + e.message }
+      }
+    }
+
+    // 非 PDD 平台使用 CDP 方案
     const result = await syncAllOrdersByBrowser(accountId, platform)
     console.log(`[PurchaseSync IPC] 批量同步结果: ${result.success ? 'OK' : 'FAIL'}, orders: ${result.orders?.length || 0}`)
 

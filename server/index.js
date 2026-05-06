@@ -2312,7 +2312,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       return res.json(fail('参数不完整'))
     }
 
-    // 订单状态映射表
+    // 订单状态映射表（文本 + PDD combinedOrderStatus 数字）
     const statusMap = {
       '等待买家付款': 'pending',
       '买家已付款': 'pending',
@@ -2331,11 +2331,33 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       '退款中': 'refunded'
     }
 
-    const newStatus = statusMap[order_info.status] || null
+    // PDD combinedOrderStatus 数字映射
+    const pddStatusMap = {
+      0: 'pending', 1: 'pending',
+      2: 'pending', 3: 'shipped',
+      4: 'received', 5: 'received',
+      6: 'cancelled', 7: 'refunded', 8: 'refunded'
+    }
+
+    let newStatus = statusMap[order_info.status] || null
+
+    // PDD 数字状态映射（order_info.combined_status 或 order_info.status 为数字）
+    if (!newStatus && platform === 'pinduoduo') {
+      const numStatus = typeof order_info.status === 'number' ? order_info.status : parseInt(order_info.status)
+      if (!isNaN(numStatus) && pddStatusMap[numStatus]) {
+        newStatus = pddStatusMap[numStatus]
+      }
+    }
+
+    // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
+    const validStatuses = ['pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+    if (!newStatus && validStatuses.includes(order_info.status)) {
+      newStatus = order_info.status
+    }
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, purchase_no, status, logistics_no, logistics_company, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -2371,6 +2393,33 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       console.log(`[Browser-Sync-Update] 物流公司: ${order_info.logistics_company}`)
     }
 
+    // PDD 搜索 API 返回的商品信息（仅当原数据为空/弱时才更新）
+    if (order_info.goods_name && (!localOrder.goods_name || localOrder.goods_name.length <= 4)) {
+      updateFields.push('goods_name=?')
+      updateValues.push(order_info.goods_name)
+      console.log(`[Browser-Sync-Update] 商品名称: ${order_info.goods_name}`)
+    }
+    if (order_info.goods_image && !localOrder.goods_image) {
+      updateFields.push('goods_image=?')
+      updateValues.push(order_info.goods_image)
+      console.log(`[Browser-Sync-Update] 商品图片: ${order_info.goods_image.substring(0, 80)}`)
+    }
+    if (order_info.sku && !localOrder.sku) {
+      updateFields.push('sku=?')
+      updateValues.push(order_info.sku)
+      console.log(`[Browser-Sync-Update] SKU规格: ${order_info.sku}`)
+    }
+    if (order_info.quantity && (!localOrder.quantity || localOrder.quantity === 0)) {
+      updateFields.push('quantity=?')
+      updateValues.push(order_info.quantity)
+      console.log(`[Browser-Sync-Update] 数量: ${order_info.quantity}`)
+    }
+    if (order_info.purchase_price && (!localOrder.purchase_price || Number(localOrder.purchase_price) === 0)) {
+      updateFields.push('purchase_price=?')
+      updateValues.push(order_info.purchase_price)
+      console.log(`[Browser-Sync-Update] 采购单价: ${order_info.purchase_price}`)
+    }
+
     if (updateFields.length > 0) {
       updateValues.push(localOrder.id)
       await pool.execute(
@@ -2383,7 +2432,9 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       status: newStatus || localOrder.status,
       logistics_no: order_info.logistics_no || localOrder.logistics_no,
       logistics_company: order_info.logistics_company || localOrder.logistics_company,
-      logistics_status: order_info.logistics_status || ''
+      logistics_status: order_info.logistics_status || '',
+      goods_name: order_info.goods_name || localOrder.goods_name,
+      goods_image: order_info.goods_image || localOrder.goods_image
     }))
   } catch (err) {
     console.error(`[Browser-Sync-Update] Error: ${err.message}`)
@@ -2406,7 +2457,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
 
     // 获取本地已绑定的采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
       [ownerId, '']
     )
 
@@ -2433,6 +2484,14 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
       '退款中': 'refunded'
     }
 
+    // PDD combinedOrderStatus 数字映射
+    const pddStatusMap = {
+      0: 'pending', 1: 'pending',
+      2: 'pending', 3: 'shipped',
+      4: 'received', 5: 'received',
+      6: 'cancelled', 7: 'refunded', 8: 'refunded'
+    }
+
     let matchedCount = 0
 
     for (const platformOrder of orders) {
@@ -2440,7 +2499,20 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
       if (!localOrder) continue
 
       matchedCount++
-      const newStatus = statusMap[platformOrder.status] || localOrder.status
+
+      // 解析状态：支持文本、PDD 数字状态、以及系统标准状态值
+      let newStatus = statusMap[platformOrder.status] || localOrder.status
+      if (!statusMap[platformOrder.status] && platform === 'pinduoduo') {
+        const numStatus = typeof platformOrder.status === 'number' ? platformOrder.status : parseInt(platformOrder.status)
+        if (!isNaN(numStatus) && pddStatusMap[numStatus]) {
+          newStatus = pddStatusMap[numStatus]
+        }
+      }
+      // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
+      const validStatuses = ['pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+      if (!statusMap[platformOrder.status] && validStatuses.includes(platformOrder.status)) {
+        newStatus = platformOrder.status
+      }
 
       const updateFields = []
       const updateValues = []
@@ -2462,6 +2534,28 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         updateValues.push(platformOrder.logistics_company)
       }
 
+      // PDD 搜索 API 返回的商品信息（仅当原数据为空/弱时才更新）
+      if (platformOrder.goods_name && (!localOrder.goods_name || localOrder.goods_name.length <= 4)) {
+        updateFields.push('goods_name=?')
+        updateValues.push(platformOrder.goods_name)
+      }
+      if (platformOrder.goods_image && !localOrder.goods_image) {
+        updateFields.push('goods_image=?')
+        updateValues.push(platformOrder.goods_image)
+      }
+      if (platformOrder.sku && !localOrder.sku) {
+        updateFields.push('sku=?')
+        updateValues.push(platformOrder.sku)
+      }
+      if (platformOrder.quantity && (!localOrder.quantity || localOrder.quantity === 0)) {
+        updateFields.push('quantity=?')
+        updateValues.push(platformOrder.quantity)
+      }
+      if (platformOrder.purchase_price && (!localOrder.purchase_price || Number(localOrder.purchase_price) === 0)) {
+        updateFields.push('purchase_price=?')
+        updateValues.push(platformOrder.purchase_price)
+      }
+
       if (updateFields.length > 0) {
         updateValues.push(localOrder.id)
         await pool.execute(
@@ -2476,6 +2570,28 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
     res.json(ok({ matched_count: matchedCount, total_platform: orders.length }))
   } catch (err) {
     console.error(`[Browser-Sync-Batch] Error: ${err.message}`)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取指定账号+平台的采购订单号列表（用于 PDD 批量同步搜索 API）
+app.post('/api/purchase-orders/by-account-platform', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { account_id, platform } = req.body
+
+    if (!account_id || !platform) {
+      return res.json(fail('参数不完整'))
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT id, purchase_no, platform_order_no, status FROM purchase_orders WHERE owner_id=? AND account_id=? AND platform=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      [ownerId, account_id, platform, '']
+    )
+
+    res.json(ok(rows))
+  } catch (err) {
+    console.error(`[By-Account-Platform] Error: ${err.message}`)
     res.status(500).json(fail(err.message))
   }
 })

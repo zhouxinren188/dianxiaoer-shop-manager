@@ -1220,9 +1220,10 @@ async function handleSyncSingle(row) {
         if (result.success && result.orderInfo) {
           const dbResult = result.dbResult || {}
           const parts = []
-          if (dbResult.status) parts.push(`状态: ${dbResult.status}`)
+          if (dbResult.status) parts.push(`状态: ${statusLabel(dbResult.status)}`)
           if (dbResult.logistics_no) parts.push(`物流单号: ${dbResult.logistics_no}`)
           if (dbResult.logistics_company) parts.push(`${dbResult.logistics_company}`)
+          if (dbResult.goods_name) parts.push(`商品: ${dbResult.goods_name.substring(0, 20)}`)
           const message = parts.join(', ')
           ElMessage.success(`同步成功！${message || '无更新'}`)
         } else if (result.needsRelogin) {
