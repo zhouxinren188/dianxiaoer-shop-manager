@@ -2849,8 +2849,9 @@ async function saveOrdersToServer(storeId, orders) {
   return new Promise((resolve) => {
     const token = getAuthToken()
     const data = JSON.stringify({ store_id: storeId, orders })
+    // 使用远程服务器（本地 server.js 没有 /api/sales-orders/batch 路由）
     const req = http.request({
-      hostname: 'localhost', port: 3002,
+      hostname: '150.158.54.108', port: 3002,
       path: '/api/sales-orders/batch', method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2876,8 +2877,9 @@ async function updateSyncTimeOnServer(storeId) {
   const http = require('http')
   return new Promise((resolve) => {
     const token = getAuthToken()
+    // 使用远程服务器（本地 server.js 没有 /api/stores/:id/sync-time 路由）
     const req = http.request({
-      hostname: 'localhost', port: 3002,
+      hostname: '150.158.54.108', port: 3002,
       path: `/api/stores/${storeId}/sync-time`, method: 'PUT',
       headers: {
         ...(token ? { 'Authorization': `Bearer ${token}` } : {})
