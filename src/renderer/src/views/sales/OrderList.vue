@@ -2225,13 +2225,13 @@ onMounted(async () => {
     } catch (e) {}
 
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
-      mainProcessSyncStatus.value = data.storeName || '店铺'
+      mainProcessSyncStatus.value = `${data.storeName || '店铺'}正在同步中...`
     })
     unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', async (data) => {
       mainProcessSyncStatus.value = ''
       if (data.skipped) {
         // 店铺被跳过（10分钟内已同步）
-        syncSkipStatus.value = `${data.storeName}：${data.message}`
+        syncSkipStatus.value = `${data.storeName}10分钟内已同步，跳过...`
         // 5秒后自动清除跳过提示
         setTimeout(() => {
           syncSkipStatus.value = ''
