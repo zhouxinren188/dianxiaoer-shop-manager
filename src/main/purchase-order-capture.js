@@ -3046,62 +3046,89 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${purchaseUrl}`)
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
-    // 从服务器加载 Cookie
-    let serverCookies = []
+    // ========== Cookie 恢复策略 ==========
+    // 优先使用 partition 中已有的 cookie（来自登录窗口，最新鲜）
+    // 只在 partition 无 PDD cookie 时才从服务器恢复（服务器 cookie 可能过时）
+    const ses = session.fromPartition(partitionName)
+    let partitionCookieCount = 0
+    let needServerRestore = true
     try {
-      const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
-        method: 'GET'
-      })
-      if (cookieRes.statusCode === 200 && cookieRes.data) {
-        const json = JSON.parse(cookieRes.data)
-        if (json.code === 0 && json.data && json.data.cookie_data) {
-          const raw = typeof json.data.cookie_data === 'string'
-            ? JSON.parse(json.data.cookie_data)
-            : json.data.cookie_data
-          if (Array.isArray(raw) && raw.length > 0) {
-            const now = Date.now() / 1000
-            let skipped = 0
-            serverCookies = raw.filter(ck => {
-              if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
-                skipped++
-                return false
-              }
-              return true
-            })
-            console.log(`[PurchaseCapture] Cookies loaded from server: ${serverCookies.length}/${raw.length} (${skipped} expired, skipped)`)
-          }
-        }
+      const partitionCookies = await ses.cookies.get({})
+      const pddCookies = partitionCookies.filter(c =>
+        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+      )
+      partitionCookieCount = pddCookies.length
+      if (platform === 'pinduoduo' && pddCookies.length > 0) {
+        // PDD：partition 已有 cookie，跳过服务器恢复（避免用过时 cookie 覆盖新鲜 cookie）
+        needServerRestore = false
+        console.log(`[PurchaseCapture] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
+        // 刷盘确保持久化
+        await new Promise(resolve => ses.flushStorageData(resolve))
       }
     } catch (e) {
-      console.warn('[PurchaseCapture] Cookie load failed:', e.message)
+      console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
     }
 
-    // 将服务器加载的 Cookie 写入 partition session（确保跨窗口/重启后 cookie 可用）
-    if (serverCookies.length > 0) {
+    // 从服务器加载 Cookie（仅在 partition 无 PDD cookie 时）
+    let serverCookies = []
+    if (needServerRestore) {
       try {
-        const ses = session.fromPartition(partitionName)
-        let setOk = 0, setFail = 0
-        for (const ck of serverCookies) {
-          try {
-            await ses.cookies.set({
-              url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
-              name: ck.name,
-              value: ck.value || '',
-              domain: ck.domain,
-              path: ck.path || '/',
-              secure: ck.secure || false,
-              httpOnly: ck.httpOnly || false,
-              expirationDate: ck.expirationDate || undefined,
-              sameSite: ck.sameSite || undefined
-            })
-            setOk++
-          } catch (e2) {
-            setFail++
+        const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+          method: 'GET'
+        })
+        if (cookieRes.statusCode === 200 && cookieRes.data) {
+          const json = JSON.parse(cookieRes.data)
+          if (json.code === 0 && json.data && json.data.cookie_data) {
+            const raw = typeof json.data.cookie_data === 'string'
+              ? JSON.parse(json.data.cookie_data)
+              : json.data.cookie_data
+            if (Array.isArray(raw) && raw.length > 0) {
+              const now = Date.now() / 1000
+              let skipped = 0
+              serverCookies = raw.filter(ck => {
+                if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
+                  skipped++
+                  return false
+                }
+                return true
+              })
+              console.log(`[PurchaseCapture] Cookies loaded from server: ${serverCookies.length}/${raw.length} (${skipped} expired, skipped)`)
+            }
           }
         }
-        console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
       } catch (e) {
-        console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
+        console.warn('[PurchaseCapture] Cookie load failed:', e.message)
+      }
+
+      // 将服务器加载的 Cookie 写入 partition session
+      if (serverCookies.length > 0) {
+        try {
+          let setOk = 0, setFail = 0
+          for (const ck of serverCookies) {
+            try {
+              await ses.cookies.set({
+                url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                name: ck.name,
+                value: ck.value || '',
+                domain: ck.domain,
+                path: ck.path || '/',
+                secure: ck.secure || false,
+                httpOnly: ck.httpOnly || false,
+                expirationDate: ck.expirationDate || undefined,
+                sameSite: ck.sameSite || undefined
+              })
+              setOk++
+            } catch (e2) {
+              setFail++
+            }
+          }
+          console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
+          // 刷盘确保持久化
+          await new Promise(resolve => ses.flushStorageData(resolve))
+          console.log(`[PurchaseCapture] Cookie已刷盘 accountId=${accountId}`)
+        } catch (e) {
+          console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
+        }
       }
     }
 
@@ -3127,8 +3154,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
     })
 
-    // ========== 反爬指纹伪装 ==========
-    const ses = session.fromPartition(partitionName)
+    // ========== 反爬指纹伪装（复用上方已获取的 ses 对象） ==========
     const chromeVersion = process.versions.chrome || '134.0.0.0'
     const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
     win.webContents.setUserAgent(cleanUA)
@@ -3149,16 +3175,23 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     let pddAddrDone = false       // PDD地址是否已处理（参考dl的dlSetReceiver机制，防止结算页无限循环点击地址）
     let pddPayClicked = false     // PDD结算页是否已选择支付宝支付（防止dom-ready和did-navigate重复触发）
     let pddAddrAreaClicked = false // PDD结算页是否已点击地址区域（防止dom-ready和did-navigate重复触发）
+    let pddCookieSaveTimer = null // PDD cookie 定期保存定时器
     const windowState = { win, pollTimer, resolved }
     activePurchaseWindows.set(purchaseNo, windowState)
 
     function cleanup() {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+      if (pddCookieSaveTimer) { clearInterval(pddCookieSaveTimer); pddCookieSaveTimer = null }
       // 联动清理后台地址窗口
       if (backgroundAddrWin && !backgroundAddrWin.isDestroyed()) {
         backgroundAddrWin.destroy()
         backgroundAddrWin = null
       }
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏到其他窗口）
+      try {
+        const ses = session.fromPartition(partitionName)
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
       windowState.pollTimer = null
       activePurchaseWindows.delete(purchaseNo)
     }
@@ -3678,6 +3711,35 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             console.warn('[PurchaseCapture] 自动保存 cookies 失败:', e.message)
           }
         }, 6000)
+      }
+
+      // ★ PDD 定期保存 cookies 到服务器（PDD 的 token 频繁轮换，必须定期刷新服务器端缓存）
+      // 首次保存：页面加载 5 秒后；之后每 60 秒保存一次
+      if (platform === 'pinduoduo') {
+        const pddSaveCookies = async () => {
+          if (win.isDestroyed() || resolved) {
+            if (pddCookieSaveTimer) { clearInterval(pddCookieSaveTimer); pddCookieSaveTimer = null }
+            return
+          }
+          try {
+            const ses = session.fromPartition(partitionName)
+            const cookies = await ses.cookies.get({})
+            if (cookies && cookies.length > 0) {
+              await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
+              })
+              console.log(`[PurchaseCapture] PDD 定期保存 cookies: ${cookies.length} 条`)
+            }
+          } catch (e) {
+            console.warn('[PurchaseCapture] PDD 定期保存 cookies 失败:', e.message)
+          }
+        }
+        // 首次保存：5秒后
+        setTimeout(pddSaveCookies, 5000)
+        // 之后每 60 秒保存一次
+        pddCookieSaveTimer = setInterval(pddSaveCookies, 60000)
       }
 
       // === 结算页地址处理 ===

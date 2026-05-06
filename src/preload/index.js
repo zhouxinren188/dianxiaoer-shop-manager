@@ -28,7 +28,9 @@ const validInvokeChannels = [
   'refresh-purchase-cookies',
   'sync-purchase-order-browser',
   'sync-purchase-orders-browser',
-  'fetch-buyer-sensitive-info'
+  'fetch-buyer-sensitive-info',
+  'toggle-jd-auto-sync',
+  'jd-auto-sync-status'
 ]
 
 const validOnChannels = [

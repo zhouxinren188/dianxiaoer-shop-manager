@@ -190,9 +190,6 @@ registerPacketCaptureIpc()
 // 注册供销订单获取 IPC
 registerSupplyOrderIpc()
 
-// 注册销售订单获取 IPC
-registerSalesOrderIpc()
-
 app.whenReady().then(async () => {
   // 启动本地后端服务
   startServer(3002)
@@ -220,6 +217,9 @@ app.whenReady().then(async () => {
 
   // 注册平台窗口 IPC（需要 mainWindow 引用）
   registerPlatformWindowIpc(mainWindow)
+
+  // 注册销售订单获取 IPC（需要 mainWindow 引用用于自动同步）
+  registerSalesOrderIpc(mainWindow)
 
   // 注册采购账号登录窗口 IPC
   registerPurchaseAccountIpc(mainWindow)

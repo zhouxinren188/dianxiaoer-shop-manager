@@ -846,7 +846,9 @@ function fetchSalesOrders(storeId) {
   })
 }
 
-function registerSalesOrderIpc() {
+function registerSalesOrderIpc(mainWindow) {
+  _mainWindow = mainWindow
+
   ipcMain.handle('fetch-sales-orders', async (event, { storeId }) => {
     console.log('[SalesFetch IPC] 收到同步请求，storeId:', storeId)
     
@@ -1432,6 +1434,7 @@ function registerSalesOrderIpc() {
 
               // 方法1a：标准UI库选择器（如果上面没找到虚拟号弹窗）
               if (!result.confirmed) {
+                var selectors = [
                 '.ant-modal .ant-btn-primary',
                 '.ant-modal-confirm-btns .ant-btn-primary',
                 '.el-message-box__btns .el-button--primary',
@@ -2650,6 +2653,24 @@ function registerSalesOrderIpc() {
       return { success: false, message: err.message }
     }
   })
+
+  // 开启/关闭京东订单自动同步（由渲染进程功能区开关控制）
+  ipcMain.handle('toggle-jd-auto-sync', (event, { enabled }) => {
+    if (enabled) {
+      if (!_mainWindow || _mainWindow.isDestroyed()) {
+        return { success: false, running: false, message: '主窗口未就绪' }
+      }
+      startAutoSyncNow(_mainWindow)
+    } else {
+      stopAutoSync()
+    }
+    return { success: true, running: !!autoSyncTimer }
+  })
+
+  // 查询自动同步是否正在运行（组件重新挂载时恢复开关状态用）
+  ipcMain.handle('jd-auto-sync-status', () => {
+    return { running: !!autoSyncTimer }
+  })
 }
 
 // ============ 解析敏感信息 ============
@@ -2804,6 +2825,7 @@ const LOCAL_SERVER = 'http://localhost:3002'
 
 let autoSyncTimer = null
 let autoSyncRunning = false
+let _mainWindow = null  // 存储 mainWindow 引用，供 IPC handler 使用
 const DEVICE_ID = `device_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 
 function httpGetJson(url) {
@@ -3055,6 +3077,21 @@ function startAutoSync(mainWindow) {
   console.log('[AutoSync] 定时同步已启动，间隔: 10 分钟')
 }
 
+// 立即执行首次同步（用户手动开启时调用，不等待延迟）
+function startAutoSyncNow(mainWindow) {
+  stopAutoSync()
+
+  // 立即执行首次同步
+  autoSyncAllStores(mainWindow)
+
+  // 定时执行
+  autoSyncTimer = setInterval(() => {
+    autoSyncAllStores(mainWindow)
+  }, AUTO_SYNC_INTERVAL)
+
+  console.log('[AutoSync] 定时同步已启动（立即执行），间隔: 10 分钟')
+}
+
 function stopAutoSync() {
   if (autoSyncTimer) {
     clearInterval(autoSyncTimer)
@@ -3062,4 +3099,4 @@ function stopAutoSync() {
   }
 }
 
-module.exports = { registerSalesOrderIpc, startAutoSync, stopAutoSync }
+module.exports = { registerSalesOrderIpc, startAutoSync, startAutoSyncNow, stopAutoSync }

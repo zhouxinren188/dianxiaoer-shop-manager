@@ -833,7 +833,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
-import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase } from '@/api/salesOrder'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
@@ -894,146 +894,21 @@ const funcSettings = reactive({
   syncPurchaseOrder: true
 })
 
-let jdOrderSyncTimer = null
-
 function onFuncChange(key, value) {
   console.log(`[功能区开关] ${key}: ${value}`)
-  
+
   if (key === 'syncJdOrder') {
     if (value) {
-      // 开启京东订单自动同步
-      console.log('[自动同步] 开启京东订单自动同步')
-      startJdOrderAutoSync()
+      window.electronAPI.invoke('toggle-jd-auto-sync', { enabled: true })
+        .catch(e => console.warn('[自动同步] 开启失败:', e.message))
       ElMessage.success('已开启京东订单自动同步（每10分钟）')
     } else {
-      // 关闭京东订单自动同步
-      console.log('[自动同步] 关闭京东订单自动同步')
-      stopJdOrderAutoSync()
+      window.electronAPI.invoke('toggle-jd-auto-sync', { enabled: false })
+        .catch(e => console.warn('[自动同步] 关闭失败:', e.message))
       ElMessage.info('已关闭京东订单自动同步')
     }
   }
 }
-
-function startJdOrderAutoSync() {
-  // 立即执行一次
-  syncAllUserStores()
-  
-  // 每10分钟执行一次
-  jdOrderSyncTimer = setInterval(() => {
-    syncAllUserStores()
-  }, 10 * 60 * 1000)
-}
-
-function stopJdOrderAutoSync() {
-  if (jdOrderSyncTimer) {
-    clearInterval(jdOrderSyncTimer)
-    jdOrderSyncTimer = null
-  }
-}
-
-async function syncAllUserStores() {
-  console.log('[自动同步] 开始同步当前用户的所有京东店铺')
-  
-  try {
-    // 获取当前用户的所有京东店铺
-    const data = await fetchStores({ platform: 'jd', store_type: 'pop', status: 'enabled', pageSize: 100 })
-    const stores = data.list || []
-    
-    if (stores.length === 0) {
-      console.log('[自动同步] 当前用户没有京东店铺')
-      return
-    }
-    
-    console.log(`[自动同步] 找到 ${stores.length} 个京东店铺，开始逐个同步`)
-    
-    // 逐个同步店铺
-    for (let i = 0; i < stores.length; i++) {
-      const store = stores[i]
-      console.log(`[自动同步] [${i + 1}/${stores.length}] 检查店铺: ${store.name} (ID:${store.id})`)
-      
-      // 检查店铺最后同步时间
-      const lastSyncAt = store.last_sync_at
-      if (lastSyncAt) {
-        const lastSyncTime = new Date(lastSyncAt).getTime()
-        const now = Date.now()
-        const minutesSinceLastSync = (now - lastSyncTime) / 1000 / 60
-        
-        console.log(`[自动同步] 店铺 ${store.name} 距上次同步: ${minutesSinceLastSync.toFixed(1)} 分钟`)
-        
-        // 如果10分钟内已同步，跳过
-        if (minutesSinceLastSync < 10) {
-          const remainingMinutes = Math.ceil(10 - minutesSinceLastSync)
-          syncSkipStatus.value = `${store.name} ${remainingMinutes}分钟后同步`
-          console.log(`[自动同步] 跳过店铺: ${store.name}，${remainingMinutes}分钟后再试`)
-          // 3秒后清空跳过提示
-          await new Promise(resolve => setTimeout(resolve, 3000))
-          syncSkipStatus.value = ''
-          continue
-        }
-      }
-      
-      console.log(`[自动同步] [${i + 1}/${stores.length}] 同步店铺: ${store.name} (ID:${store.id})`)
-      
-      try {
-        // 同步开始前显示状态
-        autoSyncStatus.value = `${store.name} 正在同步中...`
-        
-        // 确保状态显示至少500ms（让Vue有时间更新DOM）
-        await new Promise(resolve => setTimeout(resolve, 500))
-        
-        const result = await window.electronAPI.invoke('fetch-sales-orders', {
-          storeId: store.id
-        })
-        
-        if (result.success) {
-          const orders = result.data?.list || []
-          console.log(`[自动同步] [${i + 1}/${stores.length}] 成功: ${orders.length} 条订单`)
-          // 保存订单到服务器
-          if (orders.length > 0) {
-            try {
-              await saveSalesOrders(store.id, orders)
-              console.log(`[自动同步] [${i + 1}/${stores.length}] 已保存 ${orders.length} 条订单到服务器`)
-            } catch (saveErr) {
-              console.error(`[自动同步] [${i + 1}/${stores.length}] 保存订单失败:`, saveErr.message)
-            }
-          }
-          // 更新服务器上的同步时间
-          try {
-            await updateStoreSyncTime(store.id)
-          } catch (err) {
-            console.error('[自动同步] 更新同步时间失败:', err.message)
-          }
-          // 静默更新状态计数（不影响用户当前浏览的表格）
-          try {
-            await loadStatusCounts()
-          } catch (refreshErr) {
-            console.error(`[自动同步] [${i + 1}/${stores.length}] 状态计数刷新失败:`, refreshErr.message)
-          }
-        } else {
-          console.log(`[自动同步] [${i + 1}/${stores.length}] 失败: ${result.message}`)
-        }
-      } catch (err) {
-        console.error(`[自动同步] [${i + 1}/${stores.length}] 异常:`, err.message)
-      }
-      // 注意：不在这里清空 autoSyncStatus，让它保持显示直到下一个店铺开始同步
-      
-      // 多店铺之间间隔 30 秒
-      if (i < stores.length - 1) {
-        console.log('[自动同步] 等待 30 秒后同步下一个店铺...')
-        await new Promise(resolve => setTimeout(resolve, 30000))
-      }
-    }
-    
-    // 所有店铺同步完成后，清空状态
-    autoSyncStatus.value = ''
-    
-    console.log('[自动同步] 所有店铺同步完成')
-  } catch (err) {
-    console.error('[自动同步] 同步异常:', err.message)
-  }
-}
-
-// 组件卸载时清理定时器（在后面的 onUnmounted 中统一处理）
 
 // ==================== 数据加载 ====================
 
@@ -1102,6 +977,7 @@ function mapServerOrder(row) {
   return {
     id: row.id,
     selected: false,
+    storeId: row.store_id,
     orderNo: row.order_id,
     orderStatus: STATUS_ALIAS_MAP[row.status_text] || row.status_text || '',
     purchaseStatus: row.purchase_status || '未采购',
@@ -1268,15 +1144,16 @@ async function handleRevealBuyerInfo(order) {
     ElMessage.warning('请在 Electron 环境中使用此功能')
     return
   }
-  if (!searchForm.storeId) {
-    ElMessage.warning('请先选择店铺')
+  const storeId = order.storeId ?? searchForm.storeId
+  if (!storeId) {
+    ElMessage.warning('无法获取订单所属店铺，请选择店铺筛选器')
     return
   }
 
   order._sensitiveLoading = true
   try {
     const result = await window.electronAPI.invoke('fetch-buyer-sensitive-info', {
-      storeId: searchForm.storeId,
+      storeId,
       orderId: order.orderNo
     })
 
@@ -1291,7 +1168,7 @@ async function handleRevealBuyerInfo(order) {
       ElMessage.success('买家真实信息已获取')
 
       try {
-        await updateBuyerInfo(searchForm.storeId, order.orderNo, info)
+        await updateBuyerInfo(storeId, order.orderNo, info)
       } catch (e) {
         console.warn('[BuyerInfo] 回写服务器失败:', e.message)
       }
@@ -1311,15 +1188,16 @@ async function handleRevealBuyerInfoInPurchase() {
     ElMessage.warning('请在 Electron 环境中使用此功能')
     return
   }
-  if (!searchForm.storeId) {
-    ElMessage.warning('请先选择店铺')
+  const storeId = purchaseInfo.storeId ?? searchForm.storeId
+  if (!storeId) {
+    ElMessage.warning('无法获取订单所属店铺，请选择店铺筛选器')
     return
   }
 
   purchaseInfo._sensitiveLoading = true
   try {
     const result = await window.electronAPI.invoke('fetch-buyer-sensitive-info', {
-      storeId: searchForm.storeId,
+      storeId,
       orderId: purchaseInfo.salesOrderNo
     })
 
@@ -1356,7 +1234,7 @@ async function handleRevealBuyerInfoInPurchase() {
 
       // 回写到服务器
       try {
-        await updateBuyerInfo(searchForm.storeId, purchaseInfo.salesOrderNo, info)
+        await updateBuyerInfo(storeId, purchaseInfo.salesOrderNo, info)
       } catch (e) {
         console.warn('[BuyerInfo] 回写服务器失败:', e.message)
       }
@@ -1406,6 +1284,7 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.purchaseNo = purchaseNo
   purchaseInfo.salesOrderNo = order.orderNo
   purchaseInfo.salesOrderId = order.id
+  purchaseInfo.storeId = order.storeId
   purchaseInfo.goodsName = item.name
   purchaseInfo.sku = item.sku || ''
   purchaseInfo.skuId = item.skuId || item.sku_id || item.sku || ''
@@ -1640,6 +1519,7 @@ const purchaseInfo = reactive({
   purchaseNo: '',
   salesOrderNo: '',
   salesOrderId: '',
+  storeId: null,
   goodsName: '',
   sku: '',
   skuId: '',
@@ -2207,10 +2087,16 @@ function handleEditRemark(order) {
     cancelButtonText: '取消',
     inputValue: order.remark || '',
     inputType: 'textarea'
-  }).then(({ value }) => {
-    order.remark = (value || '').trim()
-    console.log('[备注] 订单:', order.orderNo, '备注:', order.remark)
-    ElMessage.success('备注已保存')
+  }).then(async ({ value }) => {
+    const remark = (value || '').trim()
+    try {
+      await updateRemark(order.id, remark)
+      order.remark = remark
+      ElMessage.success('备注已保存')
+    } catch (err) {
+      console.error('[备注] 保存失败:', err.message)
+      ElMessage.error('备注保存失败：' + (err.message || '未知错误'))
+    }
   }).catch(() => {})
 }
 
@@ -2332,6 +2218,12 @@ onMounted(async () => {
 
   // 监听自动同步事件
   if (window.electronAPI) {
+    // 恢复自动同步开关状态（主进程定时器不随组件卸载而停止）
+    try {
+      const { running } = await window.electronAPI.invoke('jd-auto-sync-status')
+      funcSettings.syncJdOrder = running
+    } catch (e) {}
+
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
       mainProcessSyncStatus.value = data.storeName || '店铺'
     })
@@ -2362,8 +2254,6 @@ onUnmounted(() => {
   manualSyncStatus.value = ''
   autoSyncStatus.value = ''
   mainProcessSyncStatus.value = ''
-  // 清理京东订单自动同步定时器
-  stopJdOrderAutoSync()
 })
 </script>
 

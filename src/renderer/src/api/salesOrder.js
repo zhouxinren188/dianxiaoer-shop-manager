@@ -25,6 +25,10 @@ export function updateBuyerInfo(storeId, orderId, buyerInfo) {
   })
 }
 
+export function updateRemark(orderId, remark) {
+  return put(`/api/sales-orders/${orderId}/remark`, { remark })
+}
+
 export function updateSalesOrderPurchaseStatus(orderId, purchaseStatus) {
   return put(`/api/sales-orders/${orderId}/purchase-status`, { purchase_status: purchaseStatus })
 }

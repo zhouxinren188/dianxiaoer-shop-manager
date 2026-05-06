@@ -15,6 +15,7 @@
  */
 
 const { BrowserWindow, ipcMain, session } = require('electron')
+const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
 
@@ -523,6 +524,10 @@ function syncSinglePddOrderBySearchApi(accountId, platformOrderNo) {
 
     function cleanup() {
       if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
+      try {
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
       activeSyncs.delete(syncKey)
       if (win && !win.isDestroyed()) win.destroy()
       win = null
@@ -547,10 +552,28 @@ function syncSinglePddOrderBySearchApi(accountId, platformOrderNo) {
         title: '[同步-PDD] 采购订单',
         webPreferences: {
           partition: partitionName,
-          contextIsolation: true,
+          // ★ contextIsolation=false：反检测脚本需要在页面 JS 之前修改 navigator/webgl 等
+          // 和采购窗口保持一致，避免 PDD 检测到指纹变化导致 session 失效
+          contextIsolation: false,
           nodeIntegration: false,
-          backgroundThrottling: false
+          sandbox: true,
+          backgroundThrottling: false,
+          preload: path.join(__dirname, 'purchase-preload.js')
         }
+      })
+
+      // ★ 反检测：伪装 UA 和 Client Hints（和采购窗口一致）
+      const chromeVersion = process.versions.chrome || '134.0.0.0'
+      const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+      win.webContents.setUserAgent(cleanUA)
+      const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+      ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
+        if (details.requestHeaders) {
+          details.requestHeaders['Sec-CH-UA'] = secChUa
+          details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+          details.requestHeaders['User-Agent'] = cleanUA
+        }
+        callback({ requestHeaders: details.requestHeaders })
       })
 
       win.webContents.setBackgroundThrottling(false)
@@ -683,6 +706,10 @@ function syncPddOrdersBySearchApi(accountId, platformOrderNos) {
 
     function cleanup() {
       if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
+      try {
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
       activeSyncs.delete(syncKey)
       if (win && !win.isDestroyed()) win.destroy()
       win = null
@@ -715,10 +742,28 @@ function syncPddOrdersBySearchApi(accountId, platformOrderNos) {
         title: '[批量同步-PDD] 采购订单',
         webPreferences: {
           partition: partitionName,
-          contextIsolation: true,
+          // ★ contextIsolation=false：反检测脚本需要在页面 JS 之前修改 navigator/webgl 等
+          // 和采购窗口保持一致，避免 PDD 检测到指纹变化导致 session 失效
+          contextIsolation: false,
           nodeIntegration: false,
-          backgroundThrottling: false
+          sandbox: true,
+          backgroundThrottling: false,
+          preload: path.join(__dirname, 'purchase-preload.js')
         }
+      })
+
+      // ★ 反检测：伪装 UA 和 Client Hints（和采购窗口一致）
+      const chromeVersion = process.versions.chrome || '134.0.0.0'
+      const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+      win.webContents.setUserAgent(cleanUA)
+      const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+      ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
+        if (details.requestHeaders) {
+          details.requestHeaders['Sec-CH-UA'] = secChUa
+          details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+          details.requestHeaders['User-Agent'] = cleanUA
+        }
+        callback({ requestHeaders: details.requestHeaders })
       })
 
       win.webContents.setBackgroundThrottling(false)
@@ -836,6 +881,10 @@ function syncSingleOrderByBrowser(accountId, platformOrderNo, platform) {
     function cleanup() {
       if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
       activeSyncs.delete(syncKey)
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
+      try {
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
       if (cdpCapture) { cdpCapture.detach().catch(() => {}); cdpCapture = null }
       if (win && !win.isDestroyed()) {
         win.destroy()
@@ -1031,6 +1080,10 @@ function syncAllOrdersByBrowser(accountId, platform) {
     function cleanup() {
       if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
       activeSyncs.delete(syncKey)
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
+      try {
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
       if (cdpCapture) { cdpCapture.detach().catch(() => {}); cdpCapture = null }
       if (win && !win.isDestroyed()) {
         win.destroy()

@@ -818,7 +818,62 @@ function registerPurchaseAccountIpc(mainWindow) {
       }
     })
 
-    win.loadURL(loginUrl)
+    // 反检测：伪装 Electron 指纹为标准 Chrome（和采购窗口一致）
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    win.webContents.setUserAgent(cleanUA)
+    const ses = session.fromPartition(partitionName)
+    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
+      if (details.requestHeaders) {
+        details.requestHeaders['Sec-CH-UA'] = secChUa
+        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        details.requestHeaders['User-Agent'] = cleanUA
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    })
+
+    // ★ 已有账号（非新建）：检查 partition 是否有有效 cookie
+    // 如果有，加载个人主页而不是登录页（避免强制重新登录）
+    // PDD 的 login.html 不会因有 cookie 自动跳转，永远显示登录页
+    let targetUrl = loginUrl
+    if (account) {
+      try {
+        const ses = session.fromPartition(partitionName)
+        const cookies = await ses.cookies.get({})
+        // PDD 关键 cookie：SUB（登录态）、PassportSessionId、PDDAccessToken 等
+        // ★ 修复：只检查关键登录cookie，而非任意PDD域cookie（避免误判已过期的session为有效）
+        const PDD_KEY_COOKIES = ['SUB', 'PassportSessionId', 'PDDAccessToken', 'SUB_PASS']
+        const now = Date.now() / 1000
+        const hasValidCookie = cookies.some(c => {
+          if (!c.domain || !(c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))) return false
+          // 优先检查关键cookie名
+          if (PDD_KEY_COOKIES.includes(c.name) && c.value && c.value.length > 5) {
+            // 检查是否过期
+            if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
+            return true
+          }
+          return false
+        })
+        // 兜底：如果没有找到关键cookie名，但有大量PDD域cookie（>5条），也认为可能有效
+        const pddCookies = cookies.filter(c =>
+          c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+        )
+        if (hasValidCookie || pddCookies.length > 5) {
+          const backendUrl = PURCHASE_BACKEND_URLS[platform]
+          if (backendUrl) {
+            targetUrl = backendUrl
+            console.log(`[PurchaseWindow] Account has cookies (keyCookie=${hasValidCookie}, pddCount=${pddCookies.length}), loading backend URL: ${backendUrl}`)
+          }
+        } else {
+          console.log(`[PurchaseWindow] No valid cookies found (pddCount=${pddCookies.length}), loading login URL`)
+        }
+      } catch(e) {
+        console.log(`[PurchaseWindow] Cookie check failed: ${e.message}`)
+      }
+    }
+
+    win.loadURL(targetUrl)
 
     win.once('ready-to-show', () => { win.focus() })
     setTimeout(() => { if (!win.isDestroyed()) win.focus() }, 500)
@@ -919,11 +974,19 @@ function registerPurchaseAccountIpc(mainWindow) {
     ipcMain.on('platform-login-credentials', credHandler)
 
     // 窗口关闭时保存采购账号 Cookie
-    win.on('close', async () => {
+    // ★ 关键修复：必须 event.preventDefault() 防止窗口在异步保存完成前被销毁
+    win.on('close', async (event) => {
       if (win._purchaseSaveDone) return
+      event.preventDefault()  // 阻止立即关闭，等异步保存完成后再 destroy
       win._purchaseSaveDone = true
 
       ipcMain.removeListener('platform-login-credentials', credHandler)
+
+      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
+      try {
+        const ses = session.fromPartition(partitionName)
+        ses.webRequest.onBeforeSendHeaders(null)
+      } catch (e) {}
 
       console.log('[PurchaseWindow] 窗口关闭，保存采购账号 accountId=', accountId)
 
@@ -977,6 +1040,9 @@ function registerPurchaseAccountIpc(mainWindow) {
       }
 
       purchaseWindows.delete(accountId)
+
+      // 5. 所有异步操作完成后才真正销毁窗口
+      win.destroy()
     })
 
     return { success: true }

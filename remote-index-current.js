@@ -1044,7 +1044,33 @@ app.post('/api/sales-orders/batch', async (req, res) => {
   }
 })
 
-// 更新销售订单买家信息（仅更新 buyer_name, buyer_phone, buyer_address）
+// 更新销售订单备注
+app.put('/api/sales-orders/:orderId/remark', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { remark } = req.body
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    let result
+    if (storeIds.length > 0) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      ;[result] = await pool.execute(
+        `UPDATE sales_orders SET remark=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+        [remark || '', orderId, ...storeIds]
+      )
+    } else {
+      ;[result] = await pool.execute(
+        'UPDATE sales_orders SET remark=?, updated_at=NOW() WHERE id=?',
+        [remark || '', orderId]
+      )
+    }
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 app.put('/api/sales-orders/:orderId/buyer-info', async (req, res) => {
   try {
     const { orderId } = req.params
