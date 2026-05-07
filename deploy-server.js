@@ -52,10 +52,10 @@ conn.on('ready', () => {
       }
       
       const file = filesToDeploy[index];
-      const localPath = file.local;
-      
+      const localPath = path.join(__dirname, file.local);
+
       console.log(`[${index + 1}/${filesToDeploy.length}] 部署 ${file.local}...`);
-      
+
       fs.readFile(localPath, 'utf8', (err, content) => {
         if (err) {
           console.error(`  读取失败: ${err.message}`);
@@ -90,6 +90,6 @@ conn.connect({
   host: '150.158.54.108',
   port: 22,
   username: 'administrator',
-  privateKey: fs.readFileSync('server-key/id_rsa'),
+  privateKey: fs.readFileSync(path.join(__dirname, 'server-key/id_rsa')),
   readyTimeout: 15000
 });

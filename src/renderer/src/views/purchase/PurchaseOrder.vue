@@ -408,6 +408,7 @@
         <el-table-column label="操作" width="180" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="handleLoginAccount(row)">登录</el-button>
+            <el-button link type="success" size="small" @click="handleReloginAccount(row)">重登</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="handleDeleteAccount(row)">删除</el-button>
           </template>
@@ -886,6 +887,27 @@ function handleLoginAccount(row) {
       password: row.password
     })
     ElMessage.info('已打开登录窗口')
+  } else {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+  }
+}
+
+function handleReloginAccount(row) {
+  if (window.electronAPI) {
+    ElMessageBox.confirm(
+      `确定清除账号 ${row.username} 的登录态并重新登录？清除后需要重新输入密码登录。`,
+      '重新登录确认',
+      { type: 'warning', confirmButtonText: '确定清除', cancelButtonText: '取消' }
+    ).then(async () => {
+      // 先清除 partition cookies
+      await window.electronAPI.invoke('clear-purchase-cookies', { accountId: String(row.id) })
+      // 再打开登录窗口（不带 account 参数，让主进程也清除 partition）
+      window.electronAPI.invoke('open-purchase-login-window', {
+        accountId: String(row.id),
+        platform: row.platform
+      })
+      ElMessage.info('已清除登录态，请重新登录')
+    }).catch(() => {})
   } else {
     ElMessage.warning('请在 Electron 环境中使用此功能')
   }

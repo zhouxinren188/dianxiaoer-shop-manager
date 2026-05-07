@@ -374,6 +374,269 @@ const PURCHASE_INTERCEPTOR = `
 })()
 `
 
+// ============ 采购页面商品信息浮层 ============
+// 商品详情页：显示完整商品信息（名称、图片、SKU、价格、收货地址）
+// 结算页：只显示收货地址信息，方便核对地址是否修改正确
+const PRODUCT_INFO_OVERLAY = `
+(function() {
+  var old = document.getElementById('jd-product-overlay');
+  if (old) old.remove();
+
+  var info = window.__jdProductInfo;
+  if (!info) return '[OVERLAY] skipped: no __jdProductInfo';
+
+  var url = (location.href || '').toLowerCase();
+
+  // === PDD 严格页面过滤（参考 dl：只在商品详情页创建浮层 DOM） ===
+  var isPdd = (info.platform || '').indexOf('pinduoduo') >= 0;
+  if (isPdd) {
+    var isPddGoods = /yangkeduo\\.com\\/goods/.test(url) || /pinduoduo\\.com\\/goods/.test(url);
+    if (!isPddGoods) return '[OVERLAY] PDD skipped: not goods page';
+  }
+
+  // === 判断是否是结算页 ===
+  var isCheckout = url.indexOf('buy.taobao.com') >= 0 ||
+                   url.indexOf('buyertrade.taobao.com') >= 0 ||
+                   url.indexOf('buy.tmall.com') >= 0 ||
+                   url.indexOf('yangkeduo.com/order') >= 0 ||
+                   url.indexOf('yangkeduo.com/checkout') >= 0 ||
+                   url.indexOf('trade.1688.com') >= 0 ||
+                   url.indexOf('buyer.trade.1688.com') >= 0;
+
+  // === PDD结算页不显示浮层（PDD不是隐藏改地址，不需要核对地址） ===
+  if (isPdd && isCheckout) return;
+
+  // === DOM 未就绪时延迟重试 ===
+  if (!document.body) {
+    document.addEventListener('DOMContentLoaded', function() {
+      window.__rebuildOverlay && window.__rebuildOverlay();
+    });
+    return '[OVERLAY] waiting for DOM';
+  }
+
+  function buildOverlay() {
+
+  // === 淘宝浮窗左侧，PDD浮窗右侧 ===
+  var overlayPos = isPdd ? 'right:20px' : 'left:20px';
+
+  // === 创建浮层容器 ===
+  var overlay = document.createElement('div');
+  overlay.id = 'jd-product-overlay';
+  overlay.style.cssText = 'position:fixed;top:80px;' + overlayPos + ';width:220px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;line-height:1.5;color:#333;border-radius:8px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.12);user-select:none;background:#fff;border:1px solid #ebeef5;';
+
+  // === 标题栏 ===
+  var header = document.createElement('div');
+  header.style.cssText = 'padding:10px 12px;display:flex;align-items:center;justify-content:space-between;cursor:move;border-bottom:1px solid #f0f0f0;background:#fafafa;';
+
+  var titleSpan = document.createElement('span');
+  titleSpan.style.cssText = 'font-weight:600;font-size:13px;color:#303133;flex:1;';
+  titleSpan.textContent = isCheckout ? '\\u6536\\u8d27\\u5730\\u5740' : '\\u5546\\u54c1\\u4fe1\\u606f';
+
+  var btnGroup = document.createElement('div');
+  btnGroup.style.cssText = 'display:flex;gap:8px;';
+
+  var toggleBtn = document.createElement('span');
+  toggleBtn.style.cssText = 'cursor:pointer;color:#909399;font-size:12px;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;transition:background .2s;';
+  toggleBtn.textContent = '\\u25b2';
+  toggleBtn.title = '\\u6536\\u8d77/\\u5c55\\u5f00';
+
+  var closeBtn = document.createElement('span');
+  closeBtn.style.cssText = 'cursor:pointer;color:#909399;font-size:16px;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;transition:background .2s;';
+  closeBtn.textContent = '\\u00d7';
+  closeBtn.title = '\\u5173\\u95ed';
+
+  btnGroup.appendChild(toggleBtn);
+  btnGroup.appendChild(closeBtn);
+  header.appendChild(titleSpan);
+  header.appendChild(btnGroup);
+
+  // === 内容区 ===
+  var body = document.createElement('div');
+  body.style.cssText = 'padding:12px;max-height:500px;overflow-y:auto;background:#fff;';
+
+  if (isCheckout) {
+    // === 结算页模式：只显示收货地址 ===
+    if (info.shippingName || info.shippingPhone) {
+      var contactRow = document.createElement('div');
+      contactRow.style.cssText = 'display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;';
+
+      if (info.shippingName) {
+        var nameSpan = document.createElement('span');
+        nameSpan.style.cssText = 'color:#303133;font-weight:500;';
+        nameSpan.textContent = info.shippingName;
+        contactRow.appendChild(nameSpan);
+      }
+      if (info.shippingPhone) {
+        var phoneSpan = document.createElement('span');
+        phoneSpan.style.cssText = 'color:#409eff;font-weight:500;';
+        phoneSpan.textContent = info.shippingPhone;
+        contactRow.appendChild(phoneSpan);
+      }
+      body.appendChild(contactRow);
+    }
+
+    if (info.shippingAddress) {
+      var addrEl = document.createElement('div');
+      addrEl.style.cssText = 'font-size:12px;color:#606266;line-height:1.5;word-break:break-all;padding:8px 10px;background:#f5f7fa;border-radius:6px;border:1px solid #ebeef5;';
+      addrEl.textContent = info.shippingAddress;
+      body.appendChild(addrEl);
+    }
+
+    // 如果没有收货信息，显示提示
+    if (!info.shippingName && !info.shippingPhone && !info.shippingAddress) {
+      var emptyEl = document.createElement('div');
+      emptyEl.style.cssText = 'font-size:12px;color:#909399;text-align:center;padding:8px;';
+      emptyEl.textContent = '\\u65e0\\u6536\\u8d27\\u5730\\u5740\\u4fe1\\u606f';
+      body.appendChild(emptyEl);
+    }
+  } else {
+    // === 商品详情页模式：显示完整商品信息 ===
+    // 商品图片（180x180）
+    if (info.image) {
+      var imgWrap = document.createElement('div');
+      imgWrap.style.cssText = 'text-align:center;margin-bottom:10px;';
+      var img = document.createElement('img');
+      img.src = info.image;
+      img.style.cssText = 'width:180px;height:180px;border-radius:6px;object-fit:contain;';
+      img.onerror = function() { imgWrap.style.display = 'none'; };
+      imgWrap.appendChild(img);
+      body.appendChild(imgWrap);
+    }
+
+    // 商品名称
+    if (info.goodsName) {
+      var nameEl = document.createElement('div');
+      nameEl.style.cssText = 'font-weight:600;font-size:13px;color:#303133;margin-bottom:4px;word-break:break-all;line-height:1.4;';
+      nameEl.textContent = info.goodsName;
+      body.appendChild(nameEl);
+    }
+
+    // SKU
+    if (info.sku) {
+      var skuEl = document.createElement('div');
+      skuEl.style.cssText = 'font-size:12px;color:#909399;margin-bottom:8px;word-break:break-all;';
+      skuEl.textContent = info.sku;
+      body.appendChild(skuEl);
+    }
+
+    // 数量 + 销售单价
+    var priceRow = document.createElement('div');
+    priceRow.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;font-size:12px;';
+
+    var qtySpan = document.createElement('span');
+    qtySpan.style.color = '#606266';
+    qtySpan.textContent = '\\u6570\\u91cf: ' + (info.quantity || 0);
+
+    var priceSpan = document.createElement('span');
+    priceSpan.style.color = '#e6a23c';
+    priceSpan.style.fontWeight = '500';
+    priceSpan.textContent = '\\u5355\\u4ef7: \\u00a5' + (Number(info.price || 0).toFixed(2));
+
+    priceRow.appendChild(qtySpan);
+    priceRow.appendChild(priceSpan);
+    body.appendChild(priceRow);
+
+    // 采购价
+    if (info.purchasePrice) {
+      var purchaseRow = document.createElement('div');
+      purchaseRow.style.cssText = 'font-size:12px;color:#67c23a;margin-bottom:8px;';
+      purchaseRow.textContent = '\\u91c7\\u8d2d\\u4ef7: \\u00a5' + Number(info.purchasePrice).toFixed(2);
+      body.appendChild(purchaseRow);
+    }
+
+    // 分割线 + 收货信息
+    if (info.shippingName || info.shippingPhone || info.shippingAddress) {
+      var divider = document.createElement('div');
+      divider.style.cssText = 'border-top:1px solid #f0f0f0;margin:8px 0;';
+      body.appendChild(divider);
+
+      if (info.shippingName || info.shippingPhone) {
+        var contactRow = document.createElement('div');
+        contactRow.style.cssText = 'display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;';
+
+        if (info.shippingName) {
+          var nameSpan = document.createElement('span');
+          nameSpan.style.color = '#606266';
+          nameSpan.textContent = info.shippingName;
+          contactRow.appendChild(nameSpan);
+        }
+        if (info.shippingPhone) {
+          var phoneSpan = document.createElement('span');
+          phoneSpan.style.color = '#606266';
+          phoneSpan.textContent = info.shippingPhone;
+          contactRow.appendChild(phoneSpan);
+        }
+        body.appendChild(contactRow);
+      }
+
+      if (info.shippingAddress) {
+        var addrEl = document.createElement('div');
+        addrEl.style.cssText = 'font-size:11px;color:#909399;line-height:1.4;word-break:break-all;';
+        addrEl.textContent = info.shippingAddress;
+        body.appendChild(addrEl);
+      }
+    }
+  }
+
+  overlay.appendChild(header);
+  overlay.appendChild(body);
+  document.body.appendChild(overlay);
+
+  // === 收起/展开 ===
+  var collapsed = false;
+  toggleBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    collapsed = !collapsed;
+    body.style.display = collapsed ? 'none' : 'block';
+    toggleBtn.textContent = collapsed ? '\\u25bc' : '\\u25b2';
+  });
+
+  // === 关闭 ===
+  closeBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    overlay.style.display = 'none';
+  });
+
+  // === 拖拽 ===
+  var dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+  header.addEventListener('mousedown', function(e) {
+    if (e.target === toggleBtn || e.target === closeBtn) return;
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    var rect = overlay.getBoundingClientRect();
+    startLeft = rect.left;
+    startTop = rect.top;
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var dx = e.clientX - startX;
+    var dy = e.clientY - startY;
+    overlay.style.left = (startLeft + dx) + 'px';
+    overlay.style.top = (startTop + dy) + 'px';
+    overlay.style.right = 'auto';
+  });
+
+  document.addEventListener('mouseup', function() {
+    dragging = false;
+  });
+  }
+
+  // 注册全局重建函数（DOMContentLoaded 回调用）
+  window.__rebuildOverlay = function() {
+    var old2 = document.getElementById('jd-product-overlay');
+    if (old2) old2.remove();
+    buildOverlay();
+  };
+
+  // 立即构建浮层
+  buildOverlay();
+})()
+`
+
 // 读取捕获的响应（读后清空）
 const READ_CAPTURED_PURCHASES = `
 (function() {
@@ -1370,11 +1633,8 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       }
 
       // === 填写详细地址 ===
-      // 去掉【】及其中内容（卖家备注），以及其他淘宝不接受的特殊字符
-      var cleanAddr = targetOther.replace(/【[^】]*】/g, '').replace(/\[[^\]]*\]/g, '').trim();
-      if (cleanAddr !== targetOther) {
-        console.log('[AddressAutoFill] Address cleaned: "' + targetOther + '" -> "' + cleanAddr + '"');
-      }
+      // 保留完整地址（包括【采购编号】等后缀），不再移除方括号内容
+      var cleanAddr = targetOther;
 
       var textarea = document.querySelector('.cndzk-entrance-associate-area-textarea')
         || document.querySelector('textarea[placeholder*="详细地址"]')
@@ -2906,11 +3166,11 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
                         (urlLower.includes('passport') && urlLower.includes('1688.com')) ||
                         (urlLower.includes('passport') && urlLower.includes('taobao.com')) ||
                         urlLower.includes('yangkeduo.com/login')
-    if (isLoginPage && purchaseInfo.accountPassword) {
+    if (isLoginPage && purchaseInfo.accountPassword && platform !== 'pinduoduo') {
       addrWin.show()  // 显示窗口让用户看到登录过程
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
-        // 和 dl 一致：所有平台使用通用登录脚本
+        // 和 dl 一致：非 PDD 平台使用通用登录脚本（PDD 反爬严格，程序化 input 事件易被检测）
         const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
         if (script) {
           addrWin.webContents.executeJavaScript(script).catch(() => {})
@@ -2933,11 +3193,11 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
                         (urlLower.includes('passport') && urlLower.includes('1688.com')) ||
                         (urlLower.includes('passport') && urlLower.includes('taobao.com')) ||
                         urlLower.includes('yangkeduo.com/login')
-    if (isLoginPage && purchaseInfo.accountPassword) {
+    if (isLoginPage && purchaseInfo.accountPassword && platform !== 'pinduoduo') {
       addrWin.show()  // 显示窗口让用户看到登录过程
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
-        // 和 dl 一致：所有平台使用通用登录脚本
+        // 和 dl 一致：非 PDD 平台使用通用登录脚本（PDD 反爬严格，程序化 input 事件易被检测）
         const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
         if (script) {
           addrWin.webContents.executeJavaScript(script).catch(() => {})
@@ -3143,6 +3403,21 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const hasShippingInfo = purchaseInfo.shippingName || purchaseInfo.shippingPhone || purchaseInfo.shippingAddress
     const needAddrSetup = hasShippingInfo && (platform === '1688' || platform === 'taobao' || platform === 'pinduoduo')
     const parsedAddr = needAddrSetup ? parseAddress(purchaseInfo.shippingAddress) : null
+
+    // 构建京东商品信息，供采购窗口浮层显示
+    const jdInfo = JSON.stringify({
+      goodsName: purchaseInfo.goodsName || '',
+      image: purchaseInfo.image || '',
+      sku: purchaseInfo.sku || '',
+      quantity: purchaseInfo.quantity || 0,
+      price: purchaseInfo.price || 0,
+      purchasePrice: purchaseInfo.purchasePrice || 0,
+      shippingName: purchaseInfo.shippingName || '',
+      shippingPhone: purchaseInfo.shippingPhone || '',
+      shippingAddress: purchaseInfo.shippingAddress || '',
+      salesOrderNo: purchaseInfo.salesOrderNo || '',
+      platform: platform || ''
+    })
 
     const win = new BrowserWindow({
       width: 1280,
@@ -3560,12 +3835,15 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         doBindAndNotify()
       }
 
-      // 5秒后关闭窗口（留足时间给API调用）
-      setTimeout(() => {
-        if (win && !win.isDestroyed()) {
-          win.destroy()
-        }
-      }, 5000)
+      // 淘宝平台不自动关闭窗口（用户需要在支付宝页面完成支付后手动关闭）
+      // 其他平台5秒后自动关闭窗口
+      if (platform !== 'taobao') {
+        setTimeout(() => {
+          if (win && !win.isDestroyed()) {
+            win.destroy()
+          }
+        }, 5000)
+      }
     }
 
     function onWindowClosed() {
@@ -3652,6 +3930,16 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       win.webContents.executeJavaScript(PURCHASE_INTERCEPTOR).catch(() => {})
       console.log('[PurchaseCapture] Interceptor injected (anti-detect handled by preload)')
 
+      // 注入商品信息浮层（采购页面右上角显示销售订单商品信息，方便对比）
+      // ★ PDD 安全策略（参考 dl）：脚本内部通过 URL 正则判断只在商品详情页创建浮层 DOM
+      //   登录页/结算页/支付页等一律跳过，和 dl 的 pddBuyer 行为一致
+      // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
+      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+        .then(result => {
+          if (result) console.log(`[PurchaseCapture] Overlay result: ${result}`)
+        })
+        .catch(() => {})
+
       // === 登录页自动填充 ===
       const urlLower = currentUrl.toLowerCase()
       const isLoginPage = urlLower.includes('login.taobao.com') ||
@@ -3661,10 +3949,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                           (urlLower.includes('passport') && urlLower.includes('taobao.com')) ||
                           urlLower.includes('yangkeduo.com/login')
 
-      if (isLoginPage && purchaseInfo.accountPassword && !resolved) {
+      if (isLoginPage && purchaseInfo.accountPassword && !resolved && platform !== 'pinduoduo') {
+        // ★ PDD 不自动填充：PDD 反爬严格，程序化 input 事件（无 keyboard 事件）容易被检测
+        //   且 dl 也不会自动填充 PDD 登录页，用户手动输入即可
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
-          // 和 dl 一致：所有平台使用通用登录脚本
+          // 和 dl 一致：非 PDD 平台使用通用登录脚本
           const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
           if (script) {
             win.webContents.executeJavaScript(script).catch(() => {})
@@ -4164,10 +4454,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                              (navUrlLower.includes('passport') && navUrlLower.includes('taobao.com')) ||
                              navUrlLower.includes('yangkeduo.com/login')
 
-      if (isLoginPageNav && purchaseInfo.accountPassword && !resolved) {
+      if (isLoginPageNav && purchaseInfo.accountPassword && !resolved && platform !== 'pinduoduo') {
+        // ★ PDD 不自动填充：PDD 反爬严格，程序化 input 事件（无 keyboard 事件）容易被检测
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
-          // 和 dl 一致：所有平台使用通用登录脚本
+          // 和 dl 一致：非 PDD 平台使用通用登录脚本
           const script = buildLoginAutoFillScript(purchaseInfo.accountName, purchaseInfo.accountPassword)
           if (script) {
             win.webContents.executeJavaScript(script).catch(() => {})
@@ -4283,6 +4574,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           }, 1000)
         }
       }
+
+      // 页面导航后重新注入商品信息浮层（脚本内部按 URL 过滤，PDD 只在商品页创建 DOM）
+      // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
+      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+        .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(nav) result: ${result}`) })
+        .catch(() => {})
     })
 
     // SPA内的hash/pushState导航
@@ -4368,6 +4665,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           }, 2000)
         }
       }
+
+      // SPA导航后重新注入商品信息浮层（脚本内部按 URL 过滤，PDD 只在商品页创建 DOM）
+      // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
+      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+        .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(spa) result: ${result}`) })
+        .catch(() => {})
     })
 
     // 页面即将导航前 — 关键时机！在跳走之前：
@@ -4410,7 +4713,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           .then(responses => {
             if (responses && responses.length > 0 && !resolved) {
               console.log(`[PurchaseCapture] PDD: Flushed ${responses.length} responses before navigation:`)
-              // 逐条打印响应URL，搞清楚PDD实际调了什么API
               for (const r of responses) {
                 const rUrl = (r.url || '').substring(0, 120)
                 const isPdd = rUrl.includes('yangkeduo') || rUrl.includes('pinduoduo')

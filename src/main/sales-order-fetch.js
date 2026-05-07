@@ -102,6 +102,25 @@ const API_INTERCEPTOR = `
     return result;
   }
 
+  // 修改请求体中的订单号搜索字段（二次同步：按订单号精确查询活跃订单状态）
+  function patchBodySearchOrderIds(body, orderIds) {
+    if (!body || typeof body !== 'string' || !orderIds || !orderIds.length) return body;
+    try {
+      if (body.charAt(0) === '{') {
+        var obj = JSON.parse(body);
+        // 京东 queryOrderPage 请求体结构: { request: { data: { orderIds: [...] } } }
+        var dataObj = (obj.request && obj.request.data) ? obj.request.data : (obj.data || null);
+        if (dataObj) {
+          dataObj.orderIds = orderIds;
+          delete dataObj.orderStatusTypes;
+          console.log('[SalesFetch] patchBodySearchOrderIds: set orderIds=' + orderIds.length + ', deleted orderStatusTypes');
+          return JSON.stringify(obj);
+        }
+      }
+    } catch(e) {}
+    return body;
+  }
+
   // 拦截 fetch
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
@@ -117,7 +136,7 @@ const API_INTERCEPTOR = `
         if (urlStr.indexOf('queryOrderPage') !== -1) {
           window.__debugRequestBodies.push({ type: 'fetch', bodyType: 'string', body: init.body.substring(0, 2000), url: urlStr.substring(0, 200) });
         }
-        init = Object.assign({}, init, { body: patchBodySortOrder(patchBodyPageSize(init.body)) });
+        init = Object.assign({}, init, { body: patchBodySearchOrderIds(patchBodySortOrder(patchBodyPageSize(init.body)), window.__searchOrderIds || null) });
       } else {
         // body 不是字符串，记录其类型用于调试
         if (urlStr.indexOf('queryOrderPage') !== -1) {
@@ -197,7 +216,7 @@ const API_INTERCEPTOR = `
 
     // 修改 body 中的 pageSize 和排序
     if (body && typeof body === 'string') {
-      body = patchBodySortOrder(patchBodyPageSize(body));
+      body = patchBodySearchOrderIds(patchBodySortOrder(patchBodyPageSize(body)), window.__searchOrderIds || null);
     } else if (body instanceof URLSearchParams) {
       // 处理 URLSearchParams 格式
       if (body.has('pageSize')) body.set('pageSize', ORDER_PAGE_SIZE);
@@ -208,7 +227,7 @@ const API_INTERCEPTOR = `
       // 检查是否有嵌套 JSON 参数包含 pageSize
       body.forEach(function(value, key) {
         if (typeof value === 'string' && value.indexOf('pageSize') !== -1) {
-          body.set(key, patchBodySortOrder(patchBodyPageSize(value)));
+          body.set(key, patchBodySearchOrderIds(patchBodySortOrder(patchBodyPageSize(value)), window.__searchOrderIds || null));
         }
       });
     } else if (body instanceof FormData) {
@@ -221,6 +240,7 @@ const API_INTERCEPTOR = `
             patched = patchBodyPageSize(patched);
           }
           patched = patchBodySortOrder(patched);
+          patched = patchBodySearchOrderIds(patched, window.__searchOrderIds || null);
           body.set('body', patched);
         }
       } catch(e) {}
@@ -286,7 +306,7 @@ try {
 } catch(e) {}
 `
 
-function fetchSalesOrders(storeId) {
+function fetchSalesOrders(storeId, options = {}) {
   return new Promise(async (resolve) => {
     if (activeFetches.has(storeId)) {
       return resolve({ success: false, message: '该店铺正在获取数据，请等待完成' })
@@ -313,7 +333,7 @@ function fetchSalesOrders(storeId) {
       console.log('[SalesFetch] Session无京东Cookie，尝试从数据库恢复...')
       try {
         const { restoreCookiesFromDB } = require('./cookie-heartbeat')
-        const restored = await restoreCookiesFromDB(storeId)
+        const restored = await restoreCookiesFromDB(storeId, { skipFlush: true })
         if (restored) {
           // 恢复后重新获取Cookie
           cookies = await ses.cookies.get({})
@@ -334,6 +354,7 @@ function fetchSalesOrders(storeId) {
     let overallTimer = null
     let resolved = false
     let allCapturedResponses = []
+    const searchOrderIds = options.searchOrderIds || null
 
     function cleanup() {
       if (overallTimer) { clearTimeout(overallTimer); overallTimer = null }
@@ -392,9 +413,25 @@ function fetchSalesOrders(storeId) {
       // 在每次 DOM 就绪时注入 API 拦截器 + 可见性覆盖
       win.webContents.on('dom-ready', () => {
         if (win.isDestroyed() || resolved) return
-        win.webContents.executeJavaScript(API_INTERCEPTOR).catch(() => {})
-        win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
-        console.log('[SalesFetch] API interceptor + visibility override injected')
+        // 先注入搜索订单号（必须在拦截器之前设置，确保拦截器首次捕获请求时就能读取到）
+        if (searchOrderIds && searchOrderIds.length > 0) {
+          win.webContents.executeJavaScript(
+            `window.__searchOrderIds = ${JSON.stringify(searchOrderIds)}`
+          ).then(() => {
+            // searchOrderIds 注入完成后再注入拦截器
+            win.webContents.executeJavaScript(API_INTERCEPTOR).catch(() => {})
+            win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
+            console.log('[SalesFetch] Search order IDs injected FIRST, then interceptor:', searchOrderIds.length)
+          }).catch(() => {
+            // 即使 searchOrderIds 注入失败也要注入拦截器
+            win.webContents.executeJavaScript(API_INTERCEPTOR).catch(() => {})
+            win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
+          })
+        } else {
+          win.webContents.executeJavaScript(API_INTERCEPTOR).catch(() => {})
+          win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
+          console.log('[SalesFetch] API interceptor + visibility override injected')
+        }
       })
 
       win.webContents.on('did-navigate', (event, url) => {
@@ -554,16 +591,35 @@ function fetchSalesOrders(storeId) {
        * 京麦销售订单页面 API 关键词：orderList, queryOrder, order_list 等
        */
       function findOrderData(responses) {
-        // 优先查找 URL 中包含订单相关关键词的 API
+        // 优先查找 URL 中包含 queryOrderPage 的 API（这是主订单列表接口）
+        // 其他接口如 queryOrderSearchInfo、queryOrderTabs 等不是订单数据
+        const priorityKeywords = ['queryorderpage', 'orderlistbff']
         const orderUrlKeywords = ['orderList', 'queryOrder', 'order_list', 'getOrderList', 'orderSearch', 'order/list']
+
+        // 第一轮：优先匹配 queryOrderPage（订单列表主接口）
         let bestMatch = null
         for (const r of responses) {
           if (r.status !== 200) continue
           const urlLower = r.url.toLowerCase()
-          const matched = orderUrlKeywords.some(kw => urlLower.includes(kw.toLowerCase()))
-          if (!matched) continue
+          const isPriority = priorityKeywords.some(kw => urlLower.includes(kw.toLowerCase()))
+          if (!isPriority) continue
           if (!bestMatch || r.bodyLen > bestMatch.bodyLen) {
             bestMatch = r
+          }
+        }
+
+        // 第二轮：如果第一轮没找到，再用宽泛关键词匹配
+        if (!bestMatch) {
+          for (const r of responses) {
+            if (r.status !== 200) continue
+            const urlLower = r.url.toLowerCase()
+            const matched = orderUrlKeywords.some(kw => urlLower.includes(kw.toLowerCase()))
+            if (!matched) continue
+            // 排除非订单数据接口
+            if (urlLower.includes('queryordersearchinfo') || urlLower.includes('queryordertags') || urlLower.includes('queryordertabs')) continue
+            if (!bestMatch || r.bodyLen > bestMatch.bodyLen) {
+              bestMatch = r
+            }
           }
         }
 
@@ -573,9 +629,11 @@ function fetchSalesOrders(storeId) {
             const json = JSON.parse(bestMatch.body)
             const list = extractOrderList(json)
             if (list && list.length > 0) {
-              const orders = list.map(normalizeSalesOrder)
-              const total = json.totalCount || json.total || json.data?.total || orders.length
-              result = { orders, total, apiUrl: bestMatch.url, rawOrders: list }
+              const orders = list.map(normalizeSalesOrder).filter(o => o.orderId) // 过滤掉 orderId 为空的无效订单
+              if (orders.length > 0) {
+                const total = json.totalCount || json.total || json.data?.total || orders.length
+                result = { orders, total, apiUrl: bestMatch.url, rawOrders: list }
+              }
             }
           } catch (e) {
             console.log('[SalesFetch] Parse order API failed:', e.message)
@@ -587,15 +645,20 @@ function fetchSalesOrders(storeId) {
           for (const r of responses) {
             if (r.status !== 200 || r.bodyLen < 500) continue
             if (r.url.includes('.css') || r.url.includes('.js') || r.url.includes('.png')) continue
+            // 排除非订单数据接口
+            const urlLower = r.url.toLowerCase()
+            if (urlLower.includes('queryordersearchinfo') || urlLower.includes('queryordertags') || urlLower.includes('queryordertabs')) continue
             try {
               const body = r.body
               if (!body || (body.charAt(0) !== '{' && body.charAt(0) !== '[')) continue
               const json = JSON.parse(body)
               const list = findArrayWithField(json, 'orderId')
               if (list && list.length > 0) {
-                const orders = list.map(normalizeSalesOrder)
-                result = { orders, total: orders.length, apiUrl: r.url, rawOrders: list }
-                break
+                const orders = list.map(normalizeSalesOrder).filter(o => o.orderId) // 过滤掉 orderId 为空的无效订单
+                if (orders.length > 0) {
+                  result = { orders, total: orders.length, apiUrl: r.url, rawOrders: list }
+                  break
+                }
               }
             } catch (e) {}
           }
@@ -826,6 +889,18 @@ function fetchSalesOrders(storeId) {
           logisticsInfo.mailNo || logisticsInfo.logisticsNo || logisticsInfo.waybillCode ||
           extInfo.mailNo || extInfo.logisticsNo ||
           ''
+
+        // 发货仓库（京东 API 返回 venderWareHouse 对象）
+        // 有 wareHouseName 直接用；wareHouseId=0 或 null 为官方货源；wareHouseId 非零为供应商仓库
+        if (raw.venderWareHouse && raw.venderWareHouse.wareHouseName) {
+          order.warehouseName = raw.venderWareHouse.wareHouseName
+        } else if (!raw.venderWareHouse || !raw.venderWareHouse.wareHouseId) {
+          // wareHouseId 为 0、null、undefined → 官方货源
+          order.warehouseName = '官方货源'
+        } else {
+          // wareHouseId 非零但无 wareHouseName → 供应商仓库
+          order.warehouseName = '供应商仓库'
+        }
 
         // 商品信息（从 orderItems 提取）
         const items = raw.orderItems || raw.skuList || raw.itemList || []
@@ -2677,8 +2752,10 @@ function registerSalesOrderIpc(mainWindow) {
 
   // 开启/关闭京东订单自动同步（由渲染进程功能区开关控制）
   ipcMain.handle('toggle-jd-auto-sync', (event, { enabled }) => {
+    console.log('[AutoSync] toggle-jd-auto-sync 收到, enabled:', enabled, 'autoSyncRunning:', autoSyncRunning, 'mainWindow:', !!_mainWindow)
     if (enabled) {
       if (!_mainWindow || _mainWindow.isDestroyed()) {
+        console.log('[AutoSync] 主窗口未就绪，无法启动')
         return { success: false, running: false, message: '主窗口未就绪' }
       }
       startAutoSyncNow(_mainWindow)
@@ -2892,6 +2969,21 @@ function httpGetJsonAuth(url, token) {
   })
 }
 
+// 获取指定店铺的活跃订单号（待出库/已出库/暂停），用于二次同步更新状态
+async function getActiveOrderIds(storeId) {
+  const token = getAuthToken()
+  const json = await httpGetJsonAuth(
+    `http://150.158.54.108:3002/api/sales-orders/active-order-ids?store_id=${storeId}`,
+    token
+  )
+  if (json && json.code === 0 && json.data?.orderIds) {
+    console.log(`[AutoSync] getActiveOrderIds store_id=${storeId}: ${json.data.orderIds.length} 个活跃订单`)
+    return json.data.orderIds
+  }
+  console.log(`[AutoSync] getActiveOrderIds store_id=${storeId}: 无活跃订单或API未就绪, response:`, JSON.stringify(json)?.substring(0, 200))
+  return []
+}
+
 // 主进程直接保存订单到服务器（避免通过 IPC 传递订单导致双重保存）
 async function saveOrdersToServer(storeId, orders) {
   const http = require('http')
@@ -3047,31 +3139,47 @@ async function autoSyncAllStores(mainWindow) {
   try {
     // 从远程服务器获取所有启用店铺（本地 server.js 的 /api/cookies 无数据）
     const token = getAuthToken()
+    console.log('[AutoSync] token状态:', token ? '已设置' : '未设置(可能未登录)')
+    console.log('[AutoSync] 正在获取店铺列表...')
     const storeJson = await httpGetJsonAuth('http://150.158.54.108:3002/api/stores?pageSize=1000', token)
+    console.log('[AutoSync] 店铺列表请求返回, code:', storeJson?.code, 'data?.list长度:', storeJson?.data?.list?.length)
     if (!storeJson || storeJson.code !== 0 || !storeJson.data?.list) {
       console.log('[AutoSync] 获取店铺列表失败:', JSON.stringify(storeJson)?.substring(0, 200))
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('auto-sync-result', {
+          success: false,
+          skipped: true,
+          message: '获取店铺列表失败' + (storeJson?.message ? ': ' + storeJson.message : '（请检查网络或重新登录）')
+        })
+      }
       return
     }
 
     // 筛选京东平台店铺，并检查 Electron session 中是否有 Cookie
     const allStores = storeJson.data.list
+    console.log('[AutoSync] 获取到店铺总数:', allStores.length, '开始检查Cookie...')
     const jdStores = []
-    for (const s of allStores) {
-      if (s.platform !== 'jd' || s.status !== 'enabled') continue
+    for (let idx = 0; idx < allStores.length; idx++) {
+      const s = allStores[idx]
+      if (s.platform !== 'jd' || s.status !== 'enabled' || s.store_type === 'supplier') continue
+      console.log(`[AutoSync] [Cookie检查] 店铺 ${s.name} (ID:${s.id}) 平台:${s.platform} 类型:${s.store_type || 'pop'} 状态:${s.status}`)
       // 检查 Electron session partition 中是否有 JD Cookie
       const partitionName = `persist:platform-${s.id}`
       const ses = session.fromPartition(partitionName)
       const allCookies = await ses.cookies.get({})
       let jdCookies = allCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+      console.log(`[AutoSync] [Cookie检查] 店铺 ${s.name} Session中有 ${jdCookies.length} 个京东Cookie`)
       // 如果Session无京东Cookie，尝试从数据库恢复（与心跳逻辑一致）
       if (jdCookies.length === 0) {
         console.log(`[AutoSync] 店铺 ${s.name} (ID:${s.id}) Session无京东Cookie，尝试从数据库恢复...`)
         try {
           const { restoreCookiesFromDB } = require('./cookie-heartbeat')
-          const restored = await restoreCookiesFromDB(s.id)
+          const restored = await restoreCookiesFromDB(s.id, { skipFlush: true })
+          console.log(`[AutoSync] 店铺 ${s.name} 从数据库恢复Cookie结果: ${restored ? '成功' : '失败'}`)
           if (restored) {
             const restoredCookies = await ses.cookies.get({})
             jdCookies = restoredCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+            console.log(`[AutoSync] 店铺 ${s.name} 恢复后有 ${jdCookies.length} 个京东Cookie`)
           }
         } catch (e) {
           console.error(`[AutoSync] 从数据库恢复Cookie失败: ${e.message}`)
@@ -3086,10 +3194,17 @@ async function autoSyncAllStores(mainWindow) {
 
     if (jdStores.length === 0) {
       console.log('[AutoSync] 无可同步的京东店铺')
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('auto-sync-result', {
+          success: false,
+          skipped: true,
+          message: '无可同步的京东店铺（请先登录京东后台）'
+        })
+      }
       return
     }
 
-    console.log(`[AutoSync] 待同步店铺: ${jdStores.length} 个`)
+    console.log(`[AutoSync] 待同步店铺: ${jdStores.length} 个`, jdStores.map(s => s.store_name).join(', '))
 
     // 逐个同步，避免并发风控
     for (let i = 0; i < jdStores.length; i++) {
@@ -3157,6 +3272,56 @@ async function autoSyncAllStores(mainWindow) {
         await releaseSyncLock(store.store_id, 'sales', result?.success ?? false)
       }
 
+      // === 二次同步：更新活跃订单状态 ===
+      try {
+        const activeIds = await getActiveOrderIds(store.store_id)
+        if (activeIds.length > 0) {
+          console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 活跃订单: ${activeIds.length} 条，开始状态更新`)
+          // 分批处理，每批最多 50 条
+          const BATCH_SIZE = 50
+          for (let b = 0; b < activeIds.length; b += BATCH_SIZE) {
+            const batch = activeIds.slice(b, b + BATCH_SIZE)
+            console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 搜索订单号: [${batch.slice(0, 5).join(', ')}${batch.length > 5 ? ', ...' : ''}] (共${batch.length}条)`)
+            const activeResult = await fetchSalesOrders(store.store_id, {
+              searchOrderIds: batch
+            })
+            if (activeResult.success) {
+              const orders = activeResult.data?.list || []
+              if (orders.length > 0) {
+                // 详细记录每个订单的 ID 和状态
+                const statusSummary = {}
+                for (const o of orders) {
+                  const st = o.statusText || '未知'
+                  statusSummary[st] = (statusSummary[st] || 0) + 1
+                }
+                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${Math.floor(b/BATCH_SIZE)+1}: JD返回${orders.length}条, 状态分布: ${JSON.stringify(statusSummary)}`)
+                // 记录具体的状态变化（对比活跃订单原本是待出库/已出库/暂停）
+                const changedOrders = orders.filter(o => !['待出库', '已出库', '暂停订单'].includes(o.statusText))
+                if (changedOrders.length > 0) {
+                  console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态已变更的订单: ${changedOrders.map(o => o.orderId + '→' + o.statusText).join(', ')}`)
+                } else {
+                  console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 本批次无状态变更（JD返回的订单仍为活跃状态）`)
+                }
+                // 记录JD未返回的订单号（可能已被删除或不在搜索范围内）
+                const returnedIds = new Set(orders.map(o => o.orderId))
+                const missingIds = batch.filter(id => !returnedIds.has(id))
+                if (missingIds.length > 0) {
+                  console.log(`[AutoSync] [${i + 1}/${jdStores.length}] JD未返回的订单: ${missingIds.join(', ')} (共${missingIds.length}条)`)
+                }
+                await saveOrdersToServer(store.store_id, orders)
+              } else {
+                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${Math.floor(b/BATCH_SIZE)+1}: JD返回0条（搜索了${batch.length}个订单号）`)
+              }
+            } else {
+              console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新失败: ${activeResult.message}`)
+            }
+          }
+        }
+      } catch (activeErr) {
+        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 活跃订单状态同步失败: ${activeErr.message}`)
+        // 状态同步失败不影响主流程
+      }
+
       // 多店铺之间间隔 5 秒
       if (i < jdStores.length - 1) {
         console.log('[AutoSync] 等待 5 秒后同步下一个店铺...')
@@ -3165,6 +3330,13 @@ async function autoSyncAllStores(mainWindow) {
     }
   } catch (err) {
     console.log('[AutoSync] 自动同步异常:', err.message)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auto-sync-result', {
+        success: false,
+        skipped: true,
+        message: '自动同步异常: ' + err.message
+      })
+    }
   } finally {
     autoSyncRunning = false
     console.log('[AutoSync] === 自动同步结束 ===')
@@ -3191,6 +3363,10 @@ function startAutoSync(mainWindow) {
 // 立即执行首次同步（用户手动开启时调用，不等待延迟）
 function startAutoSyncNow(mainWindow) {
   stopAutoSync()
+  // 强制重置运行状态，防止上次卡住导致一直跳过
+  autoSyncRunning = false
+
+  console.log('[AutoSync] startAutoSyncNow 被调用，立即开始同步')
 
   // 立即执行首次同步
   autoSyncAllStores(mainWindow)

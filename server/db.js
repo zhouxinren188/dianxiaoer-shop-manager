@@ -128,7 +128,7 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS user_tokens (
         id INT PRIMARY KEY AUTO_INCREMENT,
         user_id INT NOT NULL,
-        token VARCHAR(200) NOT NULL UNIQUE,
+        token VARCHAR(500) NOT NULL UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         KEY idx_token (token),
         KEY idx_user_id (user_id)
@@ -231,6 +231,7 @@ async function initDB() {
         buyer_address VARCHAR(500) DEFAULT '',
         logistics_company VARCHAR(50) DEFAULT '',
         logistics_no VARCHAR(100) DEFAULT '',
+        warehouse_name VARCHAR(100) DEFAULT '',
         sku_id VARCHAR(50) DEFAULT '',
         product_name VARCHAR(300) DEFAULT '',
         product_image VARCHAR(500) DEFAULT '',
@@ -246,6 +247,18 @@ async function initDB() {
         KEY idx_order_time (order_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    // 销售订单表添加 warehouse_name 列（兼容已有表）
+    try {
+      await connection.execute('ALTER TABLE sales_orders ADD COLUMN warehouse_name VARCHAR(100) DEFAULT \'\' AFTER logistics_no')
+      console.log('[DB] sales_orders 表已添加 warehouse_name 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] sales_orders.warehouse_name 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 sales_orders.warehouse_name 列失败:', e.message)
+      }
+    }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")

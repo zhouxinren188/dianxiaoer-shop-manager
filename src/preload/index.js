@@ -20,6 +20,7 @@ const validInvokeChannels = [
   'packet-capture-stop',
   'packet-capture-status',
   'open-external-url',
+  'open-product-url',
   'fetch-supply-orders',
   'fetch-sales-orders',
   'set-auth-token',
@@ -29,6 +30,7 @@ const validInvokeChannels = [
   'sync-purchase-order-browser',
   'sync-purchase-orders-browser',
   'fetch-buyer-sensitive-info',
+  'clear-purchase-cookies',
   'toggle-jd-auto-sync',
   'jd-auto-sync-status'
 ]

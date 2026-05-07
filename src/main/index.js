@@ -156,6 +156,27 @@ ipcMain.handle('open-external-url', (event, { url }) => {
   return { success: true }
 })
 
+ipcMain.handle('open-product-url', (event, { storeId, skuId }) => {
+  if (!skuId) return { success: false, message: 'SKU为空' }
+  const url = `https://item.jd.com/${skuId}.html`
+  const partitionName = `persist:platform-${storeId}`
+  const urlWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: `商品详情 - ${skuId}`,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: storeId ? partitionName : undefined
+    }
+  })
+  urlWin.loadURL(url).catch(err => {
+    console.error('[OpenProductURL] loadURL failed:', err.message)
+  })
+  return { success: true }
+})
+
 // 窗口尺寸切换：登录页 <-> 主页
 ipcMain.handle('window-set-login-size', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)

@@ -88,7 +88,7 @@ function cookiesToHeader(cookies) {
 }
 
 // 从数据库查询店铺 Cookie 并恢复到 Electron session
-async function restoreCookiesFromDB(storeId) {
+async function restoreCookiesFromDB(storeId, { skipFlush = false } = {}) {
   try {
     const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies/${storeId}`)
     if (res.statusCode !== 200) {
@@ -136,9 +136,17 @@ async function restoreCookiesFromDB(storeId) {
 
     // 恢复后立即刷盘，确保 Cookie 持久化到磁盘
     // 否则 session 对象被 GC 后，下次 session.fromPartition() 从磁盘加载会丢失这些 Cookie
-    if (restored > 0) {
-      await new Promise(resolve => ses.flushStorageData(resolve))
-      console.log(`[Heartbeat] Cookie已刷盘 store_id=${storeId}`)
+    // skipFlush: AutoSync 调用时跳过刷盘（Heartbeat 会定期刷盘），避免因 flushStorageData 卡死导致同步阻塞
+    if (restored > 0 && !skipFlush) {
+      try {
+        await Promise.race([
+          new Promise(resolve => ses.flushStorageData(resolve)),
+          new Promise(resolve => setTimeout(resolve, 5000)) // 5秒超时，防止 flushStorageData 卡死
+        ])
+        console.log(`[Heartbeat] Cookie已刷盘 store_id=${storeId}`)
+      } catch (flushErr) {
+        console.warn(`[Heartbeat] Cookie刷盘超时或失败 store_id=${storeId}:`, flushErr?.message)
+      }
     }
 
     return restored > 0

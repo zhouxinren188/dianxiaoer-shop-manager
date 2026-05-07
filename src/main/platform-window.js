@@ -1059,6 +1059,20 @@ function registerPurchaseAccountIpc(mainWindow) {
 
   // 从浏览器 session 刷新 cookies 到服务器数据库
   // 前端在同步之前调用此接口，确保服务器能拿到最新的 _m_h5_tk 等 token
+  // 清除采购账号的 partition cookies（重新登录用）
+  ipcMain.handle('clear-purchase-cookies', async (event, { accountId }) => {
+    try {
+      const partitionName = `persist:purchase-${accountId}`
+      const ses = session.fromPartition(partitionName)
+      await ses.clearStorageData({ storages: ['cookies'] })
+      console.log(`[PurchaseWindow] 已清除账号 ${accountId} 的 cookies`)
+      return { success: true }
+    } catch (err) {
+      console.error('[PurchaseWindow] 清除 cookies 失败:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
   ipcMain.handle('refresh-purchase-cookies', async (event, { accountId, platform }) => {
     try {
       const partitionName = `persist:purchase-${accountId}`

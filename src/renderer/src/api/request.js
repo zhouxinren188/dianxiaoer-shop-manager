@@ -58,6 +58,18 @@ async function request(url, options = {}) {
     const json = JSON.parse(responseText)
 
     if (json.code !== 0) {
+      // 被踢下线：其他设备登录了同一账号
+      if (json.code === 1 && json.needsRelogin) {
+        localStorage.removeItem('accessToken')
+        localStorage.removeItem('currentUser')
+        localStorage.removeItem('userInfo')
+        window.electronAPI?.invoke('set-auth-token', null).catch(() => {})
+        window.dispatchEvent(new CustomEvent('force-logout', { detail: json.message }))
+        window.location.hash = '#/login'
+        const err = new Error(json.message)
+        err.needsRelogin = true
+        throw err
+      }
       // 401 未登录错误不抛出，由调用方处理
       if (json.code === 1 && json.message && json.message.includes('登录')) {
         return json

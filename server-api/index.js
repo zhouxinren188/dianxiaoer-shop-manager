@@ -309,6 +309,11 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       { expiresIn: '7d', issuer: 'dianxiaoer-api' }
     )
 
+    // 删除该用户的所有旧 token（踢掉其他设备的会话，实现单点登录）
+    await dbPool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
+    // 保存新 token 到 user_tokens 表
+    await dbPool.execute('INSERT INTO user_tokens (user_id, token) VALUES (?, ?)', [user.id, accessToken])
+
     console.log(`[API] 用户登录: ${username}`)
     res.json({
       success: true,
@@ -326,6 +331,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     console.error('[API] 登录错误:', err.message)
     res.status(500).json({ success: false, message: '服务器错误' })
   }
+})
+
+// 登出（删除 user_tokens 中的 token）
+app.post('/api/logout', async (req, res) => {
+  const authHeader = req.headers['authorization'] || ''
+  const token = authHeader.replace('Bearer ', '').trim()
+  if (token) {
+    await dbPool.execute('DELETE FROM user_tokens WHERE token = ?', [token])
+  }
+  res.json({ success: true, message: '已登出' })
 })
 
 // 刷新令牌

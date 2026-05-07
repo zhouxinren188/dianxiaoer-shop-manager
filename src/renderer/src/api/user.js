@@ -54,8 +54,18 @@ export function fetchUserPurchaseAccounts(userId) {
   return get(`/api/users/${userId}/purchase-accounts`)
 }
 
-// 退出登录（清除 token，但保留记住的账号密码）
-export function logout() {
+// 退出登录（通知服务端删除 token，清除本地状态）
+export async function logout() {
+  // 先通知两个服务端删除 token（踢掉当前会话）
+  try {
+    await post('/api/auth/logout')
+  } catch (e) {}
+  try {
+    await fetch('http://150.158.54.108:3001/api/logout', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${localStorage.getItem('accessToken')}`, 'Content-Type': 'application/json' }
+    })
+  } catch (e) {}
   localStorage.removeItem('accessToken')
   localStorage.removeItem('currentUser')
   localStorage.removeItem('userInfo')

@@ -194,6 +194,7 @@
               <span class="order-header-no">{{ order.orderNo }}</span>
               <span class="order-header-divider">|</span>
               <span class="order-header-shop">{{ order.shopName }}</span>
+              <span v-if="order.warehouseName" class="order-header-warehouse" :style="{color: order.warehouseName === '商家全国仓' ? '#909399' : order.warehouseName === '供应商仓库' ? '#67c23a' : '#409eff'}">[{{ order.warehouseName }}]</span>
               <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
               <el-tag v-if="getDisplayPurchaseStatus(order)" :type="purchaseStatusTagType(getDisplayPurchaseStatus(order))" size="small" effect="plain">{{ getDisplayPurchaseStatus(order) }}</el-tag>
               <el-link v-if="order.purchaseStatus === '未采购'" type="info" :underline="false" style="margin-left:2px;font-size:12px" @click.stop="handleIgnorePurchase(order)">忽略</el-link>
@@ -231,7 +232,7 @@
                       <span class="goods-img-text">{{ item.name.charAt(0) }}</span>
                     </div>
                     <div class="goods-info">
-                      <p class="goods-name">{{ item.name }}</p>
+                      <p class="goods-name goods-name-link" @click.stop="handleOpenProduct(order, item)">{{ item.name }}</p>
                       <p class="goods-sku" v-if="item.sku">{{ item.sku }}</p>
                       <div class="goods-sku-row">
                         <el-tag v-if="item.purchaseStatus" :type="purchaseStatusTagType(item.purchaseStatus)" size="small" effect="plain">{{ item.purchaseStatus }}</el-tag>
@@ -441,6 +442,7 @@
           <div class="detail-grid-2col">
             <div class="detail-row"><span class="detail-label">物流公司</span><span class="detail-value">{{ currentOrder.logisticsCompany || '--' }}</span></div>
             <div class="detail-row"><span class="detail-label">物流单号</span><span class="detail-value">{{ currentOrder.logisticsNo || '--' }}</span></div>
+            <div v-if="currentOrder.warehouseName" class="detail-row"><span class="detail-label">发货仓库</span><span class="detail-value" :style="{color: currentOrder.warehouseName === '商家全国仓' ? '#909399' : currentOrder.warehouseName === '供应商仓库' ? '#67c23a' : '#409eff'}">{{ currentOrder.warehouseName }}</span></div>
           </div>
         </div>
 
@@ -688,6 +690,15 @@
                     <span>获取真实信息</span>
                   </el-button>
                 </div>
+                <el-alert
+                  v-if="purchaseInfo.purchaseType === 'dropship' && (purchaseInfo.shippingName.includes('*') || purchaseInfo.shippingAddress.includes('***'))"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  style="margin-top:8px;font-size:12px;"
+                >
+                  客户信息未解密，请先点击"获取真实信息"后再下单
+                </el-alert>
               </div>
             </div>
 
@@ -899,12 +910,33 @@ function onFuncChange(key, value) {
 
   if (key === 'syncJdOrder') {
     if (value) {
+      autoSyncStatus.value = '正在启动自动同步...'
+      const syncTimeout = setTimeout(() => {
+        if (autoSyncStatus.value === '正在启动自动同步...') {
+          autoSyncStatus.value = '自动同步无响应，请检查终端日志'
+          setTimeout(() => { autoSyncStatus.value = '' }, 8000)
+        }
+      }, 15000)
       window.electronAPI.invoke('toggle-jd-auto-sync', { enabled: true })
-        .catch(e => console.warn('[自动同步] 开启失败:', e.message))
+        .then(res => {
+          clearTimeout(syncTimeout)
+          console.log('[自动同步] 开启结果:', JSON.stringify(res))
+          if (!res?.running) {
+            autoSyncStatus.value = '自动同步启动失败'
+            setTimeout(() => { autoSyncStatus.value = '' }, 5000)
+          }
+        })
+        .catch(e => {
+          clearTimeout(syncTimeout)
+          console.warn('[自动同步] 开启失败:', e.message)
+          autoSyncStatus.value = '自动同步开启异常: ' + e.message
+          setTimeout(() => { autoSyncStatus.value = '' }, 5000)
+        })
       ElMessage.success('已开启京东订单自动同步（每10分钟）')
     } else {
       window.electronAPI.invoke('toggle-jd-auto-sync', { enabled: false })
         .catch(e => console.warn('[自动同步] 关闭失败:', e.message))
+      autoSyncStatus.value = ''
       ElMessage.info('已关闭京东订单自动同步')
     }
   }
@@ -995,6 +1027,7 @@ function mapServerOrder(row) {
     logisticsCompany: row.logistics_company || '',
     logisticsNo: row.logistics_no || '',
     outboundNo: row.logistics_no || '',
+    warehouseName: row.warehouse_name || '',
     shopName: row.store_name || getStoreNameById(row.store_id),
     shopTag: '京东',
     items,
@@ -1138,6 +1171,17 @@ function handleOpenChat(order) {
   }
 }
 
+function handleOpenProduct(order, item) {
+  const skuId = item.sku ? item.sku.replace('SKU: ', '') : ''
+  if (!skuId) {
+    ElMessage.warning('该商品无SKU信息，无法访问商品链接')
+    return
+  }
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-product-url', { storeId: order.storeId, skuId })
+  }
+}
+
 async function handleRevealBuyerInfo(order) {
   if (order._sensitiveLoading) return
   if (!window.electronAPI) {
@@ -1213,11 +1257,9 @@ async function handleRevealBuyerInfoInPurchase() {
       if (info.buyerAddress) {
         purchaseInfo.buyerAddress = info.buyerAddress
       }
-      // 三方代发时同步更新收货地址
+      // 三方代发时重新按格式生成收货地址预览
       if (purchaseInfo.purchaseType === 'dropship') {
-        purchaseInfo.shippingName = purchaseInfo.buyerName
-        purchaseInfo.shippingPhone = purchaseInfo.buyerPhone
-        purchaseInfo.shippingAddress = purchaseInfo.buyerAddress
+        updateDropshipShipping()
       }
       // 同步更新订单列表中的原始 order 对象
       const order = tableData.value.find(o => o.orderNo === purchaseInfo.salesOrderNo)
@@ -1318,8 +1360,8 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.shippingName = (order.customerName || '').replace(/\[\d+\]/, '').trim()
   purchaseInfo.shippingPhone = ''
   let initAddr = (order.address || '').replace(/\.?\[\d+\]/, '').trim()
-  if (order.customerPhone && initNameCode) {
-    initAddr = initAddr + '【派件联系' + order.customerPhone + '-' + initNameCode + '】'
+  if (order.customerPhone) {
+    initAddr = initAddr + '【派件联系' + order.customerPhone + '】'
   }
   purchaseInfo.shippingAddress = initAddr
   purchaseDialogVisible.value = true
@@ -1582,17 +1624,16 @@ function applyWarehouseAddress(wh) {
   purchaseInfo.warehouseAddress = wh.location || wh.address || ''
 }
 
-// 三方代发：手机号=仓库手机号，姓名去掉[编号]，地址+【派件联系{虚拟号}-{编号}】
+// 三方代发：手机号=仓库手机号，姓名去掉[编号]，地址+【派件联系{buyerPhone}】
 function updateDropshipShipping() {
   // 从买家姓名中提取编号并去掉，如 "苏宝宝[3899]" -> 姓名"苏宝宝"，编号"3899"
   const nameCodeMatch = (purchaseInfo.buyerName || '').match(/\[(\d+)\]/)
-  const nameCode = nameCodeMatch ? nameCodeMatch[1] : ''
   purchaseInfo.shippingName = (purchaseInfo.buyerName || '').replace(/\[\d+\]/, '').trim()
   purchaseInfo.shippingPhone = purchaseInfo.warehousePhone || purchaseInfo.buyerPhone || ''
   // 地址也去掉.[编号]或[编号]，再追加派件联系后缀
   let addr = (purchaseInfo.buyerAddress || '').replace(/\.?\[\d+\]/, '').trim()
-  if (purchaseInfo.buyerPhone && nameCode) {
-    addr = addr + '【派件联系' + purchaseInfo.buyerPhone + '-' + nameCode + '】'
+  if (purchaseInfo.buyerPhone) {
+    addr = addr + '【派件联系' + purchaseInfo.buyerPhone + '】'
   }
   purchaseInfo.shippingAddress = addr
 }
@@ -1603,7 +1644,7 @@ function updateWarehouseShipping() {
   purchaseInfo.shippingPhone = purchaseInfo.warehousePhone
   let addr = purchaseInfo.warehouseAddress || ''
   if (purchaseInfo.purchaseNo) {
-    addr = addr + ' ' + purchaseInfo.purchaseNo
+    addr = addr + '【' + purchaseInfo.purchaseNo + '】'
   }
   purchaseInfo.shippingAddress = addr
 }
@@ -1739,6 +1780,11 @@ function handleGoOrder() {
     ElMessage.warning('请选择发货仓库')
     return
   }
+  // 三方代发必须先解密客户信息（卡片内有内联提示，此处仅阻止提交）
+  if (purchaseInfo.purchaseType === 'dropship' &&
+      (purchaseInfo.shippingName.includes('*') || purchaseInfo.shippingAddress.includes('***'))) {
+    return
+  }
 
   let finalUrl = url
   if (!/^https?:\/\//i.test(finalUrl)) {
@@ -1773,6 +1819,7 @@ function handleGoOrder() {
         sku: purchaseInfo.sku,
         skuId: purchaseInfo.skuId,
         quantity: purchaseInfo.quantity,
+        price: purchaseInfo.price,
         purchasePrice: purchaseInfo.purchasePrice,
         remark: purchaseInfo.remark,
         sourceUrl: finalUrl,
@@ -1926,11 +1973,6 @@ function onPurchaseDialogClosed() {
 async function handlePurchaseSubmit() {
   if (!purchaseInfo.platformOrderNo.trim()) {
     ElMessage.warning('请输入平台订单号')
-    return
-  }
-  // 三方代发必须先获取真实买家信息
-  if (purchaseInfo.purchaseType === 'dropship' && !purchaseInfo._buyerRevealed) {
-    ElMessage.warning('该订单尚未解密客户信息，请获取真实信息后再下单')
     return
   }
 
@@ -2225,13 +2267,15 @@ onMounted(async () => {
     } catch (e) {}
 
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
+      console.log('[自动同步] 收到 auto-sync-start:', JSON.stringify(data))
       mainProcessSyncStatus.value = `${data.storeName || '店铺'}正在同步中...`
     })
     unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', async (data) => {
+      console.log('[自动同步] 收到 auto-sync-result:', JSON.stringify(data))
       mainProcessSyncStatus.value = ''
+      autoSyncStatus.value = ''
       if (data.skipped) {
-        // 店铺被跳过（10分钟内已同步）
-        syncSkipStatus.value = `${data.storeName}10分钟内已同步，跳过...`
+        syncSkipStatus.value = data.message || `${data.storeName || '店铺'}已跳过`
         // 5秒后自动清除跳过提示
         setTimeout(() => {
           syncSkipStatus.value = ''
@@ -2835,6 +2879,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+.order-header-warehouse {
+  font-size: 12px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
 .order-header-chat-icon {
   font-size: 15px;
   color: #2b5aed;
@@ -2983,6 +3033,14 @@ onUnmounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.goods-name-link {
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.goods-name-link:hover {
+  color: #409eff;
 }
 
 .goods-sku {

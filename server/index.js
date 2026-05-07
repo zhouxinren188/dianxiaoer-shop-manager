@@ -74,6 +74,14 @@ app.use(async (req, res, next) => {
             [username]
           )
           if (rows.length) {
+            // 校验 token 是否仍在 user_tokens 表中（单点登录：同一用户不可同时在线）
+            const [tokenRows] = await pool.execute(
+              'SELECT 1 FROM user_tokens WHERE token = ? LIMIT 1',
+              [token]
+            )
+            if (tokenRows.length === 0) {
+              return res.status(401).json({ code: 1, message: '账号在其他设备登录，请重新登录', needsRelogin: true })
+            }
             user = rows[0]
             user.user_id = user.id
           }
@@ -1116,10 +1124,10 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            order_time, payment_time, ship_time, finish_time,
            total_amount, goods_amount, shipping_fee, payment_method,
            buyer_name, buyer_phone, buyer_address,
-           logistics_company, logistics_no,
+           logistics_company, logistics_no, warehouse_name,
            sku_id, product_name, product_image, unit_price, quantity,
            item_count, all_items, raw_data)
-         VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?, ?,?,?,?,?, ?,?,?)
+         VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?,?,?,?, ?,?,?)
          ON DUPLICATE KEY UPDATE
            store_id=VALUES(store_id),
            order_state=VALUES(order_state), status_text=VALUES(status_text),
@@ -1131,6 +1139,7 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            buyer_phone=IF(VALUES(buyer_phone) REGEXP '[*]', buyer_phone, IF(VALUES(buyer_phone)!='', VALUES(buyer_phone), buyer_phone)),
            buyer_address=IF(VALUES(buyer_address)!='', VALUES(buyer_address), buyer_address),
            logistics_company=VALUES(logistics_company), logistics_no=VALUES(logistics_no),
+           warehouse_name=VALUES(warehouse_name),
            sku_id=VALUES(sku_id), product_name=VALUES(product_name),
            product_image=VALUES(product_image), unit_price=VALUES(unit_price),
            quantity=VALUES(quantity), item_count=VALUES(item_count),
@@ -1141,7 +1150,7 @@ app.post('/api/sales-orders/batch', async (req, res) => {
           o.orderTime || '', o.paymentTime || '', o.shipTime || '', o.finishTime || '',
           o.totalAmount || 0, o.goodsAmount || 0, o.shippingFee || 0, o.paymentMethod || '',
           o.buyerName || '', o.buyerPhone || '', o.buyerAddress || '',
-          o.logisticsCompany || '', o.logisticsNo || '',
+          o.logisticsCompany || '', o.logisticsNo || '', o.warehouseName || '',
           o.skuId || '', o.productName || '', o.productImage || '',
           o.unitPrice || 0, o.quantity || 0,
           o.itemCount || 1, JSON.stringify(o.allItems || null), JSON.stringify(o)
@@ -1150,6 +1159,29 @@ app.post('/api/sales-orders/batch', async (req, res) => {
       saved++
     }
     res.json(ok({ saved }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取指定店铺的活跃订单号（待出库/已出库/暂停）
+app.get('/api/sales-orders/active-order-ids', async (req, res) => {
+  try {
+    const { store_id } = req.query
+    if (!store_id) return res.json(fail('store_id 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(+store_id)) {
+      return res.status(403).json(fail('无权操作此店铺订单'))
+    }
+
+    const [rows] = await pool.query(
+      `SELECT order_id FROM sales_orders
+       WHERE store_id = ? AND status_text IN ('待出库', '已出库', '暂停订单')
+       ORDER BY order_time DESC`,
+      [parseInt(store_id)]
+    )
+    res.json(ok({ orderIds: rows.map(r => r.order_id) }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -1652,7 +1684,7 @@ app.get('/api/store-sales-stats', async (req, res) => {
     const storePlaceholders = targetStoreIds.map(() => '?').join(',')
     const [storeRows] = await pool.execute(
       `SELECT s.id as storeId, s.name as storeName, s.platform, s.tags,
-              COALESCE(SUM(so.goods_amount), 0) as salesAmount,
+              COALESCE(SUM(so.total_amount), 0) as salesAmount,
               COUNT(so.id) as orderCount
        FROM stores s
        LEFT JOIN sales_orders so ON s.id = so.store_id AND so.status_text NOT IN (${excludePlaceholders}) ${dateJoin}
@@ -4999,10 +5031,12 @@ app.post('/api/auth/login', async (req, res) => {
       { expiresIn: '7d', issuer: 'dianxiaoer-server' }
     )
 
-    // 保存 token 到 user_tokens 表
+    // 删除该用户的所有旧 token（踢掉其他设备的会话）
+    await pool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
+    // 保存新 token 到 user_tokens 表
     await pool.execute(
-      'INSERT INTO user_tokens (user_id, token) VALUES (?, ?) ON DUPLICATE KEY UPDATE token = ?',
-      [user.id, token, token]
+      'INSERT INTO user_tokens (user_id, token) VALUES (?, ?)',
+      [user.id, token]
     )
 
     res.json(ok({
@@ -5020,6 +5054,15 @@ app.post('/api/auth/login', async (req, res) => {
     console.error('[Auth] 登录失败:', err.message)
     res.status(500).json(fail('登录失败'))
   }
+})
+
+app.post('/api/auth/logout', async (req, res) => {
+  const authHeader = req.headers['authorization'] || ''
+  const token = authHeader.replace('Bearer ', '').trim()
+  if (token) {
+    await pool.execute('DELETE FROM user_tokens WHERE token = ?', [token])
+  }
+  res.json(ok({ message: '已登出' }))
 })
 
 // ============ 仓库管理路由 ============

@@ -4,12 +4,17 @@
 </template>
 
 <script setup>
+import { onMounted, onUnmounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import AppUpdater from './components/AppUpdater.vue'
 
-// 应用启动时，将 localStorage 中已有的 token 同步到主进程
-// 解决重启后主进程 authToken 丢失导致采购绑定 401 的问题
-const savedToken = localStorage.getItem('accessToken')
-if (savedToken) {
-  window.electronAPI?.invoke('set-auth-token', savedToken).catch(() => {})
+// 清除主进程中的旧 token（localStorage 已在 main.js 中清除）
+window.electronAPI?.invoke('set-auth-token', null).catch(() => {})
+
+// 监听被踢下线事件（其他设备登录了同一账号）
+function onForceLogout(e) {
+  ElMessage.warning(e.detail || '账号在其他设备登录，请重新登录')
 }
+onMounted(() => window.addEventListener('force-logout', onForceLogout))
+onUnmounted(() => window.removeEventListener('force-logout', onForceLogout))
 </script>
