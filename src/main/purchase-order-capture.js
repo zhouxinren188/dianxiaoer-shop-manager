@@ -27,6 +27,14 @@ function isValidProductImage(image) {
   return true
 }
 
+// 非阻塞版 flushStorageData：后台执行刷盘，不阻塞窗口创建和页面加载
+// cookie 已通过 ses.cookies.set() 写入内存，即使刷盘未完成也能被后续请求使用
+function flushStorageDataAsync(ses) {
+  ses.flushStorageData(() => {
+    console.log('[PurchaseCapture] flushStorageData completed (async)')
+  })
+}
+
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url)
@@ -2801,7 +2809,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   const addrWin = new BrowserWindow({
     width: 1280,
     height: 860,
-    show: true,  // 测试期间可见，方便调试地址填充流程
+    show: false,  // 隐藏窗口，仅用于后台设置地址（需要登录/验证时再显示）
     title: `设置收货地址 - ${platform}`,
     webPreferences: {
       partition: partitionName,
@@ -3062,8 +3070,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         // PDD：partition 已有 cookie，跳过服务器恢复（避免用过时 cookie 覆盖新鲜 cookie）
         needServerRestore = false
         console.log(`[PurchaseCapture] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
-        // 刷盘确保持久化
-        await new Promise(resolve => ses.flushStorageData(resolve))
+        // 刷盘确保持久化（非阻塞：cookie已在内存中，不阻塞窗口创建）
+        flushStorageDataAsync(ses)
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
@@ -3123,9 +3131,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             }
           }
           console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
-          // 刷盘确保持久化
-          await new Promise(resolve => ses.flushStorageData(resolve))
-          console.log(`[PurchaseCapture] Cookie已刷盘 accountId=${accountId}`)
+          // 刷盘确保持久化（非阻塞：cookie已在内存中，不阻塞窗口创建）
+          flushStorageDataAsync(ses)
         } catch (e) {
           console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
         }
@@ -3873,7 +3880,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 }).catch(() => {})
               }, 2000)
             }
-          } else if (platform !== '1688') {
+          } else if (platform !== '1688' && platform !== 'taobao' && platform !== 'tmall') {
+            // 淘宝/天猫的地址设置在后台窗口 startBackgroundAddressSetup 中完成，不在采购窗口注入
+            // buildAddressAutoFillScript 的 Phase 3 会点击"管理收货地址"导致采购窗口跳转到地址管理页
             const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
             win.webContents.executeJavaScript(fillScript).catch(() => {})
             console.log(`[PurchaseCapture] Address auto-fill injected for checkout page`)
@@ -4248,7 +4257,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 }).catch(() => {})
               }, 2000)
             }
-          } else if (platform !== '1688') {
+          } else if (platform !== '1688' && platform !== 'taobao' && platform !== 'tmall') {
+            // 淘宝/天猫的地址设置在后台窗口中完成，不在采购窗口注入
             setTimeout(() => {
               if (win.isDestroyed() || resolved) return
               const fillScript = buildAddressAutoFillScript(shippingName, shippingPhone, shippingAddress, platform)
@@ -4474,6 +4484,21 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 窗口关闭
     win.on('closed', () => {
       onWindowClosed()
+    })
+
+    // 页面加载失败处理
+    win.webContents.on('did-fail-load', (event, errorCode, errorDesc, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return  // 只关心主框架加载失败
+      if (errorCode === -3) return  // ERR_ABORTED：用户导航或重定向导致，非真正错误
+      console.error(`[PurchaseCapture] Page load failed: ${errorCode} ${errorDesc} url=${validatedURL}`)
+    })
+
+    // 渲染进程崩溃处理
+    win.webContents.on('render-process-gone', (event, details) => {
+      console.error(`[PurchaseCapture] Render process gone: ${details.reason} ${details.exitCode}`)
+      if (!resolved) {
+        onWindowClosed()
+      }
     })
 
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）
