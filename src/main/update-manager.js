@@ -102,7 +102,16 @@ function startFullDownload() {
   // 然后自动触发 download-progress 和 update-downloaded 事件
   autoUpdater.checkForUpdates().then((result) => {
     if (result && result.updateInfo) {
-      console.log('[UpdateManager] electron-updater 确认版本:', result.updateInfo.version)
+      const fullVersion = result.updateInfo.version
+      const appVersion = app.getVersion()
+      // 防止下载同版本或更低版本的全量包（热更新版本可能高于全量版本）
+      if (parseVersion(fullVersion) <= parseVersion(appVersion)) {
+        console.log('[UpdateManager] 全量版本', fullVersion, '<= 当前版本', appVersion, '，跳过下载')
+        state = 'error'
+        send('um-update-error', { message: '当前已是最新版本' })
+        return
+      }
+      console.log('[UpdateManager] electron-updater 确认版本:', fullVersion)
       autoUpdater.downloadUpdate().catch((err) => {
         console.error('[UpdateManager] 全量下载失败:', err.message)
         state = 'error'
@@ -141,24 +150,30 @@ async function startHotDownload() {
 // 热更新失败 → 降级到全量更新
 async function fallbackToFullUpdate(hotError) {
   try {
-    const result = await checkServerForUpdate()
-    // 检查是否有全量更新可用（用 appVersion 和 full.version 比较）
-    // 即使服务端返回 hot，我们这里也尝试用 full
     const autoUpdater = getAutoUpdater()
     const fullResult = await autoUpdater.checkForUpdates()
 
     if (fullResult && fullResult.updateInfo) {
-      currentUpdateType = 'full'
-      updateInfo = { ...updateInfo, version: fullResult.updateInfo.version, type: 'full' }
-      console.log('[UpdateManager] 降级到全量更新:', fullResult.updateInfo.version)
-      send('um-update-available', {
-        version: fullResult.updateInfo.version,
-        type: 'full',
-        size: 0,
-        changelog: '快速更新失败，将使用完整更新',
-        force: false
-      })
-      state = 'idle'
+      const fullVersion = fullResult.updateInfo.version
+      const appVersion = app.getVersion()
+      // 只有全量版本 > 当前 appVersion 才降级，否则会下载同版本导致死循环
+      if (parseVersion(fullVersion) > parseVersion(appVersion)) {
+        currentUpdateType = 'full'
+        updateInfo = { ...updateInfo, version: fullVersion, type: 'full' }
+        console.log('[UpdateManager] 降级到全量更新:', fullVersion)
+        send('um-update-available', {
+          version: fullVersion,
+          type: 'full',
+          size: 0,
+          changelog: '快速更新失败，将使用完整更新',
+          force: false
+        })
+        state = 'idle'
+      } else {
+        console.log('[UpdateManager] 全量版本', fullVersion, '<= 当前版本', appVersion, '，不降级')
+        state = 'error'
+        send('um-update-error', { message: '更新失败: ' + hotError })
+      }
     } else {
       state = 'error'
       send('um-update-error', { message: '更新失败: ' + hotError + '（无可用的完整更新包）' })

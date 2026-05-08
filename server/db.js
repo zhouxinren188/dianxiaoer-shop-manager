@@ -260,6 +260,30 @@ async function initDB() {
       }
     }
 
+    // 销售订单表添加 remark 列（商家备注）
+    try {
+      await connection.execute('ALTER TABLE sales_orders ADD COLUMN remark TEXT DEFAULT NULL COMMENT \'商家备注\' AFTER warehouse_name')
+      console.log('[DB] sales_orders 表已添加 remark 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] sales_orders.remark 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 sales_orders.remark 列失败:', e.message)
+      }
+    }
+
+    // 销售订单表添加 sys_remark 列（系统备注）
+    try {
+      await connection.execute('ALTER TABLE sales_orders ADD COLUMN sys_remark TEXT DEFAULT NULL COMMENT \'系统备注\' AFTER remark')
+      console.log('[DB] sales_orders 表已添加 sys_remark 列')
+    } catch (e) {
+      if (e.code === 'ER_DUP_FIELDNAME') {
+        console.log('[DB] sales_orders.sys_remark 列已存在，跳过')
+      } else {
+        console.error('[DB] 添加 sales_orders.sys_remark 列失败:', e.message)
+      }
+    }
+
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
     if (rows[0].count === 0) {

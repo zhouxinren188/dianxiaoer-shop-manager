@@ -3,9 +3,9 @@ const BASE_URL = 'http://150.158.54.108:3002'  // 远程服务器
 // const BASE_URL = 'http://localhost:3002'  // 本地开发（调试用）
 
 async function request(url, options = {}) {
-  const { method = 'GET', data, params, timeout = 10000 } = options
+  const { method = 'GET', data, params, timeout = 10000, baseUrl } = options
 
-  let fullUrl = BASE_URL + url
+  let fullUrl = (baseUrl || BASE_URL) + url
   if (params) {
     const search = new URLSearchParams()
     Object.entries(params).forEach(([key, val]) => {
@@ -90,8 +90,8 @@ async function request(url, options = {}) {
   }
 }
 
-export function get(url, params) {
-  return request(url, { method: 'GET', params })
+export function get(url, params, baseUrl) {
+  return request(url, { method: 'GET', params, baseUrl })
 }
 
 export function post(url, data, timeout) {

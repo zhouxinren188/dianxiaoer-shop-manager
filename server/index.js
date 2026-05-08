@@ -2435,16 +2435,16 @@ app.put('/api/purchase-accounts/:id/status', async (req, res) => {
 // 获取下一个采购编号（全局递增，避免编号冲突）
 app.get('/api/purchase-orders/next-no', async (req, res) => {
   try {
-    // 只取纯数字格式的 purchase_no，忽略 TEST_ 等非编号数据
+    // 查找 A+数字 格式的最大编号（A0001, A0002, ...），与批量导入的纯数字编号永不冲突
     const [rows] = await pool.execute(
-      "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^[0-9]+$' ORDER BY id DESC LIMIT 1"
+      "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^A[0-9]+$' ORDER BY CAST(SUBSTRING(purchase_no, 2) AS UNSIGNED) DESC LIMIT 1"
     )
     let nextNum = 1
     if (rows.length > 0 && rows[0].purchase_no) {
-      const num = parseInt(rows[0].purchase_no, 10)
+      const num = parseInt(rows[0].purchase_no.substring(1), 10)
       if (!isNaN(num)) nextNum = num + 1
     }
-    const purchaseNo = String(nextNum).padStart(4, '0')
+    const purchaseNo = 'A' + String(nextNum).padStart(4, '0')
     res.json(ok({ purchase_no: purchaseNo }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -2473,7 +2473,7 @@ app.post('/api/purchase-orders', async (req, res) => {
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
          shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
          account_id=VALUES(account_id),
-         status='pending',
+         status=IF(platform_order_no IS NULL OR platform_order_no='', 'pending', status),
          updated_at=NOW()`,
       [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', inventory_id||null, quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
@@ -2556,33 +2556,55 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
         errors.push({ row: rowNum, message: `采购平台"${platform}"无效，支持: taobao/pinduoduo/1688/douyin` }); failCount++; continue
       }
 
+      // 采购类型映射
+      const PURCHASE_TYPE_ALIAS = { '三方代发': 'dropship', '仓库转发': 'warehouse' }
+      let purchaseType = String(row.purchase_type || '').trim()
+      if (PURCHASE_TYPE_ALIAS[purchaseType]) purchaseType = PURCHASE_TYPE_ALIAS[purchaseType]
+      if (purchaseType && purchaseType !== 'dropship' && purchaseType !== 'warehouse') {
+        errors.push({ row: rowNum, message: `采购类型"${purchaseType}"无效，支持: dropship/warehouse 或 三方代发/仓库转发` }); failCount++; continue
+      }
+      if (!purchaseType) purchaseType = 'dropship'
+
       // 采购编号：用户填写则用用户的，否则自动生成
       const userPurchaseNo = String(row.purchase_no || '').trim()
       const purchaseNo = userPurchaseNo || String(nextNum++).padStart(4, '0')
       const quantity = parseInt(row.quantity) || 1
       const purchasePrice = parseFloat(row.purchase_price) || 0
 
+      // 自动查找 sales_order_id
+      let salesOrderId = null
+      const soNo = String(row.sales_order_no || '').trim()
+      if (soNo) {
+        const [soRows] = await pool.execute(
+          'SELECT id FROM sales_orders WHERE order_id = ? LIMIT 1',
+          [soNo]
+        )
+        if (soRows.length) salesOrderId = soRows[0].id
+      }
+
       try {
         await pool.execute(
           `INSERT INTO purchase_orders
-            (purchase_no, sales_order_no, platform_order_no, goods_name, sku, quantity,
+            (purchase_no, sales_order_no, sales_order_id, platform_order_no, goods_name, sku, quantity,
              source_url, platform, purchase_price, remark,
-             shipping_name, shipping_phone, shipping_address, account_id,
+             purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
              status, owner_id, created_by)
-           VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, 'pending', ?, ?)
+           VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, 'pending', ?, ?)
            ON DUPLICATE KEY UPDATE
              owner_id=VALUES(owner_id),
-             sales_order_no=VALUES(sales_order_no), platform_order_no=VALUES(platform_order_no),
+             sales_order_no=VALUES(sales_order_no), sales_order_id=VALUES(sales_order_id),
+             platform_order_no=VALUES(platform_order_no),
              goods_name=VALUES(goods_name), sku=VALUES(sku), quantity=VALUES(quantity),
              source_url=VALUES(source_url), platform=VALUES(platform),
              purchase_price=VALUES(purchase_price), remark=VALUES(remark),
-             shipping_name=VALUES(shipping_name), shipping_phone=VALUES(shipping_phone),
-             shipping_address=VALUES(shipping_address), account_id=VALUES(account_id),
-             status='pending', updated_at=NOW()`,
-          [purchaseNo, String(row.sales_order_no).trim(), String(row.platform_order_no).trim(),
+             purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
+             shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
+             account_id=VALUES(account_id),
+             status=IF(platform_order_no IS NULL OR platform_order_no='', 'pending', status), updated_at=NOW()`,
+          [purchaseNo, soNo, salesOrderId, String(row.platform_order_no).trim(),
            row.goods_name || '', row.sku || '', quantity,
            row.source_url || '', platform, purchasePrice, row.remark || '',
-           row.shipping_name || '', row.shipping_phone || '', row.shipping_address || '', accountId,
+           purchaseType, row.shipping_name || '', row.shipping_phone || '', row.shipping_address || '', accountId,
            ownerId, req.user.id]
         )
         successCount++
@@ -2618,9 +2640,11 @@ app.get('/api/purchase-orders', async (req, res) => {
       // 子账号：只看自己被分配的采购账号创建的订单 + 自己手动创建的订单(account_id为空)
       // created_by IS NULL 表示迁移前的老订单，对同owner下所有用户可见
       sql = `
-        SELECT po.*, pa.account as account_name
+        SELECT po.*, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
         WHERE po.owner_id=?
           AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
                OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
@@ -2636,9 +2660,11 @@ app.get('/api/purchase-orders', async (req, res) => {
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT po.*, pa.account as account_name
+        SELECT po.*, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
         WHERE po.owner_id=?
       `
       countSql = `
@@ -2658,6 +2684,88 @@ app.get('/api/purchase-orders', async (req, res) => {
     sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
     res.json(ok({ list: rows, total }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// 获取采购订单关联的销售商品信息
+app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    // 先查采购订单，获取 sales_order_id
+    const [poRows] = await pool.execute(
+      'SELECT sales_order_id, sales_order_no FROM purchase_orders WHERE id=? AND owner_id=?',
+      [req.params.id, ownerId]
+    )
+    if (!poRows.length) return res.status(404).json(fail('采购订单不存在'))
+    const { sales_order_id, sales_order_no } = poRows[0]
+    if (!sales_order_id && !sales_order_no) return res.json(ok(null))
+
+    // 通过 sales_order_id（数字主键）或 sales_order_no → sales_orders.order_id（订单号字符串）关联查询
+    let soRows = []
+    if (sales_order_id) {
+      const [rows] = await pool.execute(
+        `SELECT so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
+                so.store_id, s.name AS store_name, s.platform AS store_platform, so.warehouse_name
+         FROM sales_orders so
+         LEFT JOIN stores s ON so.store_id = s.id
+         WHERE so.id = ?`,
+        [sales_order_id]
+      )
+      soRows = rows
+    }
+    // sales_order_id 未匹配时，用 sales_order_no 匹配 sales_orders.order_id
+    if (!soRows.length && sales_order_no) {
+      const [rows] = await pool.execute(
+        `SELECT so.id, so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
+                so.store_id, s.name AS store_name, s.platform AS store_platform, so.warehouse_name
+         FROM sales_orders so
+         LEFT JOIN stores s ON so.store_id = s.id
+         WHERE so.order_id = ?`,
+        [String(sales_order_no)]
+      )
+      soRows = rows
+    }
+    if (!soRows.length) return res.json(ok(null))
+
+    const row = soRows[0]
+    // 如果原来没有 sales_order_id，回填
+    if (!sales_order_id && row.id) {
+      pool.execute('UPDATE purchase_orders SET sales_order_id=? WHERE id=?', [row.id, req.params.id]).catch(() => {})
+    }
+
+    // 解析 all_items JSON（可能含多个商品）
+    let items = []
+    if (row.all_items) {
+      try {
+        const parsed = typeof row.all_items === 'string' ? JSON.parse(row.all_items) : row.all_items
+        if (Array.isArray(parsed)) {
+          items = parsed.map(item => ({
+            name: item.name || item.goodsName || item.product_name || '',
+            image: item.image || item.goodsImage || item.product_image || '',
+            price: item.price || item.unitPrice || item.unit_price || 0,
+            quantity: item.quantity || item.num || 1
+          }))
+        }
+      } catch (e) { /* all_items 解析失败则用主商品 */ }
+    }
+    // 若 all_items 为空，用主商品字段兜底
+    if (!items.length) {
+      items = [{
+        name: row.product_name || '',
+        image: row.product_image || '',
+        price: row.unit_price || 0,
+        quantity: row.quantity || 1
+      }]
+    }
+
+    res.json(ok({
+      storeName: row.store_name || '',
+      storePlatform: row.store_platform || '',
+      orderId: row.order_id || '',
+      statusText: row.status_text || '',
+      warehouseName: row.warehouse_name || '',
+      items
+    }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 

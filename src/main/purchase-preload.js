@@ -194,3 +194,6 @@ if (window.outerHeight === 0) {
 // 16. PDD 地址页早期注入 — 已废弃
 // 地址填写逻辑通过 executeJavaScript 在 did-navigate 中注入，
 // 省市区级联通过"先绑定 DOMNodeInserted 监听器再 click"解决时序问题。
+
+// 17. 保存原生 window.open 引用（页面 JS 可能覆盖 window.open，preload 在页面 JS 之前执行）
+window.__dxeOpen = window.open.bind(window)

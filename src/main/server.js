@@ -684,6 +684,7 @@ app.get('/api/sales-skus/unbound', (req, res) => proxyGetRequest(req, res, '/api
 app.post('/api/sku-bindings', (req, res) => proxyBodyRequest(req, res, '/api/sku-bindings', 'POST'))
 app.delete('/api/sku-bindings', (req, res) => proxyBodyRequest(req, res, '/api/sku-bindings', 'DELETE'))
 app.post('/api/inventory/quick-create', (req, res) => proxyBodyRequest(req, res, '/api/inventory/quick-create', 'POST'))
+app.get('/api/purchase-orders/:id/related-sales', (req, res) => proxyGetRequest(req, res, `/api/purchase-orders/${req.params.id}/related-sales`))
 
 // ============ 启动 ============
 

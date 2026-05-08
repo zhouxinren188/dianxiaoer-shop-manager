@@ -114,93 +114,135 @@
     <!-- 数据表格 -->
     <el-card class="table-card" shadow="never">
       <el-table
+        ref="purchaseTableRef"
         :data="pagedData"
         stripe
-        border
         v-loading="loading"
-        :header-cell-style="{ background: '#f5f7fa', fontWeight: 600 }"
+        :header-cell-style="{ background: '#f7f8fa', fontWeight: 600, color: '#909399', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }"
+        :cell-style="{ padding: '12px 0' }"
         row-key="id"
+        @expand-change="handleExpandChange"
+        @row-click="handleRowClick"
       >
-        <el-table-column prop="purchase_no" label="采购编号" width="160" align="center">
+        <!-- 展开行：关联销售商品信息（隐藏展开箭头） -->
+        <el-table-column type="expand" class-name="hide-expand-icon">
           <template #default="{ row }">
-            <span class="purchase-no">{{ row.purchase_no }}</span>
+            <div class="expand-panel">
+              <div class="expand-header">
+                <span class="expand-header-dot"></span>
+                <span class="expand-header-title">关联销售订单</span>
+              </div>
+              <div v-if="relatedSalesLoadingMap[row.id]" class="expand-loading">
+                <el-icon class="is-loading" :size="16" color="#409EFF"><Loading /></el-icon>
+                <span>加载中...</span>
+              </div>
+              <div v-else-if="!relatedSalesDataMap[row.id]" class="expand-empty">暂无关联销售订单</div>
+              <div v-else class="expand-row">
+                <span class="expand-tag store-tag">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+                  {{ relatedSalesDataMap[row.id].storeName || '--' }}
+                </span>
+                <span v-if="relatedSalesDataMap[row.id].warehouseName" class="expand-tag warehouse-tag">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4"/></svg>
+                  {{ relatedSalesDataMap[row.id].warehouseName }}
+                </span>
+                <span class="expand-tag order-tag copyable" @click.stop="copyText(relatedSalesDataMap[row.id].orderId)" title="点击复制订单号">{{ relatedSalesDataMap[row.id].orderId || '--' }}</span>
+                <span class="expand-tag status-tag" :class="getSalesStatusClass(relatedSalesDataMap[row.id].statusText)">
+                  <span class="expand-status-dot"></span>
+                  {{ relatedSalesDataMap[row.id].statusText || '--' }}
+                </span>
+                <div class="expand-divider"></div>
+                <div v-for="(item, idx) in relatedSalesDataMap[row.id].items" :key="idx" class="expand-product-item">
+                  <div class="expand-product-img">
+                    <el-image v-if="item.image" :src="item.image" fit="cover"
+                      :preview-src-list="[item.image]" :preview-teleported="true" />
+                    <div v-else class="expand-product-img-empty">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#c0c4cc" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                    </div>
+                  </div>
+                  <span class="expand-product-name">{{ item.name || '--' }}</span>
+                  <span class="expand-product-price">¥{{ Number(item.price || 0).toFixed(2) }}</span>
+                  <span class="expand-product-qty">x{{ item.quantity }}</span>
+                </div>
+              </div>
+            </div>
           </template>
         </el-table-column>
 
-        <el-table-column prop="account_name" label="采购账号" width="140" align="center">
+        <el-table-column prop="purchase_no" label="采购编号" width="140" align="center">
           <template #default="{ row }">
-            <span v-if="row.account_name">{{ row.account_name }}</span>
-            <span v-else class="text-muted">--</span>
+            <span class="cell-purchase-no">{{ row.purchase_no }}</span>
           </template>
         </el-table-column>
 
         <el-table-column prop="platform_order_no" label="采购订单号" width="180" align="center">
           <template #default="{ row }">
-            <span v-if="row.platform_order_no">{{ row.platform_order_no }}</span>
-            <el-tag v-else type="info" size="small">未绑定</el-tag>
+            <span v-if="row.platform_order_no" class="cell-order-no">{{ row.platform_order_no }}</span>
+            <span v-else class="cell-empty">--</span>
           </template>
         </el-table-column>
 
         <el-table-column prop="goods_name" label="商品信息" min-width="260">
           <template #default="{ row }">
-            <div style="display:flex;align-items:center;gap:10px;">
-              <el-image v-if="row.goods_image" :src="row.goods_image"
-                style="width:50px;height:50px;border-radius:6px;flex-shrink:0;"
-                fit="cover" :preview-src-list="[row.goods_image]" preview-teleported />
-              <div v-else style="width:50px;height:50px;border-radius:6px;flex-shrink:0;background:#f5f7fa;display:flex;align-items:center;justify-content:center;">
-                <span style="color:#c0c4cc;font-size:11px;">无图</span>
+            <div class="cell-product">
+              <div class="cell-product-img">
+                <el-image v-if="row.goods_image" :src="row.goods_image" fit="cover"
+                  :preview-src-list="[row.goods_image]" preview-teleported />
+                <div v-else class="cell-product-img-empty">--</div>
               </div>
-              <span style="overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">{{ row.goods_name }}</span>
+              <div class="cell-product-name">{{ row.goods_name }}</div>
             </div>
           </template>
         </el-table-column>
 
         <el-table-column prop="quantity" label="数量" width="70" align="center" />
 
-        <el-table-column prop="purchase_price" label="采购单价" width="100" align="right">
+        <el-table-column prop="purchase_price" label="采购单价" width="100" align="center">
           <template #default="{ row }">
-            <span v-if="row.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ Number(row.purchase_price).toFixed(2) }}</span>
-            <span v-else class="text-muted">--</span>
+            <span v-if="row.purchase_price" class="cell-price">¥{{ Number(row.purchase_price).toFixed(2) }}</span>
+            <span v-else class="cell-empty">--</span>
           </template>
         </el-table-column>
 
         <el-table-column prop="platform" label="采购平台" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="platformTagType(row.platform)" size="small" effect="plain">{{ platformLabel(row.platform) }}</el-tag>
+            <span class="cell-platform">{{ platformLabel(row.platform) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column prop="sales_order_no" label="关联销售单号" width="160" align="center">
+        <el-table-column prop="purchase_type" label="采购类型" width="130" align="center">
           <template #default="{ row }">
-            <span class="sales-order-link">{{ row.sales_order_no }}</span>
+            <div>
+              <el-tag v-if="row.purchase_type === 'warehouse'" type="warning" size="small">仓库转发</el-tag>
+              <el-tag v-else type="success" size="small">三方代发</el-tag>
+            </div>
+            <div v-if="row.warehouse_name" class="cell-warehouse">{{ row.warehouse_name }}</div>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="logistics_no" label="物流单号" width="160" align="center">
+          <template #default="{ row }">
+            <span v-if="row.logistics_no" class="cell-order-no">{{ row.logistics_no }}</span>
+            <span v-else class="cell-empty">--</span>
           </template>
         </el-table-column>
 
         <el-table-column prop="status" label="订单状态" width="110" align="center">
           <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="logistics_no" label="物流单号" width="200" align="center">
-          <template #default="{ row }">
-            <div v-if="row.logistics_no" style="display:flex;align-items:center;gap:6px;justify-content:center">
-              <span>{{ row.logistics_no }}</span>
-              <el-button link type="primary" size="small" @click="handleViewLogistics(row)">
-                查看轨迹
-              </el-button>
-            </div>
-            <span v-else class="text-muted">--</span>
+            <span class="cell-status" :class="'status-' + row.status">
+              <span class="status-dot"></span>
+              {{ statusLabel(row.status) }}
+            </span>
           </template>
         </el-table-column>
 
         <el-table-column prop="created_at" label="创建时间" width="160" align="center">
           <template #default="{ row }">
-            <span>{{ formatTime(row.created_at) }}</span>
+            <span class="cell-time">{{ formatTime(row.created_at) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="300" align="center" fixed="right">
+        <el-table-column label="操作" width="200" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="success" size="small" @click="handleSyncSingle(row)">
               同步
@@ -257,7 +299,6 @@
             <span v-if="currentRow.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ (Number(currentRow.purchase_price) * currentRow.quantity).toFixed(2) }}</span>
             <span v-else>--</span>
           </el-descriptions-item>
-          <el-descriptions-item label="关联销售单号">{{ currentRow.sales_order_no }}</el-descriptions-item>
           <el-descriptions-item label="订单状态">
             <el-tag :type="statusTagType(currentRow.status)" size="small">{{ statusLabel(currentRow.status) }}</el-tag>
           </el-descriptions-item>
@@ -645,6 +686,11 @@
           <el-table-column prop="quantity" label="数量" width="60" align="center" />
           <el-table-column prop="purchase_price" label="采购单价" width="80" align="center" />
           <el-table-column prop="platform" label="平台" width="80" align="center" />
+          <el-table-column prop="purchase_type" label="采购类型" width="90" align="center">
+            <template #default="{ row }">
+              {{ row.purchase_type || '三方代发' }}
+            </template>
+          </el-table-column>
           <el-table-column label="校验" width="80" align="center">
             <template #default="{ row }">
               <el-tag v-if="row._valid" type="success" size="small">通过</el-tag>
@@ -703,17 +749,19 @@ import {
   Upload,
   Download
 } from '@element-plus/icons-vue'
-import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders } from '@/api/purchaseOrder'
+import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 
 // ==================== 常量配置 ====================
 
 const statusOptions = [
+  { label: '已下单', value: 'ordered' },
   { label: '待发货', value: 'pending' },
   { label: '已发货', value: 'shipped' },
   { label: '运输中', value: 'in_transit' },
   { label: '已签收', value: 'received' },
-  { label: '已入库', value: 'stocked' }
+  { label: '已入库', value: 'stocked' },
+  { label: '已取消', value: 'cancelled' }
 ]
 
 // 批量导入 — 模版列定义
@@ -726,6 +774,7 @@ const importTemplateFields = [
   { header: '数量', required: false, desc: '采购数量，默认1' },
   { header: '采购单价', required: false, desc: '采购单价，默认0' },
   { header: '采购平台', required: false, desc: 'taobao/pinduoduo/1688/douyin 或中文：淘宝/拼多多/1688/抖音' },
+  { header: '采购类型', required: false, desc: '三方代发/仓库转发，不填默认三方代发' },
   { header: 'SKU', required: false, desc: '商品SKU' },
   { header: '来源链接', required: false, desc: '商品采购链接' },
   { header: '备注', required: false, desc: '备注信息' },
@@ -744,6 +793,7 @@ const HEADER_KEY_MAP = {
   '数量': 'quantity',
   '采购单价': 'purchase_price',
   '采购平台': 'platform',
+  '采购类型': 'purchase_type',
   'SKU': 'sku',
   '来源链接': 'source_url',
   '备注': 'remark',
@@ -790,6 +840,12 @@ const importDataWithValidation = computed(() => {
       const p = String(row.platform).trim()
       const mapped = PLATFORM_ALIAS[p] || p
       if (!VALID_PLATFORMS.includes(mapped)) errors.push(`采购平台"${p}"无效`)
+    }
+    if (row.purchase_type) {
+      const pt = String(row.purchase_type).trim()
+      if (pt !== 'dropship' && pt !== 'warehouse' && pt !== '三方代发' && pt !== '仓库转发') {
+        errors.push(`采购类型"${pt}"无效，请填：三方代发/仓库转发`)
+      }
     }
     return { ...row, _valid: errors.length === 0, _errors: errors }
   })
@@ -992,8 +1048,25 @@ function statusLabel(val) {
 }
 
 function statusTagType(val) {
-  const map = { pending: 'info', shipped: '', in_transit: 'warning', received: 'success', stocked: 'success' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', stocked: 'success', cancelled: 'danger' }
   return map[val] || 'info'
+}
+
+function getSalesStatusClass(statusText) {
+  if (!statusText) return 'status-default'
+  if (statusText.includes('取消') || statusText.includes('关闭')) return 'status-danger'
+  if (statusText.includes('完成') || statusText.includes('已出库')) return 'status-success'
+  if (statusText.includes('待出库') || statusText.includes('待付款')) return 'status-warning'
+  return 'status-default'
+}
+
+function copyText(text) {
+  if (!text) return
+  navigator.clipboard.writeText(text).then(() => {
+    ElMessage.success('已复制: ' + text)
+  }).catch(() => {
+    ElMessage.error('复制失败')
+  })
 }
 
 function formatTime(val) {
@@ -1125,6 +1198,48 @@ function handleViewDetail(row) {
 const logisticsVisible = ref(false)
 const logisticsData = ref(null)
 const logisticsLoading = ref(false)
+
+// 关联销售商品信息（展开行模式）
+const relatedSalesDataMap = reactive({})
+const relatedSalesLoadingMap = reactive({})
+const purchaseTableRef = ref()
+const expandedRows = ref([])
+
+async function loadRelatedSales(rowId) {
+  relatedSalesLoadingMap[rowId] = true
+  try {
+    const data = await fetchRelatedSales(rowId)
+    relatedSalesDataMap[rowId] = data
+  } catch (e) {
+    relatedSalesDataMap[rowId] = null
+  } finally {
+    relatedSalesLoadingMap[rowId] = false
+  }
+}
+
+function handleExpandChange(row, expandedRowList) {
+  // 手风琴模式：只保留当前展开行
+  if (expandedRowList.includes(row)) {
+    expandedRows.value = [row]
+    loadRelatedSales(row.id)
+  } else {
+    expandedRows.value = []
+  }
+}
+
+function handleRowClick(row) {
+  if (!purchaseTableRef.value) return
+  const isExpanded = expandedRows.value.some(r => r.id === row.id)
+  if (isExpanded) {
+    purchaseTableRef.value.toggleRowExpansion(row, false)
+  } else {
+    // 先折叠其他行
+    expandedRows.value.forEach(r => {
+      purchaseTableRef.value.toggleRowExpansion(r, false)
+    })
+    purchaseTableRef.value.toggleRowExpansion(row, true)
+  }
+}
 
 async function handleViewLogistics(row) {
   logisticsVisible.value = true
@@ -1589,14 +1704,99 @@ async function handleImportFileChange(file) {
   importParsing.value = true
   try {
     const XLSX = await import('xlsx')
-    const data = await file.raw.arrayBuffer()
-    const workbook = XLSX.read(data, { type: 'array' })
-    const sheetName = workbook.SheetNames[0]
-    const sheet = workbook.Sheets[sheetName]
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 })
 
-    if (rows.length < 2) {
-      ElMessage.warning('文件中没有数据行')
+    // 读取文件：使用FileReader获取Uint8Array，兼容性更好
+    const fileData = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = e => resolve(new Uint8Array(e.target.result))
+      reader.onerror = reject
+      reader.readAsArrayBuffer(file.raw)
+    })
+
+    // 尝试多种方式读取workbook
+    let workbook = null
+    try { workbook = XLSX.read(fileData, { type: 'array' }) } catch (e) { /* ignore */ }
+    if (!workbook) {
+      try { workbook = XLSX.read(fileData, { type: 'buffer' }) } catch (e) { /* ignore */ }
+    }
+    if (!workbook) {
+      ElMessage.error('无法解析该文件，请确认是有效的Excel文件（.xlsx或.xls）')
+      importParsing.value = false
+      return
+    }
+
+    // 修正sheet范围：部分Excel文件的!ref(dimension)未正确更新，导致sheet_to_json遗漏数据行
+    function fixSheetRange(ws) {
+      if (!ws || !ws['!ref']) return
+      let maxR = 0, maxC = 0
+      Object.keys(ws).forEach(key => {
+        if (key[0] !== '!') {
+          const addr = XLSX.utils.decode_cell(key)
+          if (addr.r > maxR) maxR = addr.r
+          if (addr.c > maxC) maxC = addr.c
+        }
+      })
+      const range = XLSX.utils.decode_range(ws['!ref'])
+      if (maxR > range.e.r || maxC > range.e.c) {
+        range.e.r = Math.max(range.e.r, maxR)
+        range.e.c = Math.max(range.e.c, maxC)
+        ws['!ref'] = XLSX.utils.encode_range(range)
+      }
+    }
+
+    // 遍历所有sheet，找到表头匹配且有数据行的sheet
+    let sheetName = null
+    let rows = null
+    for (let i = 0; i < workbook.SheetNames.length; i++) {
+      const name = workbook.SheetNames[i]
+      const ws = workbook.Sheets[name]
+      fixSheetRange(ws)
+      const sheetRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false })
+
+      // 调试：输出每个sheet的信息
+      let cellCount = 0, maxRow = 0
+      Object.keys(ws).forEach(k => { if (k[0] !== '!') { cellCount++; const a = XLSX.utils.decode_cell(k); if (a.r > maxRow) maxRow = a.r } })
+      console.log(`[导入] Sheet${i}: "${name}", !ref=${ws['!ref']}, 单元格=${cellCount}, 最大行=${maxRow}, 解析行数=${sheetRows.length}`)
+      if (sheetRows.length > 0) console.log(`[导入] 表头:`, sheetRows[0])
+
+      if (sheetRows.length < 2) continue
+      // 检查表头是否包含采购订单的关键字段
+      const header = sheetRows[0].map(h => String(h || '').trim().replace(/（必填）|（选填）|\(必填\)|\(选填\)/g, '').trim())
+      const hasSalesCol = header.includes('销售关联单号')
+      const hasOrderCol = header.includes('采购订单号')
+      if (hasSalesCol || hasOrderCol) {
+        sheetName = name
+        rows = sheetRows
+        break
+      }
+    }
+
+    // 如果仍未找到数据，尝试强制扩展sheet范围重新读取
+    if (!rows || rows.length < 2) {
+      console.log('[导入] 常规方式未找到数据，尝试强制扩展范围...')
+      for (let i = 0; i < workbook.SheetNames.length; i++) {
+        const ws = workbook.Sheets[workbook.SheetNames[i]]
+        if (!ws || !ws['!ref']) continue
+        const range = XLSX.utils.decode_range(ws['!ref'])
+        // 强制扩展到10000行
+        range.e.r = Math.max(range.e.r, 9999)
+        ws['!ref'] = XLSX.utils.encode_range(range)
+        const sheetRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false })
+        console.log(`[导入] 强制扩展 Sheet${i}: "${workbook.SheetNames[i]}", 解析行数=${sheetRows.length}`)
+        if (sheetRows.length > 0) console.log(`[导入] 强制扩展表头:`, sheetRows[0])
+        if (sheetRows.length >= 2) {
+          const header = sheetRows[0].map(h => String(h || '').trim().replace(/（必填）|（选填）|\(必填\)|\(选填\)/g, '').trim())
+          if (header.includes('销售关联单号') || header.includes('采购订单号')) {
+            sheetName = workbook.SheetNames[i]
+            rows = sheetRows
+            break
+          }
+        }
+      }
+    }
+
+    if (!rows || rows.length < 2) {
+      ElMessage.warning('文件中没有数据行，请确认数据填写在正确的sheet中')
       importParsing.value = false
       return
     }
@@ -1666,6 +1866,12 @@ async function handleConfirmImport() {
     if (obj.platform) {
       const p = String(obj.platform).trim()
       if (PLATFORM_ALIAS[p]) obj.platform = PLATFORM_ALIAS[p]
+    }
+    // 采购类型映射
+    if (obj.purchase_type) {
+      const pt = String(obj.purchase_type).trim()
+      if (pt === '三方代发') obj.purchase_type = 'dropship'
+      else if (pt === '仓库转发') obj.purchase_type = 'warehouse'
     }
     return obj
   })
@@ -1784,7 +1990,7 @@ function handleImportDialogClose() {
 
 .status-tab-item {
   padding: 6px 14px;
-  border-radius: 4px;
+  border-radius: 16px;
   font-size: 13px;
   color: #606266;
   cursor: pointer;
@@ -1807,6 +2013,33 @@ function handleImportDialogClose() {
 
 .table-card {
   margin-bottom: 16px;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.06);
+}
+
+.filter-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.06);
+}
+
+/* 表格行hover效果：蓝色背景 + 左侧指示条 */
+.table-card :deep(.el-table__row) {
+  position: relative;
+  transition: background-color 0.15s;
+}
+.table-card :deep(.el-table__row:hover > td.el-table__cell) {
+  background-color: #f5f9ff !important;
+}
+.table-card :deep(.el-table__row:hover > td:first-child::before) {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: linear-gradient(180deg, #409eff, #66b1ff);
+  border-radius: 0 2px 2px 0;
+  z-index: 1;
 }
 
 .purchase-no {
@@ -1824,10 +2057,22 @@ function handleImportDialogClose() {
   color: #c0c4cc;
 }
 
+/* 分页器紧凑样式 */
 .pagination-wrap {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   padding-top: 16px;
+  border-top: 1px solid #f0f2f5;
+  margin-top: 4px;
+}
+.pagination-wrap :deep(.el-pagination) {
+  gap: 4px;
+}
+.pagination-wrap :deep(.el-pager li) {
+  min-width: 28px;
+  height: 28px;
+  border-radius: 4px;
 }
 
 .platform-select-grid {
@@ -1867,5 +2112,353 @@ function handleImportDialogClose() {
   display: block;
   font-size: 12px;
   color: #909399;
+}
+
+/* ===== 表格单元格样式（参考截图风格） ===== */
+.cell-purchase-no {
+  color: #e6a23c;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cell-order-no {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  color: #606266;
+}
+
+.cell-empty {
+  color: #c0c4cc;
+  font-size: 12px;
+}
+
+.cell-price {
+  color: #f56c6c;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cell-platform {
+  font-size: 12px;
+  color: #606266;
+}
+
+.cell-warehouse {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+.cell-time {
+  font-size: 12px;
+  color: #909399;
+}
+
+.cell-product {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cell-product-img {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid #f0f0f0;
+}
+
+.cell-product-img .el-image {
+  width: 100%;
+  height: 100%;
+}
+
+.cell-product-img-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
+  color: #c0c4cc;
+  font-size: 11px;
+}
+
+.cell-product-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 13px;
+  color: #303133;
+  line-height: 1.4;
+}
+
+/* 订单状态标签：圆点+文字（参考截图2风格） */
+.cell-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 10px;
+  border-radius: 12px;
+}
+
+.cell-status .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cell-status.status-ordered { color: #409eff; background: #ecf5ff; }
+.cell-status.status-ordered .status-dot { background: #409eff; }
+
+.cell-status.status-pending { color: #909399; background: #f4f4f5; }
+.cell-status.status-pending .status-dot { background: #909399; }
+
+.cell-status.status-shipped { color: #409eff; background: #ecf5ff; }
+.cell-status.status-shipped .status-dot { background: #409eff; }
+
+.cell-status.status-in_transit { color: #e6a23c; background: #fdf6ec; }
+.cell-status.status-in_transit .status-dot { background: #e6a23c; }
+
+.cell-status.status-received { color: #67c23a; background: #f0f9eb; }
+.cell-status.status-received .status-dot { background: #67c23a; }
+
+.cell-status.status-stocked { color: #67c23a; background: #f0f9eb; }
+.cell-status.status-stocked .status-dot { background: #67c23a; }
+
+.cell-status.status-cancelled { color: #f56c6c; background: #fef0f0; }
+.cell-status.status-cancelled .status-dot { background: #f56c6c; }
+
+/* ===== 展开行：关联销售商品信息 ===== */
+
+/* 隐藏展开箭头列 */
+:deep(.el-table__expand-column .cell) {
+  display: none;
+}
+:deep(.el-table__expand-column) {
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+}
+:deep(th.el-table__expand-column) {
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border-right: none !important;
+}
+
+/* 展开行覆盖固定列空白 */
+:deep(.el-table__expanded-cell) {
+  padding: 0 !important;
+}
+:deep(.el-table__expanded-cell .cell) {
+  padding: 0 !important;
+}
+
+/* 展开面板整体 */
+.expand-panel {
+  padding: 10px 20px 12px;
+  background: #fafbfc;
+  border-top: 1px solid #f0f2f5;
+}
+
+/* 标题行：关联销售订单 */
+.expand-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.expand-header-dot {
+  width: 3px;
+  height: 14px;
+  background: #409eff;
+  border-radius: 2px;
+}
+
+.expand-header-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #606266;
+  letter-spacing: 0.3px;
+}
+
+/* 加载状态 */
+.expand-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 0;
+  color: #909399;
+  font-size: 13px;
+}
+
+/* 空状态 */
+.expand-empty {
+  text-align: center;
+  padding: 16px 0;
+  color: #c0c4cc;
+  font-size: 13px;
+}
+
+/* 单行布局：标签 + 分隔线 + 商品卡片 */
+.expand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.expand-row::-webkit-scrollbar { height: 4px; }
+.expand-row::-webkit-scrollbar-track { background: transparent; }
+.expand-row::-webkit-scrollbar-thumb { background: #d0d3d8; border-radius: 2px; }
+
+/* 信息标签 */
+.expand-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid #e4e7ed;
+  background: #fff;
+  color: #606266;
+}
+
+.expand-tag svg { flex-shrink: 0; }
+
+.expand-tag.store-tag {
+  color: #303133;
+  font-weight: 500;
+}
+.expand-tag.store-tag svg { color: #909399; }
+
+.expand-tag.warehouse-tag {
+  color: #e6a23c;
+  font-size: 11px;
+  font-weight: 500;
+}
+.expand-tag.warehouse-tag svg { color: #e6a23c; }
+
+.expand-tag.order-tag {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 11px;
+  color: #409eff;
+  background: #ecf5ff;
+  border-color: #d9ecff;
+}
+
+.expand-tag.copyable {
+  cursor: pointer;
+  user-select: none;
+  transition: all .15s;
+}
+.expand-tag.copyable:hover {
+  background: #d9ecff;
+  border-color: #b3d8ff;
+}
+.expand-tag.copyable:active {
+  transform: scale(0.97);
+}
+
+.expand-tag.status-tag {
+  font-weight: 500;
+  gap: 6px;
+}
+
+/* 状态圆点 */
+.expand-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.expand-tag.status-danger { color: #f56c6c; background: #fef0f0; border-color: #fbc4c4; }
+.expand-tag.status-danger .expand-status-dot { background: #f56c6c; }
+.expand-tag.status-success { color: #67c23a; background: #f0f9eb; border-color: #c2e7b0; }
+.expand-tag.status-success .expand-status-dot { background: #67c23a; }
+.expand-tag.status-warning { color: #e6a23c; background: #fdf6ec; border-color: #f5dab1; }
+.expand-tag.status-warning .expand-status-dot { background: #e6a23c; }
+.expand-tag.status-default { color: #909399; background: #f4f4f5; border-color: #d3d4d6; }
+.expand-tag.status-default .expand-status-dot { background: #909399; }
+
+/* 分隔线 */
+.expand-divider {
+  width: 1px;
+  height: 24px;
+  background: #dcdfe6;
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+/* 商品项：图片 + 标题 + 价格 + 数量 单行排列 */
+.expand-product-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  max-width: 420px;
+  min-width: 0;
+}
+
+/* 商品图片 */
+.expand-product-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid #f0f0f0;
+}
+
+.expand-product-img .el-image {
+  width: 100%;
+  height: 100%;
+}
+
+.expand-product-img-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
+}
+
+.expand-product-name {
+  font-size: 12px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  max-width: 525px;
+}
+
+.expand-product-price {
+  font-size: 12px;
+  color: #f56c6c;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.expand-product-qty {
+  font-size: 11px;
+  color: #909399;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 </style>

@@ -3277,10 +3277,23 @@ async function autoSyncAllStores(mainWindow) {
         const activeIds = await getActiveOrderIds(store.store_id)
         if (activeIds.length > 0) {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 活跃订单: ${activeIds.length} 条，开始状态更新`)
-          // 分批处理，每批最多 50 条
           const BATCH_SIZE = 50
+          const totalBatches = Math.ceil(activeIds.length / BATCH_SIZE)
+          // 通知渲染进程二次同步开始
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('auto-sync-progress', {
+              storeId: store.store_id,
+              storeName: store.store_name,
+              stage: 'secondary',
+              current: 0,
+              total: totalBatches,
+              message: `${store.store_name}二次同步中...`
+            })
+          }
+          let totalUpdated = 0
           for (let b = 0; b < activeIds.length; b += BATCH_SIZE) {
             const batch = activeIds.slice(b, b + BATCH_SIZE)
+            const batchIdx = Math.floor(b / BATCH_SIZE) + 1
             console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 搜索订单号: [${batch.slice(0, 5).join(', ')}${batch.length > 5 ? ', ...' : ''}] (共${batch.length}条)`)
             const activeResult = await fetchSalesOrders(store.store_id, {
               searchOrderIds: batch
@@ -3294,10 +3307,11 @@ async function autoSyncAllStores(mainWindow) {
                   const st = o.statusText || '未知'
                   statusSummary[st] = (statusSummary[st] || 0) + 1
                 }
-                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${Math.floor(b/BATCH_SIZE)+1}: JD返回${orders.length}条, 状态分布: ${JSON.stringify(statusSummary)}`)
+                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回${orders.length}条, 状态分布: ${JSON.stringify(statusSummary)}`)
                 // 记录具体的状态变化（对比活跃订单原本是待出库/已出库/暂停）
                 const changedOrders = orders.filter(o => !['待出库', '已出库', '暂停订单'].includes(o.statusText))
                 if (changedOrders.length > 0) {
+                  totalUpdated += changedOrders.length
                   console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态已变更的订单: ${changedOrders.map(o => o.orderId + '→' + o.statusText).join(', ')}`)
                 } else {
                   console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 本批次无状态变更（JD返回的订单仍为活跃状态）`)
@@ -3310,10 +3324,22 @@ async function autoSyncAllStores(mainWindow) {
                 }
                 await saveOrdersToServer(store.store_id, orders)
               } else {
-                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${Math.floor(b/BATCH_SIZE)+1}: JD返回0条（搜索了${batch.length}个订单号）`)
+                console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回0条（搜索了${batch.length}个订单号）`)
               }
             } else {
               console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新失败: ${activeResult.message}`)
+            }
+            // 通知渲染进程二次同步进度
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('auto-sync-progress', {
+                storeId: store.store_id,
+                storeName: store.store_name,
+                stage: 'secondary',
+                current: batchIdx,
+                total: totalBatches,
+                updatedCount: totalUpdated,
+                message: `${store.store_name}二次同步中... (${batchIdx}/${totalBatches})`
+              })
             }
           }
         }

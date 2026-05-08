@@ -518,33 +518,48 @@
       
       <!-- Step 1: idle 状态 - 信息+选账号 -->
       <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
-        <!-- 顶部：商品信息横幅 -->
-        <div class="product-banner">
-          <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" class="product-banner-image" fit="cover" />
-          <div v-else class="product-banner-image product-banner-placeholder" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
-            <span class="product-initial">{{ purchaseInfo.goodsName.charAt(0) }}</span>
-          </div>
-          <div class="product-banner-info">
-            <h4 class="product-name">{{ purchaseInfo.goodsName }}</h4>
-            <p v-if="purchaseInfo.sku" class="product-sku">SKU: {{ purchaseInfo.sku }}</p>
-            <div class="product-meta-row">
-              <el-tag type="danger" effect="plain" size="default">
-                <el-icon><PriceTag /></el-icon>
-                单价: ¥{{ purchaseInfo.price.toFixed(2) }}
-              </el-tag>
-              <el-tag type="info" effect="plain" size="default">
-                <el-icon><Tickets /></el-icon>
-                数量: {{ purchaseInfo.quantity }}
-              </el-tag>
-              <el-tag type="warning" effect="plain" size="default">
-                <el-icon><Document /></el-icon>
-                采购编号: {{ purchaseInfo.purchaseNo }}
-              </el-tag>
-              <el-tag type="success" effect="plain" size="default">
-                <el-icon><Connection /></el-icon>
-                订单号: {{ purchaseInfo.salesOrderNo }}
-              </el-tag>
-            </div>
+        <!-- 顶部：收货地址 -->
+        <div class="shipping-banner">
+          <div class="card-body">
+            <div class="shipping-banner-content">
+                <div class="shipping-banner-left">
+                  <div v-if="purchaseInfo.shippingName || purchaseInfo.shippingPhone" class="address-contact-row">
+                    <span class="contact-name">{{ purchaseInfo.shippingName }}</span>
+                    <span v-if="purchaseInfo.shippingPhone" class="contact-phone">{{ purchaseInfo.shippingPhone }}</span>
+                  </div>
+                  <div v-if="purchaseInfo.shippingAddress" class="address-detail">{{ purchaseInfo.shippingAddress }}</div>
+                  <div v-if="!purchaseInfo.shippingName && !purchaseInfo.shippingAddress" class="empty-address">
+                    <el-icon><InfoFilled /></el-icon>
+                    <span>选择仓库后自动填充地址</span>
+                  </div>
+                </div>
+                <div class="shipping-banner-right">
+                  <el-tag size="default" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="light" class="address-type-badge">
+                    {{ purchaseInfo.purchaseType === 'dropship' ? '三方代发模式' : '仓库发货模式' }}
+                  </el-tag>
+                  <el-button
+                    v-if="purchaseInfo.purchaseType === 'dropship'"
+                    type="primary"
+                    text
+                    size="default"
+                    :loading="purchaseInfo._sensitiveLoading"
+                    class="get-real-info-btn"
+                    @click="handleRevealBuyerInfoInPurchase"
+                  >
+                    <el-icon><View /></el-icon>
+                    <span>获取真实信息</span>
+                  </el-button>
+                </div>
+              </div>
+              <el-alert
+                v-if="purchaseInfo.purchaseType === 'dropship' && (purchaseInfo.shippingName.includes('*') || purchaseInfo.shippingAddress.includes('***'))"
+                type="warning"
+                :closable="false"
+                show-icon
+                style="margin-top:8px;font-size:12px;"
+              >
+                客户信息未解密，请先点击"获取真实信息"后再下单
+              </el-alert>
           </div>
         </div>
 
@@ -556,7 +571,7 @@
               <el-icon><Setting /></el-icon>
               <span>采购配置</span>
             </div>
-            
+
             <div class="config-form">
               <div class="form-group source-and-detail">
                 <div class="source-area">
@@ -589,6 +604,10 @@
                   <el-button type="primary" plain size="default" class="add-source-btn" @click="openAddSourceForm">
                     <el-icon><Plus /></el-icon>
                     <span>新增货源链接</span>
+                  </el-button>
+                  <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
+                    @click="handleOpenPddBrowsing" style="margin-top:4px">
+                    拼多多选品
                   </el-button>
                 </div>
               </div>
@@ -656,52 +675,34 @@
             </div>
           </div>
 
-          <!-- 右侧：信息区 -->
+          <!-- 右侧：商品信息区 -->
           <div class="info-section">
-            <div class="info-card address-info-card">
-              <div class="card-header">
-                <el-icon><Location /></el-icon>
-                <span>收货地址</span>
+            <div class="product-info-card">
+              <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" class="product-main-image" fit="cover" />
+              <div v-else class="product-main-image product-banner-placeholder" :style="{ background: getItemColor(purchaseInfo.goodsName) }">
+                <span class="product-initial">{{ purchaseInfo.goodsName.charAt(0) }}</span>
               </div>
-              <div class="card-body">
-                <div v-if="purchaseInfo.shippingName || purchaseInfo.shippingPhone" class="address-contact-row">
-                  <span class="contact-name">{{ purchaseInfo.shippingName }}</span>
-                  <span v-if="purchaseInfo.shippingPhone" class="contact-phone">{{ purchaseInfo.shippingPhone }}</span>
+              <h4 class="product-name" style="text-align:center;">{{ purchaseInfo.goodsName }}</h4>
+              <p v-if="purchaseInfo.sku" class="product-sku" style="text-align:center;">SKU: {{ purchaseInfo.sku }}</p>
+              <div class="product-meta-grid">
+                <div class="meta-item meta-price">
+                  <span class="meta-label">单价</span>
+                  <span class="meta-value">¥{{ purchaseInfo.price.toFixed(2) }}</span>
                 </div>
-                <div v-if="purchaseInfo.shippingAddress" class="address-detail">{{ purchaseInfo.shippingAddress }}</div>
-                <div v-if="!purchaseInfo.shippingName && !purchaseInfo.shippingAddress" class="empty-address">
-                  <el-icon><InfoFilled /></el-icon>
-                  <span>选择仓库后自动填充地址</span>
+                <div class="meta-item meta-qty">
+                  <span class="meta-label">数量</span>
+                  <span class="meta-value">{{ purchaseInfo.quantity }}</span>
                 </div>
-                <div class="address-footer">
-                  <el-tag size="default" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="light" class="address-type-badge">
-                    {{ purchaseInfo.purchaseType === 'dropship' ? '三方代发模式' : '仓库发货模式' }}
-                  </el-tag>
-                  <el-button
-                    v-if="purchaseInfo.purchaseType === 'dropship'"
-                    type="primary"
-                    text
-                    size="default"
-                    :loading="purchaseInfo._sensitiveLoading"
-                    class="get-real-info-btn"
-                    @click="handleRevealBuyerInfoInPurchase"
-                  >
-                    <el-icon><View /></el-icon>
-                    <span>获取真实信息</span>
-                  </el-button>
+                <div class="meta-item meta-no">
+                  <span class="meta-label">采购编号</span>
+                  <span class="meta-value">{{ purchaseInfo.purchaseNo }}</span>
                 </div>
-                <el-alert
-                  v-if="purchaseInfo.purchaseType === 'dropship' && (purchaseInfo.shippingName.includes('*') || purchaseInfo.shippingAddress.includes('***'))"
-                  type="warning"
-                  :closable="false"
-                  show-icon
-                  style="margin-top:8px;font-size:12px;"
-                >
-                  客户信息未解密，请先点击"获取真实信息"后再下单
-                </el-alert>
+                <div class="meta-item meta-order">
+                  <span class="meta-label">订单号</span>
+                  <span class="meta-value">{{ purchaseInfo.salesOrderNo }}</span>
+                </div>
               </div>
             </div>
-
           </div>
         </div>
       </div>
@@ -1765,6 +1766,21 @@ function openSourceLink(url) {
   }
 }
 
+// 拼多多选品：用采购账号 session 打开 PDD 首页
+async function handleOpenPddBrowsing() {
+  if (!purchaseInfo.selectedAccountId) {
+    ElMessage.warning('请先选择采购账号')
+    return
+  }
+  try {
+    await window.electronAPI.invoke('open-pdd-browsing-window', {
+      accountId: purchaseInfo.selectedAccountId
+    })
+  } catch (e) {
+    ElMessage.error('打开拼多多选品窗口失败: ' + e.message)
+  }
+}
+
 // 去下单：打开内嵌BrowserWindow
 function handleGoOrder() {
   const url = purchaseInfo.sourceUrl.trim()
@@ -1851,7 +1867,9 @@ let unsubAddressFilled = null
 let unsubAddressSetupDone = null
 let unsubAddressSetupStart = null
 let unsubAutoSyncStart = null
+let unsubPddProductLink = null
 let unsubAutoSyncResult = null
+let unsubSyncProgress = null
 let unsubStoreStatusChanged = null
 
 function setupPurchaseListeners() {
@@ -1944,6 +1962,13 @@ function setupPurchaseListeners() {
       })
     }
   })
+  // 监听 PDD 浏览窗口回传的商品链接
+  unsubPddProductLink = window.electronAPI.onUpdate('pdd-product-link-update', (data) => {
+    if (data && data.url && purchaseInfo.step === 0) {
+      purchaseInfo.sourceUrl = data.url
+      ElMessage.success('已提取商品链接到货源链接')
+    }
+  })
 }
 
 function cleanupPurchaseListeners() {
@@ -1952,6 +1977,7 @@ function cleanupPurchaseListeners() {
   if (unsubAddressFilled) { unsubAddressFilled(); unsubAddressFilled = null }
   if (unsubAddressSetupDone) { unsubAddressSetupDone(); unsubAddressSetupDone = null }
   if (unsubAddressSetupStart) { unsubAddressSetupStart(); unsubAddressSetupStart = null }
+  if (unsubPddProductLink) { unsubPddProductLink(); unsubPddProductLink = null }
 }
 
 function onPurchaseDialogClosed() {
@@ -2286,6 +2312,11 @@ onMounted(async () => {
         loadStatusCounts()
       }
     })
+    unsubSyncProgress = window.electronAPI.onUpdate('auto-sync-progress', (data) => {
+      if (data.stage === 'secondary') {
+        mainProcessSyncStatus.value = data.message || `${data.storeName || '店铺'}二次同步中...`
+      }
+    })
     // 监听店铺在线状态变化（心跳检测），重新加载店铺列表即可
     unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', () => {
       loadStores()
@@ -2301,6 +2332,7 @@ onUnmounted(() => {
   // 清理自动同步 IPC 监听器
   if (unsubAutoSyncStart) { unsubAutoSyncStart(); unsubAutoSyncStart = null }
   if (unsubAutoSyncResult) { unsubAutoSyncResult(); unsubAutoSyncResult = null }
+  if (unsubSyncProgress) { unsubSyncProgress(); unsubSyncProgress = null }
   if (unsubStoreStatusChanged) { unsubStoreStatusChanged(); unsubStoreStatusChanged = null }
   manualSyncStatus.value = ''
   autoSyncStatus.value = ''
@@ -4162,6 +4194,81 @@ onUnmounted(() => {
   border-radius: 8px;
   border: 1px solid #e8eaed;
   margin-bottom: 16px;
+}
+
+.shipping-banner {
+  margin-bottom: 16px;
+}
+.shipping-banner .info-card {
+  border-radius: 8px;
+}
+.shipping-banner-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.shipping-banner-left {
+  flex: 1;
+  min-width: 0;
+}
+.shipping-banner-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 右侧商品信息卡片 */
+.product-info-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.product-main-image {
+  width: 280px;
+  height: 280px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+.product-meta-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 4px;
+  border-radius: 6px;
+  background: #f5f7fa;
+}
+.meta-item .meta-label {
+  font-size: 11px;
+  color: #909399;
+  margin-bottom: 2px;
+}
+.meta-item .meta-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+.meta-price .meta-value {
+  color: #f56c6c;
+}
+.meta-no .meta-value {
+  color: #e6a23c;
+  font-size: 12px;
+}
+.meta-order .meta-value {
+  color: #67c23a;
+  font-size: 11px;
+  word-break: break-all;
+  text-align: center;
 }
 
 .product-banner-image {

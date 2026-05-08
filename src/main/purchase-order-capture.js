@@ -637,6 +637,60 @@ const PRODUCT_INFO_OVERLAY = `
 })()
 `
 
+// ============ 商品链接提取按钮（PDD 浏览窗口专用） ============
+const PRODUCT_LINK_EXTRACTOR = `
+(function() {
+  // ★ 返回按钮（所有页面都显示）
+  var oldBack = document.getElementById('dxe-back-btn');
+  if (oldBack) oldBack.remove();
+  var backBtn = document.createElement('div');
+  backBtn.id = 'dxe-back-btn';
+  backBtn.innerHTML = '← 返回';
+  backBtn.style.cssText = 'position:fixed;top:12px;left:12px;z-index:2147483647;' +
+    'padding:6px 14px;background:rgba(0,0,0,0.55);color:#fff;border-radius:16px;' +
+    'font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.2);' +
+    'user-select:none;font-family:-apple-system,BlinkMacSystemFont,sans-serif;' +
+    'transition:background 0.2s;backdrop-filter:blur(4px);';
+  backBtn.addEventListener('mouseenter', function() { this.style.background = 'rgba(0,0,0,0.75)'; });
+  backBtn.addEventListener('mouseleave', function() { this.style.background = 'rgba(0,0,0,0.55)'; });
+  backBtn.addEventListener('click', function() { history.back(); });
+  document.body.appendChild(backBtn);
+
+  // ★ 提取链接按钮（仅商品页显示）
+  var old = document.getElementById('dxe-extract-link-btn');
+  if (old) old.remove();
+
+  var url = (location.href || '').toLowerCase();
+  var isPddGoods = /yangkeduo\\.com\\/goods/.test(url) || /pinduoduo\\.com\\/goods/.test(url);
+  if (!isPddGoods) return;
+
+  var btn = document.createElement('div');
+  btn.id = 'dxe-extract-link-btn';
+  btn.textContent = '提取链接';
+  btn.style.cssText = 'position:fixed;bottom:60px;right:20px;z-index:2147483647;' +
+    'padding:8px 16px;background:#409eff;color:#fff;border-radius:20px;' +
+    'font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.15);' +
+    'user-select:none;font-family:-apple-system,BlinkMacSystemFont,sans-serif;';
+  document.body.appendChild(btn);
+
+  btn.addEventListener('click', function() {
+    var productUrl = location.href;
+    // 1. 复制到剪贴板（最可靠，参考 dl 的"复制链接"按钮）
+    try { navigator.clipboard.writeText(productUrl); } catch(e) {}
+    // 2. 通过原生 window.open 触发主进程 setWindowOpenHandler（自动回填货源链接）
+    var openFn = window.__dxeOpen || window.open;
+    try { openFn('dxe://product-link?url=' + encodeURIComponent(productUrl)); } catch(e) {}
+    // 视觉反馈
+    btn.textContent = '已复制链接 ✓';
+    btn.style.background = '#67c23a';
+    setTimeout(function() {
+      btn.textContent = '提取链接';
+      btn.style.background = '#409eff';
+    }, 1500);
+  });
+})();
+`
+
 // 读取捕获的响应（读后清空）
 const READ_CAPTURED_PURCHASES = `
 (function() {
@@ -4863,6 +4917,159 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     if (state && state.win && !state.win.isDestroyed()) {
       state.win.destroy()
     }
+    return { success: true }
+  })
+
+  // ============ 拼多多选品浏览窗口 ============
+  const activePddBrowsingWindows = new Map() // accountId -> win
+
+  ipcMain.handle('open-pdd-browsing-window', async (event, params) => {
+    const { accountId } = params
+
+    // 防重复：同 accountId 窗口已打开则聚焦
+    if (activePddBrowsingWindows.has(accountId)) {
+      const existing = activePddBrowsingWindows.get(accountId)
+      if (existing && !existing.isDestroyed()) {
+        existing.focus()
+        return { success: true, message: '窗口已打开' }
+      }
+      activePddBrowsingWindows.delete(accountId)
+    }
+
+    // session partition（复用采购下单的同一 partition，共享登录态）
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
+
+    // Cookie 恢复（同采购下单窗口逻辑：优先 partition 已有，必要时从服务器恢复）
+    let needServerRestore = true
+    try {
+      const partitionCookies = await ses.cookies.get({})
+      const pddCookies = partitionCookies.filter(c =>
+        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+      )
+      if (pddCookies.length > 0) {
+        needServerRestore = false
+        console.log(`[PddBrowsing] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
+        flushStorageDataAsync(ses)
+      }
+    } catch (e) {
+      console.warn('[PddBrowsing] Partition cookie检查失败:', e.message)
+    }
+
+    if (needServerRestore) {
+      try {
+        const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, { method: 'GET' })
+        if (cookieRes.statusCode === 200 && cookieRes.data) {
+          const json = JSON.parse(cookieRes.data)
+          if (json.code === 0 && json.data && json.data.cookie_data) {
+            const raw = typeof json.data.cookie_data === 'string'
+              ? JSON.parse(json.data.cookie_data)
+              : json.data.cookie_data
+            if (Array.isArray(raw) && raw.length > 0) {
+              const now = Date.now() / 1000
+              const serverCookies = raw.filter(ck => {
+                if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
+                return true
+              })
+              console.log(`[PddBrowsing] Cookies loaded from server: ${serverCookies.length}/${raw.length}`)
+              let setOk = 0, setFail = 0
+              for (const ck of serverCookies) {
+                try {
+                  await ses.cookies.set({
+                    url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                    name: ck.name, value: ck.value || '', domain: ck.domain, path: ck.path || '/',
+                    secure: ck.secure || false, httpOnly: ck.httpOnly || false,
+                    expirationDate: ck.expirationDate || undefined, sameSite: ck.sameSite || undefined
+                  })
+                  setOk++
+                } catch (e2) { setFail++ }
+              }
+              console.log(`[PddBrowsing] Cookies restored: ${setOk} ok, ${setFail} failed`)
+              flushStorageDataAsync(ses)
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[PddBrowsing] Cookie load failed:', e.message)
+      }
+    }
+
+    // 创建 BrowserWindow
+    const win = new BrowserWindow({
+      width: 1280,
+      height: 860,
+      show: true,
+      title: '拼多多选品',
+      webPreferences: {
+        partition: partitionName,
+        contextIsolation: false,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: path.join(__dirname, 'purchase-preload.js')
+      }
+    })
+
+    // 反检测
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    win.webContents.setUserAgent(cleanUA)
+    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
+      if (details.requestHeaders) {
+        details.requestHeaders['Sec-CH-UA'] = secChUa
+        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        details.requestHeaders['User-Agent'] = cleanUA
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    })
+
+    // 拦截页面 window.open 调用，提取商品链接
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (url && url.startsWith('dxe://product-link?url=')) {
+        try {
+          const productUrl = decodeURIComponent(url.replace('dxe://product-link?url=', ''))
+          console.log(`[PddBrowsing] 商品链接提取: ${productUrl}`)
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('pdd-product-link-update', { url: productUrl })
+          }
+        } catch (e) {
+          console.warn('[PddBrowsing] 商品链接解析失败:', e.message)
+        }
+        return { action: 'deny' } // 阻止打开新窗口
+      }
+      return { action: 'allow' } // 其他 window.open 正常放行
+    })
+
+    // 注入商品链接提取按钮（dom-ready + SPA 导航）
+    win.webContents.on('dom-ready', () => {
+      win.webContents.executeJavaScript(PRODUCT_LINK_EXTRACTOR).catch(() => {})
+    })
+    win.webContents.on('did-navigate', () => {
+      setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.webContents.executeJavaScript(PRODUCT_LINK_EXTRACTOR).catch(() => {})
+        }
+      }, 500)
+    })
+    win.webContents.on('did-navigate-in-page', () => {
+      setTimeout(() => {
+        if (!win.isDestroyed()) {
+          win.webContents.executeJavaScript(PRODUCT_LINK_EXTRACTOR).catch(() => {})
+        }
+      }, 500)
+    })
+
+    activePddBrowsingWindows.set(accountId, win)
+
+    // 窗口关闭时清理
+    win.on('closed', () => {
+      try { ses.webRequest.onBeforeSendHeaders(null) } catch (e) {}
+      activePddBrowsingWindows.delete(accountId)
+    })
+
+    // 加载拼多多首页
+    win.loadURL('https://mobile.yangkeduo.com')
+
     return { success: true }
   })
 }

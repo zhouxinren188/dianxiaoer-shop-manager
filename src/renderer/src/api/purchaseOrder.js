@@ -54,3 +54,8 @@ export function fetchLogisticsTracking(id) {
 export function batchImportPurchaseOrders(orders) {
   return post('/api/purchase-orders/batch-import', { orders }, 30000)
 }
+
+// 获取采购订单关联的销售商品信息（通过本地代理服务器转发）
+export function fetchRelatedSales(id) {
+  return get(`/api/purchase-orders/${id}/related-sales`, null, 'http://localhost:3002')
+}

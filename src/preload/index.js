@@ -32,7 +32,8 @@ const validInvokeChannels = [
   'fetch-buyer-sensitive-info',
   'clear-purchase-cookies',
   'toggle-jd-auto-sync',
-  'jd-auto-sync-status'
+  'jd-auto-sync-status',
+  'open-pdd-browsing-window'
 ]
 
 const validOnChannels = [
@@ -51,7 +52,9 @@ const validOnChannels = [
   'purchase-address-setup-start',
   'packet-capture-auto-stopped',
   'auto-sync-start',
-  'auto-sync-result'
+  'auto-sync-result',
+  'auto-sync-progress',
+  'pdd-product-link-update'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {
