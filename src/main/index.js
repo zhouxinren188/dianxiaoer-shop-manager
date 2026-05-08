@@ -212,6 +212,24 @@ registerPacketCaptureIpc()
 registerSupplyOrderIpc()
 
 app.whenReady().then(async () => {
+  // 启动诊断：检查用户数据目录是否可写（影响localStorage持久化和缓存）
+  try {
+    const fs = require('fs')
+    const userDataPath = app.getPath('userData')
+    console.log(`[Main] 用户数据目录: ${userDataPath}`)
+    if (!fs.existsSync(userDataPath)) {
+      fs.mkdirSync(userDataPath, { recursive: true })
+      console.log('[Main] 用户数据目录已创建')
+    }
+    // 测试写入权限
+    const testFile = path.join(userDataPath, '.write-test')
+    fs.writeFileSync(testFile, 'ok')
+    fs.unlinkSync(testFile)
+    console.log('[Main] 用户数据目录可写')
+  } catch (e) {
+    console.error('[Main] 用户数据目录不可写:', e.message)
+  }
+
   // 启动本地后端服务
   startServer(3002)
 
@@ -224,9 +242,31 @@ app.whenReady().then(async () => {
     }
   })
 
-  // 启动前清除缓存，防止旧缓存导致页面内容错误
+  // 仅在版本更新时清除缓存，避免每次启动都清理导致变慢
+  // 旧缓存可能导致页面内容错误，但每次启动清理代价太大（阻塞窗口创建+资源全部重新下载）
   try {
-    await session.defaultSession.clearCache()
+    const fs = require('fs')
+    const versionFlagPath = path.join(app.getPath('userData'), '.cache-version')
+    const currentVersion = app.getVersion()
+    let needClearCache = false
+    try {
+      const lastVersion = fs.readFileSync(versionFlagPath, 'utf8').trim()
+      if (lastVersion !== currentVersion) {
+        needClearCache = true
+        console.log(`[Main] 版本变更 ${lastVersion} → ${currentVersion}，需要清理缓存`)
+      }
+    } catch (e) {
+      // 版本标记文件不存在，首次启动或重装，清理缓存
+      needClearCache = true
+      console.log('[Main] 未找到版本标记，清理缓存')
+    }
+    if (needClearCache) {
+      await session.defaultSession.clearCache()
+      fs.writeFileSync(versionFlagPath, currentVersion, 'utf8')
+      console.log('[Main] 缓存已清理，版本标记已更新')
+    } else {
+      console.log('[Main] 版本未变更，跳过缓存清理')
+    }
   } catch (e) {
     // 忽略清理失败
   }
