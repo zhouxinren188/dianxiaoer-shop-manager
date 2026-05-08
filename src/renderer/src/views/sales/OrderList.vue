@@ -280,7 +280,7 @@
                         <span>采购中</span>
                       </el-button>
                     </el-tooltip>
-                    <el-button v-else type="warning" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
+                    <el-button v-else :type="skuHasSourcesCache[item.skuId || item.sku_id || item.sku] ? 'danger' : 'warning'" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
                       <el-icon><ShoppingCart /></el-icon>
                       <span>采购下单</span>
                     </el-button>
@@ -568,8 +568,14 @@
           <!-- 左侧：配置区 -->
           <div class="config-section">
             <div class="section-header">
-              <el-icon><Setting /></el-icon>
-              <span>采购配置</span>
+              <div class="section-header-left">
+                <el-icon><Setting /></el-icon>
+                <span>采购配置</span>
+              </div>
+              <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
+                @click="handleOpenPddBrowsing">
+                拼多多选品
+              </el-button>
             </div>
 
             <div class="config-form">
@@ -604,10 +610,6 @@
                   <el-button type="primary" plain size="default" class="add-source-btn" @click="openAddSourceForm">
                     <el-icon><Plus /></el-icon>
                     <span>新增货源链接</span>
-                  </el-button>
-                  <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
-                    @click="handleOpenPddBrowsing" style="margin-top:4px">
-                    拼多多选品
                   </el-button>
                 </div>
               </div>
@@ -1059,6 +1061,8 @@ async function loadOrdersFromServer() {
     const list = (data.list || []).map(mapServerOrder)
     tableData.value = list
     total.value = data.total || 0
+    // 加载完成后，批量拉取货源配置，标记哪些 skuId 有货源链接
+    loadSkuSourcesMap()
   } catch (err) {
     console.warn('从服务器加载订单失败:', err.message)
   }
@@ -1439,6 +1443,41 @@ async function handlePurchase(order, item, itemIdx) {
   }
 }
 
+// 批量加载当前页订单的货源映射（只查当前页涉及的 skuId，不拉全量）
+async function loadSkuSourcesMap() {
+  // 收集当前页所有 skuId（去重、跳过已缓存的）
+  const skuIds = new Set()
+  for (const order of tableData.value) {
+    for (const item of (order.items || [])) {
+      const sid = item.skuId || item.sku_id || item.sku
+      if (sid && skuHasSourcesCache[sid] === undefined) {
+        skuIds.add(sid)
+      }
+    }
+  }
+  if (skuIds.size === 0) return  // 当前页没有未查询的 skuId
+  try {
+    // 逐个查询未缓存的 skuId（并行）
+    const tasks = [...skuIds].map(async skuId => {
+      try {
+        const res = await fetchSkuPurchaseConfigList(skuId)
+        let list = []
+        if (res) {
+          if (res.list && Array.isArray(res.list)) list = res.list
+          else if (Array.isArray(res)) list = res
+          else if (res.purchase_link !== undefined) list = [res]
+        }
+        skuHasSourcesCache[skuId] = list.length > 0
+      } catch (e) {
+        skuHasSourcesCache[skuId] = false  // 查询失败标记为无，避免重复查
+      }
+    })
+    await Promise.all(tasks)
+  } catch (e) {
+    // 非关键功能，静默失败
+  }
+}
+
 // 加载SKU货源列表
 async function loadSkuSources(skuId) {
   skuSources.value = []
@@ -1457,6 +1496,8 @@ async function loadSkuSources(skuId) {
         list = [res]
       }
       skuSources.value = list
+      // 缓存该 skuId 是否有货源链接
+      skuHasSourcesCache[skuId] = list.length > 0
       // 默认选中第一条
       if (list.length > 0) {
         selectedSourceIndex.value = 0
@@ -1596,6 +1637,7 @@ const purchaseInfo = reactive({
 
 // 货源管理
 const skuSources = ref([])
+const skuHasSourcesCache = reactive({})  // skuId → boolean，缓存是否有货源链接
 const selectedSourceIndex = ref(-1)
 const sourceManageVisible = ref(false)
 const sourceFormVisible = ref(false)
@@ -4339,10 +4381,17 @@ onUnmounted(() => {
 .section-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   margin-bottom: 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid #f0f0f0;
+}
+
+.section-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .section-header .el-icon {

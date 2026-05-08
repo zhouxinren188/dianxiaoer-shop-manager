@@ -3561,6 +3561,16 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       } catch (e) {
         console.error('[PurchaseCapture] Save cookies failed:', e.message)
       }
+
+      // 刷盘确保 persist:partition 数据持久化到磁盘（关键！否则重启后cookie丢失）
+      try {
+        const ses = session.fromPartition(partitionName)
+        ses.flushStorageData(() => {
+          console.log('[PurchaseCapture] Purchase partition数据已刷盘')
+        })
+      } catch (e) {
+        console.error('[PurchaseCapture] Purchase partition刷盘失败:', e.message)
+      }
     }
 
     function onOrderCaptured(platformOrderNo) {
@@ -3580,27 +3590,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
           .then(async () => {
             console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
-            // 绑定成功后写入系统备注
-            if (purchaseInfo.salesOrderId) {
-              try {
-                const purchasePriceText = capturedAmount || purchaseInfo.purchasePrice || ''
-                const sysRemark = `【${purchaseNo}】${platformOrderNo} ${purchasePriceText}（${purchaseInfo.accountName || ''}）`
-                const sysRemarkRes = await httpRequest(`${BUSINESS_SERVER}/api/sales-orders/${purchaseInfo.salesOrderId}/sys-remark`, {
-                  method: 'PUT',
-                  body: JSON.stringify({ sys_remark: sysRemark })
-                })
-                const sysRemarkJson = JSON.parse(sysRemarkRes.data)
-                if (sysRemarkJson.code === 0 && sysRemarkJson.data && sysRemarkJson.data.updated > 0) {
-                  console.log(`[PurchaseCapture] 系统备注已写入: ${sysRemark}`)
-                } else {
-                  console.warn(`[PurchaseCapture] 系统备注写入可能失败: HTTP ${sysRemarkRes.statusCode}, body=${sysRemarkRes.data.substring(0, 200)}`)
-                }
-              } catch (e) {
-                console.warn(`[PurchaseCapture] 系统备注写入失败(非关键): ${e.message}`)
-              }
-            } else {
-              console.warn(`[PurchaseCapture] 跳过系统备注写入: salesOrderId 为空`)
-            }
+            // 系统备注已在 autoCreateAndBind 内部写入，这里只发送通知事件
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('purchase-order-captured', {
                 purchaseNo,
@@ -4994,10 +4984,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
     }
 
-    // 创建 BrowserWindow
+    // 创建 BrowserWindow（竖屏手机比例，模拟移动端浏览体验）
     const win = new BrowserWindow({
-      width: 1280,
-      height: 860,
+      width: 770,
+      height: 960,
       show: true,
       title: '拼多多选品',
       webPreferences: {
@@ -5061,11 +5051,76 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     activePddBrowsingWindows.set(accountId, win)
 
-    // 窗口关闭时清理
-    win.on('closed', () => {
-      try { ses.webRequest.onBeforeSendHeaders(null) } catch (e) {}
-      activePddBrowsingWindows.delete(accountId)
+    // 窗口关闭时：保存cookie到服务器 + 刷盘持久化，然后才销毁窗口
+    win.on('close', (e) => {
+      if (win._pddBrowsingSaveDone) return
+      e.preventDefault()  // 阻止立即关闭，等异步保存完成
+      win._pddBrowsingSaveDone = true
+
+      const doSaveAndDestroy = async () => {
+        console.log(`[PddBrowsing] 窗口关闭，保存cookie accountId=${accountId}`)
+
+        // 1. 保存cookie到服务器
+        try {
+          const cookies = await ses.cookies.get({})
+          if (cookies && cookies.length > 0) {
+            await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform: 'pinduoduo' })
+            })
+            console.log(`[PddBrowsing] Cookie已保存到服务器: ${cookies.length} 条`)
+          }
+        } catch (err) {
+          console.error('[PddBrowsing] Cookie保存失败:', err.message)
+        }
+
+        // 2. 刷盘确保持久化到磁盘（关键！persist:分区的数据必须flush才能在重启后保留）
+        try {
+          await new Promise(resolve => ses.flushStorageData(resolve))
+          console.log('[PddBrowsing] Session数据已刷盘')
+        } catch (err) {
+          console.error('[PddBrowsing] 刷盘失败:', err.message)
+        }
+
+        // 3. 清理
+        try { ses.webRequest.onBeforeSendHeaders(null) } catch (e) {}
+        activePddBrowsingWindows.delete(accountId)
+
+        // 4. 清除定时保存
+        if (win._pddCookieSaveTimer) {
+          clearInterval(win._pddCookieSaveTimer)
+          win._pddCookieSaveTimer = null
+        }
+
+        // 5. 销毁窗口
+        win.destroy()
+      }
+
+      doSaveAndDestroy()
     })
+
+    // 定时保存cookie到服务器（每3分钟，防止崩溃丢失）
+    win._pddCookieSaveTimer = setInterval(async () => {
+      if (win.isDestroyed()) {
+        clearInterval(win._pddCookieSaveTimer)
+        win._pddCookieSaveTimer = null
+        return
+      }
+      try {
+        const cookies = await ses.cookies.get({})
+        if (cookies && cookies.length > 0) {
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform: 'pinduoduo' })
+          })
+          console.log(`[PddBrowsing] 定时cookie保存: ${cookies.length} 条`)
+        }
+      } catch (err) {
+        // 静默失败，不影响用户体验
+      }
+    }, 3 * 60 * 1000)
 
     // 加载拼多多首页
     win.loadURL('https://mobile.yangkeduo.com')
@@ -5138,6 +5193,24 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, captur
   })
   console.log(`[PurchaseCapture] 绑定订单号响应: HTTP ${bindRes.statusCode}, body=${bindRes.data.substring(0, 500)}`)
   checkApiResponse(bindRes, '绑定订单号')
+
+  // 2.1 绑定成功后立即写入系统备注（覆盖旧备注）
+  if (salesOrderId) {
+    try {
+      const purchasePriceText = capturedAmount || purchasePrice || ''
+      const sysRemark = `【${purchaseNo}】${platformOrderNo} ${purchasePriceText}（${purchaseInfo.accountName || ''}）`
+      const sysRemarkRes = await httpRequest(`${BUSINESS_SERVER}/api/sales-orders/${salesOrderId}/sys-remark`, {
+        method: 'PUT',
+        body: JSON.stringify({ sys_remark: sysRemark })
+      })
+      const sysRemarkJson = JSON.parse(sysRemarkRes.data)
+      if (sysRemarkJson.code === 0 && sysRemarkJson.data && sysRemarkJson.data.updated > 0) {
+        console.log(`[PurchaseCapture] 系统备注已写入(覆盖): ${sysRemark}`)
+      }
+    } catch (e) {
+      console.warn(`[PurchaseCapture] 系统备注写入失败(非关键): ${e.message}`)
+    }
+  }
 
   // 2.5 验证订单是否确实存入数据库（查询最近订单，匹配 purchaseNo）
   try {

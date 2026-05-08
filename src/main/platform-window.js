@@ -1041,7 +1041,16 @@ function registerPurchaseAccountIpc(mainWindow) {
 
       purchaseWindows.delete(accountId)
 
-      // 5. 所有异步操作完成后才真正销毁窗口
+      // 5. 刷盘确保 persist:partition 数据持久化到磁盘（关键！否则重启后cookie丢失）
+      try {
+        const purchaseSes = session.fromPartition(partitionName)
+        await new Promise(resolve => purchaseSes.flushStorageData(resolve))
+        console.log('[PurchaseWindow] Purchase partition数据已刷盘 accountId=', accountId)
+      } catch (e) {
+        console.error('[PurchaseWindow] Purchase partition刷盘失败:', e.message)
+      }
+
+      // 6. 所有异步操作完成后才真正销毁窗口
       win.destroy()
     })
 

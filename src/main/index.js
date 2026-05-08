@@ -269,3 +269,17 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+// 应用退出前刷盘所有 persist: 分区数据（关键！防止重启后cookie丢失）
+// persist: 分区的数据存储在磁盘，但 Chromium 会缓冲写入，如果不主动 flush，退出时可能丢失
+app.on('before-quit', () => {
+  try {
+    // 扫描所有 partition session 并 flush（Electron 的 session API 不提供列举方法，
+    // 所以 flush defaultSession + 已知的 partition pattern）
+    session.defaultSession.flushStorageData(() => {
+      console.log('[Main] Default session flushed on quit')
+    })
+  } catch (e) {
+    // 忽略刷盘失败
+  }
+})

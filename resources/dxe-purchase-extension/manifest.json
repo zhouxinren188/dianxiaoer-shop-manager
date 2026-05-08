@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "DXE Purchase Helper",
+  "version": "1.0",
+  "description": "店小二采购助手",
+  "permissions": ["storage", "cookies", "scripting"],
+  "host_permissions": [
+    "*://mobile.yangkeduo.com/*",
+    "*://yangkeduo.com/*",
+    "http://localhost:*/dxe/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://mobile.yangkeduo.com/*"],
+      "js": ["stealth.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["*://mobile.yangkeduo.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
