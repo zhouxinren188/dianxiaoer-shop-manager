@@ -3392,35 +3392,44 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
     // ========== Cookie 恢复策略 ==========
-    // 优先使用 partition 中已有的 cookie（来自登录窗口，最新鲜）
-    // 只在 partition 无 PDD cookie 时才从服务器恢复（服务器 cookie 可能过时）
+    // ★ 智能恢复：partition有cookie时信任partition（更新鲜），不覆盖；
+    //   partition无cookie时才从服务器恢复（登录窗口已关闭+win.destroy导致内存数据丢失）
+    // ★ 事故教训：始终从服务器恢复会用过时cookie覆盖新鲜cookie（如secure属性变化），
+    //   导致PDD登录态失效。partition的persist:数据比服务器更可靠。
     const ses = session.fromPartition(partitionName)
-    let partitionCookieCount = 0
     let needServerRestore = true
     try {
       const partitionCookies = await ses.cookies.get({})
       const pddCookies = partitionCookies.filter(c =>
         c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
       )
-      partitionCookieCount = pddCookies.length
-      if (platform === 'pinduoduo' && pddCookies.length > 0) {
-        // PDD：partition 已有 cookie，跳过服务器恢复（避免用过时 cookie 覆盖新鲜 cookie）
+      if (pddCookies.length > 0) {
         needServerRestore = false
-        console.log(`[PurchaseCapture] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
-        // 刷盘确保持久化（非阻塞：cookie已在内存中，不阻塞窗口创建）
+        console.log(`[PurchaseCapture] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复（partition数据比服务器更新鲜）`)
+
+        // ★ 域名分域诊断：区分 yangkeduo.com 和 pinduoduo.com 的 cookie
+        const yangkeduoCookies = pddCookies.filter(c => c.domain.includes('yangkeduo.com'))
+        const pinduoduoCookies = pddCookies.filter(c => c.domain.includes('pinduoduo.com') && !c.domain.includes('yangkeduo.com'))
+        console.log(`[PurchaseCapture] Cookie域名分布: yangkeduo.com=${yangkeduoCookies.length}, pinduoduo.com=${pinduoduoCookies.length}`)
+        yangkeduoCookies.forEach(c => console.log(`  [yangkeduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly}`))
+        pinduoduoCookies.forEach(c => console.log(`  [pinduoduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly}`))
+
+        // 刷盘确保持久化（非阻塞）
         flushStorageDataAsync(ses)
+      } else {
+        console.log(`[PurchaseCapture] Partition无PDD cookie，需从服务器恢复`)
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
     }
 
-    // 从服务器加载 Cookie（仅在 partition 无 PDD cookie 时）
-    let serverCookies = []
     if (needServerRestore) {
+      let serverCookies = []
       try {
         const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
           method: 'GET'
         })
+        console.log(`[PurchaseCapture] Cookie服务器响应: statusCode=${cookieRes.statusCode}`)
         if (cookieRes.statusCode === 200 && cookieRes.data) {
           const json = JSON.parse(cookieRes.data)
           if (json.code === 0 && json.data && json.data.cookie_data) {
@@ -3438,8 +3447,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 return true
               })
               console.log(`[PurchaseCapture] Cookies loaded from server: ${serverCookies.length}/${raw.length} (${skipped} expired, skipped)`)
+            } else {
+              console.warn(`[PurchaseCapture] ⚠ 服务器cookie_data为空或非数组: isArray=${Array.isArray(raw)}, len=${raw?.length}`)
             }
+          } else {
+            console.warn(`[PurchaseCapture] ⚠ 服务器返回无cookie数据: code=${json.code}, hasData=${!!json.data}`)
           }
+        } else {
+          console.warn(`[PurchaseCapture] ⚠ 服务器cookie请求失败: statusCode=${cookieRes.statusCode}, data=${(cookieRes.data || '').substring(0, 200)}`)
         }
       } catch (e) {
         console.warn('[PurchaseCapture] Cookie load failed:', e.message)
@@ -3451,8 +3466,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           let setOk = 0, setFail = 0
           for (const ck of serverCookies) {
             try {
-              // ★ 修复：sameSite='no_restriction'(SameSite=None)必须搭配secure=true
-              // 否则Chromium会静默拒绝设置cookie，导致PDD登录态丢失
               const sameSite = ck.sameSite || undefined
               const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
               await ses.cookies.set({
@@ -3473,7 +3486,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             }
           }
           console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
-          // 刷盘确保持久化（非阻塞：cookie已在内存中，不阻塞窗口创建）
+
+          // ★ 诊断：设置后立即读回验证
+          try {
+            const verifyCookies = await ses.cookies.get({})
+            const verifyPdd = verifyCookies.filter(c =>
+              c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+            )
+            const keyNames = ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id', 'pdd_vds', 'api_uid']
+            const keyFound = verifyPdd.filter(c => keyNames.includes(c.name))
+            console.log(`[PurchaseCapture] 验证：partition中现有 ${verifyPdd.length} 条PDD cookie, 关键cookie ${keyFound.length} 条`)
+            const foundNames = new Set(keyFound.map(c => c.name))
+            keyNames.filter(n => !foundNames.has(n)).forEach(n => console.log(`  MISSING: ${n}`))
+          } catch (ve) {}
+
           flushStorageDataAsync(ses)
         } catch (e) {
           console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
@@ -3523,11 +3549,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
     win.webContents.setUserAgent(cleanUA)
     const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+
+    // ★ 诊断：检查goods页面初始请求是否携带Cookie
+    let initialRequestLogged = false
     ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
       if (details.requestHeaders) {
         details.requestHeaders['Sec-CH-UA'] = secChUa
         details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
         details.requestHeaders['User-Agent'] = cleanUA
+
+        // ★ 诊断：只对第一个yangkeduo.com请求打印Cookie头
+        if (!initialRequestLogged && details.url && details.url.includes('yangkeduo.com')) {
+          initialRequestLogged = true
+          const cookieHeader = details.requestHeaders['Cookie'] || details.requestHeaders['cookie'] || '(MISSING)'
+          const cookieStr = typeof cookieHeader === 'string' ? cookieHeader : JSON.stringify(cookieHeader)
+          console.log(`[PurchaseCapture] 初始请求Cookie头: url=${details.url.substring(0, 80)} cookieLen=${cookieStr.length} cookie=${cookieStr.substring(0, 300)}`)
+        }
       }
       callback({ requestHeaders: details.requestHeaders })
     })
@@ -4969,7 +5006,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const partitionName = `persist:purchase-${accountId}`
     const ses = session.fromPartition(partitionName)
 
-    // Cookie 恢复（同采购下单窗口逻辑：优先 partition 已有，必要时从服务器恢复）
+    // Cookie 恢复（★ 同采购下单窗口：智能恢复策略）
+    // partition有cookie时信任partition（更新鲜），不覆盖；
+    // partition无cookie时才从服务器恢复
     let needServerRestore = true
     try {
       const partitionCookies = await ses.cookies.get({})
@@ -4980,6 +5019,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         needServerRestore = false
         console.log(`[PddBrowsing] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
         flushStorageDataAsync(ses)
+      } else {
+        console.log(`[PddBrowsing] Partition无PDD cookie，需从服务器恢复`)
       }
     } catch (e) {
       console.warn('[PddBrowsing] Partition cookie检查失败:', e.message)
@@ -4988,6 +5029,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     if (needServerRestore) {
       try {
         const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, { method: 'GET' })
+        console.log(`[PddBrowsing] Cookie服务器响应: statusCode=${cookieRes.statusCode}`)
         if (cookieRes.statusCode === 200 && cookieRes.data) {
           const json = JSON.parse(cookieRes.data)
           if (json.code === 0 && json.data && json.data.cookie_data) {
@@ -5019,9 +5061,27 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 }
               }
               console.log(`[PddBrowsing] Cookies restored: ${setOk} ok, ${setFail} failed`)
+
+              // ★ 诊断：验证cookie写入
+              try {
+                const verifyCookies = await ses.cookies.get({})
+                const verifyPdd = verifyCookies.filter(c =>
+                  c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+                )
+                const keyNames = ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id', 'pdd_vds', 'api_uid']
+                const keyFound = verifyPdd.filter(c => keyNames.includes(c.name))
+                console.log(`[PddBrowsing] 验证：partition中现有 ${verifyPdd.length} 条PDD cookie, 关键cookie ${keyFound.length} 条`)
+                const foundNames = new Set(keyFound.map(c => c.name))
+                keyNames.filter(n => !foundNames.has(n)).forEach(n => console.log(`  MISSING: ${n}`))
+              } catch (ve) {}
+
               flushStorageDataAsync(ses)
             }
+          } else {
+            console.warn(`[PddBrowsing] ⚠ 服务器返回无cookie数据: code=${json.code}`)
           }
+        } else {
+          console.warn(`[PddBrowsing] ⚠ 服务器cookie请求失败: statusCode=${cookieRes.statusCode}`)
         }
       } catch (e) {
         console.warn('[PddBrowsing] Cookie load failed:', e.message)

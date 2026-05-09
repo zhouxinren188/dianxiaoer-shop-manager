@@ -1,5 +1,6 @@
-const { BrowserWindow, ipcMain, session } = require('electron')
+const { BrowserWindow, ipcMain, session, dialog } = require('electron')
 const path = require('path')
+const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
@@ -764,14 +765,17 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
 // 采购平台登录 URL
 const PURCHASE_LOGIN_URLS = {
   taobao: 'https://login.taobao.com/member/login.jhtml',
-  pinduoduo: 'https://mobile.pinduoduo.com/login.html',
+  // ★ PDD登录必须在 yangkeduo.com 域上完成（对齐dl系统）：
+  //   登录在 yangkeduo.com → cookie设在 .yangkeduo.com → 商品页(yangkeduo.com)能用
+  //   登录在 pinduoduo.com → cookie只在 .pinduoduo.com → 商品页(yangkeduo.com)零cookie→跳登录
+  pinduoduo: 'https://mobile.yangkeduo.com/login.html',
   douyin: 'https://www.douyin.com/login'
 }
 
 // 采购平台后台 URL（用于登录成功检测）
 const PURCHASE_BACKEND_URLS = {
   taobao: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
-  pinduoduo: 'https://mobile.pinduoduo.com/personal.html',
+  pinduoduo: 'https://mobile.yangkeduo.com/personal.html',
   douyin: 'https://www.douyin.com/'
 }
 
@@ -996,14 +1000,18 @@ function registerPurchaseAccountIpc(mainWindow) {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
         console.log('[PurchaseWindow] 获取到 cookie 数量:', cookies.length)
-        // ★ 诊断：打印所有PDD域cookie，方便和dl系统对比
+        // ★ 诊断：打印所有PDD域cookie，含域名/session分类
         const pddCookies = cookies.filter(c =>
           c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
         )
         if (pddCookies.length > 0) {
-          const pddCookieNames = pddCookies.map(c => `${c.name}=${(c.value || '').substring(0, 20)}... [domain=${c.domain} secure=${c.secure} sameSite=${c.sameSite}]`)
-          console.log(`[PurchaseWindow] PDD域cookie共${pddCookies.length}条:`)
-          pddCookieNames.forEach(n => console.log('  ' + n))
+          const sessionC = pddCookies.filter(c => !c.expirationDate || c.expirationDate <= 0)
+          const persistentC = pddCookies.filter(c => c.expirationDate && c.expirationDate > 0)
+          const yangkeduoC = pddCookies.filter(c => c.domain.includes('yangkeduo.com'))
+          const pinduoduoC = pddCookies.filter(c => c.domain.includes('pinduoduo.com') && !c.domain.includes('yangkeduo.com'))
+          console.log(`[PurchaseWindow] PDD cookie: total=${pddCookies.length}, session=${sessionC.length}, persistent=${persistentC.length}`)
+          console.log(`[PurchaseWindow] 域名分布: yangkeduo.com=${yangkeduoC.length}, pinduoduo.com=${pinduoduoC.length}`)
+          pddCookies.forEach(c => console.log(`  ${c.name}=${(c.value || '').substring(0, 15)}... domain=${c.domain} secure=${c.secure} sameSite=${c.sameSite} session=${!c.expirationDate||c.expirationDate<=0}`))
         } else {
           console.log('[PurchaseWindow] ⚠ 未找到任何PDD域cookie!')
         }
@@ -1077,6 +1085,88 @@ function registerPurchaseAccountIpc(mainWindow) {
     return { success: true }
   })
 
+  // 打开采购账号个人中心窗口（诊断用：验证cookie是否持久化）
+  ipcMain.handle('open-purchase-personal-window', async (event, { accountId, platform }) => {
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
+
+    // ★ 诊断：打印partition中所有PDD cookie的详细属性（域名/session/过期时间）
+    try {
+      const cookies = await ses.cookies.get({})
+      const pddCookies = cookies.filter(c =>
+        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+      )
+      const yangkeduoCookies = pddCookies.filter(c => c.domain.includes('yangkeduo.com'))
+      const pinduoduoCookies = pddCookies.filter(c => c.domain.includes('pinduoduo.com') && !c.domain.includes('yangkeduo.com'))
+      const sessionCookies = pddCookies.filter(c => !c.expirationDate || c.expirationDate <= 0)
+      const persistentCookies = pddCookies.filter(c => c.expirationDate && c.expirationDate > 0)
+      const now = Date.now() / 1000
+      const expiredCookies = persistentCookies.filter(c => c.expirationDate < now)
+      console.log(`[PersonalCenter] ★★★ Cookie诊断 ★★★`)
+      console.log(`[PersonalCenter] PDD总cookie: ${pddCookies.length}, session(无过期时间)=${sessionCookies.length}, persistent=${persistentCookies.length}, 已过期=${expiredCookies.length}`)
+      console.log(`[PersonalCenter] 域名分布: yangkeduo.com=${yangkeduoCookies.length}, pinduoduo.com=${pinduoduoCookies.length}`)
+      yangkeduoCookies.forEach(c => console.log(`  [yangkeduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly} session=${!c.expirationDate||c.expirationDate<=0} expires=${c.expirationDate>0?new Date(c.expirationDate*1000).toISOString():'NEVER'}`))
+      pinduoduoCookies.forEach(c => console.log(`  [pinduoduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly} session=${!c.expirationDate||c.expirationDate<=0} expires=${c.expirationDate>0?new Date(c.expirationDate*1000).toISOString():'NEVER'}`))
+    } catch (e) {
+      console.warn('[PersonalCenter] Cookie诊断失败:', e.message)
+    }
+
+    // ★ PDD个人中心用 pinduoduo.com 域名（和登录页同域），排除跨域干扰
+    // 个人中心也用 yangkeduo.com 域（和登录页同域，对齐dl系统）
+    const PERSONAL_URLS = {
+      pinduoduo: 'https://mobile.yangkeduo.com/personal.html',
+      taobao: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
+      douyin: 'https://www.douyin.com/'
+    }
+    const targetUrl = PERSONAL_URLS[platform]
+    if (!targetUrl) {
+      return { success: false, message: `不支持的采购平台: ${platform}` }
+    }
+
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 750,
+      title: `个人中心 - ${platform}`,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: partitionName,
+        preload: preloadPath
+      }
+    })
+
+    // 反检测：伪装 UA（和登录窗口一致）
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    win.webContents.setUserAgent(cleanUA)
+    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
+      if (details.requestHeaders) {
+        details.requestHeaders['Sec-CH-UA'] = secChUa
+        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        details.requestHeaders['User-Agent'] = cleanUA
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    })
+
+    win.loadURL(targetUrl)
+
+    // 导航诊断：观察是否被重定向到登录页
+    win.webContents.on('did-navigate', (event, url) => {
+      console.log(`[PersonalCenter] did-navigate: ${url.substring(0, 120)}`)
+    })
+    win.webContents.on('did-navigate-in-page', (event, url) => {
+      console.log(`[PersonalCenter] did-navigate-in-page: ${url.substring(0, 120)}`)
+    })
+
+    win.on('close', () => {
+      try { ses.webRequest.onBeforeSendHeaders(null) } catch (e) {}
+    })
+
+    return { success: true }
+  })
+
   // 从浏览器 session 刷新 cookies 到服务器数据库
   // 前端在同步之前调用此接口，确保服务器能拿到最新的 _m_h5_tk 等 token
   // 清除采购账号的 partition cookies（重新登录用）
@@ -1112,6 +1202,209 @@ function registerPurchaseAccountIpc(mainWindow) {
       return { success: true, count: 0, hasH5Tk: false }
     } catch (err) {
       console.error('[PurchaseWindow] 刷新 cookies 失败:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
+  // 导出采购账号 Cookie 到文件
+  ipcMain.handle('export-purchase-cookies', async (event, { accountId, accountName, platform }) => {
+    try {
+      const partitionName = `persist:purchase-${accountId}`
+      const ses = session.fromPartition(partitionName)
+      const allCookies = await ses.cookies.get({})
+
+      if (!allCookies || allCookies.length === 0) {
+        return { success: false, error: '该账号没有Cookie，请先登录' }
+      }
+
+      // 按平台过滤Cookie
+      const PLATFORM_DOMAINS = {
+        pinduoduo: ['pinduoduo.com', 'yangkeduo.com', 'pdd.net'],
+        taobao: ['taobao.com', 'tmall.com', 'alibaba.com'],
+        jd: ['jd.com', 'jd.hk'],
+        douyin: ['jinritemai.com', 'douyin.com']
+      }
+      const domains = PLATFORM_DOMAINS[platform] || []
+      const filteredCookies = domains.length > 0
+        ? allCookies.filter(c => c.domain && domains.some(d => c.domain.includes(d)))
+        : allCookies
+
+      if (filteredCookies.length === 0) {
+        return { success: false, error: `未找到${platform || '该平台'}的Cookie，请先登录` }
+      }
+
+      // 生成导出内容：注释头 + JSON行格式（每行一个cookie，保留完整属性用于精确恢复）
+      const lines = [
+        `# Cookie Export - Account: ${accountName || accountId} - ${platform || 'unknown'}`,
+        `# Exported at: ${new Date().toISOString()}`,
+        `# 由店小二系统导出，可通过"导入Cookie"功能恢复`,
+        `# 格式：每行一个JSON对象，包含name/value/domain/path/secure/httpOnly/sameSite/expirationDate`,
+        ''
+      ]
+      for (const ck of filteredCookies) {
+        const obj = {
+          name: ck.name,
+          value: ck.value,
+          domain: ck.domain,
+          path: ck.path || '/',
+          secure: ck.secure || false,
+          httpOnly: ck.httpOnly || false,
+          sameSite: ck.sameSite || undefined,
+          expirationDate: ck.expirationDate || undefined
+        }
+        lines.push(JSON.stringify(obj))
+      }
+
+      // 弹出保存文件对话框
+      const result = await dialog.showSaveDialog({
+        title: '导出Cookie',
+        defaultPath: `${accountName || 'account'}_${platform || 'cookie'}.txt`,
+        filters: [{ name: '文本文件', extensions: ['txt'] }, { name: '所有文件', extensions: ['*'] }]
+      })
+
+      if (result.canceled) {
+        return { success: false, error: '用户取消' }
+      }
+
+      fs.writeFileSync(result.filePath, lines.join('\n'), 'utf-8')
+      console.log(`[PurchaseWindow] Cookie已导出: ${filteredCookies.length}条 → ${result.filePath}`)
+      return { success: true, count: filteredCookies.length, filePath: result.filePath }
+    } catch (err) {
+      console.error('[PurchaseWindow] Cookie导出失败:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
+  // 导入采购账号 Cookie 从文件
+  ipcMain.handle('import-purchase-cookies', async (event, { accountId, platform }) => {
+    try {
+      // 弹出文件选择对话框
+      const result = await dialog.showOpenDialog({
+        title: '导入Cookie',
+        filters: [{ name: '文本文件', extensions: ['txt'] }, { name: 'JSON文件', extensions: ['json'] }, { name: '所有文件', extensions: ['*'] }],
+        properties: ['openFile']
+      })
+
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        return { success: false, error: '用户取消' }
+      }
+
+      const filePath = result.filePaths[0]
+      const content = fs.readFileSync(filePath, 'utf-8')
+
+      // 解析文件：支持两种格式
+      // 格式1：JSON行格式（带#注释，由店小二导出功能生成）
+      // 格式2：DL系统的 name=value;name2=value2 格式（纯文本）
+      let cookies = []
+
+      const lines = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+
+      if (lines.length === 0) {
+        return { success: false, error: '文件为空或格式无法识别' }
+      }
+
+      // 检测格式：如果第一行以{开头，则是JSON行格式
+      if (lines[0].startsWith('{')) {
+        // JSON行格式
+        for (const line of lines) {
+          try {
+            const obj = JSON.parse(line)
+            if (obj.name) {
+              cookies.push(obj)
+            }
+          } catch (e) {
+            // 跳过无法解析的行
+          }
+        }
+      } else {
+        // DL系统格式：name=value;name2=value2
+        const fullStr = lines.join(';')
+        const pairs = fullStr.split(';').map(p => p.trim()).filter(p => p)
+        const PLATFORM_DOMAINS = {
+          pinduoduo: '.yangkeduo.com',
+          taobao: '.taobao.com',
+          jd: '.jd.com',
+          douyin: '.jinritemai.com'
+        }
+        const defaultDomain = PLATFORM_DOMAINS[platform] || ''
+
+        for (const pair of pairs) {
+          const eqIdx = pair.indexOf('=')
+          if (eqIdx < 1) continue
+          const name = pair.substring(0, eqIdx).trim()
+          const value = pair.substring(eqIdx + 1).trim()
+          // 跳过DL系统的内部cookie
+          if (['dlUserToken', 'dlBuyID', 'dlSetReceiver', 'dlGoodsID'].includes(name)) continue
+          if (name && value) {
+            const isPdd = defaultDomain.includes('yangkeduo') || defaultDomain.includes('pinduoduo')
+            cookies.push({
+              name,
+              value,
+              domain: defaultDomain,
+              path: '/',
+              secure: isPdd,
+              httpOnly: false,
+              sameSite: isPdd ? 'no_restriction' : 'lax'
+            })
+          }
+        }
+      }
+
+      if (cookies.length === 0) {
+        return { success: false, error: '文件中未找到有效的Cookie数据' }
+      }
+
+      // 写入到partition session
+      const partitionName = `persist:purchase-${accountId}`
+      const ses = session.fromPartition(partitionName)
+
+      let setOk = 0, setFail = 0
+      for (const ck of cookies) {
+        try {
+          const sameSite = ck.sameSite || undefined
+          const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
+          const domain = ck.domain || ''
+          const url = (secure ? 'https://' : 'http://') + domain.replace(/^\./, '') + (ck.path || '/')
+          await ses.cookies.set({
+            url,
+            name: ck.name,
+            value: ck.value || '',
+            domain,
+            path: ck.path || '/',
+            secure,
+            httpOnly: ck.httpOnly || false,
+            expirationDate: ck.expirationDate || undefined,
+            sameSite
+          })
+          setOk++
+        } catch (e2) {
+          setFail++
+          console.warn(`[PurchaseWindow] Cookie导入失败: ${ck.name} domain=${ck.domain} err=${e2.message}`)
+        }
+      }
+
+      // 刷盘确保持久化
+      await new Promise(resolve => ses.flushStorageData(resolve))
+
+      // 同步保存到服务器数据库
+      try {
+        const allCookies = await ses.cookies.get({})
+        if (allCookies.length > 0) {
+          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie_data: JSON.stringify(allCookies), platform })
+          })
+          console.log(`[PurchaseWindow] Cookie已同步到服务器: ${allCookies.length}条`)
+        }
+      } catch (e) {
+        console.warn('[PurchaseWindow] Cookie同步到服务器失败:', e.message)
+      }
+
+      console.log(`[PurchaseWindow] Cookie已导入: ${setOk}成功, ${setFail}失败`)
+      return { success: true, count: setOk, failed: setFail }
+    } catch (err) {
+      console.error('[PurchaseWindow] Cookie导入失败:', err.message)
       return { success: false, error: err.message }
     }
   })

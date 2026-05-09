@@ -446,10 +446,13 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" align="center">
+        <el-table-column label="操作" width="340" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="handleLoginAccount(row)">登录</el-button>
             <el-button link type="success" size="small" @click="handleReloginAccount(row)">重登</el-button>
+            <el-button link type="primary" size="small" @click="handlePersonalCenter(row)">个人中心</el-button>
+            <el-button link type="info" size="small" @click="handleExportCookies(row)">导出Cookie</el-button>
+            <el-button link type="info" size="small" @click="handleImportCookies(row)">导入Cookie</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
             <el-button link type="danger" size="small" @click="handleDeleteAccount(row)">删除</el-button>
           </template>
@@ -966,6 +969,61 @@ function handleReloginAccount(row) {
     }).catch(() => {})
   } else {
     ElMessage.warning('请在 Electron 环境中使用此功能')
+  }
+}
+
+function handlePersonalCenter(row) {
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-purchase-personal-window', {
+      accountId: String(row.id),
+      platform: row.platform
+    })
+    ElMessage.info('已打开个人中心窗口')
+  } else {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+  }
+}
+
+async function handleExportCookies(row) {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  try {
+    const result = await window.electronAPI.invoke('export-purchase-cookies', {
+      accountId: String(row.id),
+      accountName: row.username,
+      platform: row.platform
+    })
+    if (result.success) {
+      ElMessage.success(`已导出 ${result.count} 条Cookie到文件`)
+    } else if (result.error !== '用户取消') {
+      ElMessage.error('导出失败: ' + result.error)
+    }
+  } catch (err) {
+    ElMessage.error('导出失败: ' + err.message)
+  }
+}
+
+async function handleImportCookies(row) {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  try {
+    const result = await window.electronAPI.invoke('import-purchase-cookies', {
+      accountId: String(row.id),
+      platform: row.platform
+    })
+    if (result.success) {
+      ElMessage.success(`已导入 ${result.count} 条Cookie${result.failed > 0 ? `，${result.failed}条失败` : ''}`)
+      // 导入后刷新账号列表
+      await loadAccounts()
+    } else if (result.error !== '用户取消') {
+      ElMessage.error('导入失败: ' + result.error)
+    }
+  } catch (err) {
+    ElMessage.error('导入失败: ' + err.message)
   }
 }
 
