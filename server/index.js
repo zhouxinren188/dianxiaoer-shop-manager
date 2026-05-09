@@ -4,7 +4,7 @@ const path = require('path')
 const fs = require('fs')
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
-const { pool, initDB } = require('./db')
+const { pool, initDB, startKeepAlive } = require('./db')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.32-taobao-cookie-filter'
@@ -2301,39 +2301,38 @@ app.put('/api/sku-purchase-config/update-price', async (req, res) => {
 
 app.get('/api/purchase-accounts', async (req, res) => {
   try {
+    // 用 LEFT JOIN 一次性查出账号+cookie有效性，避免 N+1 查询
     let rows
     if (req.user.user_type === 'sub') {
-      // 子账号：只返回被分配的采购账号
       const [r] = await pool.execute(
-        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at
+        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at,
+                CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END AS cookie_valid
          FROM purchase_accounts pa
          INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
+         LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
          WHERE upa.user_id = ?
          ORDER BY pa.id DESC`, [req.user.id]
       )
       rows = r
     } else {
-      // 主账号：返回自己名下所有采购账号
       const ownerId = getOwnerId(req.user)
       const [r] = await pool.execute(
-        'SELECT id, account, password, platform, online, created_at, updated_at FROM purchase_accounts WHERE owner_id=? ORDER BY id DESC',
+        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at,
+                CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END AS cookie_valid
+         FROM purchase_accounts pa
+         LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
+         WHERE pa.owner_id=?
+         ORDER BY pa.id DESC`,
         [ownerId]
       )
       rows = r
     }
-    
-    // 为每个账号检查Cookie是否有效（是否存在Cookie数据）
-    const accountList = await Promise.all(rows.map(async (row) => {
-      const [cookieRows] = await pool.execute(
-        'SELECT id FROM purchase_cookies WHERE account_id = ? LIMIT 1',
-        [row.id]
-      )
-      return {
-        ...row,
-        cookie_valid: cookieRows.length > 0  // 有Cookie数据就认为有效
-      }
+
+    const accountList = rows.map(row => ({
+      ...row,
+      cookie_valid: !!row.cookie_valid
     }))
-    
+
     res.json(ok({ list: accountList, total: accountList.length }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -5194,6 +5193,7 @@ app.get('/health', async (req, res) => {
 const PORT = process.env.PORT || 3002
 
 initDB().then(() => {
+  startKeepAlive()
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] 后端服务已启动: http://0.0.0.0:${PORT}`)
   })

@@ -446,11 +446,10 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="340" align="center">
+        <el-table-column label="操作" width="280" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="handleLoginAccount(row)">登录</el-button>
             <el-button link type="success" size="small" @click="handleReloginAccount(row)">重登</el-button>
-            <el-button link type="primary" size="small" @click="handlePersonalCenter(row)">个人中心</el-button>
             <el-button link type="info" size="small" @click="handleExportCookies(row)">导出Cookie</el-button>
             <el-button link type="info" size="small" @click="handleImportCookies(row)">导入Cookie</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
@@ -967,18 +966,6 @@ function handleReloginAccount(row) {
       })
       ElMessage.info('已清除登录态，请重新登录')
     }).catch(() => {})
-  } else {
-    ElMessage.warning('请在 Electron 环境中使用此功能')
-  }
-}
-
-function handlePersonalCenter(row) {
-  if (window.electronAPI) {
-    window.electronAPI.invoke('open-purchase-personal-window', {
-      accountId: String(row.id),
-      platform: row.platform
-    })
-    ElMessage.info('已打开个人中心窗口')
   } else {
     ElMessage.warning('请在 Electron 环境中使用此功能')
   }

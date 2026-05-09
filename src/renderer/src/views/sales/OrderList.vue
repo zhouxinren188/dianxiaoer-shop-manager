@@ -1296,32 +1296,41 @@ async function handleRevealBuyerInfoInPurchase() {
 }
 
 async function handlePurchase(order, item, itemIdx) {
-  // 先锁定订单，防止其他用户同时采购
+  // 锁定订单 + 获取采购编号（并行请求，减少等待时间）
+  let lockResult, noResult
   try {
-    await lockSalesOrderForPurchase(order.id)
+    [lockResult, noResult] = await Promise.all([
+      lockSalesOrderForPurchase(order.id).catch(e => ({ _lockError: e })),
+      fetchNextPurchaseNo().catch(e => ({ _noError: e }))
+    ])
   } catch (e) {
-    // 锁定失败（已被其他人锁定），显示友情提醒
-    const msg = e.message || '该订单目前有其他用户在采购'
+    ElMessage.error('操作失败: ' + e.message)
+    return
+  }
+
+  // 锁定失败
+  if (lockResult && lockResult._lockError) {
+    const msg = lockResult._lockError.message || '该订单目前有其他用户在采购'
     ElMessage.warning({ message: msg, duration: 3000 })
-    // 刷新列表以获取最新锁定状态
     loadOrdersFromServer()
     return
   }
-  // 锁定成功，更新本地状态使其他按钮即时禁用
+  // 锁定成功，更新本地状态
   order.purchaseLockedBy = true
   order.purchaseLockedName = '我'
 
-  let purchaseNo
-  try {
-    const res = await fetchNextPurchaseNo()
-    purchaseNo = res.purchase_no || res.data?.purchase_no
-    if (!purchaseNo) throw new Error('empty')
-  } catch (e) {
+  // 编号获取失败
+  if (noResult && noResult._noError || !noResult) {
     ElMessage.error('获取采购编号失败')
-    // 获取编号失败，解锁订单并恢复本地状态
-    unlockSalesOrderPurchase(order.id).catch(err => {
-      console.warn('[采购解锁] 获取编号失败时解锁失败:', err.message)
-    })
+    unlockSalesOrderPurchase(order.id).catch(() => {})
+    order.purchaseLockedBy = null
+    order.purchaseLockedName = null
+    return
+  }
+  const purchaseNo = noResult.purchase_no || noResult.data?.purchase_no
+  if (!purchaseNo) {
+    ElMessage.error('获取采购编号失败')
+    unlockSalesOrderPurchase(order.id).catch(() => {})
     order.purchaseLockedBy = null
     order.purchaseLockedName = null
     return
@@ -1378,36 +1387,37 @@ async function handlePurchase(order, item, itemIdx) {
     console.warn('[采购下单] IPC监听注册失败:', e.message)
   }
 
-  // 加载采购账号列表（每次打开都重新加载，确保数据最新）
-  try {
-    const res = await fetchPurchaseAccounts()
-    console.log('[采购下单] 采购账号API返回:', JSON.stringify(res))
-    const rawList = res && res.list ? res.list : (Array.isArray(res) ? res : [])
+  // 加载采购账号列表和仓库列表（并行请求，减少卡顿）
+  const [accountsRes, warehousesRes] = await Promise.all([
+    fetchPurchaseAccounts().catch(e => {
+      console.warn('[采购下单] 加载采购账号失败:', e.message)
+      ElMessage.warning('加载采购账号失败: ' + e.message)
+      return null
+    }),
+    fetchWarehouses().catch(e => {
+      console.warn('[采购下单] 加载仓库失败:', e.message)
+      ElMessage.warning('加载仓库失败: ' + e.message)
+      return null
+    })
+  ])
+
+  if (accountsRes) {
+    const rawList = accountsRes && accountsRes.list ? accountsRes.list : (Array.isArray(accountsRes) ? accountsRes : [])
     purchaseAccounts.value = rawList.map(a => ({
       ...a,
       username: a.account || a.username || '',
       status: a.online ? 'online' : 'offline'
     }))
-  } catch (e) {
-    console.warn('[采购下单] 加载采购账号失败:', e.message)
-    ElMessage.warning('加载采购账号失败: ' + e.message)
   }
 
-  // 加载仓库列表（每次打开都重新加载）
-  try {
-    const wRes = await fetchWarehouses()
-    console.log('[采购下单] 仓库API返回:', JSON.stringify(wRes))
-    if (wRes && wRes.list) {
-      warehouseList.value = wRes.list
-    } else if (Array.isArray(wRes)) {
-      warehouseList.value = wRes
+  if (warehousesRes) {
+    if (warehousesRes && warehousesRes.list) {
+      warehouseList.value = warehousesRes.list
+    } else if (Array.isArray(warehousesRes)) {
+      warehouseList.value = warehousesRes
     } else {
       warehouseList.value = []
-      console.warn('[采购下单] 仓库API返回格式异常:', wRes)
     }
-  } catch (e) {
-    console.warn('[采购下单] 加载仓库失败:', e.message)
-    ElMessage.warning('加载仓库失败: ' + e.message)
   }
   // 恢复上次选择的仓库，或只有一个仓库时自动选中
   const lastWhId = localStorage.getItem('lastWarehouseId')

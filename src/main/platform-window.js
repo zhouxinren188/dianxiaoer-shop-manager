@@ -952,8 +952,8 @@ function registerPurchaseAccountIpc(mainWindow) {
         setTimeout(ensureH5TokenAndSave, 5000)
       }
 
-      // 登录页自动填充账号密码
-      if (isLoginPage && (account || password)) {
+      // 登录页自动填充账号密码（PDD禁用：程序化input事件无keyboard事件，易触发风控）
+      if (isLoginPage && platform !== 'pinduoduo' && (account || password)) {
         setTimeout(() => {
           if (win.isDestroyed() || loginDetected) return
           const script = buildLoginAutoFillScript(account || '', password || '')
@@ -1000,21 +1000,6 @@ function registerPurchaseAccountIpc(mainWindow) {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
         console.log('[PurchaseWindow] 获取到 cookie 数量:', cookies.length)
-        // ★ 诊断：打印所有PDD域cookie，含域名/session分类
-        const pddCookies = cookies.filter(c =>
-          c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
-        )
-        if (pddCookies.length > 0) {
-          const sessionC = pddCookies.filter(c => !c.expirationDate || c.expirationDate <= 0)
-          const persistentC = pddCookies.filter(c => c.expirationDate && c.expirationDate > 0)
-          const yangkeduoC = pddCookies.filter(c => c.domain.includes('yangkeduo.com'))
-          const pinduoduoC = pddCookies.filter(c => c.domain.includes('pinduoduo.com') && !c.domain.includes('yangkeduo.com'))
-          console.log(`[PurchaseWindow] PDD cookie: total=${pddCookies.length}, session=${sessionC.length}, persistent=${persistentC.length}`)
-          console.log(`[PurchaseWindow] 域名分布: yangkeduo.com=${yangkeduoC.length}, pinduoduo.com=${pinduoduoC.length}`)
-          pddCookies.forEach(c => console.log(`  ${c.name}=${(c.value || '').substring(0, 15)}... domain=${c.domain} secure=${c.secure} sameSite=${c.sameSite} session=${!c.expirationDate||c.expirationDate<=0}`))
-        } else {
-          console.log('[PurchaseWindow] ⚠ 未找到任何PDD域cookie!')
-        }
       } catch (e) {
         console.error('[PurchaseWindow] 获取 Cookie 失败:', e.message)
       }
@@ -1082,88 +1067,6 @@ function registerPurchaseAccountIpc(mainWindow) {
     if (win && !win.isDestroyed()) {
       win.close()
     }
-    return { success: true }
-  })
-
-  // 打开采购账号个人中心窗口（诊断用：验证cookie是否持久化）
-  ipcMain.handle('open-purchase-personal-window', async (event, { accountId, platform }) => {
-    const partitionName = `persist:purchase-${accountId}`
-    const ses = session.fromPartition(partitionName)
-
-    // ★ 诊断：打印partition中所有PDD cookie的详细属性（域名/session/过期时间）
-    try {
-      const cookies = await ses.cookies.get({})
-      const pddCookies = cookies.filter(c =>
-        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
-      )
-      const yangkeduoCookies = pddCookies.filter(c => c.domain.includes('yangkeduo.com'))
-      const pinduoduoCookies = pddCookies.filter(c => c.domain.includes('pinduoduo.com') && !c.domain.includes('yangkeduo.com'))
-      const sessionCookies = pddCookies.filter(c => !c.expirationDate || c.expirationDate <= 0)
-      const persistentCookies = pddCookies.filter(c => c.expirationDate && c.expirationDate > 0)
-      const now = Date.now() / 1000
-      const expiredCookies = persistentCookies.filter(c => c.expirationDate < now)
-      console.log(`[PersonalCenter] ★★★ Cookie诊断 ★★★`)
-      console.log(`[PersonalCenter] PDD总cookie: ${pddCookies.length}, session(无过期时间)=${sessionCookies.length}, persistent=${persistentCookies.length}, 已过期=${expiredCookies.length}`)
-      console.log(`[PersonalCenter] 域名分布: yangkeduo.com=${yangkeduoCookies.length}, pinduoduo.com=${pinduoduoCookies.length}`)
-      yangkeduoCookies.forEach(c => console.log(`  [yangkeduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly} session=${!c.expirationDate||c.expirationDate<=0} expires=${c.expirationDate>0?new Date(c.expirationDate*1000).toISOString():'NEVER'}`))
-      pinduoduoCookies.forEach(c => console.log(`  [pinduoduo] ${c.name}=${(c.value||'').substring(0,15)}... secure=${c.secure} sameSite=${c.sameSite} httpOnly=${c.httpOnly} session=${!c.expirationDate||c.expirationDate<=0} expires=${c.expirationDate>0?new Date(c.expirationDate*1000).toISOString():'NEVER'}`))
-    } catch (e) {
-      console.warn('[PersonalCenter] Cookie诊断失败:', e.message)
-    }
-
-    // ★ PDD个人中心用 pinduoduo.com 域名（和登录页同域），排除跨域干扰
-    // 个人中心也用 yangkeduo.com 域（和登录页同域，对齐dl系统）
-    const PERSONAL_URLS = {
-      pinduoduo: 'https://mobile.yangkeduo.com/personal.html',
-      taobao: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
-      douyin: 'https://www.douyin.com/'
-    }
-    const targetUrl = PERSONAL_URLS[platform]
-    if (!targetUrl) {
-      return { success: false, message: `不支持的采购平台: ${platform}` }
-    }
-
-    const win = new BrowserWindow({
-      width: 1100,
-      height: 750,
-      title: `个人中心 - ${platform}`,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        partition: partitionName,
-        preload: preloadPath
-      }
-    })
-
-    // 反检测：伪装 UA（和登录窗口一致）
-    const chromeVersion = process.versions.chrome || '134.0.0.0'
-    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
-    win.webContents.setUserAgent(cleanUA)
-    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
-    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
-      if (details.requestHeaders) {
-        details.requestHeaders['Sec-CH-UA'] = secChUa
-        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
-        details.requestHeaders['User-Agent'] = cleanUA
-      }
-      callback({ requestHeaders: details.requestHeaders })
-    })
-
-    win.loadURL(targetUrl)
-
-    // 导航诊断：观察是否被重定向到登录页
-    win.webContents.on('did-navigate', (event, url) => {
-      console.log(`[PersonalCenter] did-navigate: ${url.substring(0, 120)}`)
-    })
-    win.webContents.on('did-navigate-in-page', (event, url) => {
-      console.log(`[PersonalCenter] did-navigate-in-page: ${url.substring(0, 120)}`)
-    })
-
-    win.on('close', () => {
-      try { ses.webRequest.onBeforeSendHeaders(null) } catch (e) {}
-    })
-
     return { success: true }
   })
 

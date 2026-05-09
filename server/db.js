@@ -501,4 +501,24 @@ async function initDB() {
   }
 }
 
-module.exports = { pool, initDB }
+// 定期心跳保活：防止MySQL连接池空闲超时断开
+// 远程用户反馈：登录后前1-3次点击"采购下单"卡顿10-15s，2-3小时不动再次操作也卡顿
+// 原因：TCP keepalive默认间隔7200秒，无法阻止防火墙/MySQL关闭空闲连接
+// 修复：每5分钟ping一次，保持所有池连接活跃
+function startKeepAlive(intervalMs = 5 * 60 * 1000) {
+  setInterval(async () => {
+    try {
+      const conn = await pool.getConnection()
+      try {
+        await conn.ping()
+      } finally {
+        conn.release()
+      }
+    } catch (err) {
+      console.warn('[DB] Keepalive ping failed:', err.message)
+    }
+  }, intervalMs)
+  console.log(`[DB] Keepalive started (interval: ${intervalMs / 1000}s)`)
+}
+
+module.exports = { pool, initDB, startKeepAlive }
