@@ -640,52 +640,75 @@ const PRODUCT_INFO_OVERLAY = `
 // ============ 商品链接提取按钮（PDD 浏览窗口专用） ============
 const PRODUCT_LINK_EXTRACTOR = `
 (function() {
+  // ★ 通用按钮样式
+  var btnBase = 'position:fixed;left:12px;z-index:10000;' +
+    'min-width:76px;text-align:center;padding:7px 16px;color:#fff;border-radius:8px;' +
+    'font-size:13px;cursor:pointer;user-select:none;' +
+    'font-family:-apple-system,BlinkMacSystemFont,sans-serif;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,0.15);' +
+    'transition:all 0.2s ease;';
+
   // ★ 返回按钮（所有页面都显示）
   var oldBack = document.getElementById('dxe-back-btn');
   if (oldBack) oldBack.remove();
   var backBtn = document.createElement('div');
   backBtn.id = 'dxe-back-btn';
   backBtn.innerHTML = '← 返回';
-  backBtn.style.cssText = 'position:fixed;top:12px;left:12px;z-index:2147483647;' +
-    'padding:6px 14px;background:rgba(0,0,0,0.55);color:#fff;border-radius:16px;' +
-    'font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.2);' +
-    'user-select:none;font-family:-apple-system,BlinkMacSystemFont,sans-serif;' +
-    'transition:background 0.2s;backdrop-filter:blur(4px);';
-  backBtn.addEventListener('mouseenter', function() { this.style.background = 'rgba(0,0,0,0.75)'; });
-  backBtn.addEventListener('mouseleave', function() { this.style.background = 'rgba(0,0,0,0.55)'; });
+  backBtn.style.cssText = btnBase + 'top:12px;background:rgba(0,0,0,0.5);backdrop-filter:blur(8px);';
+  backBtn.addEventListener('mouseenter', function() { this.style.background = 'rgba(0,0,0,0.7)'; });
+  backBtn.addEventListener('mouseleave', function() { this.style.background = 'rgba(0,0,0,0.5)'; });
   backBtn.addEventListener('click', function() { history.back(); });
   document.body.appendChild(backBtn);
 
-  // ★ 提取链接按钮（仅商品页显示）
-  var old = document.getElementById('dxe-extract-link-btn');
-  if (old) old.remove();
+  // ★ 提取链接 + 相似商品 按钮（仅商品页显示）
+  var oldExtract = document.getElementById('dxe-extract-link-btn');
+  if (oldExtract) oldExtract.remove();
+  var oldSimilar = document.getElementById('dxe-similar-btn');
+  if (oldSimilar) oldSimilar.remove();
 
   var url = (location.href || '').toLowerCase();
   var isPddGoods = /yangkeduo\\.com\\/goods/.test(url) || /pinduoduo\\.com\\/goods/.test(url);
   if (!isPddGoods) return;
 
+  // 提取链接按钮
   var btn = document.createElement('div');
   btn.id = 'dxe-extract-link-btn';
   btn.textContent = '提取链接';
-  btn.style.cssText = 'position:fixed;bottom:60px;right:20px;z-index:2147483647;' +
-    'padding:8px 16px;background:#409eff;color:#fff;border-radius:20px;' +
-    'font-size:13px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.15);' +
-    'user-select:none;font-family:-apple-system,BlinkMacSystemFont,sans-serif;';
+  btn.style.cssText = btnBase + 'top:52px;background:linear-gradient(135deg,#667eea,#764ba2);';
   document.body.appendChild(btn);
 
   btn.addEventListener('click', function() {
     var productUrl = location.href;
-    // 1. 复制到剪贴板（最可靠，参考 dl 的"复制链接"按钮）
     try { navigator.clipboard.writeText(productUrl); } catch(e) {}
-    // 2. 通过原生 window.open 触发主进程 setWindowOpenHandler（自动回填货源链接）
     var openFn = window.__dxeOpen || window.open;
     try { openFn('dxe://product-link?url=' + encodeURIComponent(productUrl)); } catch(e) {}
-    // 视觉反馈
-    btn.textContent = '已复制链接 ✓';
-    btn.style.background = '#67c23a';
+    btn.textContent = '已复制 ✓';
+    btn.style.background = 'linear-gradient(135deg,#36d1dc,#5b86e5)';
     setTimeout(function() {
       btn.textContent = '提取链接';
-      btn.style.background = '#409eff';
+      btn.style.background = 'linear-gradient(135deg,#667eea,#764ba2)';
+    }, 1500);
+  });
+
+  // 相似商品按钮
+  var similarBtn = document.createElement('div');
+  similarBtn.id = 'dxe-similar-btn';
+  similarBtn.textContent = '相似商品';
+  similarBtn.style.cssText = btnBase + 'top:92px;background:linear-gradient(135deg,#f093fb,#f5576c);';
+  document.body.appendChild(similarBtn);
+
+  similarBtn.addEventListener('click', function() {
+    var goodsList = document.querySelector('.goods-recommend-list-container');
+    if (goodsList) {
+      goodsList.scrollIntoView(true);
+    } else {
+      window.scrollTo(0, document.body.scrollHeight);
+    }
+    similarBtn.textContent = '已跳转 ✓';
+    similarBtn.style.background = 'linear-gradient(135deg,#36d1dc,#5b86e5)';
+    setTimeout(function() {
+      similarBtn.textContent = '相似商品';
+      similarBtn.style.background = 'linear-gradient(135deg,#f093fb,#f5576c)';
     }, 1500);
   });
 })();
@@ -3428,20 +3451,25 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           let setOk = 0, setFail = 0
           for (const ck of serverCookies) {
             try {
+              // ★ 修复：sameSite='no_restriction'(SameSite=None)必须搭配secure=true
+              // 否则Chromium会静默拒绝设置cookie，导致PDD登录态丢失
+              const sameSite = ck.sameSite || undefined
+              const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
               await ses.cookies.set({
-                url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
                 name: ck.name,
                 value: ck.value || '',
                 domain: ck.domain,
                 path: ck.path || '/',
-                secure: ck.secure || false,
+                secure,
                 httpOnly: ck.httpOnly || false,
                 expirationDate: ck.expirationDate || undefined,
-                sameSite: ck.sameSite || undefined
+                sameSite
               })
               setOk++
             } catch (e2) {
               setFail++
+              console.warn(`[PurchaseCapture] Cookie设置失败: ${ck.name} domain=${ck.domain} sameSite=${ck.sameSite} secure=${ck.secure} err=${e2.message}`)
             }
           }
           console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
@@ -3538,6 +3566,17 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         let cookies
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
+        // ★ 诊断：打印PDD域cookie名称，方便和dl系统对比
+        if (platform === 'pinduoduo' && cookies && cookies.length > 0) {
+          const pddCookies = cookies.filter(c =>
+            c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+          )
+          if (pddCookies.length > 0) {
+            const names = pddCookies.map(c => `${c.name}=${(c.value || '').substring(0, 20)}... [domain=${c.domain}]`)
+            console.log(`[PurchaseCapture] PDD域cookie共${pddCookies.length}条:`)
+            names.forEach(n => console.log('  ' + n))
+          }
+        }
         if (cookies && cookies.length > 0) {
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
@@ -4965,14 +5004,19 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               let setOk = 0, setFail = 0
               for (const ck of serverCookies) {
                 try {
+                  const sameSite = ck.sameSite || undefined
+                  const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
                   await ses.cookies.set({
-                    url: (ck.secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                    url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
                     name: ck.name, value: ck.value || '', domain: ck.domain, path: ck.path || '/',
-                    secure: ck.secure || false, httpOnly: ck.httpOnly || false,
-                    expirationDate: ck.expirationDate || undefined, sameSite: ck.sameSite || undefined
+                    secure, httpOnly: ck.httpOnly || false,
+                    expirationDate: ck.expirationDate || undefined, sameSite
                   })
                   setOk++
-                } catch (e2) { setFail++ }
+                } catch (e2) {
+                  setFail++
+                  console.warn(`[PddBrowsing] Cookie设置失败: ${ck.name} domain=${ck.domain} sameSite=${ck.sameSite} secure=${ck.secure} err=${e2.message}`)
+                }
               }
               console.log(`[PddBrowsing] Cookies restored: ${setOk} ok, ${setFail} failed`)
               flushStorageDataAsync(ses)

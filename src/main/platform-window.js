@@ -841,9 +841,9 @@ function registerPurchaseAccountIpc(mainWindow) {
       try {
         const ses = session.fromPartition(partitionName)
         const cookies = await ses.cookies.get({})
-        // PDD 关键 cookie：SUB（登录态）、PassportSessionId、PDDAccessToken 等
-        // ★ 修复：只检查关键登录cookie，而非任意PDD域cookie（避免误判已过期的session为有效）
-        const PDD_KEY_COOKIES = ['SUB', 'PassportSessionId', 'PDDAccessToken', 'SUB_PASS']
+        // ★ PDD 关键登录cookie（对齐dl系统实际存储的PDD认证cookie）
+        // SUB/PassportSessionId/SUB_PASS 是淘宝cookie，不是PDD的！
+        const PDD_KEY_COOKIES = ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id', 'pdd_vds', 'api_uid']
         const now = Date.now() / 1000
         const hasValidCookie = cookies.some(c => {
           if (!c.domain || !(c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))) return false
@@ -996,6 +996,17 @@ function registerPurchaseAccountIpc(mainWindow) {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
         console.log('[PurchaseWindow] 获取到 cookie 数量:', cookies.length)
+        // ★ 诊断：打印所有PDD域cookie，方便和dl系统对比
+        const pddCookies = cookies.filter(c =>
+          c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+        )
+        if (pddCookies.length > 0) {
+          const pddCookieNames = pddCookies.map(c => `${c.name}=${(c.value || '').substring(0, 20)}... [domain=${c.domain} secure=${c.secure} sameSite=${c.sameSite}]`)
+          console.log(`[PurchaseWindow] PDD域cookie共${pddCookies.length}条:`)
+          pddCookieNames.forEach(n => console.log('  ' + n))
+        } else {
+          console.log('[PurchaseWindow] ⚠ 未找到任何PDD域cookie!')
+        }
       } catch (e) {
         console.error('[PurchaseWindow] 获取 Cookie 失败:', e.message)
       }

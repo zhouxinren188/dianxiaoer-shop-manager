@@ -118,17 +118,19 @@ async function restoreCookiesFromDB(storeId, { skipFlush = false } = {}) {
     for (const c of dbCookies) {
       if (!c.name || !c.domain) continue
       try {
-        const cookie = { url: buildCookieUrl(c), name: c.name, value: c.value || '', domain: c.domain, path: c.path || '/' }
-        if (c.secure) cookie.secure = true
+        // ★ 修复：sameSite='no_restriction'(SameSite=None)必须搭配secure=true
+        const sameSite = c.sameSite || undefined
+        const secure = sameSite === 'no_restriction' ? true : !!c.secure
+        const cookie = { url: buildCookieUrl(c), name: c.name, value: c.value || '', domain: c.domain, path: c.path || '/', secure }
         if (c.httpOnly) cookie.httpOnly = true
-        if (c.sameSite) cookie.sameSite = c.sameSite
+        if (sameSite) cookie.sameSite = sameSite
         if (c.expirationDate && c.expirationDate > 0) {
           cookie.expirationDate = c.expirationDate
         }
         await ses.cookies.set(cookie)
         restored++
       } catch (e) {
-        // 个别 Cookie 写入失败不影响整体
+        console.warn(`[Heartbeat] Cookie写入失败: ${c.name} domain=${c.domain} sameSite=${c.sameSite} secure=${c.secure} err=${e.message}`)
       }
     }
 
