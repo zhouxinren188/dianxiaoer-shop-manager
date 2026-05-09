@@ -7,9 +7,50 @@ const bcrypt = require('bcryptjs')
 const { pool, initDB, startKeepAlive } = require('./db')
 
 // 版本标记 - 用于验证代码是否更新
-const APP_VERSION = 'v1.0.32-taobao-cookie-filter'
+const APP_VERSION = 'v1.0.33-purchase-perf'
 console.log(`[Server] Application version: ${APP_VERSION}`)
-console.log('[Server] Taobao cookie filter: ENABLED (fix HTTP 431 error)')
+
+// ============ 采购编号内存缓存 ============
+// 避免每次获取编号都执行 REGEXP 全表扫描（远程用户首次点击卡顿10s+的根因）
+let _nextPurchaseSeq = 0  // 下一个可用的 A 编号序列号
+
+async function initPurchaseNoCache() {
+  try {
+    const [rows] = await pool.execute(
+      "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^A[0-9]+$' ORDER BY CAST(SUBSTRING(purchase_no, 2) AS UNSIGNED) DESC LIMIT 1"
+    )
+    if (rows.length > 0 && rows[0].purchase_no) {
+      const num = parseInt(rows[0].purchase_no.substring(1), 10)
+      if (!isNaN(num)) _nextPurchaseSeq = num + 1
+    }
+    if (_nextPurchaseSeq === 0) _nextPurchaseSeq = 1
+    console.log(`[PurchaseNo] 缓存初始化完成, 下一个编号: A${String(_nextPurchaseSeq).padStart(4, '0')}`)
+  } catch (err) {
+    console.warn('[PurchaseNo] 缓存初始化失败, 回退到查询模式:', err.message)
+    _nextPurchaseSeq = 0  // 0 表示未缓存，回退到查询模式
+  }
+}
+
+// ============ 过期锁定时清理 ============
+// 原来每次 purchase-lock 请求都执行全表扫描清理过期锁，改为定时清理
+let _lastLockCleanup = 0
+function startLockCleanup(intervalMs = 10 * 60 * 1000) {
+  async function cleanup() {
+    try {
+      const [result] = await pool.execute(
+        `UPDATE sales_orders SET purchase_locked_by=NULL, purchase_locked_at=NULL WHERE purchase_locked_at IS NOT NULL AND purchase_locked_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)`
+      )
+      if (result.affectedRows > 0) {
+        console.log(`[LockCleanup] 清理了 ${result.affectedRows} 个过期锁`)
+      }
+    } catch (err) {
+      console.warn('[LockCleanup] 清理失败:', err.message)
+    }
+  }
+  cleanup()  // 启动时立即执行一次
+  setInterval(cleanup, intervalMs)
+  console.log(`[LockCleanup] 定时清理已启动 (间隔: ${intervalMs / 1000}s)`)
+}
 
 // JWT 密钥（与 dianxiaoer-api 保持一致）
 // 优先从环境变量读取，否则使用默认值
@@ -1177,7 +1218,7 @@ app.get('/api/sales-orders/active-order-ids', async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT order_id FROM sales_orders
-       WHERE store_id = ? AND status_text IN ('待出库', '已出库', '暂停订单')
+       WHERE store_id = ? AND status_text IN ('待付款', '等待付款', '待出库', '已出库', '暂停订单')
        ORDER BY order_time DESC`,
       [parseInt(store_id)]
     )
@@ -1296,10 +1337,7 @@ app.post('/api/sales-orders/:orderId/purchase-lock', async (req, res) => {
     const userId = req.user.id
     if (!orderId) return res.json(fail('orderId 不能为空'))
 
-    // 先清理超过10分钟的过期锁（防止死锁）
-    await pool.execute(
-      `UPDATE sales_orders SET purchase_locked_by=NULL, purchase_locked_at=NULL WHERE purchase_locked_at IS NOT NULL AND purchase_locked_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE)`
-    )
+    // 过期锁清理已改为定时任务（startLockCleanup），不再每次请求全表扫描
 
     // 检查当前锁定状态（仅查询当前用户有权限的订单）
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -2343,16 +2381,16 @@ app.post('/api/purchase-accounts', async (req, res) => {
     const { account, password, platform } = req.body
     if (!platform) return res.json(fail('platform 不能为空'))
     if (!account) return res.json(fail('账号不能为空'))
-    // upsert：同 account+owner_id 存在则更新，不存在则插入
+    // upsert：同 account+platform+owner_id 存在则更新，不存在则插入
     const [result] = await pool.execute(
       `INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)
-       ON DUPLICATE KEY UPDATE password=VALUES(password), platform=VALUES(platform), online=0`,
+       ON DUPLICATE KEY UPDATE password=VALUES(password), online=0`,
       [account, password||'', platform, ownerId]
     )
     // insertId 在 ON DUPLICATE KEY UPDATE 时可能不可靠，用 SELECT 确保获取正确的 ID
     const [rows] = await pool.execute(
-      'SELECT id FROM purchase_accounts WHERE account = ? AND owner_id = ?',
-      [account, ownerId]
+      'SELECT id FROM purchase_accounts WHERE account = ? AND platform = ? AND owner_id = ?',
+      [account, platform, ownerId]
     )
     const accountId = rows[0]?.id
     if (!accountId) return res.status(500).json(fail('账号创建/更新失败'))
@@ -2431,19 +2469,27 @@ app.put('/api/purchase-accounts/:id/status', async (req, res) => {
 
 // ============ 采购订单 ============
 
-// 获取下一个采购编号（全局递增，避免编号冲突）
+// 获取下一个采购编号（优先内存缓存，避免全表扫描）
 app.get('/api/purchase-orders/next-no', async (req, res) => {
   try {
-    // 查找 A+数字 格式的最大编号（A0001, A0002, ...），与批量导入的纯数字编号永不冲突
-    const [rows] = await pool.execute(
-      "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^A[0-9]+$' ORDER BY CAST(SUBSTRING(purchase_no, 2) AS UNSIGNED) DESC LIMIT 1"
-    )
-    let nextNum = 1
-    if (rows.length > 0 && rows[0].purchase_no) {
-      const num = parseInt(rows[0].purchase_no.substring(1), 10)
-      if (!isNaN(num)) nextNum = num + 1
+    let purchaseNo
+    if (_nextPurchaseSeq > 0) {
+      // 缓存命中：直接递增，零查询
+      purchaseNo = 'A' + String(_nextPurchaseSeq).padStart(4, '0')
+      _nextPurchaseSeq++
+    } else {
+      // 缓存未就绪：回退到查询模式
+      const [rows] = await pool.execute(
+        "SELECT purchase_no FROM purchase_orders WHERE purchase_no REGEXP '^A[0-9]+$' ORDER BY CAST(SUBSTRING(purchase_no, 2) AS UNSIGNED) DESC LIMIT 1"
+      )
+      let nextNum = 1
+      if (rows.length > 0 && rows[0].purchase_no) {
+        const num = parseInt(rows[0].purchase_no.substring(1), 10)
+        if (!isNaN(num)) nextNum = num + 1
+      }
+      purchaseNo = 'A' + String(nextNum).padStart(4, '0')
+      _nextPurchaseSeq = nextNum + 1
     }
-    const purchaseNo = 'A' + String(nextNum).padStart(4, '0')
     res.json(ok({ purchase_no: purchaseNo }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -5194,6 +5240,8 @@ const PORT = process.env.PORT || 3002
 
 initDB().then(() => {
   startKeepAlive()
+  startLockCleanup()
+  initPurchaseNoCache()
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] 后端服务已启动: http://0.0.0.0:${PORT}`)
   })

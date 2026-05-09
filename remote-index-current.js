@@ -1343,10 +1343,17 @@ app.post('/api/purchase-accounts', async (req, res) => {
     const { account, password, platform } = req.body
     if (!platform) return res.json(fail('platform 不能为空'))
     const [result] = await pool.execute(
-      'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
+      `INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)
+       ON DUPLICATE KEY UPDATE password=VALUES(password), online=0`,
       [account||'', password||'', platform, ownerId]
     )
-    res.json(ok({ id: result.insertId }))
+    const [rows] = await pool.execute(
+      'SELECT id FROM purchase_accounts WHERE account = ? AND platform = ? AND owner_id = ?',
+      [account||'', platform, ownerId]
+    )
+    const accountId = rows[0]?.id || result.insertId
+    const isUpdate = result.affectedRows >= 2
+    res.json(ok({ id: accountId, updated: isUpdate }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 

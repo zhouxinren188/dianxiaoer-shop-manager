@@ -55,7 +55,7 @@
           <el-select v-model="filterForm.platform" placeholder="全部" clearable style="width: 130px">
             <el-option label="淘宝/天猫" value="taobao" />
             <el-option label="拼多多" value="pinduoduo" />
-            <el-option label="1688" value="1688" />
+            <el-option label="阿里巴巴" value="1688" />
           </el-select>
         </el-form-item>
         <el-form-item label="订单状态">
@@ -328,7 +328,7 @@
           <el-descriptions-item label="物流单号">{{ logisticsData.tracking_no || '--' }}</el-descriptions-item>
           <el-descriptions-item label="数据来源">
             <el-tag size="small" :type="logisticsData.source === 'express100' ? 'success' : logisticsData.source === 'local' ? 'info' : 'primary'">
-              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '1688' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地记录' : '快递100' }}
+              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '阿里巴巴' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地记录' : '快递100' }}
             </el-tag>
           </el-descriptions-item>
         </el-descriptions>
@@ -371,7 +371,7 @@
           <el-radio-group v-model="syncForm.platform">
             <el-radio value="taobao">淘宝/天猫</el-radio>
             <el-radio value="pinduoduo">拼多多</el-radio>
-            <el-radio value="1688">1688</el-radio>
+            <el-radio value="1688">阿里巴巴</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="采购账号">
@@ -399,6 +399,7 @@
           <el-select v-model="addAccountForm.platform" placeholder="请选择平台" style="width: 100%">
             <el-option label="淘宝/天猫" value="taobao" />
             <el-option label="拼多多" value="pinduoduo" />
+            <el-option label="阿里巴巴" value="1688" />
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
@@ -476,6 +477,7 @@
           <el-select v-model="editAccountForm.platform" style="width: 100%">
             <el-option label="淘宝/天猫" value="taobao" />
             <el-option label="拼多多" value="pinduoduo" />
+            <el-option label="阿里巴巴" value="1688" />
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
@@ -523,7 +525,7 @@
           <el-select v-model="editPurchaseForm.platform" placeholder="请选择采购平台" style="width: 100%">
             <el-option label="淘宝/天猫" value="taobao" />
             <el-option label="拼多多" value="pinduoduo" />
-            <el-option label="1688" value="1688" />
+            <el-option label="阿里巴巴" value="1688" />
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
@@ -582,7 +584,7 @@
           <el-select v-model="addPurchaseForm.platform" placeholder="请选择采购平台" style="width: 100%">
             <el-option label="淘宝/天猫" value="taobao" />
             <el-option label="拼多多" value="pinduoduo" />
-            <el-option label="1688" value="1688" />
+            <el-option label="阿里巴巴" value="1688" />
             <el-option label="抖音" value="douyin" />
           </el-select>
         </el-form-item>
@@ -622,7 +624,7 @@
           <p>1. 下载导入模版，按格式填写采购订单数据</p>
           <p>2. 标 <span style="color:#f56c6c">*</span> 的列为必填项，其他为选填</p>
           <p>3. 采购账号必须填写系统中已存在的账号名称</p>
-          <p>4. 采购平台支持中文：淘宝/天猫、拼多多、1688、抖音</p>
+          <p>4. 采购平台支持中文：淘宝/天猫、拼多多、阿里巴巴、抖音</p>
         </el-alert>
         <el-table :data="importTemplateFields" border size="small" style="margin-bottom: 16px">
           <el-table-column prop="header" label="列名" width="140" />
@@ -775,7 +777,7 @@ const importTemplateFields = [
   { header: '商品名称', required: false, desc: '商品名称' },
   { header: '数量', required: false, desc: '采购数量，默认1' },
   { header: '采购单价', required: false, desc: '采购单价，默认0' },
-  { header: '采购平台', required: false, desc: 'taobao/pinduoduo/1688/douyin 或中文：淘宝/拼多多/1688/抖音' },
+  { header: '采购平台', required: false, desc: 'taobao/pinduoduo/1688/douyin 或中文：淘宝/拼多多/阿里巴巴/抖音' },
   { header: '采购类型', required: false, desc: '三方代发/仓库转发，不填默认三方代发' },
   { header: 'SKU', required: false, desc: '商品SKU' },
   { header: '来源链接', required: false, desc: '商品采购链接' },
@@ -1078,7 +1080,7 @@ const pageInfo = reactive({
 // ==================== 工具方法 ====================
 
 function platformLabel(val) {
-  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '1688', douyin: '抖音' }
+  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '阿里巴巴', douyin: '抖音' }
   return map[val] || val || '--'
 }
 
@@ -1728,7 +1730,7 @@ async function handleDownloadTemplate() {
     ['商品名称', '否', '商品名称'],
     ['数量', '否', '整数，默认1'],
     ['采购单价', '否', '数字，默认0'],
-    ['采购平台', '否', '支持：taobao / pinduoduo / 1688 / douyin 或中文：淘宝/拼多多/1688/抖音'],
+    ['采购平台', '否', '支持：taobao / pinduoduo / 1688 / douyin 或中文：淘宝/拼多多/阿里巴巴/抖音'],
     ['SKU', '否', '商品SKU规格'],
     ['来源链接', '否', '商品采购链接'],
     ['备注', '否', '备注信息'],

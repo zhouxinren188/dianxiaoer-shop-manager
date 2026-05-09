@@ -244,7 +244,7 @@
                             <div class="search-platform-list">
                               <span class="search-platform-item" @click="handleSearchTitle(item, 'taobao')">淘宝</span>
                               <span class="search-platform-divider">|</span>
-                              <span class="search-platform-item" @click="handleSearchTitle(item, '1688')">1688</span>
+                              <span class="search-platform-item" @click="handleSearchTitle(item, '1688')">阿里巴巴</span>
                               <span class="search-platform-divider">|</span>
                               <span class="search-platform-item" @click="handleSearchTitle(item, 'pdd')">拼多多</span>
                             </div>
@@ -256,7 +256,7 @@
                             <div class="search-platform-list">
                               <span class="search-platform-item" @click="handleSearchImage(item, 'taobao')">淘宝</span>
                               <span class="search-platform-divider">|</span>
-                              <span class="search-platform-item" @click="handleSearchImage(item, '1688')">1688</span>
+                              <span class="search-platform-item" @click="handleSearchImage(item, '1688')">阿里巴巴</span>
                               <span class="search-platform-divider">|</span>
                               <span class="search-platform-item" @click="handleSearchImage(item, 'pdd')">拼多多</span>
                             </div>
@@ -274,20 +274,36 @@
                 </div>
                 <div class="ot-col ot-col-purchase">
                   <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
-                    <el-tooltip v-if="order.purchaseLockedBy" :content="`该订单目前有${order.purchaseLockedName || '其他用户'}在采购`" placement="top">
-                      <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
-                        <el-icon><Lock /></el-icon>
-                        <span>采购中</span>
+                    <template v-if="order.orderStatus === '待付款' || order.orderStatus === '已取消'">
+                      <el-tooltip :content="order.orderStatus === '待付款' ? '待付款订单无需采购' : '已取消订单无需采购'" placement="top">
+                        <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
+                          <el-icon><ShoppingCart /></el-icon>
+                          <span>采购下单</span>
+                        </el-button>
+                      </el-tooltip>
+                      <el-tooltip :content="order.orderStatus === '待付款' ? '待付款订单无需绑定' : '已取消订单无需绑定'" placement="top">
+                        <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
+                          <el-icon><OfficeBuilding /></el-icon>
+                          <span>绑定库存</span>
+                        </el-button>
+                      </el-tooltip>
+                    </template>
+                    <template v-else>
+                      <el-tooltip v-if="order.purchaseLockedBy" :content="`该订单目前有${order.purchaseLockedName || '其他用户'}在采购`" placement="top">
+                        <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
+                          <el-icon><Lock /></el-icon>
+                          <span>采购中</span>
+                        </el-button>
+                      </el-tooltip>
+                      <el-button v-else :type="skuHasSourcesCache[item.skuId || item.sku_id || item.sku] ? 'danger' : 'warning'" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
+                        <el-icon><ShoppingCart /></el-icon>
+                        <span>采购下单</span>
                       </el-button>
-                    </el-tooltip>
-                    <el-button v-else :type="skuHasSourcesCache[item.skuId || item.sku_id || item.sku] ? 'danger' : 'warning'" size="small" plain style="width:90px;margin-left:0" @click.stop="handlePurchase(order, item, itemIdx)">
-                      <el-icon><ShoppingCart /></el-icon>
-                      <span>采购下单</span>
-                    </el-button>
-                    <el-button type="primary" size="small" plain style="width:90px;margin-left:0" @click.stop="handleBindWarehouse(order, item, itemIdx)">
-                      <el-icon><OfficeBuilding /></el-icon>
-                      <span>绑定库存</span>
-                    </el-button>
+                      <el-button type="primary" size="small" plain style="width:90px;margin-left:0" @click.stop="handleBindWarehouse(order, item, itemIdx)">
+                        <el-icon><OfficeBuilding /></el-icon>
+                        <span>绑定库存</span>
+                      </el-button>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -311,10 +327,7 @@
                 <div class="remark-cell">
                   <div class="remark-item">
                     <span class="remark-label">商:</span>
-                    <span class="remark-text remark-text-merchant">{{ order.remark || '点击编辑' }}</span>
-                    <el-button type="primary" link size="small" class="remark-edit-btn" @click.stop="handleEditRemark(order)">
-                      <el-icon><Edit /></el-icon>
-                    </el-button>
+                    <span class="remark-text remark-text-merchant" @click.stop="handleEditRemark(order)">{{ order.remark || '点击编辑' }}</span>
                   </div>
                   <div v-if="order.sysRemark" class="remark-item">
                     <span class="remark-label">系:</span>
@@ -628,7 +641,7 @@
                     </el-radio-button>
                     <el-radio-button value="1688">
                       <el-icon><Shop /></el-icon>
-                      1688
+                      阿里巴巴
                     </el-radio-button>
                   </el-radio-group>
                 </div>
@@ -902,9 +915,9 @@ const syncStatusText = computed(() => {
 // ==================== 功能区 ====================
 
 const funcSettings = reactive({
-  autoOutbound: true,
-  largeLogistics: true,
-  syncJdOrder: false,  // 默认关闭
+  autoOutbound: false,
+  largeLogistics: false,
+  syncJdOrder: false,  // 默认关闭，30秒后自动开启
   syncPurchaseOrder: true
 })
 
@@ -1299,10 +1312,11 @@ async function handlePurchase(order, item, itemIdx) {
   // 锁定订单 + 获取采购编号（并行请求，减少等待时间）
   let lockResult, noResult
   try {
-    [lockResult, noResult] = await Promise.all([
+    const results = await Promise.all([
       lockSalesOrderForPurchase(order.id).catch(e => ({ _lockError: e })),
       fetchNextPurchaseNo().catch(e => ({ _noError: e }))
     ])
+    ;[lockResult, noResult] = results
   } catch (e) {
     ElMessage.error('操作失败: ' + e.message)
     return
@@ -1764,7 +1778,7 @@ watch(() => purchaseInfo.platform, (platform) => {
 })
 
 function platformLabel(val) {
-  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '1688' }
+  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '阿里巴巴' }
   return map[val] || val
 }
 
@@ -1923,6 +1937,7 @@ let unsubPddProductLink = null
 let unsubAutoSyncResult = null
 let unsubSyncProgress = null
 let unsubStoreStatusChanged = null
+let jdSyncAutoStartTimer = null
 
 function setupPurchaseListeners() {
   if (!window.electronAPI) return
@@ -2344,6 +2359,15 @@ onMounted(async () => {
       funcSettings.syncJdOrder = running
     } catch (e) {}
 
+    // 30秒后自动开启京东订单同步（如果当前未开启）
+    if (!funcSettings.syncJdOrder) {
+      jdSyncAutoStartTimer = setTimeout(() => {
+        jdSyncAutoStartTimer = null
+        funcSettings.syncJdOrder = true
+        onFuncChange('syncJdOrder', true)
+      }, 30000)
+    }
+
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {
       console.log('[自动同步] 收到 auto-sync-start:', JSON.stringify(data))
       mainProcessSyncStatus.value = `${data.storeName || '店铺'}正在同步中...`
@@ -2379,6 +2403,8 @@ onMounted(async () => {
 onUnmounted(() => {
   // 确保对话框关闭（防止 el-overlay 遮罩层残留）
   purchaseDialogVisible.value = false
+  // 清理京东同步自动开启定时器
+  if (jdSyncAutoStartTimer) { clearTimeout(jdSyncAutoStartTimer); jdSyncAutoStartTimer = null }
   // 清理采购相关 IPC 监听器
   cleanupPurchaseListeners()
   // 清理自动同步 IPC 监听器
@@ -3331,13 +3357,10 @@ onUnmounted(() => {
 .remark-text-merchant {
   color: #2b5aed;
   font-weight: 500;
-}
-
-.remark-edit-btn {
-  padding: 0;
-  font-size: 12px;
-  flex-shrink: 0;
-  margin-left: 2px;
+  cursor: pointer;
+  &:hover {
+    text-decoration: underline;
+  }
 }
 
 /* 分页 */
