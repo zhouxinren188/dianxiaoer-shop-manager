@@ -2012,11 +2012,19 @@ function setupPurchaseListeners() {
   })
   unsubAddressSetupDone = window.electronAPI.onUpdate('purchase-address-setup-done', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
-      ElMessage({
-        message: '地址已修改成功',
-        type: 'success',
-        duration: 3000
-      })
+      if (data.failed) {
+        ElMessage({
+          message: '地址自动设置失败：' + (data.reason === 'no_button' ? '未找到操作按钮' : '未找到表单'),
+          type: 'warning',
+          duration: 5000
+        })
+      } else {
+        ElMessage({
+          message: '地址已修改成功',
+          type: 'success',
+          duration: 3000
+        })
+      }
     }
   })
   unsubAddressSetupStart = window.electronAPI.onUpdate('purchase-address-setup-start', (data) => {

@@ -2969,7 +2969,7 @@ function httpGetJsonAuth(url, token) {
   })
 }
 
-// 获取指定店铺的活跃订单号（待出库/已出库/暂停），用于二次同步更新状态
+// 获取指定店铺的活跃订单号（待付款/待出库/已出库/暂停），用于二次同步更新状态
 async function getActiveOrderIds(storeId) {
   const token = getAuthToken()
   const json = await httpGetJsonAuth(
@@ -3308,8 +3308,8 @@ async function autoSyncAllStores(mainWindow) {
                   statusSummary[st] = (statusSummary[st] || 0) + 1
                 }
                 console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回${orders.length}条, 状态分布: ${JSON.stringify(statusSummary)}`)
-                // 记录具体的状态变化（对比活跃订单原本是待出库/已出库/暂停）
-                const changedOrders = orders.filter(o => !['待出库', '已出库', '暂停订单'].includes(o.statusText))
+                // 记录具体的状态变化（对比活跃订单原本是待付款/待出库/已出库/暂停）
+                const changedOrders = orders.filter(o => !['待付款', '等待付款', '待出库', '已出库', '暂停订单'].includes(o.statusText))
                 if (changedOrders.length > 0) {
                   totalUpdated += changedOrders.length
                   console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态已变更的订单: ${changedOrders.map(o => o.orderId + '→' + o.statusText).join(', ')}`)
