@@ -2769,6 +2769,162 @@ function registerSalesOrderIpc(mainWindow) {
   ipcMain.handle('jd-auto-sync-status', () => {
     return { running: !!autoSyncTimer }
   })
+
+  // 保存买家真实信息到服务器（使用批量保存接口，已验证可靠）
+  // 方案：先GET获取完整订单数据 → 映射为batch端点的camelCase格式 → 更新买家信息 → 通过batch端点保存
+  ipcMain.handle('save-buyer-info-to-server', async (event, { storeId, orderId, orderNo, buyerName, buyerPhone, buyerAddress }) => {
+    const http = require('http')
+    const token = getAuthToken()
+    console.log(`[BuyerInfo] IPC保存买家信息(v2-batch): storeId=${storeId}, orderId=${orderId}, orderNo=${orderNo}, name=${buyerName}, phone=${buyerPhone}`)
+
+    // 通用HTTP请求函数
+    function doRequest(method, path, bodyData) {
+      return new Promise((resolve) => {
+        const options = {
+          hostname: '150.158.54.108', port: 3002,
+          path, method,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          }
+        }
+        const req = http.request(options, (res) => {
+          let body = ''
+          res.on('data', chunk => { body += chunk })
+          res.on('end', () => {
+            console.log(`[BuyerInfo] ${method} ${path} 响应: ${res.statusCode}, body: ${body.substring(0, 300)}`)
+            resolve({ statusCode: res.statusCode, body })
+          })
+        })
+        req.on('error', (e) => {
+          console.log(`[BuyerInfo] ${method} ${path} 请求失败: ${e.message}`)
+          resolve({ statusCode: 0, body: '', error: e.message })
+        })
+        if (bodyData) {
+          const data = JSON.stringify(bodyData)
+          req.setHeader('Content-Length', Buffer.byteLength(data))
+          req.write(data)
+        }
+        req.end()
+      })
+    }
+
+    // 安全解析JSON字符串
+    function parseJsonSafe(val) {
+      if (!val) return val
+      if (typeof val !== 'string') return val
+      try { return JSON.parse(val) } catch { return val }
+    }
+
+    // Step 1: GET 订单完整数据（通过列表查询接口，用store_id + order_id精确查找）
+    const listPath = `/api/sales-orders?store_id=${storeId}&order_id=${encodeURIComponent(orderNo)}&pageSize=1`
+    console.log(`[BuyerInfo] Step1: 查询订单数据 ${listPath}`)
+    const getResp = await doRequest('GET', listPath)
+    if (getResp.error) {
+      return { success: false, message: '获取订单失败: ' + getResp.error }
+    }
+
+    let serverOrder
+    try {
+      const json = JSON.parse(getResp.body)
+      if (json.code !== 0 || !json.data) {
+        return { success: false, message: '获取订单失败: ' + (json.message || `code=${json.code}`) }
+      }
+      const list = json.data.list || []
+      if (list.length === 0) {
+        return { success: false, message: `未找到订单: store_id=${storeId}, order_id=${orderNo}` }
+      }
+      serverOrder = list[0]
+    } catch (e) {
+      return { success: false, message: '解析订单响应失败: ' + e.message }
+    }
+
+    console.log(`[BuyerInfo] 获取到订单: order_id=${serverOrder.order_id}, 当前buyer_name="${serverOrder.buyer_name}", buyer_phone="${serverOrder.buyer_phone}"`)
+
+    // Step 2: 将服务器snake_case格式转换为batch端点的camelCase格式（与normalizeSalesOrder输出一致）
+    const batchOrder = {
+      orderId: serverOrder.order_id || orderNo || '',
+      orderState: serverOrder.order_state || 0,
+      statusText: serverOrder.status_text || '',
+      orderTime: serverOrder.order_time || '',
+      paymentTime: serverOrder.payment_time || '',
+      shipTime: serverOrder.ship_time || serverOrder.consign_time || '',
+      finishTime: serverOrder.finish_time || serverOrder.complete_time || '',
+      goodsAmount: parseFloat(serverOrder.goods_amount) || 0,
+      shippingFee: parseFloat(serverOrder.shipping_fee) || 0,
+      totalAmount: parseFloat(serverOrder.total_amount) || 0,
+      paymentMethod: serverOrder.payment_method || '',
+      // 买家信息 — 用真实信息覆盖
+      buyerName: buyerName || serverOrder.buyer_name || '',
+      buyerPhone: buyerPhone || serverOrder.buyer_phone || '',
+      buyerAddress: buyerAddress || serverOrder.buyer_address || '',
+      // 买家账号（从raw_data中提取）
+      buyerAccount: (() => {
+        const raw = parseJsonSafe(serverOrder.raw_data)
+        return (raw && raw.buyerAccount) ? raw.buyerAccount : (serverOrder.buyer_account || '')
+      })(),
+      logisticsCompany: serverOrder.logistics_company || '',
+      logisticsNo: serverOrder.logistics_no || '',
+      warehouseName: serverOrder.warehouse_name || '',
+      skuId: serverOrder.sku_id || '',
+      productName: serverOrder.product_name || '',
+      unitPrice: parseFloat(serverOrder.unit_price) || 0,
+      quantity: serverOrder.quantity || 0,
+      productImage: serverOrder.product_image || '',
+      allItems: parseJsonSafe(serverOrder.all_items) || [],
+      itemCount: serverOrder.item_count || 0,
+      purchaseStatus: serverOrder.purchase_status || '未采购',
+      remark: serverOrder.remark || '',
+      sysRemark: serverOrder.sys_remark || '',
+      hasInventory: !!serverOrder.has_inventory
+    }
+
+    // 如果allItems为空但itemCount为0，尝试从数组长度计算
+    if (!batchOrder.itemCount && Array.isArray(batchOrder.allItems)) {
+      batchOrder.itemCount = batchOrder.allItems.length
+    }
+
+    console.log(`[BuyerInfo] Step2: 映射完成, orderId=${batchOrder.orderId}, buyerName="${batchOrder.buyerName}", buyerPhone="${batchOrder.buyerPhone}"`)
+
+    // Step 3: 通过batch端点保存（与auto-sync使用同一接口，已验证可靠）
+    console.log(`[BuyerInfo] Step3: 通过batch端点保存`)
+    const batchResp = await doRequest('POST', '/api/sales-orders/batch', {
+      store_id: storeId,
+      orders: [batchOrder]
+    })
+
+    if (batchResp.error) {
+      return { success: false, message: '保存失败: ' + batchResp.error }
+    }
+
+    try {
+      const json = JSON.parse(batchResp.body)
+      if (json.code === 0) {
+        console.log(`[BuyerInfo] 保存成功: ${json.data?.saved || '?'} 条`)
+        // 验证：保存后立即查询，确认数据是否真正写入
+        const verifyResp = await doRequest('GET', listPath)
+        if (!verifyResp.error && verifyResp.statusCode === 200) {
+          try {
+            const vJson = JSON.parse(verifyResp.body)
+            const vList = vJson.data?.list || []
+            const vData = vList[0] || {}
+            console.log(`[BuyerInfo] 验证查询: buyer_name="${vData.buyer_name}", buyer_phone="${vData.buyer_phone}"`)
+            if (vData.buyer_name === buyerName && vData.buyer_phone === buyerPhone) {
+              console.log(`[BuyerInfo] 验证通过: 数据已正确写入服务器`)
+            } else {
+              console.warn(`[BuyerInfo] 验证不匹配: 期望name="${buyerName}" 实际="${vData.buyer_name}", 期望phone="${buyerPhone}" 实际="${vData.buyer_phone}"`)
+            }
+          } catch (e) {
+            console.log(`[BuyerInfo] 验证查询解析失败: ${e.message}`)
+          }
+        }
+        return { success: true }
+      }
+      return { success: false, message: json.message || `业务错误(code=${json.code})` }
+    } catch (e) {
+      return { success: false, message: '解析保存响应失败: ' + e.message }
+    }
+  })
 }
 
 // ============ 解析敏感信息 ============
@@ -3244,7 +3400,14 @@ async function autoSyncAllStores(mainWindow) {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${orders.length} 条订单`)
           // 主进程直接保存订单到服务器，避免通过 IPC 传递导致双重保存
           if (orders.length > 0) {
-            const saved = await saveOrdersToServer(store.store_id, orders)
+            // 脱敏买家信息（含*）不上传，避免覆盖已解密的真实信息
+            const safeOrders = orders.map(o => {
+              if (o.buyerName && o.buyerName.includes('*')) delete o.buyerName
+              if (o.buyerPhone && o.buyerPhone.includes('*')) delete o.buyerPhone
+              if (o.buyerAddress && o.buyerAddress.includes('***')) delete o.buyerAddress
+              return o
+            })
+            const saved = await saveOrdersToServer(store.store_id, safeOrders)
             if (!saved) {
               console.error(`[AutoSync] [${i + 1}/${jdStores.length}] 保存订单到服务器失败！`)
             }
@@ -3322,7 +3485,14 @@ async function autoSyncAllStores(mainWindow) {
                 if (missingIds.length > 0) {
                   console.log(`[AutoSync] [${i + 1}/${jdStores.length}] JD未返回的订单: ${missingIds.join(', ')} (共${missingIds.length}条)`)
                 }
-                await saveOrdersToServer(store.store_id, orders)
+                // 脱敏买家信息不上传，保护已解密的真实信息
+                const safeActiveOrders = orders.map(o => {
+                  if (o.buyerName && o.buyerName.includes('*')) delete o.buyerName
+                  if (o.buyerPhone && o.buyerPhone.includes('*')) delete o.buyerPhone
+                  if (o.buyerAddress && o.buyerAddress.includes('***')) delete o.buyerAddress
+                  return o
+                })
+                await saveOrdersToServer(store.store_id, safeActiveOrders)
               } else {
                 console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回0条（搜索了${batch.length}个订单号）`)
               }

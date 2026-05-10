@@ -24,7 +24,7 @@ async function initPurchaseNoCache() {
       if (!isNaN(num)) _nextPurchaseSeq = num + 1
     }
     if (_nextPurchaseSeq === 0) _nextPurchaseSeq = 1
-    console.log(`[PurchaseNo] 缓存初始化完成, 下一个编号: A${String(_nextPurchaseSeq).padStart(4, '0')}`)
+    console.log(`[PurchaseNo] 缓存初始化完成, 下一个编号: A${_nextPurchaseSeq}`)
   } catch (err) {
     console.warn('[PurchaseNo] 缓存初始化失败, 回退到查询模式:', err.message)
     _nextPurchaseSeq = 0  // 0 表示未缓存，回退到查询模式
@@ -2475,7 +2475,7 @@ app.get('/api/purchase-orders/next-no', async (req, res) => {
     let purchaseNo
     if (_nextPurchaseSeq > 0) {
       // 缓存命中：直接递增，零查询
-      purchaseNo = 'A' + String(_nextPurchaseSeq).padStart(4, '0')
+      purchaseNo = 'A' + _nextPurchaseSeq
       _nextPurchaseSeq++
     } else {
       // 缓存未就绪：回退到查询模式
@@ -2487,7 +2487,7 @@ app.get('/api/purchase-orders/next-no', async (req, res) => {
         const num = parseInt(rows[0].purchase_no.substring(1), 10)
         if (!isNaN(num)) nextNum = num + 1
       }
-      purchaseNo = 'A' + String(nextNum).padStart(4, '0')
+      purchaseNo = 'A' + nextNum
       _nextPurchaseSeq = nextNum + 1
     }
     res.json(ok({ purchase_no: purchaseNo }))
@@ -2612,7 +2612,7 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
 
       // 采购编号：用户填写则用用户的，否则自动生成
       const userPurchaseNo = String(row.purchase_no || '').trim()
-      const purchaseNo = userPurchaseNo || String(nextNum++).padStart(4, '0')
+      const purchaseNo = userPurchaseNo || 'A' + (nextNum++)
       const quantity = parseInt(row.quantity) || 1
       const purchasePrice = parseFloat(row.purchase_price) || 0
 
@@ -2885,6 +2885,17 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     console.error(`[Update Purchase Order] Error:`, err)
     res.status(500).json(fail(err.message)) 
   }
+})
+
+// 删除采购订单
+app.delete('/api/purchase-orders/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const [check] = await pool.execute('SELECT id FROM purchase_orders WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    if (!check.length) return res.status(403).json(fail('无权删除此订单'))
+    await pool.execute('DELETE FROM purchase_orders WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    res.json(ok(true))
+  } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 // 获取采购订单详情（权限校验）

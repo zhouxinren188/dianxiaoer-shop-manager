@@ -171,13 +171,6 @@ import { fetchStores } from '@/api/store'
 const loading = ref(false)
 const storeOptions = ref([])
 
-const summary = reactive({
-  totalSales: 0,
-  totalOrders: 0,
-  avgOrderValue: 0,
-  totalVisitorCount: 0
-})
-
 const today = new Date().toISOString().slice(0, 10)
 const filterForm = reactive({
   storeId: '',
@@ -227,6 +220,18 @@ const sortedTableData = computed(() => {
   return data
 })
 
+const summary = computed(() => {
+  const data = sortedTableData.value
+  const totalSales = data.reduce((sum, r) => sum + (r.salesAmount || 0), 0)
+  const totalOrders = data.reduce((sum, r) => sum + (r.orderCount || 0), 0)
+  return {
+    totalSales,
+    totalOrders,
+    avgOrderValue: totalOrders > 0 ? totalSales / totalOrders : 0,
+    totalVisitorCount: data.reduce((sum, r) => sum + (r.visitorCount || 0), 0)
+  }
+})
+
 async function loadData() {
   loading.value = true
   try {
@@ -241,12 +246,7 @@ async function loadData() {
 
     const res = await fetchStoreSalesStats(params)
     if (res) {
-      const { summary: s, list } = res
-      summary.totalSales = s?.totalSales || 0
-      summary.totalOrders = s?.totalOrders || 0
-      summary.avgOrderValue = s?.avgOrderValue || 0
-      summary.totalVisitorCount = s?.totalVisitorCount || 0
-      tableData.value = list || []
+      tableData.value = res.list || []
     }
   } catch (err) {
     console.error('[店铺报表] 加载失败:', err.message, err)

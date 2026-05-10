@@ -1,4 +1,4 @@
-import { get, post, put } from './request'
+import { get, post, put, del } from './request'
 
 // 创建采购单（生成采购编号，关联销售订单商品）
 export function createPurchaseOrder(data) {
@@ -58,4 +58,9 @@ export function batchImportPurchaseOrders(orders) {
 // 获取采购订单关联的销售商品信息（通过本地代理服务器转发）
 export function fetchRelatedSales(id) {
   return get(`/api/purchase-orders/${id}/related-sales`, null, 'http://localhost:3002')
+}
+
+// 删除采购订单
+export function deletePurchaseOrder(id) {
+  return del(`/api/purchase-orders/${id}`)
 }

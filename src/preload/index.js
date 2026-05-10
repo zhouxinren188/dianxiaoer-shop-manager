@@ -30,6 +30,7 @@ const validInvokeChannels = [
   'sync-purchase-order-browser',
   'sync-purchase-orders-browser',
   'fetch-buyer-sensitive-info',
+  'save-buyer-info-to-server',
   'clear-purchase-cookies',
   'toggle-jd-auto-sync',
   'jd-auto-sync-status',

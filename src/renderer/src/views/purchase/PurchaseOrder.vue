@@ -242,7 +242,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="200" align="center" fixed="right">
+        <el-table-column label="操作" width="230" align="center" fixed="right">
           <template #default="{ row }">
             <el-button link type="success" size="small" @click="handleSyncSingle(row)">
               同步
@@ -261,6 +261,9 @@
             </el-button>
             <el-button link type="primary" size="small" @click="handleViewDetail(row)">
               详情
+            </el-button>
+            <el-button link type="danger" size="small" @click="handleDeleteOrder(row)">
+              删除
             </el-button>
           </template>
         </el-table-column>
@@ -753,7 +756,7 @@ import {
   Upload,
   Download
 } from '@element-plus/icons-vue'
-import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales } from '@/api/purchaseOrder'
+import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales, deletePurchaseOrder } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 
 // ==================== 常量配置 ====================
@@ -1238,6 +1241,21 @@ const currentRow = ref(null)
 function handleViewDetail(row) {
   currentRow.value = row
   detailVisible.value = true
+}
+
+async function handleDeleteOrder(row) {
+  try {
+    await ElMessageBox.confirm(`确定删除采购订单 ${row.purchase_no || row.id} 吗？`, '删除订单', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    await deletePurchaseOrder(row.id)
+    ElMessage.success('订单已删除')
+    loadData()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败: ' + (e.message || ''))
+  }
 }
 
 // ==================== 物流轨迹 ====================

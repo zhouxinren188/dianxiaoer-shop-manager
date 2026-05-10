@@ -710,7 +710,7 @@
                 </div>
                 <div class="meta-item meta-no">
                   <span class="meta-label">采购编号</span>
-                  <span class="meta-value">{{ purchaseInfo.purchaseNo }}</span>
+                  <span class="meta-value">{{ purchaseInfo.purchaseNo || '下单时自动生成' }}</span>
                 </div>
                 <div class="meta-item meta-order">
                   <span class="meta-label">订单号</span>
@@ -753,7 +753,7 @@
         </div>
         <el-descriptions :column="1" border size="small">
           <el-descriptions-item label="采购编号">
-            <span style="color: #e6a23c; font-weight: 600">{{ purchaseInfo.purchaseNo }}</span>
+            <span style="color: #e6a23c; font-weight: 600">{{ purchaseInfo.purchaseNo || '下单时自动生成' }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="采购平台">{{ platformLabel(purchaseInfo.platform) }}</el-descriptions-item>
         </el-descriptions>
@@ -1154,7 +1154,14 @@ async function handleSyncOrders() {
       } else {
         ElMessage.success(`成功获取 ${orders.length} 条订单，正在保存...`)
         try {
-          await saveSalesOrders(searchForm.storeId, orders)
+          // 脱敏买家信息不上传，保护已解密的真实信息
+          const safeOrders = orders.map(o => {
+            if (o.buyerName && o.buyerName.includes('*')) delete o.buyerName
+            if (o.buyerPhone && o.buyerPhone.includes('*')) delete o.buyerPhone
+            if (o.buyerAddress && o.buyerAddress.includes('***')) delete o.buyerAddress
+            return o
+          })
+          await saveSalesOrders(searchForm.storeId, safeOrders)
         } catch (saveErr) {
           console.warn('保存订单到服务器失败:', saveErr.message)
         }
@@ -1229,8 +1236,20 @@ async function handleRevealBuyerInfo(order) {
       if (info.buyerAddress) order.address = info.buyerAddress
       ElMessage.success('买家真实信息已获取')
 
+      // 通过主进程IPC保存到服务器（比渲染进程直接HTTP更可靠）
       try {
-        await updateBuyerInfo(storeId, order.orderNo, info)
+        const saveResult = await window.electronAPI.invoke('save-buyer-info-to-server', {
+          storeId: order.storeId,
+          orderId: order.id,
+          orderNo: order.orderNo,
+          buyerName: info.buyerName,
+          buyerPhone: info.buyerPhone,
+          buyerAddress: info.buyerAddress
+        })
+        if (!saveResult.success) {
+          console.warn('[BuyerInfo] 回写服务器失败:', saveResult.message)
+          ElMessage.warning('买家信息保存到服务器失败: ' + saveResult.message)
+        }
       } catch (e) {
         console.warn('[BuyerInfo] 回写服务器失败:', e.message)
       }
@@ -1292,9 +1311,20 @@ async function handleRevealBuyerInfoInPurchase() {
       ElMessage.success('买家真实信息已获取')
       purchaseInfo._buyerRevealed = true
 
-      // 回写到服务器
+      // 回写到服务器（通过主进程IPC）
       try {
-        await updateBuyerInfo(storeId, purchaseInfo.salesOrderNo, info)
+        const saveResult = await window.electronAPI.invoke('save-buyer-info-to-server', {
+          storeId: purchaseInfo.storeId,
+          orderId: purchaseInfo.salesOrderId,
+          orderNo: purchaseInfo.salesOrderNo,
+          buyerName: info.buyerName,
+          buyerPhone: info.buyerPhone,
+          buyerAddress: info.buyerAddress
+        })
+        if (!saveResult.success) {
+          console.warn('[BuyerInfo] 回写服务器失败:', saveResult.message)
+          ElMessage.warning('买家信息保存到服务器失败: ' + saveResult.message)
+        }
       } catch (e) {
         console.warn('[BuyerInfo] 回写服务器失败:', e.message)
       }
@@ -1309,14 +1339,10 @@ async function handleRevealBuyerInfoInPurchase() {
 }
 
 async function handlePurchase(order, item, itemIdx) {
-  // 锁定订单 + 获取采购编号（并行请求，减少等待时间）
-  let lockResult, noResult
+  // 只锁定订单，不获取采购编号（编号延迟到"去下单"时生成，避免浪费）
+  let lockResult
   try {
-    const results = await Promise.all([
-      lockSalesOrderForPurchase(order.id).catch(e => ({ _lockError: e })),
-      fetchNextPurchaseNo().catch(e => ({ _noError: e }))
-    ])
-    ;[lockResult, noResult] = results
+    lockResult = await lockSalesOrderForPurchase(order.id).catch(e => ({ _lockError: e }))
   } catch (e) {
     ElMessage.error('操作失败: ' + e.message)
     return
@@ -1333,25 +1359,8 @@ async function handlePurchase(order, item, itemIdx) {
   order.purchaseLockedBy = true
   order.purchaseLockedName = '我'
 
-  // 编号获取失败
-  if (noResult && noResult._noError || !noResult) {
-    ElMessage.error('获取采购编号失败')
-    unlockSalesOrderPurchase(order.id).catch(() => {})
-    order.purchaseLockedBy = null
-    order.purchaseLockedName = null
-    return
-  }
-  const purchaseNo = noResult.purchase_no || noResult.data?.purchase_no
-  if (!purchaseNo) {
-    ElMessage.error('获取采购编号失败')
-    unlockSalesOrderPurchase(order.id).catch(() => {})
-    order.purchaseLockedBy = null
-    order.purchaseLockedName = null
-    return
-  }
-
   purchaseInfo.step = 1
-  purchaseInfo.purchaseNo = purchaseNo
+  purchaseInfo.purchaseNo = ''
   purchaseInfo.salesOrderNo = order.orderNo
   purchaseInfo.salesOrderId = order.id
   purchaseInfo.storeId = order.storeId
@@ -1847,8 +1856,8 @@ async function handleOpenPddBrowsing() {
   }
 }
 
-// 去下单：打开内嵌BrowserWindow
-function handleGoOrder() {
+// 去下单：获取采购编号 + 打开内嵌BrowserWindow
+async function handleGoOrder() {
   const url = purchaseInfo.sourceUrl.trim()
   if (!url) {
     ElMessage.warning('请输入货源链接')
@@ -1866,6 +1875,26 @@ function handleGoOrder() {
   if (purchaseInfo.purchaseType === 'dropship' &&
       (purchaseInfo.shippingName.includes('*') || purchaseInfo.shippingAddress.includes('***'))) {
     return
+  }
+
+  // 获取采购编号（仅在"去下单"时生成，避免弹开卡片就消耗编号）
+  if (!purchaseInfo.purchaseNo) {
+    try {
+      const noResult = await fetchNextPurchaseNo()
+      const purchaseNo = noResult.purchase_no || noResult.data?.purchase_no
+      if (!purchaseNo) {
+        ElMessage.error('获取采购编号失败')
+        return
+      }
+      purchaseInfo.purchaseNo = purchaseNo
+      // 仓库模式：将编号追加到收货地址
+      if (purchaseInfo.purchaseType === 'warehouse' && !purchaseInfo.shippingAddress.includes('【' + purchaseNo + '】')) {
+        purchaseInfo.shippingAddress = purchaseInfo.shippingAddress + '【' + purchaseNo + '】'
+      }
+    } catch (e) {
+      ElMessage.error('获取采购编号失败: ' + e.message)
+      return
+    }
   }
 
   let finalUrl = url
