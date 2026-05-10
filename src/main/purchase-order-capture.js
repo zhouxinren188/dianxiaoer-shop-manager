@@ -14,8 +14,6 @@ function isValidProductTitle(title) {
   if (!title || title.length < 2) return false
   const invalidPatterns = /^(登录|支付宝|收银台|安全验证|付款|验证码|ALIPAY|LOGIN|PAYMENT|CAPTCHA)/i
   if (invalidPatterns.test(title)) return false
-  // 含退货/退款/售后等关键词的不是商品标题，是退货/售后相关标签（如"官方仓退货"）
-  if (/退货|退款|售后|换货|维权/.test(title)) return false
   // 标题过短（<=3字符）且不含连续中文，不太可能是真实商品名
   if (title.length <= 3 && !/[\u4e00-\u9fff]{2,}/.test(title)) return false
   return true
@@ -207,7 +205,7 @@ const PURCHASE_INTERCEPTOR = `
   // 实时检测响应中的订单号（淘宝DL系统方案 + 拼多多扩展）
   // 淘宝优先级：b2c_orid > bizOrderId > orderId（最小15位，避免误抓trade_no）
   // 拼多多优先级：order_sn > orderSn（最小10位，对齐DL系统）
-  function checkForOrderNo(body) {
+  function checkForOrderNo(body, reqUrl) {
     if (!body || body.length < 10) return;
 
     // 1. b2c_orid（淘宝DL系统核心，最可靠）
@@ -273,7 +271,7 @@ const PURCHASE_INTERCEPTOR = `
       // 仅当URL含1688时才认定，避免误匹配淘宝的短字段
       var aliFields = ['orderId', 'orderNo', 'tradeId', 'bizOrderId'];
       var aliOrder = searchFields(json, aliFields, 10, 0, /^\\d+$/);
-      if (aliOrder && urlStr && urlStr.indexOf('1688') >= 0) {
+      if (aliOrder && reqUrl && reqUrl.indexOf('1688') >= 0) {
         console.log('[PURCHASE_ORDER_FOUND]' + aliOrder);
         return;
       }
@@ -283,16 +281,10 @@ const PURCHASE_INTERCEPTOR = `
   // 实时从API响应中提取商品信息并缓存（关键！订单号捕获时页面可能已跳转到支付宝）
   // ★ PDD页面跳过此函数：PDD的API响应（如faas-leo）会返回"商城"等错误数据
   //   PDD商品信息改由结算页DOM提取 + 订单搜索API获取
-  // ★ 1688页面不再完全跳过：改为在缓存时验证标题，过滤"官方仓退货"等无效数据
-  //   保留API缓存功能以触发地址设置，标题黑名单拦截无效标题
   function cacheProductInfoFromBody(body, url) {
     if (!body || body.length < 50 || window.__cachedProductInfo) return;
-    // ★ PDD页面跳过：当前页面在PDD域下时，所有API响应都不缓存商品信息
-    if (currentPageHost.indexOf('yangkeduo') >= 0 || currentPageHost.indexOf('pinduoduo') >= 0
-        || (url && (url.indexOf('yangkeduo') >= 0 || url.indexOf('pinduoduo') >= 0))) return;
-    // ★ 1688页面：不再完全跳过，改为在缓存时验证标题有效性
-    // var currentPageHost = window.location.hostname || '';  // 已在函数开头定义
-    // if (currentPageHost.indexOf('1688.com') >= 0 || (url && url.indexOf('1688.com') >= 0)) return;
+    // ★ PDD页面跳过：yangkeduo/pinduoduo域名的API响应不含可靠商品信息
+    if (url && (url.indexOf('yangkeduo') >= 0 || url.indexOf('pinduoduo') >= 0)) return;
     try {
       var json = JSON.parse(body);
       // 淘宝/天猫订单确认/提交接口
@@ -300,10 +292,20 @@ const PURCHASE_INTERCEPTOR = `
       if (items && items.length > 0) {
         var item = items[0];
         var title = item.title || item.itemTitle || item.productName || '';
-        var image = item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+        // ★ 淘宝API：pic/picPath是商品主图，规格图在skuPicUrl等字段
+        // 如果没有SKU图字段，不缓存主图——让DOM提取获取正确的规格图
+        var is1688Api = url && url.indexOf('1688.com') >= 0;
+        var isTaobaoApi = !is1688Api && url && (url.indexOf('taobao.com') >= 0 || url.indexOf('tmall.com') >= 0);
+        var image;
+        if (isTaobaoApi) {
+          // 淘宝：只取SKU图，不回退到pic（商品主图），让DOM提取获取结算页规格图
+          image = item.skuPicUrl || item.skuPic || '';
+        } else {
+          // 1688/其他平台：完整图片字段链
+          image = item.skuPicUrl || item.skuPic || item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+        }
         var sku = item.skuText || item.skuInfo || item.specValues || '';
         // ★ 1688标题过滤：退货/售后等无效标题不缓存（如"官方仓退货"），但保留image触发地址设置
-        var is1688Api = currentPageHost.indexOf('1688.com') >= 0 || (url && url.indexOf('1688.com') >= 0);
         if (is1688Api && title && /退货|退款|售后|换货|维权/.test(title)) {
           console.log('[PurchaseCapture] 1688 API标题无效，跳过: ' + title);
           title = '';
@@ -318,7 +320,7 @@ const PURCHASE_INTERCEPTOR = `
         var p = json.data.product;
         var pTitle = p.subject || p.title || '';
         var pImage = p.imageUrl || p.picUrl || '';
-        var is1688Api2 = currentPageHost.indexOf('1688.com') >= 0 || (url && url.indexOf('1688.com') >= 0);
+        var is1688Api2 = url && url.indexOf('1688.com') >= 0;
         if (is1688Api2 && pTitle && /退货|退款|售后|换货|维权/.test(pTitle)) {
           console.log('[PurchaseCapture] 1688 API标题无效(product)，跳过: ' + pTitle);
           pTitle = '';
@@ -353,8 +355,8 @@ const PURCHASE_INTERCEPTOR = `
                 console.log('[PDD_ORDER_API]fetch ' + urlStr.substring(0, 100) + ' body=' + body.substring(0, 500));
               }
             }
-            // 实时检测订单号（关键！不等轮询）
-            checkForOrderNo(body);
+            // 实时检测订单号（关键！不等轮询，传入URL用于1688匹配）
+            checkForOrderNo(body, urlStr);
             // 实时缓存商品信息（传入URL，PDD页面跳过）
             cacheProductInfoFromBody(body, urlStr);
           }
@@ -390,8 +392,8 @@ const PURCHASE_INTERCEPTOR = `
               console.log('[PDD_ORDER_API] ' + xhr.__capUrl.substring(0, 100) + ' body=' + resp);
             }
           }
-          // 实时检测订单号（关键！不等轮询）
-          checkForOrderNo(resp);
+          // 实时检测订单号（关键！不等轮询，传入URL用于1688匹配）
+          checkForOrderNo(resp, xhr.__capUrl);
           // 实时缓存商品信息（传入URL，PDD页面跳过）
           cacheProductInfoFromBody(resp, xhr.__capUrl);
         }
@@ -763,8 +765,6 @@ const READ_CAPTURED_PURCHASES = `
 // 各平台地址管理页URL
 const ADDRESS_MANAGE_URLS = {
   taobao: 'https://member1.taobao.com/member/fresh/deliver_address.htm',
-  // 注意：work.1688.com的地址内容加载在iframe中，executeJavaScript无法访问iframe的DOM
-  // 直接用wuliu.1688.com旧URL，内容在主frame加载，DOM与dl系统一致
   '1688': 'https://wuliu.1688.com/foundation/receive_address_manager.htm',
   pinduoduo: 'https://mobile.yangkeduo.com/addresses.html'
 }
@@ -1095,8 +1095,7 @@ function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
             step = 4;
           }
         } else if (step === 4) {
-          // 选完区后，可能还有街道级别，跳过街道，直接点级联面板的"确定"按钮
-          // 对齐dl1.js 5111-5113行：点确认 → 点提交
+          // 选完区后，可能还有街道级别，跳过街道，直接点级联面板的"确定"按钮（第一个确定）
           var confirmBtn = document.querySelector('.address-cascader-dropdown .next-btn');
           if (!confirmBtn) confirmBtn = document.querySelector('.next-overlay-wrapper .next-btn');
           if (!confirmBtn) {
@@ -1111,16 +1110,55 @@ function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
           }
           if (confirmBtn && !confirmBtn.disabled) {
             confirmBtn.click();
-            console.log('[AddressAutoFill] Clicked cascader confirm button');
+            console.log('[AddressAutoFill] Clicked cascader confirm button (1st confirm)');
             clearInterval(cascaderTimer);
+            // ★ 1688有2个"确定"按钮：第1个确认级联选择，第2个确认保存地址
+            // 等级联面板关闭后，查找并点击保存按钮（第2个确定）
             setTimeout(function() {
-              var submitBtn = document.querySelector('.add-address-action-group .next-btn-primary');
-              if (submitBtn) {
-                console.log('[AddressAutoFill] Clicking submit button');
+              // 查找保存按钮：多种选择器兜底
+              var submitBtn = document.querySelector('.add-address-action-group .next-btn-primary')
+                         || document.querySelector('[class*="action-group"] .next-btn-primary')
+                         || document.querySelector('.next-btn-primary');
+              if (!submitBtn) {
+                // 兜底：找所有"确定"按钮中带primary样式的
+                var allBtns = document.querySelectorAll('.next-btn');
+                for (var sb = 0; sb < allBtns.length; sb++) {
+                  if (allBtns[sb].innerText.trim() === '确定' && allBtns[sb].classList.contains('next-btn-primary') && !allBtns[sb].disabled) {
+                    submitBtn = allBtns[sb];
+                    break;
+                  }
+                }
+              }
+              if (submitBtn && !submitBtn.disabled) {
+                console.log('[AddressAutoFill] Clicking submit button (2nd confirm/save)');
                 submitBtn.click();
                 window.__addrDialogResult = 'submitted';
+              } else {
+                // 按钮还没出现，等1秒重试
+                console.log('[AddressAutoFill] Submit button not found yet, retrying in 1s...');
+                setTimeout(function() {
+                  var retryBtn = document.querySelector('.add-address-action-group .next-btn-primary')
+                              || document.querySelector('[class*="action-group"] .next-btn-primary')
+                              || document.querySelector('.next-btn-primary');
+                  if (!retryBtn) {
+                    var allBtns2 = document.querySelectorAll('.next-btn');
+                    for (var rb = 0; rb < allBtns2.length; rb++) {
+                      if (allBtns2[rb].innerText.trim() === '确定' && allBtns2[rb].classList.contains('next-btn-primary') && !allBtns2[rb].disabled) {
+                        retryBtn = allBtns2[rb];
+                        break;
+                      }
+                    }
+                  }
+                  if (retryBtn && !retryBtn.disabled) {
+                    console.log('[AddressAutoFill] Clicking submit button (2nd confirm, retry)');
+                    retryBtn.click();
+                    window.__addrDialogResult = 'submitted';
+                  } else {
+                    console.log('[AddressAutoFill] Submit button still not found after retry');
+                  }
+                }, 1000);
               }
-            }, 500);
+            }, 1000);
           }
           // 确定按钮还没出现，继续轮询等待
         }
@@ -1919,7 +1957,7 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 const CHECKOUT_URL_PATTERNS = {
   taobao: ['buy.taobao.com', 'buyertrade.taobao.com', 'buy.tmall.com'],
   pinduoduo: ['yangkeduo.com/order', 'yangkeduo.com/checkout', 'mobile.yangkeduo.com/order', 'mms.pinduoduo.com/order'],
-  '1688': ['trade.1688.com', 'buyer.trade.1688.com', 'order.1688.com']
+  '1688': ['trade.1688.com', 'buyer.trade.1688.com']
 }
 
 /**
@@ -2358,9 +2396,8 @@ const PLATFORM_DETECTION = {
     minLength: 10
   },
   '1688': {
-    // 1688下单API路径（对齐dl：trade/create, order/create等 + 新版收银台相关）
-    urlKeywords: ['1688.com', 'trade/create', 'order/create', 'fastCreate', 'trademanager', 'createOrder', 'smart_make_order', 'trade_flow', 'cashier'],
-    fields: ['orderId', 'orderNo', 'tradeId', 'bizOrderId'],
+    urlKeywords: ['trade/create', 'order/create', 'fastCreate', 'trademanager', 'createOrder'],
+    fields: ['orderId', 'orderNo', 'tradeId'],
     minLength: 10
   }
 }
@@ -2533,37 +2570,14 @@ const EXTRACT_ORDER_FROM_PAGE = `
     } catch(e) {}
   }
 
-  // === 1688: URL参数 + DOM提取（对齐dl系统） ===
+  // === 1688: URL 参数 ===
   if (url.indexOf('1688.com') >= 0) {
-    // 1. URL参数提取
     try {
       var params = new URLSearchParams(window.location.search);
       var oid = params.get('orderId') || params.get('orderNo') || params.get('tradeId');
       if (oid && /^\\d{10,}$/.test(oid)) {
         console.log('[PurchaseCapture] Found 1688 orderId=' + oid);
         return oid;
-      }
-    } catch(e) {}
-    // 2. DOM提取：新版收银台 .order-no span（对齐dl1.js 5282行）
-    try {
-      var orderNoEl = document.querySelector('.order-no span');
-      if (orderNoEl) {
-        var orderNoText = (orderNoEl.innerText || '').trim();
-        if (/^\\d{10,}$/.test(orderNoText)) {
-          console.log('[PurchaseCapture] Found 1688 orderId from .order-no span: ' + orderNoText);
-          return orderNoText;
-        }
-      }
-    } catch(e) {}
-    // 3. DOM提取：旧版trade_flow页 input[name='initial-state-orderId']（对齐dl.js 4946行）
-    try {
-      var inputEl = document.querySelector("input[name='initial-state-orderId']");
-      if (inputEl && inputEl.value) {
-        var inputVal = inputEl.value.trim();
-        if (/^\\d{10,}$/.test(inputVal)) {
-          console.log('[PurchaseCapture] Found 1688 orderId from input: ' + inputVal);
-          return inputVal;
-        }
       }
     } catch(e) {}
   }
@@ -2654,8 +2668,7 @@ const EXTRACT_PAYMENT_AMOUNT = `
   var selectors = [
     '.pay-amount', '.total-amount', '.real-pay', '.actual-pay',
     '.price-total', '[class*="totalPay"]', '[class*="actualPay"]',
-    '.price-highlight', '.pay-price',
-    '.ext-price-info span'  // 1688新版收银台（对齐dl1.js 5278行）
+    '.price-highlight', '.pay-price'
   ];
   for (var s = 0; s < selectors.length; s++) {
     var el = document.querySelector(selectors[s]);
@@ -2683,8 +2696,6 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
   console.log('[PurchaseCapture] Extracting product info from: ' + url.substring(0, 120));
 
   // === 1. 从已拦截的API响应中提取（最可靠，订单确认/提交接口通常包含商品信息） ===
-  // ★ 1688页面不再完全跳过API缓存，改为标题验证过滤"官方仓退货"等无效数据
-  var is1688Page = url.indexOf('1688.com') >= 0;
   if (window.__capturedPurchaseResponses) {
     for (var i = window.__capturedPurchaseResponses.length - 1; i >= 0; i--) {
       var resp = window.__capturedPurchaseResponses[i];
@@ -2694,20 +2705,24 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
         var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items);
         if (items && items.length > 0) {
           var item = items[0];
-          var apiTitle = item.title || item.itemTitle || item.productName || '';
-          // ★ 1688标题过滤：退货/售后等无效标题不提取
-          if (is1688Page && apiTitle && /退货|退款|售后|换货|维权/.test(apiTitle)) apiTitle = '';
-          if (!title) title = apiTitle;
-          if (!image) image = item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+          if (!title) title = item.title || item.itemTitle || item.productName || '';
+          // ★ 淘宝API：pic是商品主图，只取SKU图字段，让DOM提取获取正确的规格图
+          var isTbApi = resp.url && (resp.url.indexOf('taobao.com') >= 0 || resp.url.indexOf('tmall.com') >= 0);
+          var is1688Resp = resp.url && resp.url.indexOf('1688.com') >= 0;
+          if (!image) {
+            if (isTbApi && !is1688Resp) {
+              image = item.skuPicUrl || item.skuPic || '';
+            } else {
+              image = item.skuPicUrl || item.skuPic || item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+            }
+          }
           if (!sku) sku = item.skuText || item.skuInfo || item.specValues || '';
           if (title) break;
         }
         // 1688订单接口
         if (json.data && json.data.product) {
           var p = json.data.product;
-          var apiP2Title = p.subject || p.title || '';
-          if (is1688Page && apiP2Title && /退货|退款|售后|换货|维权/.test(apiP2Title)) apiP2Title = '';
-          if (!title) title = apiP2Title;
+          if (!title) title = p.subject || p.title || '';
           if (!image) image = p.imageUrl || p.picUrl || '';
         }
       } catch(e) {}
@@ -2762,188 +2777,14 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
   // 1688商品详情页
   if (!title) {
     var title1688 = document.querySelector('.d-title')
-                 || document.querySelector('[class*="subject-desc"]')
-                 || document.querySelector('.title-text')
-                 || document.querySelector('[class*="offer-title"]');
+                 || document.querySelector('[class*="subject-desc"]');
     if (title1688) title = (title1688.textContent || '').trim().substring(0, 200);
-    // 诊断：输出可用元素帮助定位
-    if (!title) {
-      var mainContent = document.querySelector('#mod-detail-title') || document.querySelector('.detail-content') || document.querySelector('[class*="detail"]');
-      if (mainContent) console.log('[PurchaseCapture] 1688详情页诊断(标题未找到): area=' + (mainContent.className || '').substring(0, 80) + ' text=' + (mainContent.innerText || '').substring(0, 200));
-      console.log('[PurchaseCapture] 1688详情页og:title=' + (document.querySelector('meta[property="og:title"]') ? document.querySelector('meta[property="og:title"]').content : 'NONE') + ', docTitle=' + document.title);
-    }
   }
   if (!image) {
     var img1688 = document.querySelector('.horizontal-view img')
                || document.querySelector('[class*="slider"] img')
-               || document.querySelector('.obj-fluid img')
-               || document.querySelector('[class*="main-image"] img')
-               || document.querySelector('[class*="detail-img"] img');
+               || document.querySelector('.obj-fluid img');
     if (img1688) image = img1688.src || img1688.dataset.src || '';
-  }
-
-  // 1688下单确认页（smart_make_order）— 结算页有商品名和图片
-  // 注意：该页是React SPA，<div id="root">由place-order.js动态渲染
-  if (!title && url.indexOf('order.1688.com/order/smart_make_order') >= 0) {
-    // 方法1：常规选择器
-    var title1688Order = document.querySelector('.order-item-name a')
-                      || document.querySelector('.offer-name a')
-                      || document.querySelector('[class*="order-item"] [class*="name"] a')
-                      || document.querySelector('[class*="offer-title"]')
-                      || document.querySelector('[class*="product-name"]')
-                      || document.querySelector('a[href*="/offer/"]');
-    if (title1688Order) title = (title1688Order.textContent || title1688Order.innerText || '').trim().substring(0, 200);
-
-    // 方法2：从__INITIAL_PARAMS__获取offerId，查找包含该offerId的链接
-    if (!title && window.__INITIAL_PARAMS__) {
-      try {
-        var params = typeof window.__INITIAL_PARAMS__ === 'string' ? JSON.parse(window.__INITIAL_PARAMS__) : window.__INITIAL_PARAMS__;
-        var idStr = params.id;
-        if (idStr) {
-          var idArr = JSON.parse(idStr);
-          if (idArr && idArr[0] && idArr[0].offerId) {
-            var offerId = String(idArr[0].offerId);
-            var offerLink = document.querySelector('a[href*="' + offerId + '"]');
-            if (offerLink) {
-              var linkText = (offerLink.textContent || offerLink.innerText || '').trim();
-              if (linkText.length > 5 && !/退货|退款|售后|换货|维权/.test(linkText)) {
-                title = linkText.substring(0, 200);
-              }
-            }
-            // 如果链接没找到标题，尝试用offerId请求商品详情API
-            if (!title && offerId) {
-              // 将offerId保存到全局变量，供后续提取使用
-              window.__1688OfferId = offerId;
-            }
-          }
-        }
-      } catch(e) {}
-    }
-
-    // 方法3：结构性查找 — 找到商品图片元素，向上遍历父容器查找标题文本
-    if (!title) {
-      var productImg = document.querySelector('[class*="order-item"] img')
-                    || document.querySelector('[class*="offer-img"] img')
-                    || document.querySelector('[class*="product-img"] img')
-                    || document.querySelector('[class*="goods"] img')
-                    || document.querySelector('#root img');
-      if (productImg) {
-        var pImgParent = productImg.parentElement;
-        for (var pi = 0; pi < 5 && pImgParent && !title; pi++) {
-          var pLinks = pImgParent.querySelectorAll('a');
-          for (var li = 0; li < pLinks.length; li++) {
-            var pLinkText = (pLinks[li].textContent || '').trim();
-            if (pLinkText.length > 5 && pLinkText.length < 200 && !/退货|退款|售后|换货|维权|确认订单|去付款/.test(pLinkText)) {
-              title = pLinkText.substring(0, 200);
-              break;
-            }
-          }
-          pImgParent = pImgParent.parentElement;
-        }
-      }
-    }
-
-    // 方法4：扫描#root中所有指向detail.1688.com或/offer/的链接
-    if (!title) {
-      var rootEl = document.getElementById('root');
-      if (rootEl) {
-        var detailLinks = rootEl.querySelectorAll('a[href*="detail.1688.com"], a[href*="/offer/"]');
-        for (var dli = 0; dli < detailLinks.length; dli++) {
-          var dt = (detailLinks[dli].textContent || '').trim();
-          if (dt.length > 5 && dt.length < 200 && !/退货|退款|售后|换货|维权|确认订单|去付款/.test(dt)) {
-            title = dt.substring(0, 200);
-            break;
-          }
-        }
-      }
-    }
-
-    // 方法5：扫描#root中所有链接，找最长且像商品名的文本
-    if (!title) {
-      var rootEl2 = document.getElementById('root');
-      if (rootEl2) {
-        var allLinks = rootEl2.querySelectorAll('a');
-        var bestTitle = '';
-        for (var ali = 0; ali < allLinks.length; ali++) {
-          var at = (allLinks[ali].textContent || '').trim();
-          if (at.length > 10 && at.length < 200 && at.length > bestTitle.length
-              && !/退货|退款|售后|换货|维权|确认订单|去付款|阿里巴巴|登录|注册|首页/.test(at)) {
-            bestTitle = at;
-          }
-        }
-        if (bestTitle) title = bestTitle.substring(0, 200);
-      }
-    }
-
-    // 方法6：扫描#root中所有元素的直接文本内容（不限于<a>标签）
-    // 1688结算页React渲染后，标题可能在普通<span>/<div>中
-    if (!title) {
-      var rootEl3 = document.getElementById('root');
-      if (rootEl3) {
-        var allEls3 = rootEl3.querySelectorAll('span, div, p, a, h1, h2, h3, h4');
-        var textCandidates = [];
-        for (var ei = 0; ei < allEls3.length; ei++) {
-          // 获取直接文本节点（不含子元素文本），避免选中容器
-          var directText = '';
-          for (var ni = 0; ni < allEls3[ei].childNodes.length; ni++) {
-            if (allEls3[ei].childNodes[ni].nodeType === 3) {
-              directText += allEls3[ei].childNodes[ni].textContent || '';
-            }
-          }
-          directText = directText.trim();
-          if (directText.length > 10 && directText.length < 200
-              && !/退货|退款|售后|换货|维权|确认订单|去付款|阿里巴巴|登录|注册|首页|价格明细|应付总额|商品总计|提交订单|配送方式|快递/.test(directText)) {
-            textCandidates.push(directText);
-          }
-        }
-        // 选最长的候选文本作为标题（商品标题通常是页面上较长的文本）
-        if (textCandidates.length > 0) {
-          textCandidates.sort(function(a, b) { return b.length - a.length; });
-          title = textCandidates[0].substring(0, 200);
-        }
-      }
-    }
-
-    // 诊断：如果仍未提取到
-    if (!title) {
-      var containers = document.querySelectorAll('[class*="order"], [class*="offer"], [class*="goods"], [class*="item"], [class*="product"]');
-      var diagParts = [];
-      for (var di = 0; di < Math.min(containers.length, 5); di++) {
-        var c = containers[di];
-        diagParts.push(c.tagName + '.' + (c.className || '').substring(0, 40) + '=' + (c.innerText || '').substring(0, 100));
-      }
-      var rootHasChildren = document.getElementById('root') && document.getElementById('root').children.length > 0;
-      // 输出#root前200字文本，帮助确认React是否渲染完成
-      var rootText = document.getElementById('root') ? (document.getElementById('root').innerText || '').substring(0, 300) : 'NO_ROOT';
-      console.log('[PurchaseCapture] 1688结算页诊断(标题未找到): root已渲染=' + rootHasChildren + ', rootText=' + rootText.substring(0, 200));
-      console.log('[PurchaseCapture] 1688结算页诊断(containers): ' + diagParts.join(' | '));
-    }
-  }
-  if (!image && url.indexOf('order.1688.com/order/smart_make_order') >= 0) {
-    var img1688Order = document.querySelector('.order-item-img img')
-                    || document.querySelector('[class*="offer-img"] img')
-                    || document.querySelector('[class*="order-item"] img')
-                    || document.querySelector('[class*="product-img"] img')
-                    // 更通用：找到商品区域内第一个大于50px的图片
-                    || (function() { var imgs = document.querySelectorAll('a[href*="/offer/"] img, [class*="order"] img, [class*="offer"] img'); for (var ii = 0; ii < imgs.length; ii++) { if (imgs[ii].naturalWidth > 50 || imgs[ii].width > 50) return imgs[ii]; } return null; })();
-    if (img1688Order) image = img1688Order.src || img1688Order.dataset.src || '';
-  }
-
-  // 1688新版收银台（对齐dl1.js 5279行：.description提取商品名）
-  if (!title && url.indexOf('air.1688.com') >= 0) {
-    var desc1688 = document.querySelector('.description');
-    if (desc1688) title = (desc1688.innerText || '').trim().substring(0, 200);
-    if (!title) console.log('[PurchaseCapture] 1688收银台诊断: .description未找到, docTitle=' + document.title);
-  }
-  // 1688收银台商品图片（dl只提取了标题，补充图片提取）
-  if (!image && url.indexOf('air.1688.com') >= 0) {
-    var img1688Cashier = document.querySelector('.description') && document.querySelector('.description').parentElement
-                      ? document.querySelector('.description').parentElement.querySelector('img')
-                      : null;
-    if (!img1688Cashier) img1688Cashier = document.querySelector('[class*="goods-image"] img')
-                                        || document.querySelector('[class*="item-img"] img')
-                                        || document.querySelector('[class*="order-info"] img');
-    if (img1688Cashier) image = img1688Cashier.src || img1688Cashier.dataset.src || '';
   }
 
   // 拼多多结算页（order_checkout.html，oc-前缀的DOM类名）
@@ -3057,8 +2898,7 @@ const ORDER_CONFIRM_PATTERNS = {
   '1688': [
     'trade.1688.com/order',                    // 1688交易
     'cashier.alipay.com',                      // 支付宝
-    'order/confirm',                           // 订单确认
-    'air.1688.com/app/ctf-page/payment-cashier-pc-air/cashier.html'  // 1688新版收银台（对齐dl1.js 5265行）
+    'order/confirm'                            // 订单确认
   ]
 }
 
@@ -3205,79 +3045,6 @@ function detectTaobaoOrderFromResponses(responses) {
   return null
 }
 
-// ============ 1688收银台专属提取脚本（对齐dl1.js 5263-5282行） ============
-// 从新版收银台页面一次性提取：订单号 + 支付金额 + 商品名称
-// dl原始逻辑：
-//   var orderID = document.querySelector(".order-no span").innerText;
-//   var orderPrice = document.querySelector('.ext-price-info span').innerText.substring(1);
-//   var goodsName = document.querySelector('.description').innerText;
-
-const ALIBABA_CASHIER_EXTRACT = `
-(function() {
-  var result = { orderId: null, orderPrice: null, goodsName: null };
-  var url = window.location.href;
-
-  // 仅在1688收银台页面执行
-  if (url.indexOf('air.1688.com/app/ctf-page/payment-cashier-pc-air/cashier.html') < 0) {
-    return JSON.stringify(result);
-  }
-
-  console.log('[PurchaseCapture] 1688 cashier page detected, extracting order info (dl-aligned)');
-
-  // 1. 订单号（对齐dl1.js 5282行：.order-no span）
-  try {
-    var orderNoEl = document.querySelector('.order-no span');
-    if (orderNoEl) {
-      var orderNoText = (orderNoEl.innerText || '').trim();
-      if (/^\\d{10,}$/.test(orderNoText)) {
-        result.orderId = orderNoText;
-        console.log('[PurchaseCapture] 1688 cashier orderId: ' + orderNoText);
-      }
-    }
-  } catch(e) {}
-
-  // 订单号兜底：URL参数orderId
-  if (!result.orderId) {
-    try {
-      var params = new URLSearchParams(window.location.search);
-      var oid = params.get('orderId');
-      if (oid && /^\\d{10,}$/.test(oid)) {
-        result.orderId = oid;
-        console.log('[PurchaseCapture] 1688 cashier orderId (URL): ' + oid);
-      }
-    } catch(e) {}
-  }
-
-  // 2. 支付金额（对齐dl1.js 5278行：.ext-price-info span，去掉¥前缀）
-  try {
-    var priceEl = document.querySelector('.ext-price-info span');
-    if (priceEl) {
-      var priceText = (priceEl.innerText || '').replace(/[¥￥元,，]/g, '').trim();
-      var price = parseFloat(priceText);
-      if (price > 0 && price < 1000000) {
-        result.orderPrice = price;
-        console.log('[PurchaseCapture] 1688 cashier orderPrice: ' + price);
-      }
-    }
-  } catch(e) {}
-
-  // 3. 商品名称（对齐dl1.js 5279行：.description）
-  try {
-    var descEl = document.querySelector('.description');
-    if (descEl) {
-      var descText = (descEl.innerText || '').trim().substring(0, 200);
-      if (descText.length > 1) {
-        result.goodsName = descText;
-        console.log('[PurchaseCapture] 1688 cashier goodsName: ' + descText.substring(0, 60));
-      }
-    }
-  } catch(e) {}
-
-  console.log('[PurchaseCapture] 1688 cashier extract result: ' + JSON.stringify(result));
-  return JSON.stringify(result);
-})()
-`
-
 // ============ 地址修改成功提示（注入到采购小窗） ============
 
 const ADDRESS_SUCCESS_TOAST = `
@@ -3302,7 +3069,8 @@ const ADDRESS_SUCCESS_TOAST = `
 
 // ============ 地址刷新脚本（注入到采购窗口，在结算页刷新地址列表） ============
 
-const ADDRESS_REFRESH_SCRIPT = `
+function buildAddressRefreshScript(purchaseInfo) {
+  return `
 (function() {
   var url = window.location.href.toLowerCase();
   console.log('[AddressRefresh] Refreshing address on: ' + url.substring(0, 100));
@@ -3348,34 +3116,28 @@ const ADDRESS_REFRESH_SCRIPT = `
 
     function selectCorrectAddress() {
       // 等待地址弹窗出现，寻找目标地址
-      // 优先选择标记为"默认"的地址，或者匹配目标收件人/手机号的地址
       var waitCount = 0;
       var timer = setInterval(function() {
         waitCount++;
-        if (waitCount > 30) { // 3秒超时
+        if (waitCount > 30) {
           clearInterval(timer);
           console.log('[AddressRefresh] 1688 地址弹窗选择超时');
           return;
         }
 
-        // 查找地址列表项（弹窗中的每个地址条目）
         var addrElements = document.querySelectorAll('[class*="address"], [class*="receiver"], [class*="addr"]');
-        if (addrElements.length === 0) return; // 弹窗还没出来
+        if (addrElements.length === 0) return;
 
-        // 找到包含目标信息的地址项
         for (var j = 0; j < addrElements.length; j++) {
           var el = addrElements[j];
           var elText = (el.innerText || el.textContent || '');
 
-          // 优先匹配收件人+手机号
           var matchScore = 0;
           if (targetName && elText.indexOf(targetName) >= 0) matchScore += 2;
           if (targetPhone && elText.indexOf(targetPhone) >= 0) matchScore += 2;
-          // 含"默认"标记的加分
           if (elText.indexOf('默认') >= 0) matchScore += 1;
 
           if (matchScore >= 3) {
-            // 找到目标地址，点击选中
             el.click();
             console.log('[AddressRefresh] 1688 选中了目标地址 (score=' + matchScore + ', text=' + elText.substring(0, 60) + ')');
             clearInterval(timer);
@@ -3385,9 +3147,7 @@ const ADDRESS_REFRESH_SCRIPT = `
       }, 100);
     }
 
-    // 执行流程：先点"更改地址"，再选择地址
     if (!findAndClickChangeAddr()) {
-      // 没找到"更改地址"按钮，可能React还没渲染完，等500ms重试
       setTimeout(function() {
         if (!findAndClickChangeAddr()) {
           console.log('[AddressRefresh] 1688 未找到更改地址按钮');
@@ -3403,6 +3163,7 @@ const ADDRESS_REFRESH_SCRIPT = `
   window.__addrRefreshDone = true;
 })()
 `
+}
 
 // ============ 登录页自动填充脚本 ============
 
@@ -3563,11 +3324,6 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   })
   // 注意：dl 不做 UA 伪装，Electron 默认 UA 对各平台正常工作
 
-  // TODO: 测试期间打开DevTools，上线后删除
-  addrWin.webContents.on('dom-ready', () => {
-    if (!addrWin.isDestroyed()) addrWin.webContents.openDevTools()
-  })
-
   // 120秒最大生存期，防止窗口泄漏
   const maxLifetime = setTimeout(() => {
     if (!addrWin.isDestroyed()) {
@@ -3576,51 +3332,19 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   }, 120000)
 
-  let addrDone = false  // 提前声明，console-message处理器需要引用
-
-  // 转发后台窗口的console.log（测试期间转发所有消息）
+  // 转发后台窗口的console.log
   addrWin.webContents.on('console-message', (event, level, message) => {
-    console.log(`[AddrSetupWin] ${message}`)
-
-    // 直接从console消息检测地址设置成功（比JS变量轮询更可靠）
-    // console-message事件由主进程即时接收，不会因页面重载而丢失
-    if (addrDone) return
-    if (message.includes('Address added successfully') || message.includes('Clicking submit button')) {
-      console.log('[AddrSetupWin] Address setup success detected via console message')
-      addrDone = true
-      clearTimeout(maxLifetime)
-      // 通知前端：地址设置完成
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
-      }
-      // 在采购小窗中显示绿色居中提示
-      if (purchaseWin && !purchaseWin.isDestroyed()) {
-        purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
-        setTimeout(() => {
-          if (purchaseWin.isDestroyed()) return
-          const purchaseUrl = purchaseWin.webContents.getURL().toLowerCase()
-          const isCheckout = purchaseUrl.includes('buy.taobao.com') ||
-                             purchaseUrl.includes('buy.tmall.com') ||
-                             purchaseUrl.includes('order.1688.com') ||
-                             purchaseUrl.includes('trade.1688.com')
-          if (isCheckout) {
-            purchaseWin.webContents.executeJavaScript(ADDRESS_REFRESH_SCRIPT).catch(() => {})
-            console.log('[AddrSetupWin] Address refresh script injected to purchase window')
-          }
-        }, 2000)
-      }
-      // 延迟关闭，等保存完成
-      setTimeout(() => {
-        if (!addrWin.isDestroyed()) addrWin.destroy()
-      }, 1500)
+    if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]')) {
+      console.log(`[AddrSetupWin] ${message}`)
     }
   })
+
+  let addrDone = false
 
   // 注入地址脚本的统一入口
   function injectAddressScripts(url) {
     if (addrDone) return
     const urlLower = url.toLowerCase()
-    console.log(`[AddrSetupWin] injectAddressScripts checking URL: ${url.substring(0, 150)}`)
 
     // 淘宝地址管理页（排除中间跳转页）
     if (urlLower.includes('member1.taobao.com/member/fresh/deliver_address') && !urlLower.includes('_____tmd_____') && !urlLower.includes('login_jump')) {
@@ -3636,15 +3360,25 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
 
     // 1688地址管理页 - 点击"新增收货地址"
-    // 新版: work.1688.com?_path_=...receiveAddresses  旧版: wuliu.1688.com/foundation/receive_address_manager
-    if (urlLower.includes('receiveaddresses') || urlLower.includes('wuliu.1688.com/foundation/receive_address_manager')) {
+    if (urlLower.includes('wuliu.1688.com/foundation/receive_address_manager')) {
       console.log('[AddrSetupWin] 1688 address manager page detected')
-      // work.1688.com 是SPA，地址内容由merge.js异步渲染，需要更长的等待时间
-      var addrInjectDelay = urlLower.includes('work.1688.com') ? 3000 : 400
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
         addrWin.webContents.executeJavaScript(build1688AddressManagerScript()).catch(() => {})
-      }, addrInjectDelay)
+      }, 400)
+      return
+    }
+
+    // 1688地址编辑弹窗页 - 填写表单+省市区级联
+    if (urlLower.includes('air.1688.com/app/1688-global/address-manage/address-dialog')) {
+      console.log('[AddrSetupWin] 1688 address dialog page detected')
+      if (parsedAddr) {
+        setTimeout(() => {
+          if (addrWin.isDestroyed() || addrDone) return
+          const script = build1688AddressDialogScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
+          addrWin.webContents.executeJavaScript(script).catch(() => {})
+        }, 400)
+      }
       return
     }
 
@@ -3661,6 +3395,76 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       return
     }
   }
+
+  // 1688地址对话框iframe检测：点击"新增收货地址"后，对话框由air.1688.com的iframe加载
+  // 主帧的executeJavaScript无法访问跨域iframe的DOM，需要在此事件中注入脚本到iframe
+  addrWin.webContents.on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
+    if (addrWin.isDestroyed() || addrDone) return
+    if (isMainFrame) return
+    const urlLower = url.toLowerCase()
+    if (!urlLower.includes('air.1688.com') && !urlLower.includes('address-dialog')) return
+
+    console.log(`[AddrSetupWin] 1688 address dialog iframe detected: ${url.substring(0, 120)}`)
+
+    if (!parsedAddr) {
+      console.log('[AddrSetupWin] No parsed address data, skipping dialog injection')
+      return
+    }
+
+    // 延迟注入，等待iframe内部DOM渲染完成
+    setTimeout(() => {
+      if (addrWin.isDestroyed() || addrDone) return
+      try {
+        const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
+        if (frame) {
+          const script = build1688AddressDialogScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
+          frame.executeJavaScript(script)
+            .then(() => console.log('[AddrSetupWin] Dialog script injected into air.1688.com iframe'))
+            .catch(err => console.log('[AddrSetupWin] Failed to inject dialog script into iframe:', err.message))
+
+          // 轮询iframe的对话框结果，传播到主帧
+          const dialogPollTimer = setInterval(() => {
+            if (addrWin.isDestroyed() || addrDone) {
+              clearInterval(dialogPollTimer)
+              return
+            }
+            try {
+              const f = webFrameMain.fromId(frameProcessId, frameRoutingId)
+              if (f) {
+                f.executeJavaScript('window.__addrDialogResult || null')
+                  .then(result => {
+                    if (result === 'submitted') {
+                      clearInterval(dialogPollTimer)
+                      console.log('[AddrSetupWin] Dialog submitted detected in iframe, propagating to main frame')
+                      // 立即标记完成，防止页面重载后脚本重复执行删除+新增
+                      addrDone = true
+                      addrWin.webContents.executeJavaScript('window.__addrManagerResult = "success"').catch(() => {})
+                      // 通知前端：地址设置完成
+                      if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
+                      }
+                      // 延迟关闭，等保存完成
+                      setTimeout(() => {
+                        if (!addrWin.isDestroyed()) addrWin.destroy()
+                      }, 2000)
+                    }
+                  })
+                  .catch(() => {})
+              } else {
+                clearInterval(dialogPollTimer)
+              }
+            } catch (e) {
+              clearInterval(dialogPollTimer)
+            }
+          }, 1000)
+        } else {
+          console.log('[AddrSetupWin] Frame not found by webFrameMain.fromId')
+        }
+      } catch (e) {
+        console.log('[AddrSetupWin] Error injecting into iframe:', e.message)
+      }
+    }, 1000)
+  })
 
   addrWin.webContents.on('dom-ready', () => {
     if (addrWin.isDestroyed() || addrDone) return
@@ -3717,68 +3521,6 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   })
 
-  // 1688地址对话框iframe检测：点击"新增收货地址"后，对话框由air.1688.com的iframe加载
-  // 主帧的executeJavaScript无法访问跨域iframe的DOM，需要在此事件中注入脚本到iframe
-  addrWin.webContents.on('did-frame-navigate', (event, url, httpResponseCode, httpStatusText, isMainFrame, frameProcessId, frameRoutingId) => {
-    if (addrWin.isDestroyed() || addrDone) return
-    if (isMainFrame) return
-    const urlLower = url.toLowerCase()
-    if (!urlLower.includes('air.1688.com') && !urlLower.includes('address-dialog')) return
-
-    console.log(`[AddrSetupWin] 1688 address dialog iframe detected: ${url.substring(0, 120)}`)
-
-    if (!parsedAddr) {
-      console.log('[AddrSetupWin] No parsed address data, skipping dialog injection')
-      return
-    }
-
-    // 延迟注入，等待iframe内部DOM渲染完成
-    setTimeout(() => {
-      if (addrWin.isDestroyed() || addrDone) return
-      try {
-        const frame = webFrameMain.fromId(frameProcessId, frameRoutingId)
-        if (frame) {
-          const script = build1688AddressDialogScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
-          frame.executeJavaScript(script)
-            .then(() => console.log('[AddrSetupWin] Dialog script injected into air.1688.com iframe'))
-            .catch(err => console.log('[AddrSetupWin] Failed to inject dialog script into iframe:', err.message))
-
-          // 轮询iframe的对话框结果，传播到主帧
-          // 因为主进程的executeJavaScript只能在主帧执行，检测不到iframe中的__addrDialogResult
-          const dialogPollTimer = setInterval(() => {
-            if (addrWin.isDestroyed() || addrDone) {
-              clearInterval(dialogPollTimer)
-              return
-            }
-            try {
-              const f = webFrameMain.fromId(frameProcessId, frameRoutingId)
-              if (f) {
-                f.executeJavaScript('window.__addrDialogResult || null')
-                  .then(result => {
-                    if (result === 'submitted') {
-                      clearInterval(dialogPollTimer)
-                      console.log('[AddrSetupWin] Dialog submitted detected in iframe, propagating to main frame')
-                      // 将结果传播到主帧，让主进程的轮询能检测到
-                      addrWin.webContents.executeJavaScript('window.__addrManagerResult = "success"').catch(() => {})
-                    }
-                  })
-                  .catch(() => {})
-              } else {
-                clearInterval(dialogPollTimer)
-              }
-            } catch (e) {
-              clearInterval(dialogPollTimer)
-            }
-          }, 1000)
-        } else {
-          console.log('[AddrSetupWin] Frame not found by webFrameMain.fromId')
-        }
-      } catch (e) {
-        console.log('[AddrSetupWin] Error injecting into iframe:', e.message)
-      }
-    }, 1000)
-  })
-
   // 地址设置结果轮询
   let checkCount = 0
   const checkTimer = setInterval(() => {
@@ -3827,7 +3569,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
                                  purchaseUrl.includes('order.1688.com') ||
                                  purchaseUrl.includes('trade.1688.com')
               if (isCheckout) {
-                purchaseWin.webContents.executeJavaScript(ADDRESS_REFRESH_SCRIPT).catch(() => {})
+                purchaseWin.webContents.executeJavaScript(buildAddressRefreshScript(purchaseInfo)).catch(() => {})
                 console.log('[AddrSetupWin] Address refresh script injected to purchase window')
               }
             }, 2000)
@@ -3841,13 +3583,11 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
           if (!addrWin.isDestroyed() && !addrWin.isVisible()) addrWin.show()
           console.log(`[AddrSetupWin] Address setup issue: ${result}, showing window`)
         } else if (result === 'no_button' || result === 'no_form') {
-          // 地址脚本找不到按钮/表单 — 不显示成功提示，只通知完成
           clearInterval(checkTimer)
           addrDone = true
           clearTimeout(maxLifetime)
-          console.log(`[AddrSetupWin] Address setup failed: ${result}, not showing success toast`)
           if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo, failed: true, reason: result })
+            mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
           }
           if (!addrWin.isDestroyed()) addrWin.destroy()
         }
@@ -4113,7 +3853,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
             // 系统备注已在 autoCreateAndBind 内部写入，这里只发送通知事件
             if (mainWindow && !mainWindow.isDestroyed()) {
-              console.log(`[PurchaseCapture] 发送purchase-order-captured通知: purchaseNo=${purchaseNo}, success=true, goodsName=${(purchaseInfo.goodsName || '').substring(0, 30)}, image=${purchaseInfo.image ? 'YES' : 'NO'}`)
               mainWindow.webContents.send('purchase-order-captured', {
                 purchaseNo,
                 platformOrderNo,
@@ -4141,54 +3880,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       // 从当前页面提取实际支付金额；商品信息优先使用缓存（从商品详情页/API拦截器提前提取）
       // 订单号捕获时页面可能已跳转到支付宝，直接从当前页面提取会拿到"登录中心-支付宝"等错误信息
       if (win && !win.isDestroyed()) {
-        const isTaobaoPlatform = (platform === 'taobao' || platform === 'tmall')
-
-        // 提取支付金额 + 商品信息缓存
-        const extractPromises = []
-
-        // ★ 淘宝/天猫：跟DL一样，只用asyncBought API获取actualFee（DL运行5年验证可靠，无需兜底）
-        // 关键：必须在页面还在淘宝域名时调用，跳转到支付宝后跨域fetch会失败
-        if (isTaobaoPlatform && platformOrderNo) {
-          const tbAsyncBoughtScript = `
-            (function() {
-              return fetch('https://buyertrade.taobao.com/trade/itemlist/asyncBought.htm?action=itemlist/BoughtQueryAction&event_submit_do_query=1&_input_charset=utf8', {
-                method: 'POST',
-                credentials: 'include',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'buyerNick=&dateBegin=0&dateEnd=0&itemTitle=${encodeURIComponent(platformOrderNo)}&lastStartRow=&logisticsService=&options=0&orderStatus=&pageNum=1&pageSize=15&queryBizType=&queryOrder=desc&rateStatus=&refund=&sellerNick=&auctionTitle=${encodeURIComponent(platformOrderNo)}&prePageNo=1'
-              }).then(function(r) { return r.text() }).then(function(text) {
-                try {
-                  var data = JSON.parse(text);
-                  var mainOrders = data.mainOrders;
-                  if (!mainOrders || mainOrders.length === 0) return JSON.stringify({error: 'no_orders'});
-                  var orderItem = mainOrders[0];
-                  var actualFee = orderItem.payInfo && orderItem.payInfo.actualFee;
-                  if (actualFee && parseFloat(actualFee) > 0) {
-                    return JSON.stringify({actualFee: parseFloat(actualFee)});
-                  }
-                  return JSON.stringify({error: 'no_fee', payInfo: JSON.stringify(orderItem.payInfo || {})});
-                } catch(e) {
-                  return JSON.stringify({error: e.message});
-                }
-              }).catch(function(e) {
-                return JSON.stringify({error: e.message});
-              });
-            })()
-          `
-          extractPromises.push(
-            win.webContents.executeJavaScript(tbAsyncBoughtScript).catch(() => null)
-          )
-        } else {
-          // 非淘宝平台：从页面/API缓存提取金额
-          extractPromises.push(
-            win.webContents.executeJavaScript(EXTRACT_PAYMENT_AMOUNT).catch(() => null)
-          )
-        }
-
-        // ★ PDD平台不读取渲染进程API缓存：API返回"商城"等通用词
-        // 1688已恢复API缓存（通过标题黑名单过滤"官方仓退货"等无效数据）
-        const skipApiCache = (platform === 'pinduoduo')
-        if (!cachedProductInfo && !skipApiCache) {
+        // 提取支付金额（当前页面仍可提取）；如果无缓存则也尝试从渲染进程API缓存提取商品信息
+        const extractPromises = [
+          win.webContents.executeJavaScript(EXTRACT_PAYMENT_AMOUNT).catch(() => null)
+        ]
+        if (!cachedProductInfo) {
+          // 先尝试从渲染进程的API拦截器缓存中提取（window.__cachedProductInfo）
+          // 如果有，就不需要再从当前页面DOM提取了
           extractPromises.push(
             win.webContents.executeJavaScript('window.__cachedProductInfo ? JSON.stringify(window.__cachedProductInfo) : null')
               .then(result => {
@@ -4198,7 +3896,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                     if (info && (info.title || info.image)) {
                       cachedProductInfo = info
                       console.log(`[PurchaseCapture] 商品信息从渲染进程API缓存获取: title=${(info.title || '').substring(0, 40)}`)
-                      return result
+                      return result  // 返回非null表示已获取
                     }
                   } catch (e) {}
                 }
@@ -4209,34 +3907,64 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }
 
         Promise.all(extractPromises).then(async (results) => {
-            const amountResult = results[0]
-            const rendererCachedStr = results[1]
+            const amount = results[0]
+            const rendererCachedStr = results[1]  // 渲染进程API缓存（可能为undefined/null）
 
-            if (isTaobaoPlatform) {
-              // 淘宝/天猫：解析asyncBought结果
-              if (amountResult) {
+            if (amount && amount > 0) {
+              capturedAmount = amount
+              console.log(`[PurchaseCapture] Payment amount captured: ¥${amount}`)
+            } else {
+              console.log('[PurchaseCapture] No payment amount captured from page/API cache')
+
+              // 淘宝/天猫：参照DL系统，直接调用 asyncBought.htm API 获取支付金额
+              // DL做法：在confirm_order页面提取b2c_orid后，立即POST asyncBought获取actualFee
+              if ((platform === 'taobao' || platform === 'tmall') && platformOrderNo && win && !win.isDestroyed()) {
                 try {
-                  const tbData = JSON.parse(amountResult)
-                  if (tbData.actualFee && tbData.actualFee > 0) {
-                    capturedAmount = tbData.actualFee
-                    console.log(`[PurchaseCapture] 淘宝asyncBought获取支付金额: ¥${capturedAmount}`)
-                  } else {
-                    console.log(`[PurchaseCapture] 淘宝asyncBought未获取到金额: ${amountResult.substring(0, 200)}`)
+                  console.log(`[PurchaseCapture] 淘宝：尝试调用asyncBought API获取支付金额, orderID=${platformOrderNo}`)
+                  const tbAmountScript = `
+                    (function() {
+                      return fetch('https://buyertrade.taobao.com/trade/itemlist/asyncBought.htm?action=itemlist/BoughtQueryAction&event_submit_do_query=1&_input_charset=utf8', {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'buyerNick=&dateBegin=0&dateEnd=0&itemTitle=${encodeURIComponent(platformOrderNo)}&lastStartRow=&logisticsService=&options=0&orderStatus=&pageNum=1&pageSize=15&queryBizType=&queryOrder=desc&rateStatus=&refund=&sellerNick=&auctionTitle=${encodeURIComponent(platformOrderNo)}&prePageNo=1'
+                      }).then(function(r) { return r.text() }).then(function(text) {
+                        try {
+                          var data = JSON.parse(text);
+                          var mainOrders = data.mainOrders;
+                          if (!mainOrders || mainOrders.length === 0) return JSON.stringify({error: 'no_orders'});
+                          var orderItem = mainOrders[0];
+                          var actualFee = orderItem.payInfo && orderItem.payInfo.actualFee;
+                          if (actualFee && parseFloat(actualFee) > 0) {
+                            return JSON.stringify({actualFee: parseFloat(actualFee)});
+                          }
+                          return JSON.stringify({error: 'no_fee', payInfo: JSON.stringify(orderItem.payInfo || {})});
+                        } catch(e) {
+                          return JSON.stringify({error: e.message});
+                        }
+                      }).catch(function(e) {
+                        return JSON.stringify({error: e.message});
+                      });
+                    })()
+                  `
+                  const tbAmountResult = await win.webContents.executeJavaScript(tbAmountScript).catch(() => null)
+                  if (tbAmountResult) {
+                    try {
+                      const tbData = JSON.parse(tbAmountResult)
+                      if (tbData.actualFee && tbData.actualFee > 0) {
+                        capturedAmount = tbData.actualFee
+                        console.log(`[PurchaseCapture] 淘宝asyncBought获取支付金额: ¥${capturedAmount}`)
+                      } else {
+                        console.log(`[PurchaseCapture] 淘宝asyncBought未获取到金额: ${tbAmountResult.substring(0, 200)}`)
+                      }
+                    } catch (e) {
+                      console.log(`[PurchaseCapture] 淘宝asyncBought解析失败: ${e.message}`)
+                    }
                   }
                 } catch (e) {
-                  console.log(`[PurchaseCapture] 淘宝asyncBought解析失败: ${e.message}`)
+                  console.log(`[PurchaseCapture] 淘宝asyncBought调用失败: ${e.message}`)
                 }
               }
-            } else {
-              // 非淘宝平台：EXTRACT_PAYMENT_AMOUNT 直接返回金额数值
-              if (amountResult && amountResult > 0) {
-                capturedAmount = amountResult
-                console.log(`[PurchaseCapture] Payment amount captured: ¥${amountResult}`)
-              }
-            }
-
-            if (!capturedAmount) {
-              console.log('[PurchaseCapture] No payment amount captured')
             }
 
             // 应用商品信息缓存（已有主进程缓存 或 渲染进程API缓存）
@@ -4369,7 +4097,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 console.warn('[PurchaseCapture] PDD订单搜索API调用失败:', e.message)
               }
             } else if (!hasGoodTitle) {
-              // ★ 1688：同样不覆盖goodsName和image，保留销售订单数据
               try {
                 const domResult = await win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO).catch(() => null)
                 if (domResult) {
@@ -4413,9 +4140,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         doBindAndNotify()
       }
 
-      // 淘宝/1688平台不自动关闭窗口（用户需要在支付宝页面完成支付后手动关闭）
-      // 其他平台5秒后自动关闭窗口
-      if (platform !== 'taobao' && platform !== '1688') {
+      // 淘宝/1688不自动关闭窗口（用户需要在支付页面完成支付后手动关闭）
+      // 拼多多5秒后自动关闭窗口
+      if (platform === 'pinduoduo') {
         setTimeout(() => {
           if (win && !win.isDestroyed()) {
             win.destroy()
@@ -4595,22 +4322,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             .catch(() => {})
         }, isProductPage ? 2000 : 1000)  // 商品详情页多等一会儿
 
-        // ★ 1688：商品详情页/结算页均可触发地址设置（与dl一致）
-        // dl在detail.1688.com商品页就通过iframe设置地址，到结算页时地址已就绪
-        // 未登录时修改会失败，用户重新下单即可，后续再优化
-        if (platform === '1688' && (isProductPage || isCheckoutUrl)) {
-          console.log(`[PurchaseCapture] 1688地址触发检查: needAddrSetup=${needAddrSetup}, parsedAddr=${!!parsedAddr}, backgroundAddrWin=${!!backgroundAddrWin}, isProductPage=${isProductPage}, isCheckoutUrl=${isCheckoutUrl}`)
-        }
-        if (needAddrSetup && parsedAddr && !backgroundAddrWin && platform === '1688' && (isProductPage || isCheckoutUrl)) {
-          setTimeout(() => {
-            if (win.isDestroyed() || resolved || backgroundAddrWin) return
-            backgroundAddrWin = startBackgroundAddressSetup({
-              purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
-            })
-            console.log(`[PurchaseCapture] 1688地址设置已直接触发, page=${isProductPage ? 'product' : 'checkout'}`)
-          }, isProductPage ? 2000 : 1000)
-        }
-
         // 二次提取尝试（针对慢加载页面）
         if (isProductPage) {
           setTimeout(() => {
@@ -4630,49 +4341,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               })
               .catch(() => {})
           }, 5000)
-        }
-
-        // ★ 1688结算页二次提取：React SPA（place-order.js）渲染较慢，首次1000ms可能标题未渲染完成
-        if (isCheckoutUrl && platform === '1688') {
-          setTimeout(() => {
-            if (win.isDestroyed() || resolved) return
-            // 已有标题且图片也有，不需要重试
-            if (cachedProductInfo && cachedProductInfo.title && cachedProductInfo.image) return
-            win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
-              .then(result => {
-                if (!result || resolved) return
-                try {
-                  const info = JSON.parse(result)
-                  if (!cachedProductInfo) {
-                    if ((info.title && isValidProductTitle(info.title)) || info.image) {
-                      cachedProductInfo = info
-                      // 同步更新purchaseInfo
-                      if (info.title && isValidProductTitle(info.title)) {
-                        purchaseInfo.goodsName = info.title
-                      }
-                      if (info.image && isValidProductImage(info.image)) {
-                        purchaseInfo.image = info.image
-                      }
-                      console.log(`[PurchaseCapture] 1688结算页二次缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
-                    }
-                  } else {
-                    // 补充缺失的标题
-                    if (!cachedProductInfo.title && info.title && isValidProductTitle(info.title)) {
-                      cachedProductInfo.title = info.title
-                      purchaseInfo.goodsName = info.title
-                      console.log(`[PurchaseCapture] 1688结算页标题补充: title=${info.title.substring(0, 40)}`)
-                    }
-                    // 补充缺失的图片
-                    if (!cachedProductInfo.image && info.image && isValidProductImage(info.image)) {
-                      cachedProductInfo.image = info.image
-                      purchaseInfo.image = info.image
-                      console.log(`[PurchaseCapture] 1688结算页图片补充`)
-                    }
-                  }
-                } catch (e) {}
-              })
-              .catch(() => {})
-          }, 4000)
         }
       }
 
@@ -5037,96 +4705,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         return
       }
 
-      // === 1688：对齐dl系统的albbBuyer()，专属页面检测 ===
-      if (platform === '1688') {
-        const is1688Cashier = urlLower.includes('air.1688.com/app/ctf-page/payment-cashier-pc-air/cashier.html')
-        const is1688TradeFlow = urlLower.includes('trade.1688.com/order/trade_flow.htm')
-        const is1688SmartOrder = urlLower.includes('order.1688.com/order/smart_make_order.htm')
-        const is1688Alipay = urlLower.includes('alipay.com')
-
-        console.log(`[PurchaseCapture] 1688 tryExtractOrderFromPage: url=${url.substring(0, 150)}, cashier=${is1688Cashier}, tradeFlow=${is1688TradeFlow}, smartOrder=${is1688SmartOrder}, alipay=${is1688Alipay}`)
-
-        if (!is1688Cashier && !is1688TradeFlow && !is1688SmartOrder && !is1688Alipay) return
-
-        // 1. 先检查URL参数（新版收银台URL含orderId参数，如cashier.html?orderId=4964251826165741115）
-        const urlOrderNo = extractOrderNoFromUrl(url, platform)
-        if (urlOrderNo) {
-          console.log(`[PurchaseCapture] 1688 order found in URL: ${urlOrderNo}`)
-          onOrderCaptured(urlOrderNo)
-          return
-        }
-
-        // 2. 从页面DOM提取订单号（对齐dl系统的两种DOM提取方式）
-        // 新版收银台: .order-no span
-        // 旧版trade_flow: input[name='initial-state-orderId']
-        const extractWithDelay = (delay) => {
-          setTimeout(() => {
-            if (win.isDestroyed() || resolved) return
-            win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
-              .then(orderNo => {
-                if (orderNo && !resolved) {
-                  console.log(`[PurchaseCapture] 1688 order extracted from page (delay=${delay}): ${orderNo}`)
-                  onOrderCaptured(orderNo)
-                }
-              })
-              .catch(() => {})
-          }, delay)
-        }
-        extractWithDelay(0)
-        extractWithDelay(1000)
-        extractWithDelay(3000)
-
-        // 3. 1688收银台：使用dl专属提取脚本一次性获取订单号+金额+商品（对齐dl1.js 5263-5282行）
-        if (is1688Cashier) {
-          const extractCashier = (delay) => {
-            setTimeout(() => {
-              if (win.isDestroyed() || resolved) return
-              win.webContents.executeJavaScript(ALIBABA_CASHIER_EXTRACT)
-                .then(resultStr => {
-                  if (!resultStr || resolved) return
-                  try {
-                    const r = JSON.parse(resultStr)
-                    // 订单号
-                    if (r.orderId && !resolved) {
-                      console.log(`[PurchaseCapture] 1688 cashier orderId: ${r.orderId}`)
-                      // 先缓存金额和商品信息，再触发绑定
-                      if (r.orderPrice && r.orderPrice > 0 && !capturedAmount) {
-                        capturedAmount = r.orderPrice
-                      }
-                      if (r.goodsName && !cachedProductInfo) {
-                        cachedProductInfo = { title: r.goodsName, image: '', sku: '' }
-                      }
-                      onOrderCaptured(r.orderId)
-                    } else if (!r.orderId) {
-                      console.log(`[PurchaseCapture] 1688 cashier: no orderId yet (delay=${delay})`)
-                    }
-                    // 即使没有订单号，也缓存金额和商品信息
-                    if (!resolved) {
-                      if (r.orderPrice && r.orderPrice > 0 && !capturedAmount) {
-                        capturedAmount = r.orderPrice
-                        console.log(`[PurchaseCapture] 1688 cashier amount cached: ¥${r.orderPrice}`)
-                      }
-                      if (r.goodsName && !cachedProductInfo) {
-                        cachedProductInfo = { title: r.goodsName, image: '', sku: '' }
-                        console.log(`[PurchaseCapture] 1688 cashier goodsName cached: ${r.goodsName.substring(0, 40)}`)
-                      }
-                    }
-                  } catch (e) {
-                    console.warn('[PurchaseCapture] 1688 cashier extract parse error:', e.message)
-                  }
-                })
-                .catch(() => {})
-            }, delay)
-          }
-          // 多次重试（收银台页面可能还在加载）
-          extractCashier(500)
-          extractCashier(2000)
-          extractCashier(4000)
-        }
-        return
-      }
-
-      // === 非淘宝/非拼多多/非1688平台：保持原有逻辑 ===
+      // === 非淘宝/非拼多多平台：保持原有逻辑 ===
       const checkoutPatterns = CHECKOUT_URL_PATTERNS[platform] || []
       const confirmPatterns = ORDER_CONFIRM_PATTERNS[platform] || []
       const isRelevantPage = checkoutPatterns.some(p => urlLower.includes(p.toLowerCase())) ||
@@ -5459,33 +5038,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               }
             } else {
               console.log(`[PurchaseCapture] PDD will-navigate: no captured responses to flush`)
-            }
-          })
-          .catch(() => {})
-      }
-
-      // 1688：页面跳转前刷新已拦截的API响应（对齐dl：1688下单→收银台跳转会销毁JS上下文）
-      if (platform === '1688' && !resolved) {
-        console.log(`[PurchaseCapture] 1688 will-navigate: leaving current page for ${url.substring(0, 120)}, flushing captured responses...`)
-        // 1. 先尝试从当前页面DOM提取订单号（对齐dl：trade_flow页跳转前提取input[name='initial-state-orderId']）
-        win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
-          .then(orderNo => {
-            if (orderNo && !resolved) {
-              console.log(`[PurchaseCapture] 1688 order extracted before navigation: ${orderNo}`)
-              onOrderCaptured(orderNo)
-            }
-          })
-          .catch(() => {})
-        // 2. 刷新API拦截器缓存的响应
-        win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
-          .then(responses => {
-            if (responses && responses.length > 0 && !resolved) {
-              console.log(`[PurchaseCapture] 1688: Flushed ${responses.length} responses before navigation`)
-              const orderNo = detectOrderNo(responses, platform)
-              if (orderNo) {
-                console.log(`[PurchaseCapture] 1688 order found in flushed responses: ${orderNo}`)
-                onOrderCaptured(orderNo)
-              }
             }
           })
           .catch(() => {})

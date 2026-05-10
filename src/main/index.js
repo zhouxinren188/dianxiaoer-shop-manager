@@ -242,31 +242,9 @@ app.whenReady().then(async () => {
     }
   })
 
-  // 仅在版本更新时清除缓存，避免每次启动都清理导致变慢
-  // 旧缓存可能导致页面内容错误，但每次启动清理代价太大（阻塞窗口创建+资源全部重新下载）
+  // 启动前清除缓存，防止旧缓存导致页面内容错误
   try {
-    const fs = require('fs')
-    const versionFlagPath = path.join(app.getPath('userData'), '.cache-version')
-    const currentVersion = app.getVersion()
-    let needClearCache = false
-    try {
-      const lastVersion = fs.readFileSync(versionFlagPath, 'utf8').trim()
-      if (lastVersion !== currentVersion) {
-        needClearCache = true
-        console.log(`[Main] 版本变更 ${lastVersion} → ${currentVersion}，需要清理缓存`)
-      }
-    } catch (e) {
-      // 版本标记文件不存在，首次启动或重装，清理缓存
-      needClearCache = true
-      console.log('[Main] 未找到版本标记，清理缓存')
-    }
-    if (needClearCache) {
-      await session.defaultSession.clearCache()
-      fs.writeFileSync(versionFlagPath, currentVersion, 'utf8')
-      console.log('[Main] 缓存已清理，版本标记已更新')
-    } else {
-      console.log('[Main] 版本未变更，跳过缓存清理')
-    }
+    await session.defaultSession.clearCache()
   } catch (e) {
     // 忽略清理失败
   }
