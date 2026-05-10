@@ -279,57 +279,141 @@ const PURCHASE_INTERCEPTOR = `
   }
 
   // 实时从API响应中提取商品信息并缓存（关键！订单号捕获时页面可能已跳转到支付宝）
-  // ★ PDD页面跳过此函数：PDD的API响应（如faas-leo）会返回"商城"等错误数据
-  //   PDD商品信息改由结算页DOM提取 + 订单搜索API获取
+  // ★★★ 深度平台隔离：1688 / 淘宝 / PDD 完全独立代码路径 ★★★
   function cacheProductInfoFromBody(body, url) {
-    if (!body || body.length < 50 || window.__cachedProductInfo) return;
-    // ★ PDD页面跳过：yangkeduo/pinduoduo域名的API响应不含可靠商品信息
+    if (!body || body.length < 50) return;
+    var _is1688Url = url && url.indexOf('1688.com') >= 0;
+    var _isTaobaoUrl = url && (url.indexOf('taobao.com') >= 0 || url.indexOf('tmall.com') >= 0);
+    // PDD：直接跳过，PDD的API响应不含可靠商品信息，由订单搜索API提供
     if (url && (url.indexOf('yangkeduo') >= 0 || url.indexOf('pinduoduo') >= 0)) return;
     try {
       var json = JSON.parse(body);
-      // 淘宝/天猫订单确认/提交接口
-      var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items || json.data.cartItems);
-      if (items && items.length > 0) {
-        var item = items[0];
-        var title = item.title || item.itemTitle || item.productName || '';
-        // ★ 淘宝API：pic/picPath是商品主图，规格图在skuPicUrl等字段
-        // 如果没有SKU图字段，不缓存主图——让DOM提取获取正确的规格图
-        var is1688Api = url && url.indexOf('1688.com') >= 0;
-        var isTaobaoApi = !is1688Api && url && (url.indexOf('taobao.com') >= 0 || url.indexOf('tmall.com') >= 0);
-        var image;
-        if (isTaobaoApi) {
-          // 淘宝：只取SKU图，不回退到pic（商品主图），让DOM提取获取结算页规格图
-          image = item.skuPicUrl || item.skuPic || '';
-        } else {
-          // 1688/其他平台：完整图片字段链
-          image = item.skuPicUrl || item.skuPic || item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+
+      // ═══════════════════════════════════════════════════════════
+      // ═══ 1688 分支：弱缓存 + 退货过滤 + productName字段 ═══
+      // ═══════════════════════════════════════════════════════════
+      if (_is1688Url) {
+        // 1688弱缓存：允许后续API补充缺失的title/image
+        var _isWeak1688 = window.__cachedProductInfo && (!window.__cachedProductInfo.title || !window.__cachedProductInfo.image);
+        if (window.__cachedProductInfo && !_isWeak1688) return;
+
+        // 1688订单确认/提交接口：items提取
+        var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items || json.data.cartItems);
+        if (items && items.length > 0) {
+          // 遍历items找到标题有效的商品（跳过"官方仓退货"等无效标题）
+          var selectedItem = items[0];
+          if (items.length > 1) {
+            for (var ii = 0; ii < items.length; ii++) {
+              var itTitle = items[ii].title || items[ii].itemTitle || items[ii].productName || '';
+              if (itTitle && !/退货|退款|售后|换货|维权/.test(itTitle)) {
+                selectedItem = items[ii];
+                break;
+              }
+            }
+          }
+          var title = selectedItem.title || selectedItem.itemTitle || selectedItem.productName || '';
+          // 1688：完整图片字段链（与淘宝不同，1688不需要区分SKU图和主图）
+          var image = selectedItem.skuPicUrl || selectedItem.skuPic || selectedItem.pic || selectedItem.picPath || selectedItem.itemPic || selectedItem.productImage || selectedItem.imageUrl || '';
+          var sku = selectedItem.skuText || selectedItem.skuInfo || selectedItem.specValues || '';
+          // 1688退货标题过滤：退货/售后等无效标题不缓存，但保留image触发地址设置
+          if (title && /退货|退款|售后|换货|维权/.test(title)) {
+            console.log('[PurchaseCapture] 1688 API标题无效，跳过: ' + title);
+            title = '';
+          }
+          // 1688弱缓存覆盖：补充缺失的title或image，保留已有字段
+          if (_isWeak1688 && window.__cachedProductInfo) {
+            var _newTitle = title || window.__cachedProductInfo.title || '';
+            var _newImage = image || window.__cachedProductInfo.image || '';
+            var _newSku = sku || window.__cachedProductInfo.sku || '';
+            if (_newTitle !== (window.__cachedProductInfo.title || '') || _newImage !== (window.__cachedProductInfo.image || '')) {
+              window.__cachedProductInfo = { title: _newTitle, image: _newImage, sku: _newSku };
+              console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+            }
+          } else if (title || image) {
+            window.__cachedProductInfo = { title: title, image: image, sku: sku };
+            console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+          }
         }
-        var sku = item.skuText || item.skuInfo || item.specValues || '';
-        // ★ 1688标题过滤：退货/售后等无效标题不缓存（如"官方仓退货"），但保留image触发地址设置
-        if (is1688Api && title && /退货|退款|售后|换货|维权/.test(title)) {
-          console.log('[PurchaseCapture] 1688 API标题无效，跳过: ' + title);
-          title = '';
+        // 1688 product字段（弱缓存兼容）
+        var _has1688Cache2 = !!window.__cachedProductInfo;
+        var _isWeak1688_2 = window.__cachedProductInfo && (!window.__cachedProductInfo.title || !window.__cachedProductInfo.image);
+        if ((!_has1688Cache2 || _isWeak1688_2) && json.data && json.data.product) {
+          var p = json.data.product;
+          var pTitle = p.subject || p.title || '';
+          var pImage = p.imageUrl || p.picUrl || '';
+          if (pTitle && /退货|退款|售后|换货|维权/.test(pTitle)) {
+            console.log('[PurchaseCapture] 1688 API标题无效(product)，跳过: ' + pTitle);
+            pTitle = '';
+          }
+          if (_isWeak1688_2) {
+            var _newPTitle = pTitle || window.__cachedProductInfo.title || '';
+            var _newPImage = pImage || window.__cachedProductInfo.image || '';
+            if (_newPTitle !== (window.__cachedProductInfo.title || '') || _newPImage !== (window.__cachedProductInfo.image || '')) {
+              window.__cachedProductInfo = { title: _newPTitle, image: _newPImage, sku: window.__cachedProductInfo.sku || '' };
+              console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+            }
+          } else if (pTitle || pImage) {
+            window.__cachedProductInfo = { title: pTitle, image: pImage, sku: '' };
+            console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+          }
         }
-        if (title || image) {
-          window.__cachedProductInfo = { title: title, image: image, sku: sku };
-          console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+        // 1688收银台API：productName + imageUrl字段（弱缓存兼容）
+        var _has1688Cache3 = !!window.__cachedProductInfo;
+        var _isWeak1688_3 = window.__cachedProductInfo && (!window.__cachedProductInfo.title || !window.__cachedProductInfo.image);
+        if ((!_has1688Cache3 || _isWeak1688_3) && json.data && json.data.productName) {
+          var pnTitle = json.data.productName || '';
+          var pnImage = json.data.imageUrl || json.data.productImage || json.data.productImageUrl || json.data.picUrl || '';
+          if (pnTitle && /退货|退款|售后|换货|维权/.test(pnTitle)) {
+            console.log('[PurchaseCapture] 1688 API标题无效(productName)，跳过: ' + pnTitle);
+            pnTitle = '';
+          }
+          if (_isWeak1688_3) {
+            var _newPnTitle = pnTitle || window.__cachedProductInfo.title || '';
+            var _newPnImage = pnImage || window.__cachedProductInfo.image || '';
+            if (_newPnTitle !== (window.__cachedProductInfo.title || '') || _newPnImage !== (window.__cachedProductInfo.image || '')) {
+              window.__cachedProductInfo = { title: _newPnTitle, image: _newPnImage, sku: window.__cachedProductInfo.sku || '' };
+              console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+            }
+          } else if (pnTitle || pnImage) {
+            window.__cachedProductInfo = { title: pnTitle, image: pnImage, sku: '' };
+            console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+          }
         }
       }
-      // 1688订单接口
-      if (!window.__cachedProductInfo && json.data && json.data.product) {
-        var p = json.data.product;
-        var pTitle = p.subject || p.title || '';
-        var pImage = p.imageUrl || p.picUrl || '';
-        var is1688Api2 = url && url.indexOf('1688.com') >= 0;
-        if (is1688Api2 && pTitle && /退货|退款|售后|换货|维权/.test(pTitle)) {
-          console.log('[PurchaseCapture] 1688 API标题无效(product)，跳过: ' + pTitle);
-          pTitle = '';
+      // ═══════════════════════════════════════════════════════════
+      // ═══ 淘宝/天猫 分支：只取SKU图，无弱缓存，无退货过滤 ═══
+      // ═══════════════════════════════════════════════════════════
+      else if (_isTaobaoUrl) {
+        // 淘宝无弱缓存：已有缓存直接返回
+        if (window.__cachedProductInfo) return;
+
+        // 淘宝订单确认/提交接口：items提取
+        var tbItems = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items || json.data.cartItems);
+        if (tbItems && tbItems.length > 0) {
+          var tbItem = tbItems[0];
+          var tbTitle = tbItem.title || tbItem.itemTitle || '';
+          // ★ 淘宝核心规则：只取SKU图字段，不回退到pic（商品主图）
+          //   让DOM提取获取结算页规格图，避免缓存错误主图
+          var tbImage = tbItem.skuPicUrl || tbItem.skuPic || '';
+          var tbSku = tbItem.skuText || tbItem.skuInfo || tbItem.specValues || '';
+          if (tbTitle || tbImage) {
+            window.__cachedProductInfo = { title: tbTitle, image: tbImage, sku: tbSku };
+            console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+          }
         }
-        if (pTitle || pImage) {
-          window.__cachedProductInfo = { title: pTitle, image: pImage, sku: '' };
-          console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+        // 淘宝 product字段
+        if (!window.__cachedProductInfo && json.data && json.data.product) {
+          var tbP = json.data.product;
+          var tbPTitle = tbP.subject || tbP.title || '';
+          // ★ 淘宝核心规则延伸：product字段的imageUrl/picUrl也是商品主图，不缓存
+          //   只缓存title，让DOM提取获取结算页规格图，避免主图阻止SKU图提取
+          if (tbPTitle) {
+            window.__cachedProductInfo = { title: tbPTitle, image: '', sku: '' };
+            console.log('[PURCHASE_PRODUCT_CACHED]' + JSON.stringify(window.__cachedProductInfo));
+          }
         }
       }
+      // 其他域名：不做处理
     } catch(e) {}
   }
 
@@ -347,14 +431,6 @@ const PURCHASE_INTERCEPTOR = `
               body: body.substring(0, 100000),
               time: Date.now()
             });
-            // PDD域名响应日志：搞清楚PDD实际API路径
-            if (urlStr.indexOf('yangkeduo') >= 0 || urlStr.indexOf('pinduoduo') >= 0) {
-              console.log('[PDD_API_CAPTURED]fetch ' + urlStr.substring(0, 150) + ' bodyLen=' + body.length);
-              // ★ PDD订单相关API：打印响应体前500字符，确认order_sn和商品信息
-              if (urlStr.indexOf('/proxy/api/order') >= 0 || urlStr.indexOf('order/prepay') >= 0) {
-                console.log('[PDD_ORDER_API]fetch ' + urlStr.substring(0, 100) + ' body=' + body.substring(0, 500));
-              }
-            }
             // 实时检测订单号（关键！不等轮询，传入URL用于1688匹配）
             checkForOrderNo(body, urlStr);
             // 实时缓存商品信息（传入URL，PDD页面跳过）
@@ -384,14 +460,6 @@ const PURCHASE_INTERCEPTOR = `
             body: resp.substring(0, 100000),
             time: Date.now()
           });
-          // PDD域名响应日志：搞清楚PDD实际API路径
-          if (xhr.__capUrl && (xhr.__capUrl.indexOf('yangkeduo') >= 0 || xhr.__capUrl.indexOf('pinduoduo') >= 0)) {
-            console.log('[PDD_API_CAPTURED]xhr ' + xhr.__capUrl.substring(0, 150) + ' bodyLen=' + resp.length);
-            // ★ PDD订单相关API：打印完整响应体，确认order_sn和商品信息字段
-            if (xhr.__capUrl.indexOf('/proxy/api/order') >= 0 || xhr.__capUrl.indexOf('order/prepay') >= 0) {
-              console.log('[PDD_ORDER_API] ' + xhr.__capUrl.substring(0, 100) + ' body=' + resp);
-            }
-          }
           // 实时检测订单号（关键！不等轮询，传入URL用于1688匹配）
           checkForOrderNo(resp, xhr.__capUrl);
           // 实时缓存商品信息（传入URL，PDD页面跳过）
@@ -1133,6 +1201,7 @@ function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
                 console.log('[AddressAutoFill] Clicking submit button (2nd confirm/save)');
                 submitBtn.click();
                 window.__addrDialogResult = 'submitted';
+                console.log('[AddressAutoFill] 1688_DIALOG_SUBMITTED');
               } else {
                 // 按钮还没出现，等1秒重试
                 console.log('[AddressAutoFill] Submit button not found yet, retrying in 1s...');
@@ -1153,6 +1222,7 @@ function build1688AddressDialogScript(receiverName, receiverPhone, parsedAddr) {
                     console.log('[AddressAutoFill] Clicking submit button (2nd confirm, retry)');
                     retryBtn.click();
                     window.__addrDialogResult = 'submitted';
+                    console.log('[AddressAutoFill] 1688_DIALOG_SUBMITTED');
                   } else {
                     console.log('[AddressAutoFill] Submit button still not found after retry');
                   }
@@ -2690,130 +2760,270 @@ const EXTRACT_PAYMENT_AMOUNT = `
 // 从采购页面提取实际商品信息的注入脚本（商品名、图片、SKU规格）
 const EXTRACT_PURCHASE_PRODUCT_INFO = `
 (function() {
-  var title = '', image = '', sku = '';
+  var title = '', image = '', sku = '', quantity = '';
   var url = window.location.href;
+  var is1688Page = url.indexOf('1688.com') >= 0;
+  var isTaobaoPage = url.indexOf('taobao.com') >= 0 || url.indexOf('tmall.com') >= 0;
+  var isPddCheckout = url.indexOf('order_checkout') >= 0;
 
   console.log('[PurchaseCapture] Extracting product info from: ' + url.substring(0, 120));
 
-  // === 1. 从已拦截的API响应中提取（最可靠，订单确认/提交接口通常包含商品信息） ===
-  if (window.__capturedPurchaseResponses) {
-    for (var i = window.__capturedPurchaseResponses.length - 1; i >= 0; i--) {
-      var resp = window.__capturedPurchaseResponses[i];
-      try {
-        var json = JSON.parse(resp.body);
-        // 淘宝/天猫订单接口中的商品信息
-        var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items);
-        if (items && items.length > 0) {
-          var item = items[0];
-          if (!title) title = item.title || item.itemTitle || item.productName || '';
-          // ★ 淘宝API：pic是商品主图，只取SKU图字段，让DOM提取获取正确的规格图
-          var isTbApi = resp.url && (resp.url.indexOf('taobao.com') >= 0 || resp.url.indexOf('tmall.com') >= 0);
-          var is1688Resp = resp.url && resp.url.indexOf('1688.com') >= 0;
-          if (!image) {
-            if (isTbApi && !is1688Resp) {
-              image = item.skuPicUrl || item.skuPic || '';
-            } else {
-              image = item.skuPicUrl || item.skuPic || item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
-            }
+  // ═══════════════════════════════════════════════════════════
+  // ═══ 1688 提取分支 ═══
+  // ═══════════════════════════════════════════════════════════
+  if (is1688Page) {
+    // 1. 从已拦截的API响应中提取（只处理1688的响应）
+    if (window.__capturedPurchaseResponses) {
+      for (var i = window.__capturedPurchaseResponses.length - 1; i >= 0; i--) {
+        var resp = window.__capturedPurchaseResponses[i];
+        if (resp.url && resp.url.indexOf('1688.com') < 0) continue;
+        try {
+          var json = JSON.parse(resp.body);
+          var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items || json.data.cartItems);
+          if (items && items.length > 0) {
+            var item = items[0];
+            if (!title) title = item.title || item.itemTitle || item.productName || '';
+            if (!image) image = item.skuPicUrl || item.skuPic || item.pic || item.picPath || item.itemPic || item.productImage || item.imageUrl || '';
+            if (!sku) sku = item.skuText || item.skuInfo || item.specValues || '';
+            if (title) break;
           }
-          if (!sku) sku = item.skuText || item.skuInfo || item.specValues || '';
-          if (title) break;
-        }
-        // 1688订单接口
-        if (json.data && json.data.product) {
-          var p = json.data.product;
-          if (!title) title = p.subject || p.title || '';
-          if (!image) image = p.imageUrl || p.picUrl || '';
+          if (json.data && json.data.product) {
+            var p = json.data.product;
+            if (!title) title = p.subject || p.title || '';
+            if (!image) image = p.imageUrl || p.picUrl || '';
+          }
+        } catch(e) {}
+      }
+    }
+    // 2. 退货标题过滤：清空以允许后续提取
+    if (title && /退货|退款|售后|换货|维权/.test(title)) {
+      console.log('[PurchaseCapture] 1688标题无效(退货), 清空以允许后续提取: ' + title);
+      title = '';
+    }
+    // 3. og:title / og:image
+    if (!title) {
+      var ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle) title = (ogTitle.getAttribute('content') || '').substring(0, 200);
+      // og:title也可能是退货标题，再次过滤
+      if (title && /退货|退款|售后|换货|维权/.test(title)) {
+        console.log('[PurchaseCapture] 1688 og:title退货, 清空: ' + title);
+        title = '';
+      }
+    }
+    if (!image) {
+      var ogImage = document.querySelector('meta[property="og:image"]');
+      if (ogImage) image = ogImage.getAttribute('content') || '';
+    }
+    // 4. document.title（最可靠，1688格式为"商品标题 - 阿里巴巴"）
+    if (!title) {
+      var docTitle = (document.title || '').trim();
+      var dashIdx = docTitle.indexOf(' - 阿里巴巴');
+      if (dashIdx > 0) {
+        title = docTitle.substring(0, dashIdx).trim();
+      }
+    }
+    // 5. DOM选择器备选
+    if (!title) {
+      var title1688 = document.querySelector('.d-title')
+                   || document.querySelector('[class*="subject-desc"]')
+                   || document.querySelector('[class*="offer-title"]')
+                   || document.querySelector('h1[class*="title"]')
+                   || document.querySelector('[class*="Title"] span')
+                   || document.querySelector('.title-content');
+      if (title1688) title = (title1688.textContent || '').trim().substring(0, 200);
+    }
+    // 6. window.context SSR数据（1688商品页内嵌的完整商品数据）
+    if (!title && window.context && window.context.result && window.context.result.data) {
+      try {
+        var ctxData = window.context.result.data;
+        var subjectEl = ctxData.subject || (ctxData.gallery && ctxData.gallery.fields && ctxData.gallery.fields.subject);
+        if (subjectEl && typeof subjectEl === 'string') title = subjectEl.trim();
+      } catch(e) {}
+    }
+    if (!image && window.context && window.context.result && window.context.result.data) {
+      try {
+        var ctxData2 = window.context.result.data;
+        var gallery = ctxData2.gallery && ctxData2.gallery.fields;
+        if (gallery && gallery.mainImage && gallery.mainImage.length > 0) {
+          image = gallery.mainImage[0];
+          if (image && !image.startsWith('http')) image = 'https:' + image;
         }
       } catch(e) {}
     }
-  }
-
-  // === 2. 从页面DOM提取（商品详情页/确认页通用） ===
-  if (!title) {
-    // og:title meta标签（大多数电商页面都有）
-    var ogTitle = document.querySelector('meta[property="og:title"]');
-    if (ogTitle) title = (ogTitle.getAttribute('content') || '').substring(0, 200);
-  }
-  if (!image) {
-    var ogImage = document.querySelector('meta[property="og:image"]');
-    if (ogImage) image = ogImage.getAttribute('content') || '';
-  }
-
-  // 淘宝/天猫商品详情页
-  if (!title) {
-    var el = document.querySelector('.ItemHeader--mainTitle')
-          || document.querySelector('[class*="Title--mainTitle"]')
-          || document.querySelector('[class*="title--mainText"]')
-          || document.querySelector('h1[class*="title"]');
-    if (el) title = (el.textContent || '').trim().substring(0, 200);
-  }
-  if (!image) {
-    var img = document.querySelector('.MainPic--mainPic img')
-          || document.querySelector('[class*="MainPic"] img')
-          || document.querySelector('[class*="mainPic"] img');
-    if (img) image = img.src || img.dataset.src || '';
-  }
-  if (!sku) {
-    var skuEl = document.querySelector('.ItemHeader--skuText')
-            || document.querySelector('[class*="skuText"]');
-    if (skuEl) sku = (skuEl.textContent || '').trim().substring(0, 200);
-  }
-
-  // 淘宝/天猫订单确认页（buy.taobao.com）
-  if (!title) {
-    var checkoutTitle = document.querySelector('[class*="item-title"]')
-                     || document.querySelector('[class*="itemTitle"]')
-                     || document.querySelector('.order-biz-item .title');
-    if (checkoutTitle) title = (checkoutTitle.textContent || '').trim().substring(0, 200);
-  }
-  if (!image) {
-    var checkoutImg = document.querySelector('[class*="item-pic"] img')
-                   || document.querySelector('[class*="itemPic"] img')
-                   || document.querySelector('.order-biz-item img');
-    if (checkoutImg) image = checkoutImg.src || checkoutImg.dataset.src || '';
-  }
-
-  // 1688商品详情页
-  if (!title) {
-    var title1688 = document.querySelector('.d-title')
-                 || document.querySelector('[class*="subject-desc"]');
-    if (title1688) title = (title1688.textContent || '').trim().substring(0, 200);
-  }
-  if (!image) {
-    var img1688 = document.querySelector('.horizontal-view img')
-               || document.querySelector('[class*="slider"] img')
-               || document.querySelector('.obj-fluid img');
-    if (img1688) image = img1688.src || img1688.dataset.src || '';
-  }
-
-  // 拼多多结算页（order_checkout.html，oc-前缀的DOM类名）
-  var isPddCheckout = window.location.href.indexOf('order_checkout') >= 0;
-  if (!title && isPddCheckout) {
-    // 诊断：输出#main下直接子元素的class，帮助定位选择器
-    var mainEl = document.querySelector('#main');
-    if (mainEl) {
-      var childClasses = [];
-      var children = mainEl.querySelectorAll(':scope > div > div');
-      for (var ci = 0; ci < Math.min(children.length, 10); ci++) {
-        childClasses.push(children[ci].className ? children[ci].className.substring(0, 60) : '(no-class)');
-      }
-      console.log('[PurchaseCapture] PDD结算页DOM诊断: children=' + childClasses.join(' | '));
+    if (!image) {
+      var img1688 = document.querySelector('.horizontal-view img')
+                 || document.querySelector('[class*="slider"] img')
+                 || document.querySelector('.obj-fluid img')
+                 || document.querySelector('[class*="main-image"] img')
+                 || document.querySelector('[class*="offer-detail"] img');
+      if (img1688) image = img1688.src || img1688.dataset.src || '';
     }
-    // 标题选择器
+    // 7. 1688收银台页面
+    var is1688Cashier = url.indexOf('trade.1688.com') >= 0 || url.indexOf('order.1688.com') >= 0;
+    if (is1688Cashier) {
+      if (!title) {
+        var cashierTitle = document.querySelector('[class*="order-item"] [class*="title"]')
+                        || document.querySelector('[class*="orderItem"] [class*="title"]')
+                        || document.querySelector('[class*="item-info"] [class*="name"]')
+                        || document.querySelector('[class*="product-info"] [class*="name"]')
+                        || document.querySelector('.order-item-title')
+                        || document.querySelector('.item-title');
+        if (cashierTitle) title = (cashierTitle.textContent || '').trim().substring(0, 200);
+      }
+      if (!image) {
+        var cashierImg = document.querySelector('[class*="order-item"] img')
+                      || document.querySelector('[class*="orderItem"] img')
+                      || document.querySelector('[class*="item-info"] img')
+                      || document.querySelector('[class*="product-info"] img')
+                      || document.querySelector('.item-img img');
+        if (cashierImg) image = cashierImg.src || cashierImg.dataset.src || '';
+      }
+    }
+    // 8. 1688最终退货标题过滤
+    if (title && /退货|退款|售后|换货|维权/.test(title)) {
+      console.log('[PurchaseCapture] 1688最终过滤：退货标题已清空: ' + title);
+      title = '';
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ═══ 淘宝/天猫 提取分支 ═══
+  // ═══════════════════════════════════════════════════════════
+  else if (isTaobaoPage) {
+    // ★ 判断是否为结算页（结算页优先提取SKU图，而非og:image主图）
+    var isTbCheckout = url.indexOf('buy.taobao.com') >= 0 || url.indexOf('buy.tmall.com') >= 0
+                   || url.indexOf('buyertrade.taobao.com') >= 0;
+
+    // 1. 从已拦截的API响应中提取（只处理淘宝/天猫的响应）
+    if (window.__capturedPurchaseResponses) {
+      for (var i = window.__capturedPurchaseResponses.length - 1; i >= 0; i--) {
+        var resp = window.__capturedPurchaseResponses[i];
+        if (resp.url && resp.url.indexOf('1688.com') >= 0) continue;
+        try {
+          var json = JSON.parse(resp.body);
+          var items = json.data && (json.data.orderDatas || json.data.cartInfo || json.data.itemList || json.data.items);
+          if (items && items.length > 0) {
+            var item = items[0];
+            if (!title) title = item.title || item.itemTitle || '';
+            // ★ 淘宝核心规则：只取SKU图字段，不回退到pic（商品主图）
+            if (!image) image = item.skuPicUrl || item.skuPic || '';
+            if (!sku) sku = item.skuText || item.skuInfo || item.specValues || '';
+            if (title) break;
+          }
+        } catch(e) {}
+      }
+    }
+    // ★ 2. 结算页：优先提取结算页专用选择器（SKU规格图），再回退到og:image
+    //    原因：og:image是商品主图（大图），结算页选择器能获取SKU规格图
+    if (isTbCheckout) {
+      if (!title) {
+        var checkoutTitle = document.querySelector('[class*="item-title"]')
+                         || document.querySelector('[class*="itemTitle"]')
+                         || document.querySelector('.order-biz-item .title');
+        if (checkoutTitle) title = (checkoutTitle.textContent || '').trim().substring(0, 200);
+      }
+      if (!image) {
+        // ★ 结算页SKU图选择器（按优先级排列，越具体越靠前）
+        var checkoutImg = document.querySelector('[class*="item-pic"] img')
+                       || document.querySelector('[class*="itemPic"] img')
+                       || document.querySelector('.order-biz-item img')
+                       || document.querySelector('[class*="orderItem"] img')
+                       || document.querySelector('[class*="order-item"] img')
+                       || document.querySelector('[class*="itemInfo"] img')
+                       || document.querySelector('[class*="item-info"] img')
+                       || document.querySelector('[class*="product-img"] img')
+                       || document.querySelector('[class*="productImg"] img');
+        if (checkoutImg) {
+          image = checkoutImg.src || checkoutImg.dataset.src || '';
+          console.log('[PurchaseCapture] 结算页SKU图提取: selector匹配, image=' + (image ? image.substring(0, 80) : 'EMPTY'));
+        } else {
+          // ★ 兜底：在订单区域查找第一个alicdn商品图（排除gif图标）
+          var allImgs = document.querySelectorAll('img');
+          for (var ii = 0; ii < allImgs.length; ii++) {
+            var src = allImgs[ii].src || allImgs[ii].dataset.src || '';
+            if (src && src.indexOf('alicdn.com') >= 0 && src.indexOf('.gif') < 0 && src.indexOf('icon') < 0) {
+              image = src;
+              console.log('[PurchaseCapture] 结算页兜底图片提取: img扫描, image=' + image.substring(0, 80));
+              break;
+            }
+          }
+          if (!image) {
+            console.log('[PurchaseCapture] 结算页SKU图未找到，将回退到og:image主图');
+          }
+        }
+      }
+      if (!sku) {
+        var checkoutSku = document.querySelector('[class*="sku-text"]')
+                       || document.querySelector('[class*="skuText"]')
+                       || document.querySelector('[class*="spec-text"]')
+                       || document.querySelector('[class*="specText"]');
+        if (checkoutSku) sku = (checkoutSku.textContent || '').trim().substring(0, 200);
+      }
+    }
+    // 3. og:title / og:image（结算页的SKU图已提取时不会覆盖）
+    if (!title) {
+      var ogTitle = document.querySelector('meta[property="og:title"]');
+      if (ogTitle) title = (ogTitle.getAttribute('content') || '').substring(0, 200);
+    }
+    if (!image) {
+      var ogImage = document.querySelector('meta[property="og:image"]');
+      if (ogImage) image = ogImage.getAttribute('content') || '';
+    }
+    // 4. 淘宝/天猫商品详情页DOM选择器
+    if (!title) {
+      var el = document.querySelector('.ItemHeader--mainTitle')
+            || document.querySelector('[class*="Title--mainTitle"]')
+            || document.querySelector('[class*="title--mainText"]')
+            || document.querySelector('h1[class*="title"]');
+      if (el) title = (el.textContent || '').trim().substring(0, 200);
+    }
+    if (!image) {
+      var img = document.querySelector('.MainPic--mainPic img')
+            || document.querySelector('[class*="MainPic"] img')
+            || document.querySelector('[class*="mainPic"] img');
+      if (img) image = img.src || img.dataset.src || '';
+    }
+    if (!sku) {
+      var skuEl = document.querySelector('.ItemHeader--skuText')
+              || document.querySelector('[class*="skuText"]');
+      if (skuEl) sku = (skuEl.textContent || '').trim().substring(0, 200);
+    }
+    // 5. 非结算页的订单确认页兜底
+    if (!isTbCheckout) {
+      if (!title) {
+        var checkoutTitle2 = document.querySelector('[class*="item-title"]')
+                          || document.querySelector('[class*="itemTitle"]')
+                          || document.querySelector('.order-biz-item .title');
+        if (checkoutTitle2) title = (checkoutTitle2.textContent || '').trim().substring(0, 200);
+      }
+      if (!image) {
+        var checkoutImg2 = document.querySelector('[class*="item-pic"] img')
+                        || document.querySelector('[class*="itemPic"] img')
+                        || document.querySelector('.order-biz-item img');
+        if (checkoutImg2) image = checkoutImg2.src || checkoutImg2.dataset.src || '';
+      }
+    }
+    // 5. 淘宝通用兜底：页面标题
+    if (!title) {
+      title = (document.title || '').replace(/[-_|].*$/, '').trim().substring(0, 200);
+    }
+    // 过滤掉淘宝的"淘宝网 - "前缀
+    if (title) title = title.replace(/^(淘宝网|天猫)[\\-_\s]*[-_]*\s*/, '');
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // ═══ 拼多多 提取分支 ═══
+  // ═══════════════════════════════════════════════════════════
+  else if (isPddCheckout) {
+    var mainEl = document.querySelector('#main');
+    // PDD结算页标题
     var titlePdd = document.querySelector('[class*="oc-goods"] [class*="name"]')
                 || document.querySelector('[class*="oc-item"] [class*="name"]')
                 || document.querySelector('[class*="goods-name"]')
                 || document.querySelector('[class*="productName"]')
                 || document.querySelector('[class*="goodsName"]');
     if (titlePdd) title = (titlePdd.textContent || '').trim().substring(0, 200);
-    // 诊断：输出goods区域的所有文本
-    var goodsArea = document.querySelector('[class*="oc-goods"]') || document.querySelector('[class*="oc-item"]');
-    if (goodsArea && !title) {
-      console.log('[PurchaseCapture] PDD结算页goods区文本: ' + (goodsArea.innerText || '').substring(0, 200));
-    }
-  }
-  if (!image && isPddCheckout) {
+    // PDD结算页图片
     var imgPdd = document.querySelector('[class*="oc-goods"] img')
               || document.querySelector('[class*="oc-item"] img')
               || document.querySelector('[class*="goods-img"] img')
@@ -2830,10 +3040,7 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
         }
       }
     }
-  }
-  // PDD结算页数量提取
-  var quantity = '';
-  if (isPddCheckout) {
+    // PDD结算页数量提取
     var qtyEl = document.querySelector('[class*="oc-goods"] [class*="num"]')
              || document.querySelector('[class*="oc-goods"] [class*="count"]')
              || document.querySelector('[class*="oc-item"] [class*="num"]')
@@ -2842,17 +3049,15 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
              || document.querySelector('[class*="goodsNumber"]');
     if (qtyEl) quantity = (qtyEl.textContent || '').trim().replace(/[^0-9]/g, '');
     if (!quantity && goodsArea) {
-      // 尝试从goods区域文本中提取 x2、×3 等数量模式
       var goodsText = goodsArea.innerText || '';
-      var qtyMatch = goodsText.match(/[x×X]\s*(\d+)/);
+      var qtyMatch = goodsText.match(/[x×X]\\s*(\\d+)/);
       if (qtyMatch) quantity = qtyMatch[1];
     }
   }
 
-  // 通用兜底：页面标题
-  if (!title) {
-    title = (document.title || '').replace(/[-_|].*$/, '').trim().substring(0, 200);
-  }
+  // ═══════════════════════════════════════════════════════════
+  // ═══ 通用验证（所有平台共享） ═══
+  // ═══════════════════════════════════════════════════════════
 
   // 验证标题：拒绝明显来自非商品页的标题（登录页、支付页等）
   if (title) {
@@ -2862,9 +3067,6 @@ const EXTRACT_PURCHASE_PRODUCT_INFO = `
       title = '';
     }
   }
-
-  // 过滤掉淘宝的"淘宝网 - "前缀
-  if (title) title = title.replace(/^(淘宝网|天猫|1688|拼多多)[\-_\s]*[-_]*\s*/, '');
 
   // 过滤过小的图片（图标等）
   if (image && image.match(/[\\?&]size=(\\d+)/)) {
@@ -3332,14 +3534,50 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   }, 120000)
 
-  // 转发后台窗口的console.log
+  // 转发后台窗口的console.log + 检测地址操作成功信号
   addrWin.webContents.on('console-message', (event, level, message) => {
     if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]')) {
       console.log(`[AddrSetupWin] ${message}`)
     }
+    // ★ 检测地址操作成功信号（三种途径，任一触发即可）：
+    //   1. "Address added successfully" — DOMNodeInserted检测到新地址行
+    //   2. "1688_DIALOG_SUBMITTED" — 对话框提交按钮已点击（iframe轮询可能因iframe销毁失败）
+    //   3. "DIALOG_SAVE_SUCCESS" — 对话框保存成功回调
+    if (!addrDone && (message.includes('Address added successfully') || message.includes('1688_DIALOG_SUBMITTED') || message.includes('DIALOG_SAVE_SUCCESS'))) {
+      console.log('[AddrSetupWin] Address success detected via console-message: ' + message.substring(0, 80))
+      addrDone = true
+      clearTimeout(maxLifetime)
+      // 通知前端：地址设置完成
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
+      }
+      // ★ 在采购小窗中显示绿色居中提示（与result轮询一致）
+      if (purchaseWin && !purchaseWin.isDestroyed()) {
+        purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
+        // 延迟2秒后刷新结算页地址
+        setTimeout(() => {
+          if (purchaseWin.isDestroyed()) return
+          const purchaseUrl = purchaseWin.webContents.getURL().toLowerCase()
+          const isCheckout = purchaseUrl.includes('buy.taobao.com') ||
+                             purchaseUrl.includes('buy.tmall.com') ||
+                             purchaseUrl.includes('order.1688.com') ||
+                             purchaseUrl.includes('trade.1688.com')
+          if (isCheckout) {
+            purchaseWin.webContents.executeJavaScript(buildAddressRefreshScript(purchaseInfo)).catch(() => {})
+            console.log('[AddrSetupWin] Address refresh script injected to purchase window (via console-message)')
+          }
+        }, 2000)
+      }
+      // 延迟关闭，等保存完成
+      setTimeout(() => {
+        if (!addrWin.isDestroyed()) addrWin.destroy()
+      }, 3000)
+    }
   })
 
   let addrDone = false
+  let last1688ManagerInjectTime = 0  // ★ 防止页面刷新后立即重复注入1688管理脚本
+  let injected1688Count = 0           // ★ 限制1688管理脚本最多注入2次，防止循环
 
   // 注入地址脚本的统一入口
   function injectAddressScripts(url) {
@@ -3361,7 +3599,19 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
     // 1688地址管理页 - 点击"新增收货地址"
     if (urlLower.includes('wuliu.1688.com/foundation/receive_address_manager')) {
-      console.log('[AddrSetupWin] 1688 address manager page detected')
+      // ★ 防循环：10秒内不重复注入，且最多注入2次
+      const now = Date.now()
+      if (now - last1688ManagerInjectTime < 10000) {
+        console.log('[AddrSetupWin] 1688 manager script injected recently, skipping (anti-loop)')
+        return
+      }
+      if (injected1688Count >= 2) {
+        console.log('[AddrSetupWin] 1688 manager script max injections reached, skipping (anti-loop)')
+        return
+      }
+      last1688ManagerInjectTime = now
+      injected1688Count++
+      console.log('[AddrSetupWin] 1688 address manager page detected (inject #' + injected1688Count + ')')
       setTimeout(() => {
         if (addrWin.isDestroyed() || addrDone) return
         addrWin.webContents.executeJavaScript(build1688AddressManagerScript()).catch(() => {})
@@ -3838,7 +4088,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (resolved) return
       resolved = true
       windowState.resolved = true
-      console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}, winExists=${!!win}, winDestroyed=${win ? win.isDestroyed() : 'N/A'}`)
+      console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}`)
       cleanup()
 
       // 保存Cookie（用户在窗口内可能登录了，积累了新Cookie）
@@ -3998,130 +4248,223 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               }
             }
 
-            // ★ 如果缓存标题无效，尝试DOM提取兜底
-            // ★★ PDD特殊：优先使用PDD订单搜索API获取商品信息（跟DL一样）
-            const hasGoodTitle = purchaseInfo.goodsName && purchaseInfo.goodsName.length > 4
-            const hasGoodImage = purchaseInfo.image && isValidProductImage(purchaseInfo.image)
-            if ((!hasGoodTitle || !hasGoodImage) && platform === 'pinduoduo' && platformOrderNo) {
-              // PDD订单搜索API：跟DL一样，加载搜索结果页面，解析window.rawData中的orderGoods
-              try {
-                console.log(`[PurchaseCapture] PDD缓存标题无效，尝试订单搜索API: orderSn=${platformOrderNo}`)
-                const pddSearchResult = await win.webContents.executeJavaScript(`
-                  (function() {
-                    return fetch('https://mobile.yangkeduo.com/transac_orders_search_results.html?keyWord=${encodeURIComponent(platformOrderNo)}&type=1&refer_page_name=transac_orders_search_results', {
-                      credentials: 'include'
-                    }).then(function(r) { return r.text() }).then(function(html) {
-                      // 从SSR HTML中提取window.rawData（跟DL一样的方式）
-                      var start = html.indexOf('window.rawData=');
-                      if (start < 0) return JSON.stringify({error: 'no_rawData'});
-                      var dataStr = html.substring(start + 'window.rawData='.length);
-                      // DL方式：找到"}};"截止，然后补回"}}"
-                      var endIdx = dataStr.indexOf('}};');
-                      if (endIdx < 0) return JSON.stringify({error: 'no_end'});
-                      dataStr = dataStr.substring(0, endIdx + 2);
-                      // DL方式：去掉嵌套JSON字符串（,"msg":"{...},"style":）避免解析失败
-                      var pos1 = dataStr.indexOf(',"msg":"{');
-                      var pos2 = dataStr.indexOf('},"style":');
-                      if (pos1 >= 0 && pos2 >= 0 && pos2 > pos1) {
-                        dataStr = dataStr.substring(0, pos1) + dataStr.substring(pos2);
-                      }
-                      try {
-                        var data = JSON.parse(dataStr);
-                        var orders = data.resultStore && data.resultStore.orders;
-                        if (!orders || orders.length === 0) return JSON.stringify({error: 'no_orders', rawKeys: Object.keys(data)});
-                        var order = orders[0];
-                        var goods = order.orderGoods && order.orderGoods[0];
-                        if (!goods) return JSON.stringify({error: 'no_orderGoods', orderKeys: orderKeys});
-                        return JSON.stringify({
-                          goodsName: goods.goodsName || '',
-                          goodsPrice: goods.goodsPrice || '',
-                          goodsNumber: goods.goodsNumber || 1,
-                          spec: goods.spec || '',
-                          goodsImage: goods.thumbUrl || goods.goodsImage || goods.imageUrl || '',
-                          orderAmount: order.orderAmount || '',
-                          orderSn: order.orderSn || '',
-                          trackingNumber: order.trackingNumber || '',
-                          combinedOrderStatus: order.combinedOrderStatus || 0,
-                          shippingTime: order.shippingTime || 0,
-                          receiveTime: order.receiveTime || 0
-                        });
-                      } catch(e) {
-                        return JSON.stringify({error: 'parse_error', msg: e.message, sample: dataStr.substring(0, 300)});
-                      }
-                    }).catch(function(e) {
-                      return JSON.stringify({error: 'fetch_error', msg: e.message});
-                    });
-                  })()
-                `).catch(() => null)
+            // ★★★ 深度平台隔离：fallback查询按平台独立 ★★★
+            // 1688：只有从采购页缓存提取到的标题才算"好标题"
+            // 淘宝/拼多多：采购商品与销售商品相同，销售标题也可作为有效标题
 
-                if (pddSearchResult) {
-                  console.log(`[PurchaseCapture] PDD订单搜索API结果: ${pddSearchResult.substring(0, 300)}`)
-                  try {
-                    const pddInfo = JSON.parse(pddSearchResult)
-                    if (pddInfo.goodsName) {
-                      purchaseInfo.goodsName = pddInfo.goodsName
-                      console.log(`[PurchaseCapture] 商品名已覆盖(PDD订单搜索API): ${pddInfo.goodsName}`)
+            // ═══════════════════════════════════════════════════════════
+            // ═══ 1688 fallback：订单列表查询 ═══
+            // ═══════════════════════════════════════════════════════════
+            if (platform === '1688') {
+              const purchaseTitleValid = cachedProductInfo && cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title)
+              const purchaseImageValid = cachedProductInfo && cachedProductInfo.image && isValidProductImage(cachedProductInfo.image)
+              const hasGoodTitle = purchaseTitleValid
+              const hasGoodImage = purchaseImageValid
+              if ((!hasGoodTitle || !hasGoodImage) && platformOrderNo && win && !win.isDestroyed()) {
+                try {
+                  console.log(`[PurchaseCapture] 1688缓存标题/图片无效，尝试订单列表查询: orderId=${platformOrderNo}`)
+                  const aliSearchResult = await win.webContents.executeJavaScript(`
+                    (function() {
+                      var orderId = '${platformOrderNo}';
+                      // 路径1: 老版buyer_order_list.htm（可能已过时）
+                      function tryOldOrderList() {
+                        return fetch('https://trade.1688.com/order/buyer_order_list.htm?isBuyer=true&keywords=' + encodeURIComponent(orderId) + '&keywordsType=', {
+                          credentials: 'include'
+                        }).then(function(r) { return r.text() }).then(function(html) {
+                          if (html.indexOf('productName') >= 0) {
+                            try {
+                              var doc = document.createElement('html');
+                              doc.innerHTML = html;
+                              var nameEl = doc.querySelector('.productName');
+                              var imgEl = doc.querySelector('.detail img');
+                              return {source: 'old_list', goodsName: nameEl ? nameEl.innerText.trim() : '', goodsImage: imgEl ? (imgEl.src || '') : ''};
+                            } catch(e) { return {source: 'old_list', error: 'parse_error'}; }
+                          }
+                          return {source: 'old_list', error: 'no_content'};
+                        });
+                      }
+                      // 路径2: fetch新版air.1688.com订单列表SPA
+                      function tryNewOrderList() {
+                        return fetch('https://air.1688.com/app/ctf-page/trade-order-list/buyer-order-list.html?word=' + encodeURIComponent(orderId) + '&page=1&pageSize=5', {
+                          credentials: 'include'
+                        }).then(function(r) { return r.text() }).then(function(html) {
+                          var pnMatch = html.match(/"productName"\\s*:\\s*"([^"]+)"/);
+                          var imgMatch = html.match(/"imageUrl"\\s*:\\s*"([^"]+)"/);
+                          var goodsName = pnMatch ? pnMatch[1] : '';
+                          var goodsImage = imgMatch ? imgMatch[1] : '';
+                          if (goodsName || goodsImage) {
+                            return {source: 'new_list', goodsName: goodsName, goodsImage: goodsImage};
+                          }
+                          return {source: 'new_list', error: 'no_match'};
+                        });
+                      }
+                      return tryOldOrderList().then(function(result1) {
+                        if (result1.goodsName || result1.goodsImage) return JSON.stringify(result1);
+                        return tryNewOrderList().then(function(result2) {
+                          if (result2.goodsName || result2.goodsImage) return JSON.stringify(result2);
+                          return JSON.stringify({source: 'fallback', error: 'all_failed'});
+                        });
+                      }).catch(function(e) {
+                        return JSON.stringify({source: 'fallback', error: 'all_failed', msg: String(e)});
+                      });
+                    })()
+                  `).catch(() => null)
+
+                  if (aliSearchResult) {
+                    try {
+                      const aliInfo = JSON.parse(aliSearchResult)
+                      console.log(`[PurchaseCapture] 1688订单查询结果: source=${aliInfo.source || 'unknown'}, error=${aliInfo.error || 'none'}, goodsName=${(aliInfo.goodsName || '').substring(0, 40)}`)
+                      if (aliInfo.goodsName && isValidProductTitle(aliInfo.goodsName)) {
+                        purchaseInfo.goodsName = aliInfo.goodsName
+                        console.log(`[PurchaseCapture] 1688商品名已提取(订单查询/${aliInfo.source}): ${aliInfo.goodsName}`)
+                      }
+                      if (aliInfo.goodsImage && isValidProductImage(aliInfo.goodsImage)) {
+                        purchaseInfo.image = aliInfo.goodsImage
+                        console.log(`[PurchaseCapture] 1688商品图片已提取(订单查询/${aliInfo.source})`)
+                      }
+                    } catch (e) {
+                      console.warn('[PurchaseCapture] 1688订单查询解析失败:', e.message)
                     }
-                    if (pddInfo.goodsImage && isValidProductImage(pddInfo.goodsImage)) {
-                      purchaseInfo.image = pddInfo.goodsImage
-                      console.log(`[PurchaseCapture] 商品图片已覆盖(PDD订单搜索API): ${pddInfo.goodsImage.substring(0, 80)}`)
-                    }
-                    if (pddInfo.spec) {
-                      purchaseInfo.sku = pddInfo.spec
-                      console.log(`[PurchaseCapture] SKU已覆盖(PDD订单搜索API): ${pddInfo.spec}`)
-                    }
-                    if (pddInfo.goodsNumber) {
-                      purchaseInfo.quantity = pddInfo.goodsNumber
-                      console.log(`[PurchaseCapture] 数量已覆盖(PDD订单搜索API): ${pddInfo.goodsNumber}`)
-                    }
-                    if (pddInfo.goodsPrice) {
-                      purchaseInfo.unitPrice = pddInfo.goodsPrice
-                      console.log(`[PurchaseCapture] 单价已覆盖(PDD订单搜索API): ${pddInfo.goodsPrice}`)
-                    }
-                    if (pddInfo.trackingNumber) {
-                      purchaseInfo.trackingNumber = pddInfo.trackingNumber
-                      console.log(`[PurchaseCapture] 快递单号已提取(PDD订单搜索API): ${pddInfo.trackingNumber}`)
-                    }
-                    if (pddInfo.shippingTime) {
-                      purchaseInfo.shippingTime = pddInfo.shippingTime
-                      console.log(`[PurchaseCapture] 发货时间已提取(PDD订单搜索API): ${pddInfo.shippingTime}`)
-                    }
-                    if (pddInfo.error) {
-                      console.warn(`[PurchaseCapture] PDD订单搜索API错误: ${pddInfo.error}`, pddInfo.msg || pddInfo.rawKeys || '')
-                    }
-                  } catch (e) {
-                    console.warn('[PurchaseCapture] PDD订单搜索API解析失败:', e.message)
                   }
+                } catch (e) {
+                  console.warn('[PurchaseCapture] 1688订单查询调用失败:', e.message)
                 }
-              } catch (e) {
-                console.warn('[PurchaseCapture] PDD订单搜索API调用失败:', e.message)
               }
-            } else if (!hasGoodTitle) {
-              try {
-                const domResult = await win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO).catch(() => null)
-                if (domResult) {
-                  const productInfo = JSON.parse(domResult)
-                  if (productInfo.title && isValidProductTitle(productInfo.title) && productInfo.title.length > (purchaseInfo.goodsName || '').length) {
-                    purchaseInfo.goodsName = productInfo.title
-                    console.log(`[PurchaseCapture] 商品名已覆盖(实时DOM,覆盖弱缓存): ${productInfo.title}`)
-                  } else if (productInfo.title) {
-                    console.log(`[PurchaseCapture] 实时DOM标题不优于缓存: DOM=${productInfo.title}, 缓存=${purchaseInfo.goodsName || '空'}`)
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // ═══ 拼多多 fallback：订单搜索API ═══
+            // ═══════════════════════════════════════════════════════════
+            // ★ PDD始终运行订单搜索API：销售订单的图片/标题来自其他平台（如京东），
+            //   不适合用于PDD采购单。必须获取PDD专用商品数据。
+            else if (platform === 'pinduoduo') {
+              if (platformOrderNo) {
+                try {
+                  console.log(`[PurchaseCapture] PDD始终运行订单搜索API获取PDD专用数据: orderSn=${platformOrderNo}`)
+                  const pddSearchResult = await win.webContents.executeJavaScript(`
+                    (function() {
+                      return fetch('https://mobile.yangkeduo.com/transac_orders_search_results.html?keyWord=${encodeURIComponent(platformOrderNo)}&type=1&refer_page_name=transac_orders_search_results', {
+                        credentials: 'include'
+                      }).then(function(r) { return r.text() }).then(function(html) {
+                        var start = html.indexOf('window.rawData=');
+                        if (start < 0) return JSON.stringify({error: 'no_rawData'});
+                        var dataStr = html.substring(start + 'window.rawData='.length);
+                        var endIdx = dataStr.indexOf('}};');
+                        if (endIdx < 0) return JSON.stringify({error: 'no_end'});
+                        dataStr = dataStr.substring(0, endIdx + 2);
+                        var pos1 = dataStr.indexOf(',"msg":"{');
+                        var pos2 = dataStr.indexOf('},"style":');
+                        if (pos1 >= 0 && pos2 >= 0 && pos2 > pos1) {
+                          dataStr = dataStr.substring(0, pos1) + dataStr.substring(pos2);
+                        }
+                        try {
+                          var data = JSON.parse(dataStr);
+                          var orders = data.resultStore && data.resultStore.orders;
+                          if (!orders || orders.length === 0) return JSON.stringify({error: 'no_orders', rawKeys: Object.keys(data)});
+                          var order = orders[0];
+                          var goods = order.orderGoods && order.orderGoods[0];
+                          if (!goods) return JSON.stringify({error: 'no_orderGoods', orderKeys: orderKeys});
+                          return JSON.stringify({
+                            goodsName: goods.goodsName || '',
+                            goodsPrice: goods.goodsPrice || '',
+                            goodsNumber: goods.goodsNumber || 1,
+                            spec: goods.spec || '',
+                            goodsImage: goods.thumbUrl || goods.goodsImage || goods.imageUrl || '',
+                            orderAmount: order.orderAmount || '',
+                            orderSn: order.orderSn || '',
+                            trackingNumber: order.trackingNumber || '',
+                            combinedOrderStatus: order.combinedOrderStatus || 0,
+                            shippingTime: order.shippingTime || 0,
+                            receiveTime: order.receiveTime || 0
+                          });
+                        } catch(e) {
+                          return JSON.stringify({error: 'parse_error', msg: e.message, sample: dataStr.substring(0, 300)});
+                        }
+                      }).catch(function(e) {
+                        return JSON.stringify({error: 'fetch_error', msg: e.message});
+                      });
+                    })()
+                  `).catch(() => null)
+
+                  if (pddSearchResult) {
+                    console.log(`[PurchaseCapture] PDD订单搜索API结果: ${pddSearchResult.substring(0, 300)}`)
+                    try {
+                      const pddInfo = JSON.parse(pddSearchResult)
+                      // ★ PDD专用数据优先覆盖：标题、图片、规格来自PDD平台本身，
+                      //   即使销售订单已有数据也要覆盖（销售订单图片来自其他平台如京东）
+                      if (pddInfo.goodsName) {
+                        purchaseInfo.goodsName = pddInfo.goodsName
+                        console.log(`[PurchaseCapture] 商品名已覆盖(PDD订单搜索API): ${pddInfo.goodsName}`)
+                      }
+                      if (pddInfo.goodsImage && isValidProductImage(pddInfo.goodsImage)) {
+                        purchaseInfo.image = pddInfo.goodsImage
+                        console.log(`[PurchaseCapture] 商品图片已覆盖(PDD订单搜索API): ${pddInfo.goodsImage.substring(0, 80)}`)
+                      }
+                      if (pddInfo.spec) {
+                        purchaseInfo.sku = pddInfo.spec
+                        console.log(`[PurchaseCapture] SKU已覆盖(PDD订单搜索API): ${pddInfo.spec}`)
+                      }
+                      if (pddInfo.goodsNumber) {
+                        purchaseInfo.quantity = pddInfo.goodsNumber
+                        console.log(`[PurchaseCapture] 数量已覆盖(PDD订单搜索API): ${pddInfo.goodsNumber}`)
+                      }
+                      if (pddInfo.goodsPrice) {
+                        purchaseInfo.unitPrice = pddInfo.goodsPrice
+                        console.log(`[PurchaseCapture] 单价已覆盖(PDD订单搜索API): ${pddInfo.goodsPrice}`)
+                      }
+                      if (pddInfo.trackingNumber) {
+                        purchaseInfo.trackingNumber = pddInfo.trackingNumber
+                        console.log(`[PurchaseCapture] 快递单号已提取(PDD订单搜索API): ${pddInfo.trackingNumber}`)
+                      }
+                      if (pddInfo.shippingTime) {
+                        purchaseInfo.shippingTime = pddInfo.shippingTime
+                        console.log(`[PurchaseCapture] 发货时间已提取(PDD订单搜索API): ${pddInfo.shippingTime}`)
+                      }
+                      if (pddInfo.error) {
+                        console.warn(`[PurchaseCapture] PDD订单搜索API错误: ${pddInfo.error}`, pddInfo.msg || pddInfo.rawKeys || '')
+                      }
+                    } catch (e) {
+                      console.warn('[PurchaseCapture] PDD订单搜索API解析失败:', e.message)
+                    }
                   }
-                  if (productInfo.image && isValidProductImage(productInfo.image) && !purchaseInfo.image) {
-                    purchaseInfo.image = productInfo.image
-                    console.log(`[PurchaseCapture] 商品图片已覆盖(实时DOM)`)
-                  }
-                  if (productInfo.sku && !purchaseInfo.sku) {
-                    purchaseInfo.sku = productInfo.sku
-                    console.log(`[PurchaseCapture] SKU已覆盖(实时DOM): ${productInfo.sku}`)
-                  }
-                  if (productInfo.quantity && !purchaseInfo.quantity) {
-                    purchaseInfo.quantity = parseInt(productInfo.quantity) || 0
-                    console.log(`[PurchaseCapture] 数量已覆盖(实时DOM): ${productInfo.quantity}`)
-                  }
+                } catch (e) {
+                  console.warn('[PurchaseCapture] PDD订单搜索API调用失败:', e.message)
                 }
-              } catch (e) {
-                console.warn('[PurchaseCapture] DOM商品信息提取失败:', e.message)
+              }
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // ═══ 淘宝/天猫 fallback：DOM实时提取 ═══
+            // ═══════════════════════════════════════════════════════════
+            else if (platform === 'taobao' || platform === 'tmall') {
+              const hasGoodTitle = purchaseInfo.goodsName && purchaseInfo.goodsName.length > 4
+              if (!hasGoodTitle) {
+                try {
+                  const domResult = await win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO).catch(() => null)
+                  if (domResult) {
+                    const productInfo = JSON.parse(domResult)
+                    if (productInfo.title && isValidProductTitle(productInfo.title) && productInfo.title.length > (purchaseInfo.goodsName || '').length) {
+                      purchaseInfo.goodsName = productInfo.title
+                      console.log(`[PurchaseCapture] 淘宝商品名已覆盖(实时DOM): ${productInfo.title}`)
+                    } else if (productInfo.title) {
+                      console.log(`[PurchaseCapture] 淘宝实时DOM标题不优于缓存: DOM=${productInfo.title}, 缓存=${purchaseInfo.goodsName || '空'}`)
+                    }
+                    if (productInfo.image && isValidProductImage(productInfo.image) && !purchaseInfo.image) {
+                      purchaseInfo.image = productInfo.image
+                      console.log(`[PurchaseCapture] 淘宝商品图片已覆盖(实时DOM)`)
+                    }
+                    if (productInfo.sku && !purchaseInfo.sku) {
+                      purchaseInfo.sku = productInfo.sku
+                      console.log(`[PurchaseCapture] 淘宝SKU已覆盖(实时DOM): ${productInfo.sku}`)
+                    }
+                    if (productInfo.quantity && !purchaseInfo.quantity) {
+                      purchaseInfo.quantity = parseInt(productInfo.quantity) || 0
+                      console.log(`[PurchaseCapture] 淘宝数量已覆盖(实时DOM): ${productInfo.quantity}`)
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[PurchaseCapture] 淘宝DOM商品信息提取失败:', e.message)
+                }
               }
             }
 
@@ -4186,32 +4529,21 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           console.log(`[PurchaseCapture] Interceptor found candidate but invalid: "${orderNo}"`)
         }
       }
-      // PDD API 响应日志转发（搞清楚 PDD 实际 API 路径）
-      if (platform === 'pinduoduo' && message.startsWith('[PDD_API_CAPTURED]')) {
-        console.log(`[PurchaseCapture] ${message}`)
-      }
-      // PDD订单API响应体内容（确认order_sn字段格式）
-      if (platform === 'pinduoduo' && message.startsWith('[PDD_ORDER_API]')) {
-        console.log(`[PurchaseCapture] ${message}`)
-      }
       // API拦截器实时缓存的商品信息（比dom-ready更快、更可靠）
-      // ★ PDD跳过：PDD的cacheProductInfoFromBody已被禁用，不应有此消息
-      // ★ 1688已恢复：通过标题黑名单过滤"官方仓退货"等无效数据后再缓存
-      if (message.startsWith('[PURCHASE_PRODUCT_CACHED]') && platform !== 'pinduoduo') {
+      // ★★★ 深度平台隔离：按平台独立处理PURCHASE_PRODUCT_CACHED ★★★
+
+      // ═══ 1688 分支 ═══
+      if (platform === '1688' && message.startsWith('[PURCHASE_PRODUCT_CACHED]')) {
         try {
           const info = JSON.parse(message.substring('[PURCHASE_PRODUCT_CACHED]'.length))
           if (info && (info.title || info.image)) {
             // 1688标题有效性验证：过滤"官方仓退货"等退货/售后标题
-            if (platform === '1688' && info.title && !isValidProductTitle(info.title)) {
+            if (info.title && !isValidProductTitle(info.title)) {
               console.log(`[PurchaseCapture] 1688 API缓存标题无效，跳过: ${info.title}`)
             } else {
               cachedProductInfo = info
-              console.log(`[PurchaseCapture] 商品信息已缓存(API拦截): title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
-
-              // 商品信息成功提取 = 页面确认正常加载
-              // PDD 不使用后台地址窗口：dl的流程是在结算页点击地址区域跳转到地址管理页，在同一窗口内完成
-              // 淘宝/1688 仍使用后台地址窗口（独立页面流程）
-              if (needAddrSetup && parsedAddr && !backgroundAddrWin && platform !== 'pinduoduo') {
+              console.log(`[PurchaseCapture] 1688商品信息已缓存(API拦截): title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
+              if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
                 backgroundAddrWin = startBackgroundAddressSetup({
                   purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
                 })
@@ -4220,6 +4552,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           }
         } catch (e) {}
       }
+      // ═══ 淘宝/天猫 分支 ═══
+      else if ((platform === 'taobao' || platform === 'tmall') && message.startsWith('[PURCHASE_PRODUCT_CACHED]')) {
+        try {
+          const info = JSON.parse(message.substring('[PURCHASE_PRODUCT_CACHED]'.length))
+          if (info && (info.title || info.image)) {
+            cachedProductInfo = info
+            console.log(`[PurchaseCapture] 淘宝商品信息已缓存(API拦截): title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
+            if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
+              backgroundAddrWin = startBackgroundAddressSetup({
+                purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
+              })
+            }
+          }
+        } catch (e) {}
+      }
+      // ═══ 拼多多 分支：PDD跳过，cacheProductInfoFromBody已被禁用 ═══
     })
 
     console.log(`[PurchaseCapture] Address check: platform=${platform}, hasShippingInfo=${!!hasShippingInfo}, needAddrSetup=${needAddrSetup}`)
@@ -4282,67 +4630,228 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       // === 关键：在商品详情页/结算页提前缓存商品信息 ===
       // 订单号捕获时页面可能已跳转到支付宝，此时再提取就拿到"登录中心-支付宝"了
       // 所以必须在商品详情页/结算页时就把商品信息缓存住
-      // ★ PDD不用DOM提取：PDD的商品信息完全由订单搜索API提供（goodsName/goodsPrice/goodsNumber/spec）
-      //   结算页DOM提取标题不准（如"商城"），反而干扰。PDD的图片暂缺也不影响核心功能。
-      const isProductPage = urlLower.includes('item.taobao.com') ||
-                            urlLower.includes('detail.tmall.com') ||
-                            urlLower.includes('detail.1688.com') ||
-                            urlLower.includes('item.jd.com')
-      const isCheckoutUrl = urlLower.includes('buy.taobao.com') ||
-                             urlLower.includes('buy.tmall.com') ||
-                             urlLower.includes('order.1688.com') ||
-                             urlLower.includes('trade.1688.com')
+      // ★★★ 深度平台隔离：1688 / 淘宝 / PDD 完全独立代码路径 ★★★
 
-      if ((isProductPage || isCheckoutUrl) && !cachedProductInfo) {
-        // 延迟提取，等页面渲染完成
-        setTimeout(() => {
-          if (win.isDestroyed() || resolved) return
-          if (cachedProductInfo) return
-          win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
-            .then(result => {
-              if (!result || resolved) return
-              try {
-                const info = JSON.parse(result)
-                if ((info.title && isValidProductTitle(info.title)) || info.image) {
-                  cachedProductInfo = info
-                  console.log(`[PurchaseCapture] 商品信息已缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
-
-                  // 商品信息成功提取 = 页面确认正常加载
-                  // PDD 不使用后台地址窗口：dl的流程是在结算页点击地址区域跳转到地址管理页
-                  if (needAddrSetup && parsedAddr && !backgroundAddrWin && platform !== 'pinduoduo') {
-                    backgroundAddrWin = startBackgroundAddressSetup({
-                      purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
-                    })
-                  }
-                }
-              } catch (e) {
-                console.warn('[PurchaseCapture] 商品信息缓存解析失败:', e.message)
-              }
-            })
-            .catch(() => {})
-        }, isProductPage ? 2000 : 1000)  // 商品详情页多等一会儿
-
-        // 二次提取尝试（针对慢加载页面）
-        if (isProductPage) {
+      // ═══════════════════════════════════════════════════════════
+      // ═══ 1688 DOM提取分支 ═══
+      // ═══════════════════════════════════════════════════════════
+      if (platform === '1688') {
+        const is1688ProductPage = urlLower.includes('detail.1688.com')
+        const is1688CheckoutUrl = urlLower.includes('order.1688.com') || urlLower.includes('trade.1688.com')
+        // 1688：如果cachedProductInfo标题无效（退货/空），允许DOM提取覆盖
+        const hasInvalid1688Title = cachedProductInfo && (!cachedProductInfo.title || !isValidProductTitle(cachedProductInfo.title))
+        if ((is1688ProductPage || is1688CheckoutUrl) && (!cachedProductInfo || hasInvalid1688Title)) {
+          // 首次提取
           setTimeout(() => {
             if (win.isDestroyed() || resolved) return
-            if (cachedProductInfo) return
+            if (cachedProductInfo && cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title)) return
             win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
               .then(result => {
                 if (!result || resolved) return
-                if (cachedProductInfo) return
                 try {
                   const info = JSON.parse(result)
                   if ((info.title && isValidProductTitle(info.title)) || info.image) {
-                    cachedProductInfo = info
-                    console.log(`[PurchaseCapture] 商品信息二次缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
+                    // 1688弱缓存合并：已有缓存但标题无效时，用DOM提取的有效标题覆盖
+                    if (cachedProductInfo) {
+                      if (info.title && isValidProductTitle(info.title) && (!cachedProductInfo.title || !isValidProductTitle(cachedProductInfo.title))) {
+                        cachedProductInfo.title = info.title
+                      }
+                      if (info.image && isValidProductImage(info.image) && !cachedProductInfo.image) {
+                        cachedProductInfo.image = info.image
+                      }
+                      if (info.sku && !cachedProductInfo.sku) {
+                        cachedProductInfo.sku = info.sku
+                      }
+                      console.log(`[PurchaseCapture] 1688商品信息弱缓存合并: title=${(cachedProductInfo.title || '').substring(0, 40)}, image=${cachedProductInfo.image ? 'YES' : 'NO'}`)
+                    } else {
+                      cachedProductInfo = info
+                      console.log(`[PurchaseCapture] 1688商品信息已缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
+                    }
+                    // 商品信息成功提取 = 页面确认正常加载
+                    if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
+                      backgroundAddrWin = startBackgroundAddressSetup({
+                        purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
+                      })
+                    }
                   }
-                } catch (e) {}
+                } catch (e) {
+                  console.warn('[PurchaseCapture] 1688商品信息缓存解析失败:', e.message)
+                }
               })
               .catch(() => {})
-          }, 5000)
+          }, is1688ProductPage ? 2000 : 1000)
+
+          // 1688二次提取（针对慢加载页面）
+          if (is1688ProductPage) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              if (cachedProductInfo && cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title)) return
+              win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
+                .then(result => {
+                  if (!result || resolved) return
+                  if (cachedProductInfo && cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title)) return
+                  try {
+                    const info = JSON.parse(result)
+                    if ((info.title && isValidProductTitle(info.title)) || info.image) {
+                      if (cachedProductInfo) {
+                        if (info.title && isValidProductTitle(info.title) && (!cachedProductInfo.title || !isValidProductTitle(cachedProductInfo.title))) {
+                          cachedProductInfo.title = info.title
+                        }
+                        if (info.image && isValidProductImage(info.image) && !cachedProductInfo.image) {
+                          cachedProductInfo.image = info.image
+                        }
+                        console.log(`[PurchaseCapture] 1688商品信息二次弱缓存合并: title=${(cachedProductInfo.title || '').substring(0, 40)}, image=${cachedProductInfo.image ? 'YES' : 'NO'}`)
+                      } else {
+                        cachedProductInfo = info
+                        console.log(`[PurchaseCapture] 1688商品信息二次缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
+                      }
+                    }
+                  } catch (e) {}
+                })
+                .catch(() => {})
+            }, 5000)
+          }
+
+          // 1688收银台二次提取：收银台是React SPA，首次1秒延迟时DOM可能尚未渲染
+          if (is1688CheckoutUrl) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              if (cachedProductInfo && cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title) && cachedProductInfo.image) return
+              win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
+                .then(result => {
+                  if (!result || resolved) return
+                  try {
+                    const info = JSON.parse(result)
+                    if (cachedProductInfo) {
+                      let updated = false
+                      if (info.title && isValidProductTitle(info.title) && (!cachedProductInfo.title || !isValidProductTitle(cachedProductInfo.title))) {
+                        cachedProductInfo.title = info.title
+                        updated = true
+                      }
+                      if (!cachedProductInfo.image && info.image && isValidProductImage(info.image)) {
+                        cachedProductInfo.image = info.image
+                        updated = true
+                      }
+                      if (updated) {
+                        console.log(`[PurchaseCapture] 1688收银台弱缓存补充: title=${(cachedProductInfo.title || '').substring(0, 40)}, image=${cachedProductInfo.image ? 'YES' : 'NO'}`)
+                      }
+                    } else if ((info.title && isValidProductTitle(info.title)) || info.image) {
+                      cachedProductInfo = info
+                      console.log(`[PurchaseCapture] 1688收银台商品信息缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
+                    }
+                  } catch (e) {}
+                })
+                .catch(() => {})
+            }, 4000)
+          }
         }
       }
+
+      // ═══════════════════════════════════════════════════════════
+      // ═══ 淘宝/天猫 DOM提取分支 ═══
+      // ═══════════════════════════════════════════════════════════
+      else if (platform === 'taobao' || platform === 'tmall') {
+        const isTbProductPage = urlLower.includes('item.taobao.com') || urlLower.includes('detail.tmall.com')
+        const isTbCheckoutUrl = urlLower.includes('buy.taobao.com') || urlLower.includes('buy.tmall.com')
+        // ★ 淘宝提取策略：
+        //   商品详情页：仅无缓存时提取（详情页提取的是主图，不是SKU图）
+        //   结算页：始终提取！详情页缓存的是主图，结算页需要获取SKU规格图覆盖主图
+        const tbNeedsExtraction = isTbProductPage ? !cachedProductInfo : isTbCheckoutUrl
+        if (tbNeedsExtraction) {
+          setTimeout(() => {
+            if (win.isDestroyed() || resolved) return
+            // ★ 结算页不再跳过：详情页缓存的是主图，结算页必须提取SKU图覆盖
+            win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
+              .then(result => {
+                if (!result || resolved) return
+                try {
+                  const info = JSON.parse(result)
+                  if ((info.title && isValidProductTitle(info.title)) || info.image) {
+                    if (cachedProductInfo) {
+                      // ★ 结算页缓存合并策略：
+                      //   image：结算页图片（SKU规格图）始终覆盖详情页缓存（主图）
+                      //   sku：结算页SKU信息优先
+                      //   title：保留已有（详情页和结算页标题通常一致）
+                      if (isTbCheckoutUrl && info.image && isValidProductImage(info.image)) {
+                        cachedProductInfo.image = info.image
+                        console.log(`[PurchaseCapture] 淘宝结算页SKU图覆盖主图: image=${info.image ? 'YES' : 'NO'}`)
+                      } else if (!cachedProductInfo.image && info.image && isValidProductImage(info.image)) {
+                        cachedProductInfo.image = info.image
+                      }
+                      if (info.sku && !cachedProductInfo.sku) {
+                        cachedProductInfo.sku = info.sku
+                      }
+                      if (info.title && isValidProductTitle(info.title) && !cachedProductInfo.title) {
+                        cachedProductInfo.title = info.title
+                      }
+                      console.log(`[PurchaseCapture] 淘宝结算页弱缓存合并: title=${(cachedProductInfo.title || '').substring(0, 40)}, image=${cachedProductInfo.image ? 'YES' : 'NO'}, sku=${(cachedProductInfo.sku || '').substring(0, 30)}`)
+                    } else {
+                      cachedProductInfo = info
+                      console.log(`[PurchaseCapture] 淘宝商品信息已缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}, sku=${(info.sku || '').substring(0, 30)}`)
+                    }
+                    // 商品信息成功提取 = 页面确认正常加载
+                    if (needAddrSetup && parsedAddr && !backgroundAddrWin) {
+                      backgroundAddrWin = startBackgroundAddressSetup({
+                        purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin: win
+                      })
+                    }
+                  }
+                } catch (e) {
+                  console.warn('[PurchaseCapture] 淘宝商品信息缓存解析失败:', e.message)
+                }
+              })
+              .catch(() => {})
+          }, isTbProductPage ? 2000 : 1000)
+
+          // 淘宝二次提取（针对慢加载页面，仅商品详情页无缓存时）
+          if (isTbProductPage) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              if (cachedProductInfo) return
+              win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
+                .then(result => {
+                  if (!result || resolved) return
+                  if (cachedProductInfo) return
+                  try {
+                    const info = JSON.parse(result)
+                    if ((info.title && isValidProductTitle(info.title)) || info.image) {
+                      cachedProductInfo = info
+                      console.log(`[PurchaseCapture] 淘宝商品信息二次缓存: title=${(info.title || '').substring(0, 40)}, image=${info.image ? 'YES' : 'NO'}`)
+                    }
+                  } catch (e) {}
+                })
+                .catch(() => {})
+            }, 5000)
+          }
+
+          // 结算页二次提取（结算页SPA可能慢加载，补充缺失的图片）
+          if (isTbCheckoutUrl && cachedProductInfo && !cachedProductInfo.image) {
+            setTimeout(() => {
+              if (win.isDestroyed() || resolved) return
+              if (cachedProductInfo && cachedProductInfo.image) return
+              win.webContents.executeJavaScript(EXTRACT_PURCHASE_PRODUCT_INFO)
+                .then(result => {
+                  if (!result || resolved) return
+                  try {
+                    const info = JSON.parse(result)
+                    if (info.image && isValidProductImage(info.image) && cachedProductInfo && !cachedProductInfo.image) {
+                      cachedProductInfo.image = info.image
+                      console.log(`[PurchaseCapture] 淘宝结算页二次提取补充图片: image=${info.image ? 'YES' : 'NO'}`)
+                    }
+                  } catch (e) {}
+                })
+                .catch(() => {})
+            }, 4000)
+          }
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════
+      // ═══ 拼多多 DOM提取分支 ═══
+      // ═══════════════════════════════════════════════════════════
+      // PDD不用DOM提取：PDD的商品信息完全由订单搜索API提供
+      // 结算页DOM提取标题不准（如"商城"），反而干扰
+      // else if (platform === 'pinduoduo') { /* PDD跳过DOM提取 */ }
 
       // 页面加载后延迟自动保存 cookies 到服务器（获取 _m_h5_tk 等 token）
       if (platform === 'taobao') {
@@ -5138,12 +5647,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
         .then(responses => {
           if (!responses || responses.length === 0) return
-          console.log(`[PurchaseCapture] Poll: ${responses.length} new responses`)
-
-          // 诊断日志：显示每个响应的URL（帮助定位订单号在哪个API响应中）
-          for (const r of responses) {
-            console.log(`[PurchaseCapture]   Response: ${(r.url || '').substring(0, 200)} bodyLen=${(r.body || '').length}`)
-          }
 
           // 淘宝：DL方法，从API响应中搜索 b2c_orid / bizOrderId / orderId
           if (platform === 'taobao') {
@@ -5435,7 +5938,7 @@ function checkApiResponse(res, label) {
 async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount) {
   const { purchaseNo, salesOrderId, salesOrderNo, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress, accountId } = purchaseInfo
 
-  console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}, token=${getAuthToken() ? '有效' : '无'}`)
+  console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
 
   // 1. 创建采购单
   const createRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders`, {
