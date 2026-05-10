@@ -46,6 +46,16 @@
             />
           </el-select>
         </el-form-item>
+        <el-form-item label="店铺标签">
+          <el-select v-model="filterForm.tag" placeholder="全部标签" clearable style="width: 160px">
+            <el-option
+              v-for="tag in tagOptions"
+              :key="tag"
+              :label="tag"
+              :value="tag"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="统计周期">
           <el-select v-model="filterForm.period" placeholder="选择周期" style="width: 140px" @change="handlePeriodChange">
             <el-option label="今日" value="today" />
@@ -171,6 +181,7 @@ const summary = reactive({
 const today = new Date().toISOString().slice(0, 10)
 const filterForm = reactive({
   storeId: '',
+  tag: '',
   period: 'today',
   dateRange: [today, today]
 })
@@ -178,6 +189,19 @@ const filterForm = reactive({
 const sortBy = ref('sales')
 
 const tableData = ref([])
+
+// 从店铺列表提取所有唯一标签
+const tagOptions = computed(() => {
+  const tags = new Set()
+  for (const store of storeOptions.value) {
+    if (Array.isArray(store.tags)) {
+      for (const tag of store.tags) {
+        if (tag) tags.add(tag)
+      }
+    }
+  }
+  return Array.from(tags).sort()
+})
 
 const progressColor = [
   { color: '#f56c6c', percentage: 20 },
@@ -204,6 +228,7 @@ async function loadData() {
   try {
     const params = {}
     if (filterForm.storeId) params.store_id = filterForm.storeId
+    if (filterForm.tag) params.tag = filterForm.tag
     if (filterForm.period === 'custom' && filterForm.dateRange) {
       params.start_date = filterForm.dateRange[0]
       params.end_date = filterForm.dateRange[1]
@@ -251,6 +276,7 @@ function handleSearch() {
 
 function handleReset() {
   filterForm.storeId = ''
+  filterForm.tag = ''
   filterForm.period = 'today'
   filterForm.dateRange = [today, today]
   loadData()
