@@ -43,6 +43,7 @@ function createWindow() {
     frame: false,
     center: true,
     show: false,
+    backgroundColor: '#001529',
     icon: path.join(__dirname, '../../resources/icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -52,8 +53,8 @@ function createWindow() {
     }
   })
 
-  // 页面加载完成后再显示窗口，避免白屏闪烁
-  mainWindow.once('ready-to-show', () => {
+  // 等页面渲染完成后再显示窗口，避免先显示底色再显示内容
+  mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.show()
   })
 
@@ -69,10 +70,10 @@ function createWindow() {
     })
   }
 
-  // 开发模式自动打开 DevTools
-  if (!app.isPackaged) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' })
-  }
+  // 开发模式不自动打开 DevTools（避免闪烁），按 F12 手动打开
+  // if (!app.isPackaged) {
+  //   mainWindow.webContents.openDevTools({ mode: 'right' })
+  // }
 
   // 右键菜单（剪切/复制/粘贴/全选/刷新）
   mainWindow.webContents.on('context-menu', (event, params) => {
