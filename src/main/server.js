@@ -558,7 +558,6 @@ app.get('/api/store-sales-stats', async (req, res) => {
     const remoteUrl = `http://150.158.54.108:3002/api/store-sales-stats`
     const params = new URLSearchParams()
     if (req.query.store_id) params.append('store_id', req.query.store_id)
-    if (req.query.tag) params.append('tag', req.query.tag)
     if (req.query.period) params.append('period', req.query.period)
     if (req.query.start_date) params.append('start_date', req.query.start_date)
     if (req.query.end_date) params.append('end_date', req.query.end_date)

@@ -212,7 +212,11 @@ const progressColor = [
 ]
 
 const sortedTableData = computed(() => {
-  const data = [...tableData.value]
+  let data = [...tableData.value]
+  // 按标签筛选（远程API不支持tag参数，前端本地过滤）
+  if (filterForm.tag) {
+    data = data.filter(row => Array.isArray(row.tags) && row.tags.includes(filterForm.tag))
+  }
   if (sortBy.value === 'sales') {
     data.sort((a, b) => b.salesAmount - a.salesAmount)
   } else if (sortBy.value === 'orders') {
@@ -228,7 +232,6 @@ async function loadData() {
   try {
     const params = {}
     if (filterForm.storeId) params.store_id = filterForm.storeId
-    if (filterForm.tag) params.tag = filterForm.tag
     if (filterForm.period === 'custom' && filterForm.dateRange) {
       params.start_date = filterForm.dateRange[0]
       params.end_date = filterForm.dateRange[1]
