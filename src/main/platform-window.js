@@ -769,14 +769,16 @@ const PURCHASE_LOGIN_URLS = {
   //   登录在 yangkeduo.com → cookie设在 .yangkeduo.com → 商品页(yangkeduo.com)能用
   //   登录在 pinduoduo.com → cookie只在 .pinduoduo.com → 商品页(yangkeduo.com)零cookie→跳登录
   pinduoduo: 'https://mobile.yangkeduo.com/login.html',
-  douyin: 'https://www.douyin.com/login'
+  douyin: 'https://www.douyin.com/login',
+  '1688': 'https://login.1688.com/'
 }
 
 // 采购平台后台 URL（用于登录成功检测）
 const PURCHASE_BACKEND_URLS = {
   taobao: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
   pinduoduo: 'https://mobile.yangkeduo.com/personal.html',
-  douyin: 'https://www.douyin.com/'
+  douyin: 'https://www.douyin.com/',
+  '1688': 'https://trade.1688.com/order/buyer_order_list.htm'
 }
 
 // 已打开的采购账号窗口 Map<accountId, BrowserWindow>
@@ -844,33 +846,130 @@ function registerPurchaseAccountIpc(mainWindow) {
     if (account) {
       try {
         const ses = session.fromPartition(partitionName)
-        const cookies = await ses.cookies.get({})
-        // ★ PDD 关键登录cookie（对齐dl系统实际存储的PDD认证cookie）
-        // SUB/PassportSessionId/SUB_PASS 是淘宝cookie，不是PDD的！
-        const PDD_KEY_COOKIES = ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id', 'pdd_vds', 'api_uid']
+        let cookies = await ses.cookies.get({})
         const now = Date.now() / 1000
-        const hasValidCookie = cookies.some(c => {
-          if (!c.domain || !(c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))) return false
-          // 优先检查关键cookie名
-          if (PDD_KEY_COOKIES.includes(c.name) && c.value && c.value.length > 5) {
-            // 检查是否过期
-            if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
-            return true
+
+        // 各平台关键 cookie 名和域名
+        const PLATFORM_COOKIE_CONFIG = {
+          pinduoduo: {
+            domains: ['pinduoduo.com', 'yangkeduo.com'],
+            keys: ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id', 'pdd_vds', 'api_uid']
+          },
+          '1688': {
+            domains: ['1688.com', 'alibaba.com'],
+            keys: ['cookie2', '_nk_', 'sgcookie', '_m_h5_tk', 'csg_token']
+          },
+          taobao: {
+            domains: ['taobao.com', 'tmall.com'],
+            keys: ['cookie2', '_nk_', 'sgcookie', '_m_h5_tk', 'SUB']
+          },
+          douyin: {
+            domains: ['douyin.com', 'jinritemai.com'],
+            keys: ['sessionid', 'sessionid_ss', 'sid_guard', 'uid_tt', 'uid_tt_ss']
           }
-          return false
-        })
-        // 兜底：如果没有找到关键cookie名，但有大量PDD域cookie（>5条），也认为可能有效
-        const pddCookies = cookies.filter(c =>
-          c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
-        )
-        if (hasValidCookie || pddCookies.length > 5) {
+        }
+
+        const cookieConfig = PLATFORM_COOKIE_CONFIG[platform]
+        let hasValidCookie = false
+        let platformCookieCount = 0
+
+        if (cookieConfig) {
+          const { domains, keys } = cookieConfig
+          platformCookieCount = cookies.filter(c =>
+            c.domain && domains.some(d => c.domain.includes(d))
+          ).length
+          hasValidCookie = cookies.some(c => {
+            if (!c.domain || !domains.some(d => c.domain.includes(d))) return false
+            if (keys.includes(c.name) && c.value && c.value.length > 5) {
+              if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
+              return true
+            }
+            return false
+          })
+          // 兜底：如果没有找到关键cookie名，但有大量该平台域cookie（>5条），也认为可能有效
+          if (!hasValidCookie && platformCookieCount > 5) {
+            hasValidCookie = true
+          }
+        }
+
+        // ★ partition 无有效 cookie 时，尝试从服务器恢复（防止 partition 数据丢失后需要重新登录）
+        if (!hasValidCookie) {
+          console.log(`[PurchaseWindow] Partition无${platform}有效cookie (platformCount=${platformCookieCount})，尝试从服务器恢复...`)
+          try {
+            const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+              method: 'GET'
+            })
+            if (cookieRes.statusCode === 200 && cookieRes.data) {
+              const json = JSON.parse(cookieRes.data)
+              if (json.code === 0 && json.data && json.data.cookie_data) {
+                const raw = typeof json.data.cookie_data === 'string'
+                  ? JSON.parse(json.data.cookie_data)
+                  : json.data.cookie_data
+                if (Array.isArray(raw) && raw.length > 0) {
+                  const serverCookies = raw.filter(ck => {
+                    if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
+                    return true
+                  })
+                  console.log(`[PurchaseWindow] 从服务器恢复cookie: ${serverCookies.length}/${raw.length} 条`)
+                  // 写入 partition
+                  let setOk = 0
+                  for (const ck of serverCookies) {
+                    try {
+                      const sameSite = ck.sameSite || undefined
+                      const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
+                      await ses.cookies.set({
+                        url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                        name: ck.name,
+                        value: ck.value || '',
+                        domain: ck.domain,
+                        path: ck.path || '/',
+                        secure,
+                        httpOnly: ck.httpOnly || false,
+                        expirationDate: ck.expirationDate || undefined,
+                        sameSite
+                      })
+                      setOk++
+                    } catch (e2) {
+                      // ignore individual cookie set errors
+                    }
+                  }
+                  // 刷盘持久化
+                  await new Promise(resolve => ses.flushStorageData(resolve))
+                  console.log(`[PurchaseWindow] Cookie恢复写入: ${setOk} 成功`)
+
+                  // 重新检测恢复后的 cookie 是否有效
+                  cookies = await ses.cookies.get({})
+                  if (cookieConfig) {
+                    const { domains, keys } = cookieConfig
+                    platformCookieCount = cookies.filter(c =>
+                      c.domain && domains.some(d => c.domain.includes(d))
+                    ).length
+                    hasValidCookie = cookies.some(c => {
+                      if (!c.domain || !domains.some(d => c.domain.includes(d))) return false
+                      if (keys.includes(c.name) && c.value && c.value.length > 5) {
+                        if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
+                        return true
+                      }
+                      return false
+                    })
+                    if (!hasValidCookie && platformCookieCount > 5) hasValidCookie = true
+                  }
+                }
+              }
+            }
+          } catch (restoreErr) {
+            console.warn('[PurchaseWindow] 从服务器恢复cookie失败:', restoreErr.message)
+          }
+        }
+
+        if (hasValidCookie) {
           const backendUrl = PURCHASE_BACKEND_URLS[platform]
           if (backendUrl) {
             targetUrl = backendUrl
-            console.log(`[PurchaseWindow] Account has cookies (keyCookie=${hasValidCookie}, pddCount=${pddCookies.length}), loading backend URL: ${backendUrl}`)
+            console.log(`[PurchaseWindow] Account has cookies (keyCookie=${hasValidCookie}, platformCount=${platformCookieCount}), loading backend URL: ${backendUrl}`)
           }
         } else {
-          console.log(`[PurchaseWindow] No valid cookies found (pddCount=${pddCookies.length}), loading login URL`)
+          console.log(`[PurchaseWindow] No valid cookies found (platformCount=${platformCookieCount}), loading login URL`)
         }
       } catch(e) {
         console.log(`[PurchaseWindow] Cookie check failed: ${e.message}`)
@@ -1124,6 +1223,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       const PLATFORM_DOMAINS = {
         pinduoduo: ['pinduoduo.com', 'yangkeduo.com', 'pdd.net'],
         taobao: ['taobao.com', 'tmall.com', 'alibaba.com'],
+        '1688': ['1688.com', 'alibaba.com'],
         jd: ['jd.com', 'jd.hk'],
         douyin: ['jinritemai.com', 'douyin.com']
       }
@@ -1226,6 +1326,7 @@ function registerPurchaseAccountIpc(mainWindow) {
         const PLATFORM_DOMAINS = {
           pinduoduo: '.yangkeduo.com',
           taobao: '.taobao.com',
+          '1688': '.1688.com',
           jd: '.jd.com',
           douyin: '.jinritemai.com'
         }

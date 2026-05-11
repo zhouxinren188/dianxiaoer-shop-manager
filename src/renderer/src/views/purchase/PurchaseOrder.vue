@@ -926,7 +926,9 @@ async function handleAddAccountSubmit() {
     if (window.electronAPI) {
       await window.electronAPI.invoke('open-purchase-login-window', {
         accountId: String(accountId),
-        platform: addAccountForm.platform
+        platform: addAccountForm.platform,
+        account: addAccountForm.account,
+        password: addAccountForm.password
       })
       ElMessage.success('已打开登录窗口，登录完成后关闭窗口即可自动保存')
     } else {
