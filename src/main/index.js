@@ -20,6 +20,7 @@ const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync-browser'
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
+const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 const { setAuthToken } = require('./auth-store')
@@ -178,6 +179,27 @@ ipcMain.handle('open-product-url', (event, { storeId, skuId }) => {
   return { success: true }
 })
 
+// 用店铺cookie打开京东后台指定页面（售后/纠纷/合规等）
+ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
+  if (!url || !storeId) return { success: false, message: '参数不完整' }
+  const partitionName = `persist:platform-${storeId}`
+  const urlWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: title || new URL(url).hostname,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: partitionName
+    }
+  })
+  urlWin.loadURL(url).catch(err => {
+    console.error('[OpenStoreBackendURL] loadURL failed:', err.message)
+  })
+  return { success: true }
+})
+
 // 窗口尺寸切换：登录页 <-> 主页
 ipcMain.handle('window-set-login-size', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
@@ -260,6 +282,9 @@ app.whenReady().then(async () => {
 
   // 注册销售订单获取 IPC（需要 mainWindow 引用用于自动同步）
   registerSalesOrderIpc(mainWindow)
+
+  // 注册售后纠纷指标获取 IPC
+  registerAftersaleFetchIpc(mainWindow)
 
   // 注册采购账号登录窗口 IPC
   registerPurchaseAccountIpc(mainWindow)

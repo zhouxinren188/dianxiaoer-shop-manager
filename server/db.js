@@ -128,7 +128,7 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS user_tokens (
         id INT PRIMARY KEY AUTO_INCREMENT,
         user_id INT NOT NULL,
-        token VARCHAR(500) NOT NULL UNIQUE,
+        token VARCHAR(200) NOT NULL UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         KEY idx_token (token),
         KEY idx_user_id (user_id)
@@ -231,7 +231,6 @@ async function initDB() {
         buyer_address VARCHAR(500) DEFAULT '',
         logistics_company VARCHAR(50) DEFAULT '',
         logistics_no VARCHAR(100) DEFAULT '',
-        warehouse_name VARCHAR(100) DEFAULT '',
         sku_id VARCHAR(50) DEFAULT '',
         product_name VARCHAR(300) DEFAULT '',
         product_image VARCHAR(500) DEFAULT '',
@@ -247,42 +246,6 @@ async function initDB() {
         KEY idx_order_time (order_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
-
-    // 销售订单表添加 warehouse_name 列（兼容已有表）
-    try {
-      await connection.execute('ALTER TABLE sales_orders ADD COLUMN warehouse_name VARCHAR(100) DEFAULT \'\' AFTER logistics_no')
-      console.log('[DB] sales_orders 表已添加 warehouse_name 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] sales_orders.warehouse_name 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 sales_orders.warehouse_name 列失败:', e.message)
-      }
-    }
-
-    // 销售订单表添加 remark 列（商家备注）
-    try {
-      await connection.execute('ALTER TABLE sales_orders ADD COLUMN remark TEXT DEFAULT NULL COMMENT \'商家备注\' AFTER warehouse_name')
-      console.log('[DB] sales_orders 表已添加 remark 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] sales_orders.remark 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 sales_orders.remark 列失败:', e.message)
-      }
-    }
-
-    // 销售订单表添加 sys_remark 列（系统备注）
-    try {
-      await connection.execute('ALTER TABLE sales_orders ADD COLUMN sys_remark TEXT DEFAULT NULL COMMENT \'系统备注\' AFTER remark')
-      console.log('[DB] sales_orders 表已添加 sys_remark 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] sales_orders.sys_remark 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 sales_orders.sys_remark 列失败:', e.message)
-      }
-    }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
@@ -349,68 +312,6 @@ async function initDB() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_wh_sku (warehouse_id, sku),
         KEY idx_warehouse (warehouse_id),
-        KEY idx_owner (owner_id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-    `)
-
-    // 库存表添加 price 列（兼容已有表）
-    try {
-      await connection.execute('ALTER TABLE inventory ADD COLUMN price DECIMAL(12,2) DEFAULT 0.00 AFTER product_name')
-      console.log('[DB] inventory 表已添加 price 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] inventory.price 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 inventory.price 列失败:', e.message)
-      }
-    }
-
-    // 库存表添加 image 列（兼容已有表）
-    try {
-      await connection.execute('ALTER TABLE inventory ADD COLUMN image VARCHAR(500) DEFAULT \'\'')
-      console.log('[DB] inventory 表已添加 image 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] inventory.image 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 inventory.image 列失败:', e.message)
-      }
-    }
-
-    // 采购订单表添加 inventory_id 列（仓库采购关联库存项）
-    try {
-      await connection.execute('ALTER TABLE purchase_orders ADD COLUMN inventory_id INT DEFAULT NULL AFTER sku')
-      console.log('[DB] purchase_orders 表已添加 inventory_id 列')
-    } catch (e) {
-      if (e.code === 'ER_DUP_FIELDNAME') {
-        console.log('[DB] purchase_orders.inventory_id 列已存在，跳过')
-      } else {
-        console.error('[DB] 添加 purchase_orders.inventory_id 列失败:', e.message)
-      }
-    }
-    try {
-      await connection.execute('ALTER TABLE purchase_orders ADD KEY idx_inventory_id (inventory_id)')
-      console.log('[DB] purchase_orders 表已添加 inventory_id 索引')
-    } catch (e) {
-      if (e.code === 'ER_DUP_KEYNAME') {
-        console.log('[DB] purchase_orders.inventory_id 索引已存在，跳过')
-      } else {
-        console.error('[DB] 添加 purchase_orders.inventory_id 索引失败:', e.message)
-      }
-    }
-
-    // SKU绑定映射表（销售SKU → 仓库库存）
-    await connection.execute(`
-      CREATE TABLE IF NOT EXISTS sku_bindings (
-        id INT PRIMARY KEY AUTO_INCREMENT,
-        store_id INT NOT NULL,
-        sku_id VARCHAR(50) NOT NULL,
-        inventory_id INT NOT NULL,
-        warehouse_id INT NOT NULL,
-        owner_id INT DEFAULT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_store_sku (store_id, sku_id),
-        KEY idx_inventory (inventory_id),
         KEY idx_owner (owner_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
@@ -495,30 +396,48 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 售后纠纷指标表（按店铺存储各平台运营待办数据）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS store_aftersale_metrics (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        platform VARCHAR(20) DEFAULT '',
+        overdue_orders INT DEFAULT 0,
+        pending_follow_ups INT DEFAULT 0,
+        cancelled_orders INT DEFAULT 0,
+        pending_review_aftersales INT DEFAULT 0,
+        pending_process_aftersales INT DEFAULT 0,
+        pending_receive_aftersales INT DEFAULT 0,
+        pending_reply_disputes INT DEFAULT 0,
+        pending_evidence_disputes INT DEFAULT 0,
+        pending_execute_disputes INT DEFAULT 0,
+        pending_compensation INT DEFAULT 0,
+        pending_warnings INT DEFAULT 0,
+        pending_violations INT DEFAULT 0,
+        pending_industry_complaints INT DEFAULT 0,
+        pending_task_orders INT DEFAULT 0,
+        raw_data LONGTEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_platform (store_id, platform)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     console.log('[DB] 数据库初始化完成')
   } finally {
     connection.release()
   }
 }
 
-// 定期心跳保活：防止MySQL连接池空闲超时断开
-// 远程用户反馈：登录后前1-3次点击"采购下单"卡顿10-15s，2-3小时不动再次操作也卡顿
-// 原因：TCP keepalive默认间隔7200秒，无法阻止防火墙/MySQL关闭空闲连接
-// 修复：每5分钟ping一次，保持所有池连接活跃
-function startKeepAlive(intervalMs = 5 * 60 * 1000) {
+// MySQL 连接池保活：定时执行 SELECT 1 防止连接超时断开
+function startKeepAlive(intervalMs = 30 * 60 * 1000) {
   setInterval(async () => {
     try {
-      const conn = await pool.getConnection()
-      try {
-        await conn.ping()
-      } finally {
-        conn.release()
-      }
-    } catch (err) {
-      console.warn('[DB] Keepalive ping failed:', err.message)
+      await pool.execute('SELECT 1')
+    } catch (e) {
+      console.warn('[DB] keep-alive query failed:', e.message)
     }
   }, intervalMs)
-  console.log(`[DB] Keepalive started (interval: ${intervalMs / 1000}s)`)
+  console.log('[DB] MySQL keep-alive started (interval:', intervalMs / 1000, 's)')
 }
 
 module.exports = { pool, initDB, startKeepAlive }

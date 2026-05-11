@@ -309,10 +309,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       { expiresIn: '7d', issuer: 'dianxiaoer-api' }
     )
 
-    // 删除该用户的所有旧 token（踢掉其他设备的会话，实现单点登录）
-    await dbPool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
-    // 保存新 token 到 user_tokens 表
-    await dbPool.execute('INSERT INTO user_tokens (user_id, token) VALUES (?, ?)', [user.id, accessToken])
+    // 单点登录：删除该用户旧 token，再写入新 token
+    try {
+      await dbPool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
+      await dbPool.execute(
+        'INSERT INTO user_tokens (user_id, token) VALUES (?, ?)',
+        [user.id, accessToken]
+      )
+    } catch (tokenErr) {
+      console.warn('[API] 写入 user_tokens 失败（非致命）:', tokenErr.message)
+    }
 
     console.log(`[API] 用户登录: ${username}`)
     res.json({
@@ -333,12 +339,15 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
 })
 
-// 登出（删除 user_tokens 中的 token）
-app.post('/api/logout', async (req, res) => {
-  const authHeader = req.headers['authorization'] || ''
-  const token = authHeader.replace('Bearer ', '').trim()
-  if (token) {
+// 登出（删除 user_tokens 中的当前 token，实现单点登录踢出）
+app.post('/api/logout', authMiddleware, async (req, res) => {
+  const username = req.user.sub
+  const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+  try {
     await dbPool.execute('DELETE FROM user_tokens WHERE token = ?', [token])
+    console.log(`[API] 用户登出: ${username}`)
+  } catch (err) {
+    console.warn('[API] 登出删除 token 失败:', err.message)
   }
   res.json({ success: true, message: '已登出' })
 })

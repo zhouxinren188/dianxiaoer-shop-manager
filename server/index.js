@@ -1176,9 +1176,9 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            ship_time=VALUES(ship_time), finish_time=VALUES(finish_time),
            total_amount=VALUES(total_amount), goods_amount=VALUES(goods_amount),
            shipping_fee=VALUES(shipping_fee), payment_method=VALUES(payment_method),
-           buyer_name=IF(VALUES(buyer_name)!='', VALUES(buyer_name), buyer_name),
+           buyer_name=IF(VALUES(buyer_name) REGEXP '[*]', buyer_name, IF(VALUES(buyer_name)!='', VALUES(buyer_name), buyer_name)),
            buyer_phone=IF(VALUES(buyer_phone) REGEXP '[*]', buyer_phone, IF(VALUES(buyer_phone)!='', VALUES(buyer_phone), buyer_phone)),
-           buyer_address=IF(VALUES(buyer_address)!='', VALUES(buyer_address), buyer_address),
+           buyer_address=IF(VALUES(buyer_address) REGEXP '[*]', buyer_address, IF(VALUES(buyer_address)!='', VALUES(buyer_address), buyer_address)),
            logistics_company=VALUES(logistics_company), logistics_no=VALUES(logistics_no),
            warehouse_name=VALUES(warehouse_name),
            sku_id=VALUES(sku_id), product_name=VALUES(product_name),
@@ -1775,6 +1775,148 @@ app.get('/api/store-sales-stats', async (req, res) => {
     }))
   } catch (err) {
     console.error('[店铺销售统计] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 售后纠纷指标 ============
+
+// 写入店铺售后纠纷指标（由 Electron 客户端调用）
+app.post('/api/store-aftersale-metrics/:storeId', async (req, res) => {
+  try {
+    const storeId = +req.params.storeId
+    const { platform, metrics, raw_data } = req.body
+
+    if (!storeId || !platform) {
+      return res.status(400).json(fail('缺少 storeId 或 platform'))
+    }
+
+    await pool.execute(
+      `INSERT INTO store_aftersale_metrics
+       (store_id, platform, overdue_orders, pending_follow_ups, cancelled_orders,
+        pending_review_aftersales, pending_process_aftersales, pending_receive_aftersales,
+        pending_reply_disputes, pending_evidence_disputes, pending_execute_disputes,
+        pending_compensation, pending_warnings, pending_violations,
+        pending_industry_complaints, pending_task_orders, raw_data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       overdue_orders=VALUES(overdue_orders), pending_follow_ups=VALUES(pending_follow_ups),
+       cancelled_orders=VALUES(cancelled_orders), pending_review_aftersales=VALUES(pending_review_aftersales),
+       pending_process_aftersales=VALUES(pending_process_aftersales), pending_receive_aftersales=VALUES(pending_receive_aftersales),
+       pending_reply_disputes=VALUES(pending_reply_disputes), pending_evidence_disputes=VALUES(pending_evidence_disputes),
+       pending_execute_disputes=VALUES(pending_execute_disputes), pending_compensation=VALUES(pending_compensation),
+       pending_warnings=VALUES(pending_warnings), pending_violations=VALUES(pending_violations),
+       pending_industry_complaints=VALUES(pending_industry_complaints), pending_task_orders=VALUES(pending_task_orders),
+       raw_data=VALUES(raw_data)`,
+      [
+        storeId, platform,
+        metrics.overdue_orders || 0,
+        metrics.pending_follow_ups || 0,
+        metrics.cancelled_orders || 0,
+        metrics.pending_review_aftersales || 0,
+        metrics.pending_process_aftersales || 0,
+        metrics.pending_receive_aftersales || 0,
+        metrics.pending_reply_disputes || 0,
+        metrics.pending_evidence_disputes || 0,
+        metrics.pending_execute_disputes || 0,
+        metrics.pending_compensation || 0,
+        metrics.pending_warnings || 0,
+        metrics.pending_violations || 0,
+        metrics.pending_industry_complaints || 0,
+        metrics.pending_task_orders || 0,
+        raw_data || ''
+      ]
+    )
+
+    console.log(`[售后指标] storeId=${storeId} platform=${platform} 写入成功`)
+    res.json(ok({ storeId, platform }))
+  } catch (err) {
+    console.error('[售后指标] 写入错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 读取所有店铺的售后纠纷指标（前端页面调用）
+app.get('/api/store-aftersale-metrics', async (req, res) => {
+  try {
+    const { store_id } = req.query
+    const storeIds = await getAccessibleStoreIds(req.user)
+
+    if (!storeIds.length) {
+      return res.json(ok({ summary: { totalOverdueOrders: 0, totalPendingFollowUps: 0, totalPendingReviewAftersales: 0, totalPendingProcessAftersales: 0, totalPendingReplyDisputes: 0, totalPendingWarnings: 0, totalPendingViolations: 0 }, list: [] }))
+    }
+
+    let targetStoreIds = storeIds
+    if (store_id) {
+      if (!storeIds.includes(+store_id)) {
+        return res.status(403).json(fail('无权查看此店铺'))
+      }
+      targetStoreIds = [+store_id]
+    }
+
+    const storePlaceholders = targetStoreIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT m.store_id, m.platform,
+              m.overdue_orders, m.pending_follow_ups, m.cancelled_orders,
+              m.pending_review_aftersales, m.pending_process_aftersales, m.pending_receive_aftersales,
+              m.pending_reply_disputes, m.pending_evidence_disputes, m.pending_execute_disputes,
+              m.pending_compensation, m.pending_warnings, m.pending_violations,
+              m.pending_industry_complaints, m.pending_task_orders,
+              m.updated_at,
+              s.name as storeName, s.tags
+       FROM store_aftersale_metrics m
+       JOIN stores s ON m.store_id = s.id
+       WHERE m.store_id IN (${storePlaceholders})`,
+      targetStoreIds
+    )
+
+    // 没有指标数据的店铺也要展示（用0填充）
+    const [allStores] = await pool.execute(
+      `SELECT id, name, platform, tags FROM stores WHERE id IN (${storePlaceholders})`,
+      targetStoreIds
+    )
+
+    const metricsMap = new Map()
+    rows.forEach(r => metricsMap.set(r.store_id, r))
+
+    const list = allStores.map(s => {
+      const m = metricsMap.get(s.id)
+      return {
+        storeId: s.id,
+        storeName: s.name,
+        platform: s.platform,
+        tags: typeof s.tags === 'string' ? JSON.parse(s.tags || '[]') : (s.tags || []),
+        overdueOrders: m ? m.overdue_orders : 0,
+        pendingFollowUps: m ? m.pending_follow_ups : 0,
+        cancelledOrders: m ? m.cancelled_orders : 0,
+        pendingReviewAftersales: m ? m.pending_review_aftersales : 0,
+        pendingProcessAftersales: m ? m.pending_process_aftersales : 0,
+        pendingReceiveAftersales: m ? m.pending_receive_aftersales : 0,
+        pendingReplyDisputes: m ? m.pending_reply_disputes : 0,
+        pendingEvidenceDisputes: m ? m.pending_evidence_disputes : 0,
+        pendingExecuteDisputes: m ? m.pending_execute_disputes : 0,
+        pendingCompensation: m ? m.pending_compensation : 0,
+        pendingWarnings: m ? m.pending_warnings : 0,
+        pendingViolations: m ? m.pending_violations : 0,
+        pendingIndustryComplaints: m ? m.pending_industry_complaints : 0,
+        pendingTaskOrders: m ? m.pending_task_orders : 0,
+        updatedAt: m ? m.updated_at : null
+      }
+    })
+
+    const summary = {
+      totalOverdueOrders: list.reduce((s, r) => s + r.overdueOrders, 0),
+      totalPendingFollowUps: list.reduce((s, r) => s + r.pendingFollowUps, 0),
+      totalPendingReviewAftersales: list.reduce((s, r) => s + r.pendingReviewAftersales, 0),
+      totalPendingProcessAftersales: list.reduce((s, r) => s + r.pendingProcessAftersales, 0),
+      totalPendingReplyDisputes: list.reduce((s, r) => s + r.pendingReplyDisputes, 0),
+      totalPendingWarnings: list.reduce((s, r) => s + r.pendingWarnings, 0),
+      totalPendingViolations: list.reduce((s, r) => s + r.pendingViolations, 0)
+    }
+
+    res.json(ok({ summary, list }))
+  } catch (err) {
+    console.error('[售后指标] 查询错误:', err.message)
     res.status(500).json(fail(err.message))
   }
 })

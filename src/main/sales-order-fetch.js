@@ -773,6 +773,9 @@ function fetchSalesOrders(storeId, options = {}) {
         // { data: { result: [...] } }
         if (json.data && Array.isArray(json.data.result)) return json.data.result
 
+        // { data: { results: [...] } } — queryOrderPage BFF 新版接口
+        if (json.data && Array.isArray(json.data.results)) return json.data.results
+
         // { resultData: { list: [...] } }
         if (json.resultData && Array.isArray(json.resultData.list)) return json.resultData.list
 
@@ -890,16 +893,16 @@ function fetchSalesOrders(storeId, options = {}) {
           extInfo.mailNo || extInfo.logisticsNo ||
           ''
 
-        // 发货仓库（京东 API 返回 venderWareHouse 对象）
-        // 有 wareHouseName 直接用；wareHouseId=0 或 null 为官方货源；wareHouseId 非零为供应商仓库
+        // 发货仓库判断逻辑：
+        // 1. 有 wareHouseName 直接用（保留"全国仓"等真实仓库名）
+        // 2. wareHouseId > 0（有具体仓库编号）→ 供应商仓库
+        // 3. 其他（wareHouseId 为 0、-1、null）→ 官方货源
         if (raw.venderWareHouse && raw.venderWareHouse.wareHouseName) {
           order.warehouseName = raw.venderWareHouse.wareHouseName
-        } else if (!raw.venderWareHouse || !raw.venderWareHouse.wareHouseId) {
-          // wareHouseId 为 0、null、undefined → 官方货源
-          order.warehouseName = '官方货源'
-        } else {
-          // wareHouseId 非零但无 wareHouseName → 供应商仓库
+        } else if (raw.venderWareHouse && raw.venderWareHouse.wareHouseId > 0) {
           order.warehouseName = '供应商仓库'
+        } else {
+          order.warehouseName = '官方货源'
         }
 
         // 商品信息（从 orderItems 提取）
@@ -3400,13 +3403,8 @@ async function autoSyncAllStores(mainWindow) {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${orders.length} 条订单`)
           // 主进程直接保存订单到服务器，避免通过 IPC 传递导致双重保存
           if (orders.length > 0) {
-            // 脱敏买家信息（含*）不上传，避免覆盖已解密的真实信息
-            const safeOrders = orders.map(o => {
-              if (o.buyerName && o.buyerName.includes('*')) delete o.buyerName
-              if (o.buyerPhone && o.buyerPhone.includes('*')) delete o.buyerPhone
-              if (o.buyerAddress && o.buyerAddress.includes('***')) delete o.buyerAddress
-              return o
-            })
+            // 保留脱敏买家信息（含*），由服务端 SQL 层判断是否覆盖
+            const safeOrders = orders
             const saved = await saveOrdersToServer(store.store_id, safeOrders)
             if (!saved) {
               console.error(`[AutoSync] [${i + 1}/${jdStores.length}] 保存订单到服务器失败！`)
@@ -3485,13 +3483,8 @@ async function autoSyncAllStores(mainWindow) {
                 if (missingIds.length > 0) {
                   console.log(`[AutoSync] [${i + 1}/${jdStores.length}] JD未返回的订单: ${missingIds.join(', ')} (共${missingIds.length}条)`)
                 }
-                // 脱敏买家信息不上传，保护已解密的真实信息
-                const safeActiveOrders = orders.map(o => {
-                  if (o.buyerName && o.buyerName.includes('*')) delete o.buyerName
-                  if (o.buyerPhone && o.buyerPhone.includes('*')) delete o.buyerPhone
-                  if (o.buyerAddress && o.buyerAddress.includes('***')) delete o.buyerAddress
-                  return o
-                })
+                // 保留脱敏买家信息，由服务端 SQL 层判断是否覆盖
+                const safeActiveOrders = orders
                 await saveOrdersToServer(store.store_id, safeActiveOrders)
               } else {
                 console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回0条（搜索了${batch.length}个订单号）`)

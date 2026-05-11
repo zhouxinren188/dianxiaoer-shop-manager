@@ -36,7 +36,10 @@ const validInvokeChannels = [
   'jd-auto-sync-status',
   'open-pdd-browsing-window',
   'export-purchase-cookies',
-  'import-purchase-cookies'
+  'import-purchase-cookies',
+  'fetch-aftersale-metrics',
+  'check-aftersale-sync-stores',
+  'open-store-backend-url'
 ]
 
 const validOnChannels = [

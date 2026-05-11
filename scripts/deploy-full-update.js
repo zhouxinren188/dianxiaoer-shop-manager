@@ -6,12 +6,12 @@ const http = require('http')
 const HOST = '150.158.54.108'
 const PORT = 22
 const USERNAME = 'administrator'
-const PASSWORD = 'K9#m2$vL5@zQ'
 const NSSM = 'C:/nssm/nssm.exe'
 
 const ROOT = path.join(__dirname, '..')
+const SSH_KEY = fs.readFileSync(path.join(ROOT, 'server-key/id_rsa'))
 const DIST_DIR = path.join(ROOT, 'dist')
-const VERSION = '1.3.1'
+const VERSION = '1.3.42'
 const REMOTE_UPDATE_DIR = 'C:/Users/Administrator/dianxiaoer-api/updates'
 
 const conn = new Client()
@@ -50,7 +50,7 @@ function sftpUpload(sftp, localPath, remotePath) {
 // 通知服务器登记全量版本
 function notifyServer(ver) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ version: ver, changelog: `全量更新 v${ver}: 修复登录错误提示、热更新下载协议问题` })
+    const body = JSON.stringify({ version: ver, changelog: `全量更新 v${ver}: 买家信息持久化修复、采购删除、编号规则优化、启动闪烁优化` })
     const req = http.request({
       hostname: HOST,
       port: 3001,
@@ -112,7 +112,7 @@ conn.on('ready', async () => {
     await new Promise((resolve, reject) => {
       conn2.on('ready', resolve)
       conn2.on('error', reject)
-      conn2.connect({ host: HOST, port: PORT, username: USERNAME, password: PASSWORD, readyTimeout: 30000, keepaliveInterval: 10000 })
+      conn2.connect({ host: HOST, port: PORT, username: USERNAME, privateKey: SSH_KEY, readyTimeout: 30000, keepaliveInterval: 10000 })
     })
 
     const sftp2 = await new Promise((resolve, reject) => {
