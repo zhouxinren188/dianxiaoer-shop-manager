@@ -6,3 +6,5 @@ out/
 Thumbs.db
 nul
 server-key/nul
+scripts/
+sales-debug.json

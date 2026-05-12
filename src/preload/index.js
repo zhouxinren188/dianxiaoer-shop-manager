@@ -60,6 +60,7 @@ const validOnChannels = [
   'auto-sync-start',
   'auto-sync-result',
   'auto-sync-progress',
+  'batch-sync-progress',
   'pdd-product-link-update'
 ]
 

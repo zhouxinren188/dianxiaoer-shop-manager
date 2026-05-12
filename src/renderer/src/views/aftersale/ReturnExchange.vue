@@ -54,10 +54,20 @@
     <!-- 筛选区 -->
     <el-card class="filter-card" shadow="never">
       <el-form :model="filterForm" inline class="filter-form">
+        <el-form-item label="店铺标签">
+          <el-select v-model="filterForm.storeTag" placeholder="全部标签" clearable style="width: 160px">
+            <el-option
+              v-for="tag in storeTagOptions"
+              :key="tag"
+              :label="tag"
+              :value="tag"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="店铺">
           <el-select v-model="filterForm.storeId" placeholder="全部店铺" clearable style="width: 200px">
             <el-option
-              v-for="store in storeOptions"
+              v-for="store in filteredStoreOptions"
               :key="store.id"
               :label="store.name"
               :value="store.id"
@@ -156,7 +166,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Service, Search, Refresh } from '@element-plus/icons-vue'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
@@ -180,7 +190,44 @@ const summary = reactive({
 })
 
 const filterForm = reactive({
-  storeId: ''
+  storeId: '',
+  storeTag: ''
+})
+
+// 从所有店铺中提取唯一标签
+const storeTagOptions = computed(() => {
+  const tagSet = new Set()
+  for (const s of storeOptions.value) {
+    let tags = s.tags
+    if (typeof tags === 'string') {
+      try { tags = JSON.parse(tags) } catch { tags = null }
+    }
+    if (Array.isArray(tags)) {
+      tags.forEach(t => { if (t && typeof t === 'string') tagSet.add(t.trim()) })
+    }
+  }
+  return [...tagSet].sort()
+})
+
+// 按标签过滤后的店铺列表
+const filteredStoreOptions = computed(() => {
+  if (!filterForm.storeTag) return storeOptions.value
+  return storeOptions.value.filter(s => {
+    let tags = s.tags
+    if (typeof tags === 'string') {
+      try { tags = JSON.parse(tags) } catch { tags = null }
+    }
+    return Array.isArray(tags) && tags.some(t => t && t.trim() === filterForm.storeTag)
+  })
+})
+
+// 标签变更时联动
+watch(() => filterForm.storeTag, () => {
+  if (filterForm.storeId && filterForm.storeTag) {
+    const inFiltered = filteredStoreOptions.value.some(s => s.id === filterForm.storeId)
+    if (!inFiltered) filterForm.storeId = ''
+  }
+  loadData()
 })
 
 function platformLabel(platform) {
@@ -242,7 +289,14 @@ async function loadData() {
     if (filterForm.storeId) params.store_id = filterForm.storeId
     const res = await fetchAftersaleMetrics(params)
     if (res) {
-      const list = res.list || []
+      let list = res.list || []
+      // 按标签客户端过滤
+      if (filterForm.storeTag) {
+        list = list.filter(row => {
+          const tags = row.tags || []
+          return tags.some(t => t && t.trim() === filterForm.storeTag)
+        })
+      }
       tableData.value = list
 
       const s = res.summary || {}
@@ -335,6 +389,7 @@ async function loadStoreOptions() {
 
 function handleReset() {
   filterForm.storeId = ''
+  filterForm.storeTag = ''
   loadData()
 }
 

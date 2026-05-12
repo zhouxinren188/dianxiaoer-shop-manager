@@ -3390,12 +3390,16 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
 
     // 订单状态映射表（文本 + PDD combinedOrderStatus 数字）
     const statusMap = {
-      '等待买家付款': 'pending',
+      '等待买家付款': 'ordered',
       '买家已付款': 'pending',
       '待发货': 'pending',
       '待收货': 'shipped',
       '卖家已发货': 'shipped',
       '已发货': 'shipped',
+      '卖家发货': 'shipped',
+      '买家付款': 'pending',
+      '拍下宝贝': 'ordered',
+      '确认收货': 'received',
       '已签收': 'received',
       '交易成功': 'received',
       '运输中': 'in_transit',
@@ -3426,7 +3430,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
     }
 
     // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
-    const validStatuses = ['pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+    const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
     if (!newStatus && validStatuses.includes(order_info.status)) {
       newStatus = order_info.status
     }
@@ -3469,13 +3473,20 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       console.log(`[Browser-Sync-Update] 物流公司: ${order_info.logistics_company}`)
     }
 
+    // 物流轨迹数据
+    if (order_info.logistics_tracking && Array.isArray(order_info.logistics_tracking) && order_info.logistics_tracking.length > 0) {
+      updateFields.push('logistics_tracking=?')
+      updateValues.push(JSON.stringify(order_info.logistics_tracking))
+      console.log(`[Browser-Sync-Update] 物流轨迹: ${order_info.logistics_tracking.length} 条记录`)
+    }
+
     // PDD 搜索 API 返回的商品信息（仅当原数据为空/弱时才更新）
     if (order_info.goods_name && (!localOrder.goods_name || localOrder.goods_name.length <= 4)) {
       updateFields.push('goods_name=?')
       updateValues.push(order_info.goods_name)
       console.log(`[Browser-Sync-Update] 商品名称: ${order_info.goods_name}`)
     }
-    if (order_info.goods_image && !localOrder.goods_image) {
+    if (order_info.goods_image) {
       updateFields.push('goods_image=?')
       updateValues.push(order_info.goods_image)
       console.log(`[Browser-Sync-Update] 商品图片: ${order_info.goods_image.substring(0, 80)}`)
@@ -3585,7 +3596,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         }
       }
       // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
-      const validStatuses = ['pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+      const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
       if (!statusMap[platformOrder.status] && validStatuses.includes(platformOrder.status)) {
         newStatus = platformOrder.status
       }
@@ -3609,13 +3620,17 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         updateFields.push('logistics_company=?')
         updateValues.push(platformOrder.logistics_company)
       }
+      if (platformOrder.logistics_tracking && Array.isArray(platformOrder.logistics_tracking) && platformOrder.logistics_tracking.length > 0) {
+        updateFields.push('logistics_tracking=?')
+        updateValues.push(JSON.stringify(platformOrder.logistics_tracking))
+      }
 
       // PDD 搜索 API 返回的商品信息（仅当原数据为空/弱时才更新）
       if (platformOrder.goods_name && (!localOrder.goods_name || localOrder.goods_name.length <= 4)) {
         updateFields.push('goods_name=?')
         updateValues.push(platformOrder.goods_name)
       }
-      if (platformOrder.goods_image && !localOrder.goods_image) {
+      if (platformOrder.goods_image) {
         updateFields.push('goods_image=?')
         updateValues.push(platformOrder.goods_image)
       }
@@ -4908,9 +4923,9 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
 
-    // 1. 获取采购订单信息（包含account_id）
+    // 1. 获取采购订单信息（包含account_id和logistics_tracking）
     const [rows] = await pool.execute(
-      'SELECT logistics_no, logistics_company, platform, account_id FROM purchase_orders WHERE id=? AND owner_id=?',
+      'SELECT logistics_no, logistics_company, platform, account_id, logistics_tracking FROM purchase_orders WHERE id=? AND owner_id=?',
       [req.params.id, ownerId]
     )
 
@@ -4921,6 +4936,26 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
     const order = rows[0]
     if (!order.logistics_no) {
       return res.json(fail('该订单暂无物流单号'))
+    }
+
+    // 1.5 优先从数据库读取已同步的物流轨迹
+    if (order.logistics_tracking) {
+      try {
+        const tracks = typeof order.logistics_tracking === 'string'
+          ? JSON.parse(order.logistics_tracking)
+          : order.logistics_tracking
+        if (Array.isArray(tracks) && tracks.length > 0) {
+          console.log(`[Logistics] 从数据库返回 ${tracks.length} 条物流轨迹`)
+          return res.json(ok({
+            company: order.logistics_company || '',
+            tracking_no: order.logistics_no || '',
+            tracks,
+            source: 'local'
+          }))
+        }
+      } catch (e) {
+        console.log(`[Logistics] 数据库物流轨迹解析失败: ${e.message}`)
+      }
     }
 
     // 2. 查询物流轨迹（优先从平台获取，其次使用第三方API）

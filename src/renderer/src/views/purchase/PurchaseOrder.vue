@@ -15,6 +15,9 @@
         <div class="header-account">
           <span class="account-label">采购账号</span>
           <el-select v-model="selectedAccount" placeholder="请选择" size="small" style="width: 160px">
+            <el-option label="全部账号" value="">
+              <span>全部账号</span>
+            </el-option>
             <el-option v-for="acc in accountList" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id">
               <div style="display:flex;align-items:center;justify-content:space-between">
                 <span>{{ acc.username || '未命名' }}</span>
@@ -34,6 +37,19 @@
           同步采购订单
         </el-button>
       </div>
+    </div>
+    <!-- 批量同步进度 -->
+    <div v-if="batchSyncProgress.active" class="batch-sync-progress">
+      <el-progress
+        :percentage="batchSyncProgress.total > 0 ? Math.round(batchSyncProgress.current / batchSyncProgress.total * 100) : 0"
+        :stroke-width="6"
+        :show-text="false"
+        style="flex: 1"
+      />
+      <span class="batch-sync-text">
+        {{ batchSyncProgress.current }}/{{ batchSyncProgress.total }}
+        {{ batchSyncProgress.status === 'syncing' ? `正在同步 ${batchSyncProgress.orderNo}` : `同步完成 ${batchSyncProgress.orderNo}` }}
+      </span>
     </div>
 
     <!-- 筛选区 -->
@@ -210,6 +226,12 @@
           </template>
         </el-table-column>
 
+        <el-table-column prop="account_name" label="采购账号" width="140" align="center">
+          <template #default="{ row }">
+            <span>{{ row.account_name || '-' }}</span>
+          </template>
+        </el-table-column>
+
         <el-table-column prop="purchase_type" label="采购类型" width="130" align="center">
           <template #default="{ row }">
             <div>
@@ -220,9 +242,12 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="logistics_no" label="物流单号" width="160" align="center">
+        <el-table-column prop="logistics_no" label="物流单号" width="200" align="center">
           <template #default="{ row }">
-            <span v-if="row.logistics_no" class="cell-order-no">{{ row.logistics_no }}</span>
+            <div v-if="row.logistics_no">
+              <span class="cell-order-no cell-logistics-no" @click="handleViewLogistics(row)">{{ row.logistics_no }}</span>
+              <div v-if="row.logistics_company" class="cell-logistics-company">{{ row.logistics_company }}</div>
+            </div>
             <span v-else class="cell-empty">--</span>
           </template>
         </el-table-column>
@@ -322,33 +347,29 @@
     <el-dialog
       v-model="logisticsVisible"
       title="物流轨迹"
-      width="600px"
+      width="650px"
       align-center
     >
       <div v-if="logisticsData" class="logistics-container">
-        <el-descriptions :column="2" border size="small" style="margin-bottom: 20px">
-          <el-descriptions-item label="物流公司">{{ logisticsData.company || '--' }}</el-descriptions-item>
-          <el-descriptions-item label="物流单号">{{ logisticsData.tracking_no || '--' }}</el-descriptions-item>
-          <el-descriptions-item label="数据来源">
-            <el-tag size="small" :type="logisticsData.source === 'express100' ? 'success' : logisticsData.source === 'local' ? 'info' : 'primary'">
-              {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '阿里巴巴' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地记录' : '快递100' }}
-            </el-tag>
-          </el-descriptions-item>
-        </el-descriptions>
+        <div class="logistics-header">
+          <span>{{ logisticsData.company || '--' }}</span>
+          <span class="logistics-header-sep">|</span>
+          <span>{{ logisticsData.tracking_no || '--' }}</span>
+          <el-tag size="small" :type="logisticsData.source === 'local' ? 'info' : 'primary'" style="margin-left: 8px">
+            {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '阿里巴巴' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地' : '快递100' }}
+          </el-tag>
+        </div>
 
-        <el-timeline v-if="logisticsData.tracks && logisticsData.tracks.length > 0">
-          <el-timeline-item
-            v-for="(track, index) in logisticsData.tracks"
-            :key="index"
-            :timestamp="formatTime(track.time || track.timestamp)"
-            placement="top"
-            :color="index === 0 ? '#0bbd87' : '#e4e7ed'"
-          >
-            <el-card>
-              <p style="margin: 0; font-size: 14px">{{ track.context || track.desc || track.message }}</p>
-            </el-card>
-          </el-timeline-item>
-        </el-timeline>
+        <div v-if="logisticsData.tracks && logisticsData.tracks.length > 0" class="logistics-list">
+          <div v-for="(track, index) in logisticsData.tracks" :key="index" class="logistics-item" :class="{ 'logistics-item-latest': index === 0 }">
+            <div class="logistics-item-time">{{ formatTime(track.time || track.timestamp) }}</div>
+            <div class="logistics-item-dot">
+              <span class="logistics-dot" :class="index === 0 ? 'logistics-dot-active' : ''"></span>
+              <span v-if="index < logisticsData.tracks.length - 1" class="logistics-line"></span>
+            </div>
+            <div class="logistics-item-text">{{ track.context || track.desc || track.message }}</div>
+          </div>
+        </div>
         <el-empty v-else :description="logisticsData.source === 'local' ? '暂无详细轨迹，可到平台查看物流详情' : '暂无物流轨迹信息'" />
       </div>
       <div v-else v-loading="logisticsLoading" style="min-height: 200px"></div>
@@ -371,7 +392,7 @@
       />
       <el-form label-width="100px">
         <el-form-item label="采购平台">
-          <el-radio-group v-model="syncForm.platform">
+          <el-radio-group v-model="syncForm.platform" @change="syncForm.accountId = ''">
             <el-radio value="taobao">淘宝/天猫</el-radio>
             <el-radio value="pinduoduo">拼多多</el-radio>
             <el-radio value="1688">阿里巴巴</el-radio>
@@ -379,7 +400,7 @@
         </el-form-item>
         <el-form-item label="采购账号">
           <el-select v-model="syncForm.accountId" placeholder="请选择采购账号" style="width: 100%">
-            <el-option v-for="acc in accountList" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id" />
+            <el-option v-for="acc in accountList.filter(a => a.platform === syncForm.platform)" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -823,6 +844,16 @@ const syncing = ref(false)
 const tableData = ref([])
 const selectedAccount = ref('')
 
+// 批量同步进度
+const batchSyncProgress = reactive({
+  active: false,
+  current: 0,
+  total: 0,
+  orderNo: '',
+  purchaseNo: '',
+  status: '' // 'syncing' | 'done' | 'error'
+})
+
 // ==================== 批量导入 ====================
 
 const importDialogVisible = ref(false)
@@ -882,11 +913,12 @@ async function loadAccounts() {
       status: a.online ? 'online' : 'offline',
       showPwd: false
     }))
-    // 自动选中第一个在线账号
-    if (!selectedAccount.value && accountList.value.length > 0) {
-      const onlineAcc = accountList.value.find(a => a.status === 'online')
-      selectedAccount.value = (onlineAcc || accountList.value[0]).id
+    // 默认选中"全部账号"
+    if (!selectedAccount.value) {
+      selectedAccount.value = ''
     }
+    // 同步到筛选条件
+    filterForm.accountId = selectedAccount.value
   } catch (err) {
     console.warn('加载采购账号失败:', err.message)
   }
@@ -1065,6 +1097,7 @@ function handleImportAccount() {
 // 监听 Electron 主进程登录成功事件，自动刷新列表
 let unsubLoginSuccess = null
 let unsubOrderCaptured = null
+let unsubBatchSyncProgress = null
 
 const filterForm = reactive({
   purchaseNo: '',
@@ -1131,9 +1164,30 @@ function formatTime(val) {
 // ==================== 状态Tab ====================
 
 const statusTabs = computed(() => {
-  const all = tableData.value.length
+  // 基于除 status 外的其他筛选条件过滤后的数据来计算计数
+  let data = tableData.value
+  if (filterForm.purchaseNo) {
+    data = data.filter(r => r.purchase_no && r.purchase_no.includes(filterForm.purchaseNo))
+  }
+  if (filterForm.logisticsNo) {
+    data = data.filter(r => r.logistics_no && r.logistics_no.includes(filterForm.logisticsNo))
+  }
+  if (filterForm.platformOrderNo) {
+    data = data.filter(r => r.platform_order_no && r.platform_order_no.includes(filterForm.platformOrderNo))
+  }
+  if (filterForm.salesOrderNo) {
+    data = data.filter(r => r.sales_order_no && r.sales_order_no.includes(filterForm.salesOrderNo))
+  }
+  if (filterForm.platform) {
+    data = data.filter(r => r.platform === filterForm.platform)
+  }
+  if (filterForm.accountId) {
+    data = data.filter(r => r.account_id === filterForm.accountId)
+  }
+
+  const all = data.length
   const counts = {}
-  for (const row of tableData.value) {
+  for (const row of data) {
     if (row.status) {
       counts[row.status] = (counts[row.status] || 0) + 1
     }
@@ -1147,6 +1201,7 @@ const statusTabs = computed(() => {
 function handleStatusTab(val) {
   filterForm.status = val
   pageInfo.page = 1
+  loadData()
 }
 
 // ==================== 筛选与分页 ====================
@@ -1183,6 +1238,11 @@ const filteredData = computed(() => {
 watch(filteredData, (data) => {
   pageInfo.total = data.length
 }, { immediate: true })
+
+// 顶部采购账号下拉框切换时，同步到筛选条件
+watch(selectedAccount, (val) => {
+  filterForm.accountId = val
+})
 
 const pagedData = computed(() => {
   const start = (pageInfo.page - 1) * pageInfo.pageSize
@@ -1521,6 +1581,13 @@ function handleSync() {
 
 async function handleSyncSubmit() {
   syncing.value = true
+  // 重置进度
+  batchSyncProgress.active = false
+  batchSyncProgress.current = 0
+  batchSyncProgress.total = 0
+  batchSyncProgress.orderNo = ''
+  batchSyncProgress.status = ''
+
   try {
     // 使用浏览器窗口方案同步
     if (window.electronAPI) {
@@ -1529,12 +1596,25 @@ async function handleSyncSubmit() {
         platform: syncForm.platform
       })
       if (result.success) {
-        const count = result.matchedCount || 0
-        const total = result.orders?.length || 0
-        if (count > 0) {
-          ElMessage.success(`同步完成，平台获取 ${total} 条订单，匹配更新 ${count} 条`)
+        // 逐个同步模式（淘宝/1688）
+        if (result.syncedCount !== undefined) {
+          const { syncedCount, errorCount, totalOrders } = result
+          if (syncedCount > 0) {
+            ElMessage.success(`同步完成，成功 ${syncedCount} 条${errorCount > 0 ? `，失败 ${errorCount} 条` : ''}`)
+          } else if (errorCount > 0) {
+            ElMessage.error(`同步失败 ${errorCount} 条订单`)
+          } else {
+            ElMessage.info(result.message || '没有需要同步的订单')
+          }
         } else {
-          ElMessage.info(`同步完成，平台获取 ${total} 条订单，暂无新的匹配`)
+          // PDD 批量模式
+          const count = result.matchedCount || 0
+          const total = result.orders?.length || 0
+          if (count > 0) {
+            ElMessage.success(`同步完成，平台获取 ${total} 条订单，匹配更新 ${count} 条`)
+          } else {
+            ElMessage.info(`同步完成，平台获取 ${total} 条订单，暂无新的匹配`)
+          }
         }
       } else {
         if (result.needsRelogin) {
@@ -1568,8 +1648,11 @@ async function handleSyncSubmit() {
     }
     syncDialogVisible.value = false
     await loadData()
+    // 延迟隐藏进度条，让用户看到完成状态
+    setTimeout(() => { batchSyncProgress.active = false }, 2000)
   } catch (err) {
     ElMessage.error('同步失败: ' + err.message)
+    batchSyncProgress.active = false
   } finally {
     syncing.value = false
   }
@@ -1704,6 +1787,15 @@ onMounted(async () => {
         loadData()
       }
     })
+    // 监听批量同步进度
+    unsubBatchSyncProgress = window.electronAPI.onUpdate('batch-sync-progress', (data) => {
+      batchSyncProgress.active = true
+      batchSyncProgress.current = data.current
+      batchSyncProgress.total = data.total
+      batchSyncProgress.orderNo = data.orderNo || ''
+      batchSyncProgress.purchaseNo = data.purchaseNo || ''
+      batchSyncProgress.status = data.status || ''
+    })
   }
 })
 
@@ -1715,6 +1807,10 @@ onUnmounted(() => {
   if (unsubOrderCaptured) {
     unsubOrderCaptured()
     unsubOrderCaptured = null
+  }
+  if (unsubBatchSyncProgress) {
+    unsubBatchSyncProgress()
+    unsubBatchSyncProgress = null
   }
 })
 
@@ -1969,6 +2065,21 @@ function handleImportDialogClose() {
 </script>
 
 <style scoped>
+.batch-sync-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: -12px;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
+.batch-sync-text {
+  font-size: 12px;
+  color: #909399;
+  white-space: nowrap;
+}
 .import-row-invalid {
   --el-table-tr-bg-color: #fef0f0;
 }
@@ -2192,6 +2303,106 @@ function handleImportDialogClose() {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   font-size: 12px;
   color: #606266;
+}
+
+.cell-logistics-no {
+  color: var(--el-color-primary);
+  cursor: pointer;
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.cell-logistics-company {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+.logistics-header {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  color: #303133;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #ebeef5;
+}
+.logistics-header-sep {
+  color: #dcdfe6;
+  margin: 0 8px;
+}
+
+.logistics-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.logistics-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 6px 0;
+  position: relative;
+}
+
+.logistics-item-latest .logistics-item-text {
+  color: #303133;
+  font-weight: 500;
+}
+
+.logistics-item-time {
+  width: 90px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #909399;
+  text-align: right;
+  padding-right: 12px;
+  line-height: 20px;
+}
+
+.logistics-item-latest .logistics-item-time {
+  color: #0bbd87;
+}
+
+.logistics-item-dot {
+  width: 14px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.logistics-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e4e7ed;
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+
+.logistics-dot-active {
+  background: #0bbd87;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+}
+
+.logistics-line {
+  width: 1px;
+  flex: 1;
+  min-height: 14px;
+  background: #e4e7ed;
+  margin-top: 4px;
+}
+
+.logistics-item-text {
+  flex: 1;
+  font-size: 13px;
+  color: #606266;
+  line-height: 20px;
+  padding-left: 8px;
 }
 
 .cell-empty {
