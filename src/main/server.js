@@ -9,9 +9,11 @@ const app = express()
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true)
-    const allowed = ['http://localhost:3002', 'http://127.0.0.1:3002']
+    const allowed = ['http://localhost:3002', 'http://127.0.0.1:3002', 'http://localhost:5173', 'http://127.0.0.1:5173']
     if (allowed.some(a => origin.startsWith(a))) return callback(null, true)
-    callback(new Error('不允许的来源'))
+    // 本地服务器不对外暴露，未知来源也放行（仅记录警告）
+    console.warn(`[CORS] 未知来源: ${origin}`)
+    callback(null, true)
   }
 }))
 app.use(express.json())

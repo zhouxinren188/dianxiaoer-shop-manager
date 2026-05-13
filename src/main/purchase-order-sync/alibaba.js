@@ -411,12 +411,16 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-1688] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-1688] Cookies: ${cookies.length} 条`)
 
-    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
-    console.log(`[PurchaseSync-1688] 从服务器恢复 cookie（合并模式）...`)
-    const restoreResult = await restoreCookiesFromServer(accountId, '1688')
-    if (restoreResult.restored) {
-      cookies = await ses.cookies.get({})
-      console.log(`[PurchaseSync-1688] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
+    if (hasValidPlatformCookies(cookies, '1688')) {
+      console.log(`[PurchaseSync-1688] partition 已有有效平台 cookies，跳过服务器恢复`)
+    } else {
+      console.log(`[PurchaseSync-1688] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, '1688')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-1688] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+      }
     }
 
     if (!hasValidPlatformCookies(cookies, '1688')) {

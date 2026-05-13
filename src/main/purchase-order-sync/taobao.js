@@ -278,12 +278,17 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
 
-    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
-    console.log(`[PurchaseSync-Taobao] 从服务器恢复 cookie（合并模式）...`)
-    const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
-    if (restoreResult.restored) {
-      cookies = await ses.cookies.get({})
-      console.log(`[PurchaseSync-Taobao] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
+    if (hasValidPlatformCookies(cookies, 'taobao')) {
+      console.log(`[PurchaseSync-Taobao] partition 已有有效平台 cookies，跳过服务器恢复`)
+    } else {
+      // partition 缺少有效 cookies，尝试从服务器恢复（合并模式：只补充缺失的，不覆盖已有的）
+      console.log(`[PurchaseSync-Taobao] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-Taobao] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+      }
     }
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {
@@ -1377,12 +1382,16 @@ function syncAll(accountId) {
     console.log(`[PurchaseSync-Taobao-All] accountId:${accountId}`)
     console.log(`[PurchaseSync-Taobao-All] Cookies: ${cookies.length} 条`)
 
-    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
-    console.log(`[PurchaseSync-Taobao-All] 从服务器恢复 cookie（合并模式）...`)
-    const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
-    if (restoreResult.restored) {
-      cookies = await ses.cookies.get({})
-      console.log(`[PurchaseSync-Taobao-All] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
+    if (hasValidPlatformCookies(cookies, 'taobao')) {
+      console.log(`[PurchaseSync-Taobao-All] partition 已有有效平台 cookies，跳过服务器恢复`)
+    } else {
+      console.log(`[PurchaseSync-Taobao-All] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-Taobao-All] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
+      }
     }
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {

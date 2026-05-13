@@ -61,12 +61,16 @@ function syncSingle(accountId, platformOrderNo) {
 
     console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
 
-    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
-    console.log(`[PDD-SearchSync] 从服务器恢复 cookie（合并模式）...`)
-    const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
-    if (restoreResult.restored) {
-      cookies = await ses.cookies.get({})
-      console.log(`[PDD-SearchSync] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 cookies:${cookies.length}`)
+    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
+    if (hasValidPlatformCookies(cookies, 'pinduoduo')) {
+      console.log(`[PDD-SearchSync] partition 已有有效平台 cookies，跳过服务器恢复`)
+    } else {
+      console.log(`[PDD-SearchSync] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PDD-SearchSync] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 cookies:${cookies.length}`)
+      }
     }
 
     if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {

@@ -529,7 +529,7 @@ const COOKIE_RESTORE_CACHE_TTL = 600000 // 10 分钟缓存有效期（批量同�
  * @returns {Promise<{restored: boolean, count: number, skipped: number}>} 恢复结果
  */
 async function restoreCookiesFromServer(accountId, platform) {
-  const RESTORE_TIMEOUT = 15000 // 15 秒总超时，防止 HTTP 请求挂起阻塞同步
+  const RESTORE_TIMEOUT = 5000 // 5 秒总超时，防止 HTTP 请求挂起阻塞同步
 
   // 检查缓存：同一 accountId+platform 在 CACHE_TTL 内不重复请求
   const cacheKey = `${accountId}|${platform}`
