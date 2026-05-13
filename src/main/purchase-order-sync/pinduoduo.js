@@ -8,7 +8,7 @@
 const {
   BrowserWindow, session, path,
   BUSINESS_SERVER, activeSyncs,
-  httpPostJson, restoreCookiesFromServer
+  httpPostJson, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -57,9 +57,9 @@ function syncSingle(accountId, platformOrderNo) {
 
     console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
 
-    // partition 为空时，尝试从服务器恢复 cookie（解决跨设备/跨账号 partition 不共享问题）
-    if (cookies.length === 0) {
-      console.log(`[PDD-SearchSync] partition 为空，尝试从服务器恢复 cookie...`)
+    // partition 无有效平台 cookie 时，尝试从服务器恢复
+    if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
+      console.log(`[PDD-SearchSync] partition 无有效 PDD cookie，尝试从服务器恢复...`)
       const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
       if (restoreResult.restored) {
         cookies = await ses.cookies.get({})
@@ -67,7 +67,7 @@ function syncSingle(accountId, platformOrderNo) {
       }
     }
 
-    if (cookies.length === 0) {
+    if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 

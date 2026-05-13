@@ -8,7 +8,7 @@ const {
   OVERALL_TIMEOUT, POLL_INTERVAL, MAX_POLLS,
   BUSINESS_SERVER, activeSyncs,
   CDPNetworkCapture, httpPostJson, VISIBILITY_OVERRIDE,
-  resolveLogisticsCompany, extractTrackingFromData, restoreCookiesFromServer
+  resolveLogisticsCompany, extractTrackingFromData, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -408,9 +408,9 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-1688] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-1688] Cookies: ${cookies.length} 条`)
 
-    // partition 为空时，尝试从服务器恢复 cookie
-    if (cookies.length === 0) {
-      console.log(`[PurchaseSync-1688] partition 为空，尝试从服务器恢复 cookie...`)
+    // partition 无有效平台 cookie 时，尝试从服务器恢复
+    if (!hasValidPlatformCookies(cookies, '1688')) {
+      console.log(`[PurchaseSync-1688] partition 无有效1688 cookie，尝试从服务器恢复...`)
       const restoreResult = await restoreCookiesFromServer(accountId, '1688')
       if (restoreResult.restored) {
         cookies = await ses.cookies.get({})
@@ -418,7 +418,7 @@ function syncSingle(accountId, platformOrderNo) {
       }
     }
 
-    if (cookies.length === 0) {
+    if (!hasValidPlatformCookies(cookies, '1688')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 

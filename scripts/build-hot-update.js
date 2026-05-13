@@ -20,7 +20,7 @@ const OUT_DIR = path.join(ROOT, 'out')
 const DIST_DIR = path.join(ROOT, 'dist')
 
 const UPDATE_SERVER = 'http://150.158.54.108:3001'
-const ADMIN_PASSWORD = 'dianxiaoer2026'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Dxe@2026!Admin'
 
 // 从命令行参数或 package.json 读取版本
 const args = process.argv.slice(2).filter(arg => !arg.startsWith('--'))

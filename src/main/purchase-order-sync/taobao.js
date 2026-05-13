@@ -9,7 +9,7 @@ const {
   BUSINESS_SERVER, activeSyncs,
   CDPNetworkCapture, httpPostJson, VISIBILITY_OVERRIDE,
   resolveLogisticsCompany, extractTrackingFromData, normalizeTrackingItems,
-  looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer
+  looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -275,9 +275,9 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
 
-    // partition 为空时，尝试从服务器恢复 cookie
-    if (cookies.length === 0) {
-      console.log(`[PurchaseSync-Taobao] partition 为空，尝试从服务器恢复 cookie...`)
+    // partition 无有效平台 cookie 时，尝试从服务器恢复
+    if (!hasValidPlatformCookies(cookies, 'taobao')) {
+      console.log(`[PurchaseSync-Taobao] partition 无有效淘宝 cookie，尝试从服务器恢复...`)
       const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
       if (restoreResult.restored) {
         cookies = await ses.cookies.get({})
@@ -285,7 +285,7 @@ function syncSingle(accountId, platformOrderNo) {
       }
     }
 
-    if (cookies.length === 0) {
+    if (!hasValidPlatformCookies(cookies, 'taobao')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 

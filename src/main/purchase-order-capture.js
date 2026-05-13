@@ -3879,12 +3879,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
     // ========== Cookie 恢复策略 ==========
-    // partition有cookie时信任partition（更新鲜），只在partition无cookie时才从服务器恢复
+    // partition 有有效平台 cookie 时信任 partition（更新鲜），否则从服务器恢复
     const ses = session.fromPartition(partitionName)
     let needServerRestore = true
     try {
       const partitionCookies = await ses.cookies.get({})
-      // 按平台检测 cookie，只有该平台域名下有 cookie 才认为 partition 有效，跳过服务器恢复
+      // 按平台检测 cookie：必须属于该平台域名且未过期
       const PLATFORM_DOMAINS = {
         pinduoduo: ['pinduoduo.com', 'yangkeduo.com'],
         taobao: ['taobao.com', 'tmall.com'],
@@ -3892,15 +3892,19 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         douyin: ['douyin.com', 'jinritemai.com']
       }
       const domains = PLATFORM_DOMAINS[platform] || []
-      const platformCookies = domains.length > 0
-        ? partitionCookies.filter(c => c.domain && domains.some(d => c.domain.includes(d)))
-        : partitionCookies  // 未知平台，有任何cookie就认为有效
-      if (platformCookies.length > 0) {
+      const now = Date.now() / 1000
+      const validPlatformCookies = domains.length > 0
+        ? partitionCookies.filter(c =>
+            c.domain && domains.some(d => c.domain.includes(d)) &&
+            (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
+          )
+        : partitionCookies.filter(c => !c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
+      if (validPlatformCookies.length > 0) {
         needServerRestore = false
-        console.log(`[PurchaseCapture] Partition已有 ${platformCookies.length} 条${platform} cookie，跳过服务器恢复`)
+        console.log(`[PurchaseCapture] Partition已有 ${validPlatformCookies.length} 条有效${platform} cookie，跳过服务器恢复`)
         flushStorageDataAsync(ses)
       } else {
-        console.log(`[PurchaseCapture] Partition无${platform} cookie，需从服务器恢复`)
+        console.log(`[PurchaseCapture] Partition无有效${platform} cookie，需从服务器恢复`)
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
@@ -5709,21 +5713,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const ses = session.fromPartition(partitionName)
 
     // Cookie 恢复（★ 同采购下单窗口：智能恢复策略）
-    // partition有cookie时信任partition（更新鲜），不覆盖；
-    // partition无cookie时才从服务器恢复
+    // partition 有有效平台 cookie 时信任 partition（更新鲜），否则从服务器恢复
     let needServerRestore = true
     try {
       const partitionCookies = await ses.cookies.get({})
-      // PDD 浏览窗口专用，只检测 PDD 域名 cookie
-      const pddCookies = partitionCookies.filter(c =>
-        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com'))
+      // PDD 浏览窗口：检测 PDD 域名下未过期的 cookie
+      const now = Date.now() / 1000
+      const validPddCookies = partitionCookies.filter(c =>
+        c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com')) &&
+        (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
       )
-      if (pddCookies.length > 0) {
+      if (validPddCookies.length > 0) {
         needServerRestore = false
-        console.log(`[PddBrowsing] Partition已有 ${pddCookies.length} 条PDD cookie，跳过服务器恢复`)
+        console.log(`[PddBrowsing] Partition已有 ${validPddCookies.length} 条有效PDD cookie，跳过服务器恢复`)
         flushStorageDataAsync(ses)
       } else {
-        console.log(`[PddBrowsing] Partition无PDD cookie，需从服务器恢复`)
+        console.log(`[PddBrowsing] Partition无有效PDD cookie，需从服务器恢复`)
       }
     } catch (e) {
       console.warn('[PddBrowsing] Partition cookie检查失败:', e.message)

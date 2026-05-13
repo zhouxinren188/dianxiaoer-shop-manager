@@ -246,7 +246,7 @@
         <el-table-column prop="logistics_no" label="物流单号" width="200" align="center">
           <template #default="{ row }">
             <div v-if="row.logistics_no">
-              <span class="cell-order-no cell-logistics-no" @click="handleViewLogistics(row)">{{ row.logistics_no }}</span>
+              <span class="cell-order-no cell-logistics-no" @click.stop="handleViewLogistics(row)">{{ row.logistics_no }}</span>
               <div v-if="row.logistics_company" class="cell-logistics-company">{{ row.logistics_company }}</div>
             </div>
             <span v-else class="cell-empty">--</span>

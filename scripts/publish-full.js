@@ -27,7 +27,7 @@ const REMOTE_DIR = 'C:/Users/Administrator/dianxiaoer-api'
 const REMOTE_UPDATE_DIR = `${REMOTE_DIR}/updates`
 const NSSM = 'C:/nssm/nssm.exe'
 const UPDATE_SERVER = 'https://150.158.54.108:3001'
-const ADMIN_PASSWORD = 'dianxiaoer2026'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Dxe@2026!Admin'
 
 // SSH 连接配置
 const SSH_CONFIG = { host: HOST, port: SSH_PORT, username: USERNAME, password: PASSWORD, readyTimeout: 60000, keepaliveInterval: 10000 }

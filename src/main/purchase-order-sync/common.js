@@ -410,12 +410,52 @@ function refineStatusByTracking(status, tracking) {
   return status
 }
 
+// ============ Cookie 有效性检查 ============
+
+const PLATFORM_DOMAINS = {
+  pinduoduo: ['pinduoduo.com', 'yangkeduo.com'],
+  taobao: ['taobao.com', 'tmall.com'],
+  '1688': ['1688.com', 'alibaba.com'],
+  douyin: ['douyin.com', 'jinritemai.com']
+}
+
+/**
+ * 检查 partition 中是否有该平台的有效（未过期）cookie
+ * 用于判断是否需要从服务器恢复 cookie
+ *
+ * @param {Array} cookies - ses.cookies.get({}) 返回的 cookie 数组
+ * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)
+ * @returns {boolean} true 表示有有效平台 cookie，false 表示需要恢复
+ */
+function hasValidPlatformCookies(cookies, platform) {
+  if (!cookies || cookies.length === 0) return false
+
+  const domains = PLATFORM_DOMAINS[platform]
+  if (!domains || domains.length === 0) {
+    // 未知平台：有任何未过期 cookie 就认为有效
+    const now = Date.now() / 1000
+    return cookies.some(ck => !ck.expirationDate || ck.expirationDate <= 0 || ck.expirationDate > now)
+  }
+
+  const now = Date.now() / 1000
+  const validPlatformCookies = cookies.filter(ck => {
+    // 必须属于该平台域名
+    if (!ck.domain || !domains.some(d => ck.domain.includes(d))) return false
+    // 必须未过期（session cookie 无 expirationDate 或为 0，视为有效）
+    if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate <= now) return false
+    return true
+  })
+
+  return validPlatformCookies.length > 0
+}
+
 // ============ Cookie 从服务器恢复到 Partition ============
 
 /**
  * 从服务器恢复 cookie 到 Electron partition
- * 当 partition 为空时调用此函数，从 purchase_cookies 表恢复 cookie
+ * 当 partition 无有效 cookie 时调用此函数，从 purchase_cookies 表恢复 cookie
  * 解决：子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"的问题
+ * 也解决：本地 cookie 过期失效但仍有残留 cookie 导致跳过服务器恢复的问题
  *
  * @param {string} accountId - 采购账号 ID
  * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)
@@ -547,6 +587,7 @@ module.exports = {
   httpPostJson,
   // Cookie Restore
   restoreCookiesFromServer,
+  hasValidPlatformCookies,
   // Visibility
   VISIBILITY_OVERRIDE
 }
