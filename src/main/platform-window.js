@@ -188,7 +188,7 @@ function buildLoginAutoFillScript(accountName, password) {
 }
 
 function registerPlatformWindowIpc(mainWindow) {
-  const preloadPath = path.join(__dirname, '../../resources/platform-login-preload.js')
+  const preloadPath = path.join(process.resourcesPath, 'app.asar', 'resources', 'platform-login-preload.js')
   console.log('[PlatformWindow] preload path:', preloadPath)
 
   // 判断是否为后台 URL（排除登录页）
@@ -785,7 +785,7 @@ const PURCHASE_BACKEND_URLS = {
 const purchaseWindows = new Map()
 
 function registerPurchaseAccountIpc(mainWindow) {
-  const preloadPath = path.join(__dirname, '../../resources/platform-login-preload.js')
+  const preloadPath = path.join(process.resourcesPath, 'app.asar', 'resources', 'platform-login-preload.js')
 
   // 打开采购账号登录窗口
   ipcMain.handle('open-purchase-login-window', async (event, { accountId, platform, account, password }) => {

@@ -1,7 +1,7 @@
 const { app, ipcMain } = require('electron')
 const http = require('http')
 const { configureUpdater, getAutoUpdater } = require('./updater')
-const { getCurrentVersion, clearHotUpdate, downloadAndApplyUpdate } = require('./hot-updater')
+const { getCurrentVersion, clearHotUpdate, downloadAndApplyUpdate, hasMainProcessUpdate } = require('./hot-updater')
 
 const UPDATE_SERVER = 'http://150.158.54.108:3001'
 
@@ -30,7 +30,8 @@ function checkServerForUpdate() {
   return new Promise((resolve, reject) => {
     const hotVersion = getCurrentVersion()
     const appVersion = app.getVersion()
-    const url = `${UPDATE_SERVER}/api/update/check?version=${hotVersion}&appVersion=${appVersion}`
+    const electronVer = process.versions.electron
+    const url = `${UPDATE_SERVER}/api/update/check?version=${hotVersion}&appVersion=${appVersion}&electronVersion=${electronVer}`
 
     http.get(url, { timeout: 8000 }, (res) => {
       let data = ''
@@ -66,6 +67,7 @@ async function checkForUpdates(manual = false) {
     send('um-update-available', {
       version: result.version,
       type: result.updateType,
+      hotType: result.type || 'renderer', // 'renderer' 或 'main'
       size: result.size || 0,
       changelog: result.changelog || '',
       sha256: result.sha256 || '',
@@ -138,7 +140,11 @@ async function startHotDownload() {
       send('um-update-progress', { percent })
     })
     state = 'ready'
-    send('um-update-ready', { type: 'hot' })
+    const hotType = updateInfo.type || 'renderer'
+    if (hotType === 'main') {
+      console.log('[UpdateManager] 主进程热更新已就绪，重启后生效')
+    }
+    send('um-update-ready', { type: 'hot', hotType })
   } catch (e) {
     console.error('[UpdateManager] 热更新失败:', e.message)
     // 降级：尝试全量更新

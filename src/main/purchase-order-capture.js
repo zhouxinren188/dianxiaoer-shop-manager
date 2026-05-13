@@ -2,6 +2,7 @@ const { BrowserWindow, ipcMain, session, webFrameMain } = require('electron')
 const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
+const { resolveAppPath } = require('./hot-updater')
 const ProvinceData = require('./province-data')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
@@ -4008,7 +4009,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         contextIsolation: false,
         nodeIntegration: false,
         sandbox: true,
-        preload: path.join(__dirname, 'purchase-preload.js')
+        preload: resolveAppPath('out/main/purchase-preload.js')
       }
     })
 
@@ -5790,7 +5791,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         contextIsolation: false,
         nodeIntegration: false,
         sandbox: true,
-        preload: path.join(__dirname, 'purchase-preload.js')
+        preload: resolveAppPath('out/main/purchase-preload.js')
       }
     })
 

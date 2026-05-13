@@ -12,7 +12,10 @@
       <div class="update-content">
         <el-icon class="update-icon" :size="48" color="#409EFF"><Download /></el-icon>
         <p class="update-version">新版本: <strong>{{ updateInfo.version }}</strong></p>
-        <p class="update-type" v-if="updateInfo.type === 'hot'">
+        <p class="update-type" v-if="updateInfo.type === 'hot' && updateInfo.hotType === 'main'">
+          主进程更新 · 需要重启 · {{ formatSize(updateInfo.size) }}
+        </p>
+        <p class="update-type" v-else-if="updateInfo.type === 'hot'">
           快速更新 · {{ formatSize(updateInfo.size) }}
         </p>
         <p class="update-type" v-else-if="updateInfo.type === 'full'">
@@ -136,6 +139,7 @@ const errorMsg = ref('')
 const updateInfo = ref({
   version: '',
   type: '',     // 'hot' | 'full'
+  hotType: '',  // 'renderer' | 'main'
   size: 0,
   changelog: '',
   force: false

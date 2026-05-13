@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err)
 })
 
-const { getHotUpdateRendererPath } = require('./hot-updater')
+const { getHotUpdateRendererPath, getHotUpdatePreloadPath } = require('./hot-updater')
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
@@ -45,9 +45,9 @@ function createWindow() {
     center: true,
     show: false,
     backgroundColor: '#001529',
-    icon: path.join(__dirname, '../../resources/icon.ico'),
+    icon: path.join(process.resourcesPath, 'app.asar', 'resources', 'icon.ico'),
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
+      preload: getHotUpdatePreloadPath() || path.join(process.resourcesPath, 'app.asar', 'out', 'preload', 'index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -98,7 +98,7 @@ function createWindow() {
       console.log('[Main] 从热更新目录加载:', hotRendererPath)
       mainWindow.loadFile(hotRendererPath)
     } else {
-      mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+      mainWindow.loadFile(path.join(process.resourcesPath, 'app.asar', 'out', 'renderer', 'index.html'))
     }
   } else {
     // 开发模式：加载 vite 开发服务器

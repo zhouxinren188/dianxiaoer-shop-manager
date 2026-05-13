@@ -7,6 +7,7 @@ const { BrowserWindow, ipcMain, session } = require('electron')
 const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('../auth-store')
+const { resolveAppPath } = require('../hot-updater')
 
 const OVERALL_TIMEOUT = 90000 // 90 秒总超时
 const POLL_INTERVAL = 3000   // 3 秒轮询 CDP 捕获结果
@@ -588,6 +589,8 @@ module.exports = {
   // Cookie Restore
   restoreCookiesFromServer,
   hasValidPlatformCookies,
+  // Path Resolution
+  resolveAppPath,
   // Visibility
   VISIBILITY_OVERRIDE
 }

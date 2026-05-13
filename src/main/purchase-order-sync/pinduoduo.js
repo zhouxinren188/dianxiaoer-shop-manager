@@ -8,7 +8,8 @@
 const {
   BrowserWindow, session, path,
   BUSINESS_SERVER, activeSyncs,
-  httpPostJson, restoreCookiesFromServer, hasValidPlatformCookies
+  httpPostJson, restoreCookiesFromServer, hasValidPlatformCookies,
+  resolveAppPath
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -116,7 +117,7 @@ function syncSingle(accountId, platformOrderNo) {
           nodeIntegration: false,
           sandbox: true,
           backgroundThrottling: false,
-          preload: path.join(__dirname, 'purchase-preload.js')
+          preload: resolveAppPath('out/main/purchase-preload.js')
         }
       })
 
