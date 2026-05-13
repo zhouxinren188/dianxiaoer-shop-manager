@@ -133,17 +133,13 @@ if (includeMain) {
     console.log('  添加 main/purchase-preload.js')
   }
 
-  // preload/index.jsc + preload/index.js
-  const preloadJscPath = path.join(OUT_DIR, 'preload', 'index.jsc')
-  const preloadJsPath = path.join(OUT_DIR, 'preload', 'index.js')
-
-  if (fs.existsSync(preloadJscPath)) {
-    zip.addLocalFile(preloadJscPath, 'preload')
-    console.log('  添加 preload/index.jsc')
-  }
-  if (fs.existsSync(preloadJsPath)) {
-    zip.addLocalFile(preloadJsPath, 'preload')
-    console.log('  添加 preload/index.js (loader stub)')
+  // preload: 使用源码版本（非 bytenode 存根）
+  // bytenode 存根在热更新目录中无法工作（require('bytenode') 找不到模块）
+  // 导致 contextBridge.exposeInMainWorld 不执行，electronAPI 为 undefined
+  const preloadSrcPath = path.join(ROOT, 'src', 'preload', 'index.js')
+  if (fs.existsSync(preloadSrcPath)) {
+    zip.addLocalFile(preloadSrcPath, 'preload')
+    console.log('  添加 preload/index.js (源码版)')
   }
 }
 
