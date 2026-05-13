@@ -8,7 +8,7 @@
 const {
   BrowserWindow, session, path,
   BUSINESS_SERVER, activeSyncs,
-  httpPostJson
+  httpPostJson, restoreCookiesFromServer
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -53,9 +53,19 @@ function syncSingle(accountId, platformOrderNo) {
 
     const partitionName = `persist:purchase-${accountId}`
     const ses = session.fromPartition(partitionName)
-    const cookies = await ses.cookies.get({})
+    let cookies = await ses.cookies.get({})
 
     console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
+
+    // partition 为空时，尝试从服务器恢复 cookie（解决跨设备/跨账号 partition 不共享问题）
+    if (cookies.length === 0) {
+      console.log(`[PDD-SearchSync] partition 为空，尝试从服务器恢复 cookie...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PDD-SearchSync] cookie 恢复成功，当前 cookies:${cookies.length}`)
+      }
+    }
 
     if (cookies.length === 0) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })

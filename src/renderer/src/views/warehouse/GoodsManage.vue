@@ -789,7 +789,7 @@ async function handlePurchaseSubmit() {
 
     await createPurchaseOrder({
       purchase_no: purchaseNo,
-      purchase_type: 'warehouse',
+      purchase_type: 'warehouse_in',
       inventory_id: currentRow.value.id,
       goods_name: currentRow.value.product_name,
       goods_image: currentRow.value.image || '',

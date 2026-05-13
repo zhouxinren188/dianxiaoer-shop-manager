@@ -4,7 +4,7 @@
  */
 
 const { ipcMain } = require('./common')
-const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus } = require('./common')
+const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus, refineStatusByTracking } = require('./common')
 
 const taobao = require('./taobao')
 const alibaba = require('./alibaba')
@@ -35,6 +35,15 @@ async function syncSingleAndUpdate(platformModule, accountId, platformOrderNo, p
         mappedOrderInfo.status = mapOrderStatus(originalStatus)
         if (originalStatus !== mappedOrderInfo.status) {
           console.log(`[PurchaseSync IPC] 状态映射: "${originalStatus}" → "${mappedOrderInfo.status}"`)
+        }
+      }
+
+      // 根据物流轨迹修正状态：有真实揽收/已取件时 shipped → in_transit
+      if (mappedOrderInfo.status === 'shipped' && mappedOrderInfo.logistics_tracking) {
+        const refined = refineStatusByTracking(mappedOrderInfo.status, mappedOrderInfo.logistics_tracking)
+        if (refined !== mappedOrderInfo.status) {
+          console.log(`[PurchaseSync IPC] 轨迹修正状态: "${mappedOrderInfo.status}" → "${refined}"`)
+          mappedOrderInfo.status = refined
         }
       }
 

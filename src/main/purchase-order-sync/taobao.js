@@ -9,7 +9,7 @@ const {
   BUSINESS_SERVER, activeSyncs,
   CDPNetworkCapture, httpPostJson, VISIBILITY_OVERRIDE,
   resolveLogisticsCompany, extractTrackingFromData, normalizeTrackingItems,
-  looksLikeTrackingArray, mapOrderStatus, richTextToPlain
+  looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -270,10 +270,20 @@ function syncSingle(accountId, platformOrderNo) {
 
     const partitionName = `persist:purchase-${accountId}`
     const ses = session.fromPartition(partitionName)
-    const cookies = await ses.cookies.get({})
+    let cookies = await ses.cookies.get({})
 
     console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
+
+    // partition 为空时，尝试从服务器恢复 cookie
+    if (cookies.length === 0) {
+      console.log(`[PurchaseSync-Taobao] partition 为空，尝试从服务器恢复 cookie...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-Taobao] cookie 恢复成功，当前 Cookies: ${cookies.length} 条`)
+      }
+    }
 
     if (cookies.length === 0) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
@@ -1317,10 +1327,20 @@ function syncAll(accountId) {
 
     const partitionName = `persist:purchase-${accountId}`
     const ses = session.fromPartition(partitionName)
-    const cookies = await ses.cookies.get({})
+    let cookies = await ses.cookies.get({})
 
     console.log(`[PurchaseSync-Taobao-All] accountId:${accountId}`)
     console.log(`[PurchaseSync-Taobao-All] Cookies: ${cookies.length} 条`)
+
+    // partition 为空时，尝试从服务器恢复 cookie
+    if (cookies.length === 0) {
+      console.log(`[PurchaseSync-Taobao-All] partition 为空，尝试从服务器恢复 cookie...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-Taobao-All] cookie 恢复成功，当前 Cookies: ${cookies.length} 条`)
+      }
+    }
 
     if (cookies.length === 0) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })

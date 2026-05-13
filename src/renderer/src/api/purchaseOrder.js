@@ -64,3 +64,8 @@ export function fetchRelatedSales(id) {
 export function deletePurchaseOrder(id) {
   return del(`/api/purchase-orders/${id}`)
 }
+
+// 检查采购订单的仓库绑定状态
+export function checkPurchaseBinding(id) {
+  return get(`/api/purchase-orders/${id}/binding-check`)
+}

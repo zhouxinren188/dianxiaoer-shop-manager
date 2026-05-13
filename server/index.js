@@ -2090,7 +2090,7 @@ app.get('/api/inventory', async (req, res) => {
     const [rows] = await pool.query(
       `SELECT i.*, w.name AS warehouse_name,
         (SELECT COALESCE(SUM(po.quantity),0) FROM purchase_orders po
-         WHERE po.inventory_id=i.id AND po.purchase_type='warehouse'
+         WHERE po.inventory_id=i.id AND po.purchase_type IN ('warehouse','warehouse_in')
          AND po.status NOT IN ('stocked','cancelled')) AS in_transit_qty,
         (SELECT COALESCE(SUM(so.quantity),0) FROM sku_bindings sb
          INNER JOIN sales_orders so ON so.store_id=sb.store_id AND so.sku_id=sb.sku_id
@@ -2670,7 +2670,7 @@ app.post('/api/purchase-orders', async (req, res) => {
     // 创建采购单成功后，自动更新关联销售订单的采购状态并解锁
     if (sales_order_id) {
       try {
-        const purchaseStatus = purchase_type === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+        const purchaseStatus = purchase_type === 'warehouse' ? '已采购（仓库转发）' : purchase_type === 'warehouse_in' ? '已采购（仓库进货）' : '已采购（三方代发）'
         await pool.execute(
           'UPDATE sales_orders SET purchase_status=?, purchase_locked_by=NULL, purchase_locked_at=NULL, updated_at=NOW() WHERE id=?',
           [purchaseStatus, sales_order_id]
@@ -2744,11 +2744,11 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
       }
 
       // 采购类型映射
-      const PURCHASE_TYPE_ALIAS = { '三方代发': 'dropship', '仓库转发': 'warehouse' }
+      const PURCHASE_TYPE_ALIAS = { '三方代发': 'dropship', '仓库转发': 'warehouse', '仓库进货': 'warehouse_in' }
       let purchaseType = String(row.purchase_type || '').trim()
       if (PURCHASE_TYPE_ALIAS[purchaseType]) purchaseType = PURCHASE_TYPE_ALIAS[purchaseType]
-      if (purchaseType && purchaseType !== 'dropship' && purchaseType !== 'warehouse') {
-        errors.push({ row: rowNum, message: `采购类型"${purchaseType}"无效，支持: dropship/warehouse 或 三方代发/仓库转发` }); failCount++; continue
+      if (purchaseType && purchaseType !== 'dropship' && purchaseType !== 'warehouse' && purchaseType !== 'warehouse_in') {
+        errors.push({ row: rowNum, message: `采购类型"${purchaseType}"无效，支持: dropship/warehouse/warehouse_in 或 三方代发/仓库转发/仓库进货` }); failCount++; continue
       }
       if (!purchaseType) purchaseType = 'dropship'
 
@@ -2946,6 +2946,7 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
     }
 
     res.json(ok({
+      storeId: row.store_id || '',
       storeName: row.store_name || '',
       storePlatform: row.store_platform || '',
       orderId: row.order_id || '',
@@ -2956,11 +2957,70 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// 检查采购订单的仓库绑定状态
+app.get('/api/purchase-orders/:id/binding-check', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    // 查采购订单
+    const [poRows] = await pool.execute(
+      'SELECT sales_order_id, inventory_id, sku, goods_name, goods_image FROM purchase_orders WHERE id=? AND owner_id=?',
+      [req.params.id, ownerId]
+    )
+    if (!poRows.length) return res.status(404).json(fail('采购订单不存在'))
+
+    const po = poRows[0]
+
+    // 方式1: 采购订单已有 inventory_id
+    if (po.inventory_id) {
+      const [invRows] = await pool.execute(
+        'SELECT i.id, i.sku, i.product_name, i.quantity, w.name AS warehouse_name FROM inventory i LEFT JOIN warehouses w ON i.warehouse_id=w.id WHERE i.id=? AND i.owner_id=?',
+        [po.inventory_id, ownerId]
+      )
+      if (invRows.length > 0) {
+        return res.json(ok({ bound: true, inventory: { id: invRows[0].id, sku: invRows[0].sku, productName: invRows[0].product_name, warehouseName: invRows[0].warehouse_name, quantity: invRows[0].quantity } }))
+      }
+    }
+
+    // 方式2: 通过销售订单的 store_id + sku_id 查 sku_bindings
+    let storeIdForBind = null
+    if (po.sales_order_id) {
+      const [soRows] = await pool.execute(
+        'SELECT store_id, sku_id FROM sales_orders WHERE id=?',
+        [po.sales_order_id]
+      )
+      if (soRows.length > 0) {
+        const { store_id, sku_id } = soRows[0]
+        storeIdForBind = store_id
+        if (store_id && sku_id) {
+          const [bindRows] = await pool.execute(
+            'SELECT sb.inventory_id, i.sku, i.product_name, i.quantity, w.name AS warehouse_name FROM sku_bindings sb LEFT JOIN inventory i ON sb.inventory_id=i.id LEFT JOIN warehouses w ON sb.warehouse_id=w.id WHERE sb.store_id=? AND sb.sku_id=? AND sb.owner_id=?',
+            [store_id, sku_id, ownerId]
+          )
+          if (bindRows.length > 0 && bindRows[0].inventory_id) {
+            // 回填 inventory_id 到采购订单
+            pool.execute('UPDATE purchase_orders SET inventory_id=? WHERE id=?', [bindRows[0].inventory_id, req.params.id]).catch(() => {})
+            return res.json(ok({ bound: true, storeId: store_id, inventory: { id: bindRows[0].inventory_id, sku: bindRows[0].sku, productName: bindRows[0].product_name, warehouseName: bindRows[0].warehouse_name, quantity: bindRows[0].quantity } }))
+          }
+        }
+      }
+    }
+
+    // 未绑定，返回采购商品信息供绑定使用
+    res.json(ok({ bound: false, storeId: storeIdForBind, productInfo: { sku: po.sku, goodsName: po.goods_name, goodsImage: po.goods_image } }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 app.put('/api/purchase-orders/:id/status', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { status } = req.body
-    await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+    const { status, actual_quantity } = req.body
+
+    // 更新状态和实际收货数量
+    if (actual_quantity != null) {
+      await pool.execute('UPDATE purchase_orders SET status=?, actual_quantity=? WHERE id=? AND owner_id=?', [status, actual_quantity, req.params.id, ownerId])
+    } else {
+      await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+    }
 
     // 仓库采购单入库时，自动增加库存数量
     if (status === 'stocked') {
@@ -2969,12 +3029,13 @@ app.put('/api/purchase-orders/:id/status', async (req, res) => {
           'SELECT inventory_id, quantity, purchase_type FROM purchase_orders WHERE id=? AND owner_id=?',
           [req.params.id, ownerId]
         )
-        if (poRows.length > 0 && poRows[0].inventory_id && poRows[0].purchase_type === 'warehouse') {
+        if (poRows.length > 0 && poRows[0].inventory_id && (poRows[0].purchase_type === 'warehouse' || poRows[0].purchase_type === 'warehouse_in')) {
+          const qty = actual_quantity ?? poRows[0].quantity
           await pool.execute(
             'UPDATE inventory SET quantity = quantity + ? WHERE id = ? AND owner_id = ?',
-            [poRows[0].quantity, poRows[0].inventory_id, ownerId]
+            [qty, poRows[0].inventory_id, ownerId]
           )
-          console.log(`[PurchaseOrders] 仓库采购入库: inventory_id=${poRows[0].inventory_id}, +${poRows[0].quantity}`)
+          console.log(`[PurchaseOrders] 仓库采购入库: inventory_id=${poRows[0].inventory_id}, +${qty}`)
         }
       } catch (e) {
         console.warn('[PurchaseOrders] 入库更新库存失败(非关键):', e.message)

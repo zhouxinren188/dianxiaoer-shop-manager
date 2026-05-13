@@ -387,6 +387,136 @@ function httpPostJson(url, body) {
   })
 }
 
+/**
+ * 根据物流轨迹内容修正订单状态
+ * 如果状态为 shipped 且物流轨迹中有真实揽收/取件记录，升级为 in_transit
+ *
+ * 真实揽收关键词：揽收、已取件
+ * 排除：通知取件、通知快递取件（商家只是点了发货，快递还没取件）
+ */
+function refineStatusByTracking(status, tracking) {
+  if (status !== 'shipped' || !Array.isArray(tracking) || tracking.length === 0) {
+    return status
+  }
+  for (const item of tracking) {
+    const ctx = (item.context || '') + (item.desc || '')
+    // 排除"通知取件"类伪揽收（如"正在通知中通快递取件"）
+    if (/通知.*取件|取件.*通知/.test(ctx)) continue
+    if (/揽收|已取件/.test(ctx)) {
+      console.log(`[StatusRefine] shipped → in_transit (真实揽收: ${ctx.substring(0, 50)})`)
+      return 'in_transit'
+    }
+  }
+  return status
+}
+
+// ============ Cookie 从服务器恢复到 Partition ============
+
+/**
+ * 从服务器恢复 cookie 到 Electron partition
+ * 当 partition 为空时调用此函数，从 purchase_cookies 表恢复 cookie
+ * 解决：子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"的问题
+ *
+ * @param {string} accountId - 采购账号 ID
+ * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)
+ * @returns {Promise<{restored: boolean, count: number}>} 恢复结果
+ */
+async function restoreCookiesFromServer(accountId, platform) {
+  const partitionName = `persist:purchase-${accountId}`
+  const ses = session.fromPartition(partitionName)
+
+  try {
+    // 1. 从服务器获取 cookie
+    const token = getAuthToken()
+    if (!token) {
+      console.warn('[CookieRestore] 主进程没有 auth token，无法从服务器恢复 cookie')
+      return { restored: false, count: 0 }
+    }
+
+    const urlObj = new URL(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`)
+    const result = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port,
+        path: urlObj.pathname,
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` },
+        timeout: 8000
+      }
+      const req = http.request(options, (res) => {
+        let data = ''
+        res.on('data', chunk => { data += chunk })
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+        })
+      })
+      req.on('error', reject)
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+      req.end()
+    })
+
+    if (!result || result.code !== 0 || !result.data || !result.data.cookie_data) {
+      console.log(`[CookieRestore] 服务器无 cookie 数据 (accountId=${accountId})`)
+      return { restored: false, count: 0 }
+    }
+
+    // 2. 解析 cookie 数据
+    const raw = typeof result.data.cookie_data === 'string'
+      ? JSON.parse(result.data.cookie_data)
+      : result.data.cookie_data
+
+    if (!Array.isArray(raw) || raw.length === 0) {
+      console.log(`[CookieRestore] cookie 数据为空 (accountId=${accountId})`)
+      return { restored: false, count: 0 }
+    }
+
+    // 3. 过滤过期 cookie
+    const now = Date.now() / 1000
+    const validCookies = raw.filter(ck => {
+      if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
+      return true
+    })
+
+    if (validCookies.length === 0) {
+      console.log(`[CookieRestore] 所有 cookie 已过期 (accountId=${accountId}, total=${raw.length})`)
+      return { restored: false, count: 0 }
+    }
+
+    // 4. 写入 partition
+    let setOk = 0
+    for (const ck of validCookies) {
+      try {
+        const sameSite = ck.sameSite || undefined
+        const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
+        await ses.cookies.set({
+          url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+          name: ck.name,
+          value: ck.value || '',
+          domain: ck.domain,
+          path: ck.path || '/',
+          secure,
+          httpOnly: ck.httpOnly || false,
+          expirationDate: ck.expirationDate || undefined,
+          sameSite
+        })
+        setOk++
+      } catch (e) {
+        // 忽略单条 cookie 写入失败
+      }
+    }
+
+    // 5. 刷盘持久化
+    await new Promise(resolve => ses.flushStorageData(resolve))
+
+    console.log(`[CookieRestore] 恢复完成: accountId=${accountId}, ${setOk}/${validCookies.length} 条写入成功 (平台: ${platform})`)
+    return { restored: setOk > 0, count: setOk }
+
+  } catch (err) {
+    console.warn(`[CookieRestore] 恢复失败: accountId=${accountId}, ${err.message}`)
+    return { restored: false, count: 0 }
+  }
+}
+
 // ============ 页面可见性覆盖 ============
 
 const VISIBILITY_OVERRIDE = `
@@ -410,11 +540,13 @@ module.exports = {
   // Tracking
   extractTrackingFromData, normalizeTrackingItems, looksLikeTrackingArray, richTextToPlain,
   // Status
-  ORDER_STATUS_MAP, mapOrderStatus,
+  ORDER_STATUS_MAP, mapOrderStatus, refineStatusByTracking,
   // CDP
   CDPNetworkCapture,
   // HTTP
   httpPostJson,
+  // Cookie Restore
+  restoreCookiesFromServer,
   // Visibility
   VISIBILITY_OVERRIDE
 }
