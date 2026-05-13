@@ -7,11 +7,9 @@ const {
   BrowserWindow, session,
   OVERALL_TIMEOUT, POLL_INTERVAL, MAX_POLLS,
   BUSINESS_SERVER, activeSyncs,
-  TMD_PUNISH_PATTERNS, TMD_BLOCKED_BODY_LEN_THRESHOLD,
   CDPNetworkCapture, httpPostJson, VISIBILITY_OVERRIDE,
   resolveLogisticsCompany, extractTrackingFromData, normalizeTrackingItems,
-  looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies,
-  resolveAppPath, enforceLogisticsApiGap, recordLogisticsApiCall, HUMAN_BEHAVIOR_SCRIPT
+  looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
 
 // ============ 平台配置 ============
@@ -263,42 +261,38 @@ function findAllOrders(allResponses) {
  * 参考 PDD 模式：直接导航到含订单号的页面，从 API 响应中提取物流信息
  * 参考销售订单二次同步：按订单号找到订单后再获取详细信息
  */
-function syncSingle(accountId, platformOrderNo, options = {}) {
+function syncSingle(accountId, platformOrderNo) {
   return new Promise(async (resolve, reject) => {
     const syncKey = `${accountId}-taobao`
-    const sharedWin = options.sharedWindow || null   // 批量同步复用窗口
     let resolved = false
     let win = null
   try {
-    if (!sharedWin && activeSyncs.has(syncKey)) {
+    if (activeSyncs.has(syncKey)) {
       return resolve({ success: false, message: '该账号正在同步中，请等待完成' })
     }
 
-    // 批量模式（sharedWin）跳过 cookie 检查，由调用方统一管理
-    if (!sharedWin) {
-      const partitionName = `persist:purchase-${accountId}`
-      const ses = session.fromPartition(partitionName)
-      let cookies = await ses.cookies.get({})
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
+    let cookies = await ses.cookies.get({})
 
-      console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
-      console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
+    console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
+    console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
 
-      // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
-      if (hasValidPlatformCookies(cookies, 'taobao')) {
-        console.log(`[PurchaseSync-Taobao] partition 已有有效平台 cookies，跳过服务器恢复`)
-      } else {
-        // partition 缺少有效 cookies，尝试从服务器恢复（合并模式：只补充缺失的，不覆盖已有的）
-        console.log(`[PurchaseSync-Taobao] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
-        const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
-        if (restoreResult.restored) {
-          cookies = await ses.cookies.get({})
-          console.log(`[PurchaseSync-Taobao] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
-        }
+    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
+    if (hasValidPlatformCookies(cookies, 'taobao')) {
+      console.log(`[PurchaseSync-Taobao] partition 已有有效平台 cookies，跳过服务器恢复`)
+    } else {
+      // partition 缺少有效 cookies，尝试从服务器恢复（合并模式：只补充缺失的，不覆盖已有的）
+      console.log(`[PurchaseSync-Taobao] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
+      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
+      if (restoreResult.restored) {
+        cookies = await ses.cookies.get({})
+        console.log(`[PurchaseSync-Taobao] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
       }
+    }
 
-      if (!hasValidPlatformCookies(cookies, 'taobao')) {
-        return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
-      }
+    if (!hasValidPlatformCookies(cookies, 'taobao')) {
+      return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 
     let cdpCapture = null
@@ -307,34 +301,16 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
     let detailResult = null // Phase 2 的部分结果，供 Phase 3 补充
     let phaseResponses = [] // 当前阶段累积的 CDP 响应
     let pollTimer = null   // 当前阶段轮询定时器
-    let tmdDetected = false // TMD 反爬检测标志
 
     // syncSingle 使用更宽泛的 API 关键词，以捕获详情页的 API 调用
     const SINGLE_API_KEYWORDS = ['mtop.taobao']
 
-    // 命名事件处理器引用（用于清理，避免批量模式下处理器累积）
-    let handleNavigate, handleDomReady, handleFinishLoad, handleClosed
-
     function cleanup() {
       if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
-      // 移除本订单注册的事件处理器
-      if (win && !win.isDestroyed() && win.webContents) {
-        if (handleNavigate) try { win.webContents.removeListener('did-navigate', handleNavigate) } catch (e) {}
-        if (handleDomReady) try { win.webContents.removeListener('dom-ready', handleDomReady) } catch (e) {}
-        if (handleFinishLoad) try { win.webContents.removeListener('did-finish-load', handleFinishLoad) } catch (e) {}
-      }
-      if (handleClosed && win) try { win.removeListener('closed', handleClosed) } catch (e) {}
-
-      if (sharedWin) {
-        // 批量模式：不管理 activeSyncs / 不销毁窗口
-        // 必须 detach CDP，否则下个订单无法重新 attach debugger
-        if (cdpCapture) { cdpCapture.detach().catch(() => {}); cdpCapture = null }
-      } else {
-        activeSyncs.delete(syncKey)
-        if (cdpCapture) { cdpCapture.detach().catch(() => {}); cdpCapture = null }
-        if (win && !win.isDestroyed()) win.destroy()
-        win = null
-      }
+      activeSyncs.delete(syncKey)
+      if (cdpCapture) { cdpCapture.detach().catch(() => {}); cdpCapture = null }
+      if (win && !win.isDestroyed()) win.destroy()
+      win = null
     }
 
     function finish(result) {
@@ -346,66 +322,38 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
 
     const overallTimer = setTimeout(() => {
       finish({ success: false, message: '同步超时，请稍后重试' })
-    }, sharedWin ? 40000 : OVERALL_TIMEOUT) // 批量模式单订单超时 40s
+    }, OVERALL_TIMEOUT)
 
     try {
-      if (sharedWin) {
-        // 批量模式：使用已有窗口（CDP 由本函数自行创建/销毁）
-        win = sharedWin
-        console.log(`[PurchaseSync-Taobao] 批量模式: 复用已有窗口 orderNo:${platformOrderNo}`)
-      } else {
-        // 单次同步模式：创建新窗口
-        const partitionName = `persist:purchase-${accountId}`
-        const ses = session.fromPartition(partitionName)
-        win = new BrowserWindow({
-          show: false,
-          width: 1200,
-          height: 800,
-          title: '[同步] 淘宝采购订单',
-          webPreferences: {
-            partition: partitionName,
-            contextIsolation: false,
-            nodeIntegration: false,
-            sandbox: true,
-            backgroundThrottling: false,
-            preload: resolveAppPath('out/main/purchase-preload.js')
-          }
-        })
-
-        // 反检测：伪装 UA 和 Client Hints
-        const chromeVersion = process.versions.chrome || '134.0.0.0'
-        const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
-        win.webContents.setUserAgent(cleanUA)
-        const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
-        ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.taobao.com/*', '*://*.tmall.com/*'] }, (details, callback) => {
-          if (details.requestHeaders) {
-            details.requestHeaders['Sec-CH-UA'] = secChUa
-            details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
-            details.requestHeaders['User-Agent'] = cleanUA
-          }
-          callback({ requestHeaders: details.requestHeaders })
-        })
-
-        win.webContents.setBackgroundThrottling(false)
-        activeSyncs.set(syncKey, win)
-
-        // BrowserWindow 意外关闭时清理 activeSyncs，防止残留阻塞后续同步
-        handleClosed = () => {
-          if (!resolved) {
-            console.log('[PurchaseSync-Taobao] BrowserWindow 被意外关闭')
-            activeSyncs.delete(syncKey)
-            win = null
-            finish({ success: false, message: '同步窗口意外关闭' })
-          }
+      win = new BrowserWindow({
+        show: false,
+        width: 1200,
+        height: 800,
+        title: '[同步] 淘宝采购订单',
+        webPreferences: {
+          partition: partitionName,
+          contextIsolation: true,
+          nodeIntegration: false,
+          backgroundThrottling: false
         }
-        win.on('closed', handleClosed)
-      }
+      })
+
+      win.webContents.setBackgroundThrottling(false)
+      activeSyncs.set(syncKey, win)
+
+      // BrowserWindow 意外关闭时清理 activeSyncs，防止残留阻塞后续同步
+      win.on('closed', () => {
+        if (!resolved) {
+          console.log('[PurchaseSync-Taobao] BrowserWindow 被意外关闭')
+          activeSyncs.delete(syncKey)
+          win = null
+          finish({ success: false, message: '同步窗口意外关闭' })
+        }
+      })
 
       async function ensureCDP() {
         if (cdpAttached || resolved) return
-        cdpCapture = new CDPNetworkCapture(win.webContents, SINGLE_API_KEYWORDS, {
-          tmdCallback: () => { tmdDetected = true }
-        })
+        cdpCapture = new CDPNetworkCapture(win.webContents, SINGLE_API_KEYWORDS)
         try {
           cdpAttached = await cdpCapture.attach()
           console.log(`[PurchaseSync-Taobao] CDP attach: ${cdpAttached ? 'OK' : 'FAIL'}`)
@@ -414,7 +362,7 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
         }
       }
 
-      handleNavigate = async (event, url) => {
+      win.webContents.on('did-navigate', async (event, url) => {
         console.log('[PurchaseSync-Taobao] navigate:', url.substring(0, 150))
         if (PLATFORM_CONFIG.loginCheck(url)) {
           finish({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
@@ -422,25 +370,19 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
         }
         // CDP 常驻：已连接时不重新 attach，减少阶段切换开销
         if (!cdpAttached) await ensureCDP()
-      }
+      })
 
-      handleDomReady = () => {
+      win.webContents.on('dom-ready', () => {
         if (win.isDestroyed() || resolved) return
-        // VISIBILITY_OVERRIDE 已由 preload 在页面 JS 前注入，无需再执行
+        win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
         if (!cdpAttached) ensureCDP()
-      }
+      })
 
-      handleFinishLoad = () => {
+      win.webContents.on('did-finish-load', () => {
         if (win.isDestroyed() || resolved) return
         console.log('[PurchaseSync-Taobao] 页面加载完成, phase:', phase)
-        // 注入人类行为模拟脚本（滚动、鼠标移动、点击）
-        win.webContents.executeJavaScript(HUMAN_BEHAVIOR_SCRIPT).catch(() => {})
         startPhasePolling()
-      }
-
-      win.webContents.on('did-navigate', handleNavigate)
-      win.webContents.on('dom-ready', handleDomReady)
-      win.webContents.on('did-finish-load', handleFinishLoad)
+      })
 
       // ============ 轮询式数据检测 ============
       // 替代固定超时等待：每 500ms 检查一次 CDP 数据，数据到就立刻进入下一阶段
@@ -634,19 +576,16 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
       }
 
       // 导航到物流页面（Phase 3）
-      async function navigateToLogisticsPage() {
+      function navigateToLogisticsPage() {
         phase = 3
         const logisticsUrl = `https://market.m.taobao.com/app/dinamic/pc-trade-logistics/home.html?orderId=${platformOrderNo}&entrance=pc`
-        // 全局速率限制：确保物流 API 调用间隔 ≥ 10~13 秒
-        await enforceLogisticsApiGap()
-        // 随机延时 2.5~5 秒再导航，模拟真实用户从详情页点到物流页的间隔
-        const delay = 2500 + Math.random() * 2500
-        console.log(`[PurchaseSync-Taobao] 导航到物流页面（延时 ${Math.round(delay)}ms）...`)
-        await new Promise(r => setTimeout(r, delay))
-        if (win && !win.isDestroyed() && !resolved) {
-          recordLogisticsApiCall()
-          win.loadURL(logisticsUrl)
-        }
+        console.log('[PurchaseSync-Taobao] 导航到物流页面（延时 1 秒避免风控）...')
+        // 延时 1 秒再导航，避免 Phase 2 → Phase 3 快速连续页面切换触发淘宝风控拦截
+        setTimeout(() => {
+          if (win && !win.isDestroyed() && !resolved) {
+            win.loadURL(logisticsUrl)
+          }
+        }, 1000)
       }
 
       // ============ Phase 3: 检查物流页面CDP数据 ============
@@ -677,20 +616,11 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
             // 调试：输出物流页数据结构（便于确认轨迹数据格式）
             console.log('[PurchaseSync-Taobao-Tracking-Debug] 物流页数据:', JSON.stringify(data).substring(0, 10000))
 
-            // 1. 先尝试物流页专用解析
+            // 物流页面可能用组件格式或其他格式
             const parsed = parseLogisticsPageData(data, platformOrderNo)
             if (parsed) {
               console.log(`[PurchaseSync-Taobao] 物流页解析到第 ${parsedResults.length + 1} 个结果:`, JSON.stringify(parsed).substring(0, 500))
               parsedResults.push(parsed)
-            } else {
-              // 2. 物流页专用解析失败时，回退到详情页解析器
-              // 当物流API被TMD反爬虫拦截（返回463B错误），物流页仍会加载 mtop.taobao.query.detail
-              // 返回23780B订单详情数据，详情页解析器能从中提取状态和物流信息
-              const detailParsed = parseDetailData(data, platformOrderNo)
-              if (detailParsed) {
-                console.log(`[PurchaseSync-Taobao] 物流页用详情页解析器回退解析到结果:`, JSON.stringify(detailParsed).substring(0, 500))
-                parsedResults.push(detailParsed)
-              }
             }
           } catch (e) {
             console.log('[PurchaseSync-Taobao] 物流页响应处理异常:', e.message)
@@ -728,14 +658,12 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
         merged.logistics_company = resolveLogisticsCompany(merged.logistics_company, merged.logistics_company_code)
 
         clearTimeout(overallTimer)
-        // 检查 TMD 反爬拦截：CDP 检测到 punish URL 或物流 API 响应体过小
-        const isTmdBlocked = tmdDetected || (cdpCapture && cdpCapture.isTmdDetected())
         if (merged.logistics_no || merged.status || merged.logistics_company) {
           console.log('[PurchaseSync-Taobao] 最终合并结果:', JSON.stringify(merged))
-          finish({ success: true, orderInfo: merged, tmdBlocked: isTmdBlocked || undefined })
+          finish({ success: true, orderInfo: merged })
         } else {
           console.log(`[PurchaseSync-Taobao] 物流页也未找到订单 ${platformOrderNo}`)
-          finish({ success: false, message: `未找到订单 ${platformOrderNo}`, tmdBlocked: isTmdBlocked || undefined })
+          finish({ success: false, message: `未找到订单 ${platformOrderNo}` })
         }
         return true
       }
@@ -835,23 +763,6 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
           if (fields.cpName && !result.logistics_company) {
             result.logistics_company = fields.cpName
             hasAnyInfo = true
-          }
-
-          // 提取订单状态（pageHeader / orderInfo 组件中的 title/subtitle）
-          // 物流页加载的 mtop.taobao.query.detail 会返回订单详情组件
-          // pageHeader: fieldKeys=[subtitle,title], title 可能是 "卖家已发货" 等状态
-          // orderInfo: fieldKeys=[...,title], title 可能是订单状态
-          if (!result.status && (tag === 'pageHeader' || tag === 'orderInfo' || tag === 'header')) {
-            const statusText = fields.title || fields.subtitle || fields.content || ''
-            if (statusText && typeof statusText === 'string' && statusText.length > 0) {
-              // 仅当 title 看起来像订单状态时才设置（排除 "订单详情" 等页面标题）
-              const statusKeywords = ['付款', '发货', '收货', '签收', '交易', '取消', '退款', '拒收', '运输', '派送', '待']
-              if (statusKeywords.some(kw => statusText.includes(kw))) {
-                result.status = richTextToPlain(statusText)
-                hasAnyInfo = true
-                console.log(`[PurchaseSync-Taobao] 物流页组件 [${key}] 提取到状态: ${result.status}`)
-              }
-            }
           }
 
           // 提取物流状态（package 组件中的 title）
@@ -1088,8 +999,7 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
           const componentType = component.type || ''
           const isStatusStep = (tag === 'statusStep' || tag === 'statusStepTm1')
           const isDetailHeader = (tag === 'header' && componentType.includes('order_detail_header'))
-          const idMatch = component.id === targetOrderNo ||
-            (component.fields && component.fields.id === targetOrderNo)
+          const idMatch = component.id === targetOrderNo
           const keyMatch = key.includes(targetOrderNo)
           if (!idMatch && !keyMatch && !isStatusStep && !isDetailHeader) continue
 
@@ -1435,28 +1345,9 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
         return null
       }
 
-      // 入口：根据 startPhase 决定起始页面
-      // startPhase=1: 从首页开始（默认，单次同步）
-      // startPhase=2: 跳过首页，直接加载详情页（批量同步，统一走详情页避免 TMD）
-      const startPhase = options.startPhase || 1
-      const firstInChunk = options.firstInChunk || false
-
-      // 预热导航：分块首单先加载订单列表页 2-3s，模拟真实用户浏览行为
-      if (firstInChunk && sharedWin && startPhase >= 2) {
-        console.log(`[PurchaseSync-Taobao] 分块首单: 预热导航到订单列表页...`)
-        win.loadURL(PLATFORM_CONFIG.entryUrl)
-        await new Promise(r => setTimeout(r, 2000 + Math.random() * 1500))
-      }
-
-      if (startPhase >= 2) {
-        phase = 2
-        const detailUrl = `https://trade.taobao.com/trade/detail/trade_order_detail.htm?biz_order_id=${platformOrderNo}`
-        console.log(`[PurchaseSync-Taobao] 批量模式: 加载详情页 (startPhase=2)`)
-        win.loadURL(detailUrl)
-      } else {
-        console.log('[PurchaseSync-Taobao] Loading:', PLATFORM_CONFIG.entryUrl)
-        win.loadURL(PLATFORM_CONFIG.entryUrl)
-      }
+      // 入口：加载订单列表页（不带任何URL参数）
+      console.log('[PurchaseSync-Taobao] Loading:', PLATFORM_CONFIG.entryUrl)
+      win.loadURL(PLATFORM_CONFIG.entryUrl)
 
     } catch (err) {
       finish({ success: false, message: '同步失败: ' + err.message })
@@ -1464,10 +1355,8 @@ function syncSingle(accountId, platformOrderNo, options = {}) {
   } catch (err) {
     if (!resolved) {
       resolved = true
-      if (!sharedWin) {
-        activeSyncs.delete(syncKey)
-        if (win && !win.isDestroyed()) win.destroy()
-      }
+      activeSyncs.delete(syncKey)
+      if (win && !win.isDestroyed()) win.destroy()
       reject(err)
     }
   }
@@ -1544,7 +1433,6 @@ function syncAll(accountId) {
     }, OVERALL_TIMEOUT)
 
     try {
-      const ses = session.fromPartition(partitionName)
       win = new BrowserWindow({
         show: false,
         width: 1200,
@@ -1552,26 +1440,10 @@ function syncAll(accountId) {
         title: '[批量同步] 淘宝采购订单',
         webPreferences: {
           partition: partitionName,
-          contextIsolation: false,
+          contextIsolation: true,
           nodeIntegration: false,
-          sandbox: true,
-          backgroundThrottling: false,
-          preload: resolveAppPath('out/main/purchase-preload.js')
+          backgroundThrottling: false
         }
-      })
-
-      // 反检测：伪装 UA 和 Client Hints
-      const chromeVersion = process.versions.chrome || '134.0.0.0'
-      const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
-      win.webContents.setUserAgent(cleanUA)
-      const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
-      ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.taobao.com/*', '*://*.tmall.com/*'] }, (details, callback) => {
-        if (details.requestHeaders) {
-          details.requestHeaders['Sec-CH-UA'] = secChUa
-          details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
-          details.requestHeaders['User-Agent'] = cleanUA
-        }
-        callback({ requestHeaders: details.requestHeaders })
       })
 
       win.webContents.setBackgroundThrottling(false)
@@ -1608,7 +1480,7 @@ function syncAll(accountId) {
 
       win.webContents.on('dom-ready', () => {
         if (win.isDestroyed() || resolved) return
-        // VISIBILITY_OVERRIDE 已由 preload 在页面 JS 前注入，无需再执行
+        win.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
         if (!cdpAttached && !resolved) {
           cdpCapture = new CDPNetworkCapture(win.webContents, PLATFORM_CONFIG.apiKeywords)
           cdpCapture.attach().then(ok => {
@@ -1624,8 +1496,6 @@ function syncAll(accountId) {
         if (win.isDestroyed() || resolved) return
         const currentUrl = win.webContents.getURL()
         console.log('[PurchaseSync-Taobao-All] loaded:', currentUrl.substring(0, 150))
-        // 注入人类行为模拟脚本
-        win.webContents.executeJavaScript(HUMAN_BEHAVIOR_SCRIPT).catch(() => {})
         setTimeout(() => {
           if (win.isDestroyed() || resolved) return
           pollForData()

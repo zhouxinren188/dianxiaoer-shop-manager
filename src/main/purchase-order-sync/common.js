@@ -13,10 +13,6 @@ const OVERALL_TIMEOUT = 90000 // 90 秒总超时
 const POLL_INTERVAL = 3000   // 3 秒轮询 CDP 捕获结果
 const MAX_POLLS = 25         // 最多轮询 25 次（75 秒）
 
-// ============ TMD 反爬检测常量 ============
-const TMD_PUNISH_PATTERNS = ['_____tmd_____/punish', 'nocaptcha/initialize.jsonp']
-const TMD_BLOCKED_BODY_LEN_THRESHOLD = 600 // 463B 被拦截响应 < 600 << 正常 ~10KB
-
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 
 const activeSyncs = new Map() // accountId -> win
@@ -71,7 +67,7 @@ const ORDER_STATUS_MAP = {
 function mapOrderStatus(status) {
   if (!status) return status
   // 已经是标准英文状态码，直接返回
-  const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'rejected', 'stocked', 'cancelled', 'refunded']
+  const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'forwarded', 'stocked', 'pending_after_sale', 'rejected', 'cancelled', 'refunded']
   if (validStatuses.includes(status)) return status
   // 中文 → 英文映射
   return ORDER_STATUS_MAP[status] || status
@@ -230,21 +226,13 @@ function extractTrackingFromData(obj, maxDepth) {
  * 通过 Network.getResponseBody 获取响应体
  */
 class CDPNetworkCapture {
-  constructor(webContents, apiKeywords, options = {}) {
+  constructor(webContents, apiKeywords) {
     this.webContents = webContents
     this.apiKeywords = apiKeywords
     this.capturedResponses = [] // { url, status, body }
     this.capturedRequests = []  // { url, method, postData }
     this.pendingRequests = new Map() // requestId -> { url, status }
     this.attached = false
-    // TMD 反爬检测状态
-    this.tmdDetected = false
-    this.tmdPunishCount = 0
-    this._tmdCallback = options.tmdCallback || null
-    // 保存 handler 引用，detach 时移除，防止复用窗口时监听器累积导致事件重复触发
-    this._messageHandler = (event, method, params) => {
-      this._handleCDPEvent(method, params)
-    }
   }
 
   async attach() {
@@ -256,8 +244,10 @@ class CDPNetworkCapture {
       // 启用 Network 域
       await this.webContents.debugger.sendCommand('Network.enable')
 
-      // 监听 CDP 事件（使用保存的引用，便于 detach 时移除）
-      this.webContents.debugger.on('message', this._messageHandler)
+      // 监听 CDP 事件
+      this.webContents.debugger.on('message', (event, method, params) => {
+        this._handleCDPEvent(method, params)
+      })
 
       console.log('[CDP] Network capture attached')
       return true
@@ -268,25 +258,11 @@ class CDPNetworkCapture {
     }
   }
 
-  _checkTmdUrl(url) {
-    if (TMD_PUNISH_PATTERNS.some(p => url.includes(p))) {
-      if (!this.tmdDetected) {
-        this.tmdDetected = true
-        this.tmdPunishCount++
-        console.log(`[CDP] TMD punish detected: ${url.substring(0, 120)}`)
-        if (this._tmdCallback) this._tmdCallback()
-      }
-      return true
-    }
-    return false
-  }
-
   _handleCDPEvent(method, params) {
     // 捕获请求（含 postData）
     if (method === 'Network.requestWillBeSent') {
       const { requestId, request } = params
       const url = request.url || ''
-      this._checkTmdUrl(url)
       const isTargetAPI = this.apiKeywords.some(kw => url.toLowerCase().includes(kw.toLowerCase()))
       if (isTargetAPI) {
         this.capturedRequests.push({
@@ -302,9 +278,6 @@ class CDPNetworkCapture {
     if (method === 'Network.responseReceived') {
       const { requestId, response } = params
       const url = response.url || ''
-
-      // TMD URL 检测
-      this._checkTmdUrl(url)
 
       // 检查 URL 是否匹配目标 API
       const isTargetAPI = this.apiKeywords.some(kw => url.toLowerCase().includes(kw.toLowerCase()))
@@ -349,17 +322,6 @@ class CDPNetworkCapture {
         })
         console.log(`[CDP] Response captured: ${meta.url.substring(0, 100)} (${body.length}B)`)
       }
-
-      // TMD 小响应体检测：物流 API 返回极小响应体（<600B）说明被拦截
-      const isLogisticsAPI = meta.url && meta.url.includes('mtop.taobao.logistics')
-      if (isLogisticsAPI && body.length < TMD_BLOCKED_BODY_LEN_THRESHOLD && body.length > 0) {
-        if (!this.tmdDetected) {
-          this.tmdDetected = true
-          this.tmdPunishCount++
-          console.log(`[CDP] TMD blocked logistics API detected: body ${body.length}B < ${TMD_BLOCKED_BODY_LEN_THRESHOLD}B`)
-          if (this._tmdCallback) this._tmdCallback()
-        }
-      }
     } catch (e) {
       console.warn(`[CDP] GetResponseBody failed for ${requestId}:`, e.message)
     }
@@ -380,10 +342,6 @@ class CDPNetworkCapture {
   async detach() {
     try {
       if (this.attached && !this.webContents.isDestroyed()) {
-        // 先移除消息监听器，防止复用窗口时监听器累积导致事件重复触发
-        try {
-          this.webContents.debugger.removeListener('message', this._messageHandler)
-        } catch (e) {}
         this.webContents.debugger.detach()
       }
     } catch (e) {
@@ -391,10 +349,6 @@ class CDPNetworkCapture {
     }
     this.attached = false
   }
-
-  isTmdDetected() { return this.tmdDetected }
-  getTmdPunishCount() { return this.tmdPunishCount }
-  resetTmdState() { this.tmdDetected = false; this.tmdPunishCount = 0 }
 }
 
 // ============ HTTP 工具 ============
@@ -720,80 +674,12 @@ try {
 } catch(e) {}
 `
 
-// ============ 物流 API 全局速率限制器 ============
-// 跨窗口强制最低间隔，防止短时间密集调用物流 API 触发 TMD
-let _lastLogisticsApiTs = 0
-const MIN_LOGISTICS_API_GAP_MS = 10000 // 最少 10 秒间隔
-
-function enforceLogisticsApiGap() {
-  const now = Date.now()
-  const gap = MIN_LOGISTICS_API_GAP_MS + Math.random() * 3000 // 10~13 秒
-  const elapsed = now - _lastLogisticsApiTs
-  if (elapsed < gap) {
-    const wait = gap - elapsed
-    console.log(`[Stealth] 物流 API 速率限制: 等待 ${Math.round(wait)}ms`)
-    return new Promise(r => setTimeout(r, wait))
-  }
-  return Promise.resolve()
-}
-
-function recordLogisticsApiCall() {
-  _lastLogisticsApiTs = Date.now()
-}
-
-// ============ 人类行为模拟脚本 ============
-// 注入到页面中模拟滚动、鼠标移动和点击事件，让页面 JS 认为有真实用户交互
-const HUMAN_BEHAVIOR_SCRIPT = `
-(function() {
-  try {
-    var delay = 200 + Math.random() * 300;
-    setTimeout(function() {
-      // 1. 模拟 2-3 次平滑向下滚动
-      var scrollCount = 2 + Math.floor(Math.random() * 2);
-      var scrollInterval = 400 + Math.random() * 600;
-      var scrolled = 0;
-      function doScroll() {
-        if (scrolled >= scrollCount) return;
-        window.scrollBy({ top: 150 + Math.random() * 200, left: 0, behavior: 'smooth' });
-        scrolled++;
-        setTimeout(doScroll, scrollInterval);
-      }
-      doScroll();
-
-      // 2. 模拟 5-8 次鼠标移动事件
-      var moveCount = 5 + Math.floor(Math.random() * 4);
-      for (var i = 0; i < moveCount; i++) {
-        setTimeout(function() {
-          var evt = new MouseEvent('mousemove', {
-            clientX: 100 + Math.random() * (window.innerWidth - 200),
-            clientY: 100 + Math.random() * (window.innerHeight - 200),
-            bubbles: true
-          });
-          document.dispatchEvent(evt);
-        }, 300 + i * (200 + Math.random() * 300));
-      }
-
-      // 3. 模拟 1 次点击事件（安全区域）
-      setTimeout(function() {
-        var evt = new MouseEvent('click', {
-          clientX: 200 + Math.random() * 400,
-          clientY: 200 + Math.random() * 300,
-          bubbles: true
-        });
-        document.dispatchEvent(evt);
-      }, 1000 + Math.random() * 1500);
-    }, delay);
-  } catch(e) {}
-})();
-`
-
 module.exports = {
   // Electron / Node
   BrowserWindow, ipcMain, session, path, http,
   // Constants
   OVERALL_TIMEOUT, POLL_INTERVAL, MAX_POLLS,
   BUSINESS_SERVER,
-  TMD_PUNISH_PATTERNS, TMD_BLOCKED_BODY_LEN_THRESHOLD,
   activeSyncs,
   // Logistics
   CP_CODE_MAP, resolveLogisticsCompany,
@@ -811,9 +697,5 @@ module.exports = {
   // Path Resolution
   resolveAppPath,
   // Visibility
-  VISIBILITY_OVERRIDE,
-  // Stealth Rate Limiter
-  MIN_LOGISTICS_API_GAP_MS, enforceLogisticsApiGap, recordLogisticsApiCall,
-  // Human Behavior Simulation
-  HUMAN_BEHAVIOR_SCRIPT
+  VISIBILITY_OVERRIDE
 }

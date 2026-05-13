@@ -74,9 +74,11 @@
             <el-option label="阿里巴巴" value="1688" />
           </el-select>
         </el-form-item>
-        <el-form-item label="订单状态">
-          <el-select v-model="filterForm.status" placeholder="全部" clearable style="width: 130px">
-            <el-option v-for="s in statusOptions" :key="s.value" :label="s.label" :value="s.value" />
+        <el-form-item label="订单类型">
+          <el-select v-model="filterForm.purchaseType" placeholder="全部" clearable style="width: 130px">
+            <el-option label="三方代发" value="dropship" />
+            <el-option label="仓库转发" value="warehouse" />
+            <el-option label="仓库进货" value="warehouse_in" />
           </el-select>
         </el-form-item>
         <el-form-item label="采购账号">
@@ -279,11 +281,8 @@
             <el-button v-if="row.status === 'shipped'" link type="primary" size="small" @click="handleConfirmReceive(row)">
               确认签收
             </el-button>
-            <el-button v-if="row.status === 'in_transit' && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" link type="primary" size="small" @click="handleReceive(row)">
+            <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" link type="primary" size="small" @click="handleReceive(row)">
               收货
-            </el-button>
-            <el-button v-if="row.status === 'received'" link type="success" size="small" @click="handleConfirmStock(row)">
-              确认入库
             </el-button>
             <el-button v-if="row.status === 'stocked'" link type="warning" size="small" @click="handleOutbound(row)">
               出库
@@ -388,16 +387,85 @@
       align-center
       :close-on-click-modal="false"
     >
-      <div v-if="currentReceiveRow" style="text-align: center; padding: 10px 0">
+      <!-- 仓库进货：保持原有提示和入库按钮 -->
+      <div v-if="currentReceiveRow?.purchase_type === 'warehouse_in'" style="text-align: center; padding: 10px 0">
         <p style="font-size: 15px; line-height: 1.8">
-          温馨提示，该订单类型为<strong>{{ currentReceiveRow.purchase_type === 'warehouse_in' ? '仓库进货' : '仓库转发' }}</strong>，是否立即{{ currentReceiveRow.purchase_type === 'warehouse_in' ? '入库' : '转发' }}？
+          温馨提示，该订单类型为<strong>仓库进货</strong>，是否立即入库？
         </p>
       </div>
-      <template #footer>
-        <el-button @click="handleForward" :disabled="currentReceiveRow?.purchase_type === 'warehouse_in'">
-          {{ currentReceiveRow?.purchase_type === 'warehouse_in' ? '转发(开发中)' : '转发' }}
-        </el-button>
+      <template v-if="currentReceiveRow?.purchase_type === 'warehouse_in'" #footer>
         <el-button type="primary" @click="handleStockIn">入库</el-button>
+      </template>
+
+      <!-- 仓库转发：新提示语 + 云仓打单发货 + 店铺打单发货 -->
+      <div v-if="currentReceiveRow?.purchase_type === 'warehouse'" style="text-align: center; padding: 10px 0">
+        <p style="font-size: 15px; line-height: 1.8">
+          温馨提示，该订单类型为<strong>仓库转发</strong>，归属<strong>{{ currentReceiveRow.sales_warehouse_name || '未知仓库' }}</strong>，是否立即转发？
+        </p>
+      </div>
+      <template v-if="currentReceiveRow?.purchase_type === 'warehouse'" #footer>
+        <el-tooltip content="开发中，敬请期待" placement="top">
+          <span><el-button disabled>店铺打单发货</el-button></span>
+        </el-tooltip>
+        <el-button type="primary" @click="handleForward">云仓打单发货</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 云仓打单发货对话框 -->
+    <el-dialog
+      v-model="forwardDialogVisible"
+      title="云仓打单发货"
+      width="540px"
+      align-center
+      :close-on-click-modal="false"
+      class="forward-dialog"
+    >
+      <div v-loading="forwardLoading" class="forward-content">
+        <template v-if="forwardSalesData">
+          <!-- 订单概要信息 -->
+          <div class="forward-summary">
+            <div class="forward-summary-row">
+              <span class="forward-label">销售订单号</span>
+              <span class="forward-value forward-order-no">{{ forwardSalesData.orderId || '--' }}</span>
+            </div>
+            <div class="forward-summary-row">
+              <span class="forward-label">订单状态</span>
+              <span class="forward-value">
+                <el-tag size="small" :type="getSalesStatusTagType(forwardSalesData.statusText)">{{ forwardSalesData.statusText || '--' }}</el-tag>
+              </span>
+            </div>
+            <div class="forward-summary-row">
+              <span class="forward-label">归属仓库</span>
+              <span class="forward-value forward-warehouse">{{ forwardSalesData.warehouseName || '未知仓库' }}</span>
+            </div>
+            <div class="forward-summary-row">
+              <span class="forward-label">店铺名称</span>
+              <span class="forward-value">{{ forwardSalesData.storeName || '--' }}</span>
+            </div>
+          </div>
+          <!-- 商品信息 -->
+          <div class="forward-goods-title">商品信息</div>
+          <div class="forward-goods-list">
+            <div v-for="(item, idx) in forwardSalesData.items" :key="idx" class="forward-product-item">
+              <img v-if="item.image" :src="item.image" class="forward-product-img" />
+              <div v-else class="forward-product-img forward-product-img-placeholder">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" stroke="#dcdfe6" stroke-width="1.5"/><circle cx="8.5" cy="8.5" r="1.5" fill="#dcdfe6"/><path d="M21 15l-5-5L5 21" stroke="#dcdfe6" stroke-width="1.5" stroke-linecap="round"/></svg>
+              </div>
+              <div class="forward-product-info">
+                <div class="forward-product-name">{{ item.name || '--' }}</div>
+                <div class="forward-product-meta">
+                  <span class="forward-product-price">¥{{ item.price || 0 }}</span>
+                  <span class="forward-product-qty">×{{ item.quantity || 1 }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+        <div v-else-if="!forwardLoading" class="forward-empty">暂无关联销售订单信息</div>
+      </div>
+      <template #footer>
+        <el-button @click="forwardDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleConfirmForward">我已转发</el-button>
       </template>
     </el-dialog>
 
@@ -919,8 +987,10 @@ const statusOptions = [
   { label: '已发货', value: 'shipped' },
   { label: '运输中', value: 'in_transit' },
   { label: '已签收', value: 'received' },
-  { label: '已拒收', value: 'rejected' },
+  { label: '已转发', value: 'forwarded' },
   { label: '已入库', value: 'stocked' },
+  { label: '待处理售后', value: 'pending_after_sale' },
+  { label: '已拒收', value: 'rejected' },
   { label: '已取消', value: 'cancelled' }
 ]
 
@@ -1237,6 +1307,7 @@ const filterForm = reactive({
   platformOrderNo: '',
   salesOrderNo: '',
   platform: '',
+  purchaseType: '',
   status: '',
   accountId: ''
 })
@@ -1265,7 +1336,7 @@ function statusLabel(val) {
 }
 
 function statusTagType(val) {
-  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', rejected: 'danger', stocked: 'success', cancelled: 'danger' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', pending_after_sale: 'danger', rejected: 'danger', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
@@ -1275,6 +1346,14 @@ function getSalesStatusClass(statusText) {
   if (statusText.includes('完成') || statusText.includes('已出库')) return 'status-success'
   if (statusText.includes('待出库') || statusText.includes('待付款')) return 'status-warning'
   return 'status-default'
+}
+
+function getSalesStatusTagType(statusText) {
+  if (!statusText) return 'info'
+  if (statusText.includes('取消') || statusText.includes('关闭')) return 'danger'
+  if (statusText.includes('完成') || statusText.includes('已出库')) return 'success'
+  if (statusText.includes('待出库') || statusText.includes('待付款')) return 'warning'
+  return 'info'
 }
 
 function copyText(text) {
@@ -1355,6 +1434,9 @@ const filteredData = computed(() => {
   }
   if (filterForm.platform) {
     data = data.filter(r => r.platform === filterForm.platform)
+  }
+  if (filterForm.purchaseType) {
+    data = data.filter(r => r.purchase_type === filterForm.purchaseType)
   }
   if (filterForm.status) {
     data = data.filter(r => r.status === filterForm.status)
@@ -1550,6 +1632,11 @@ function handleOutbound(row) {
 const receiveDialogVisible = ref(false)
 const currentReceiveRow = ref(null)
 
+// 云仓打单发货弹窗
+const forwardDialogVisible = ref(false)
+const forwardSalesData = ref(null)
+const forwardLoading = ref(false)
+
 const stockInDialogVisible = ref(false)
 const stockInForm = reactive({
   inventoryInfo: null,
@@ -1588,14 +1675,40 @@ function handleReceive(row) {
   receiveDialogVisible.value = true
 }
 
-// 点击"转发"按钮（仓库转发可用，仓库进货禁用）
-function handleForward() {
-  if (currentReceiveRow.value?.purchase_type === 'warehouse_in') {
-    ElMessage.info('仓库进货暂不支持转发功能，敬请期待')
-    return
+// 点击"云仓打单发货"按钮 — 加载关联销售订单并打开弹窗
+async function handleForward() {
+  const row = currentReceiveRow.value
+  if (!row || row.purchase_type === 'warehouse_in') return
+
+  // 关闭收货确认弹窗
+  receiveDialogVisible.value = false
+
+  // 加载关联销售订单信息
+  forwardLoading.value = true
+  forwardSalesData.value = null
+  forwardDialogVisible.value = true
+  try {
+    const data = await fetchRelatedSales(row.id)
+    forwardSalesData.value = data
+  } catch (err) {
+    ElMessage.error('获取关联销售订单失败')
+  } finally {
+    forwardLoading.value = false
   }
-  // TODO: 转发功能待开发
-  ElMessage.info('转发功能开发中')
+}
+
+// 点击"我已转发" — 更新采购类型为已转发
+async function handleConfirmForward() {
+  const row = currentReceiveRow.value
+  if (!row) return
+  try {
+    await updatePurchaseStatus(row.id, { status: 'forwarded' })
+    row.status = 'forwarded'
+    forwardDialogVisible.value = false
+    ElMessage.success('已标记为转发完成')
+  } catch (err) {
+    ElMessage.error('操作失败: ' + (err.message || ''))
+  }
 }
 
 // 点击"入库"按钮 — 检查绑定状态
@@ -2895,6 +3008,12 @@ function handleImportDialogClose() {
 .cell-status.status-cancelled { color: #f56c6c; background: #fef0f0; }
 .cell-status.status-cancelled .status-dot { background: #f56c6c; }
 
+.cell-status.status-forwarded { color: #409eff; background: #ecf5ff; }
+.cell-status.status-forwarded .status-dot { background: #409eff; }
+
+.cell-status.status-pending_after_sale { color: #f56c6c; background: #fef0f0; }
+.cell-status.status-pending_after_sale .status-dot { background: #f56c6c; }
+
 /* ===== 展开行：关联销售商品信息 ===== */
 
 /* 隐藏展开箭头列 */
@@ -3112,7 +3231,120 @@ function handleImportDialogClose() {
   color: #f56c6c;
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* 云仓打单发货弹窗 */
+.forward-content {
+  min-height: 120px;
+}
+.forward-summary {
+  background: #f8f9fb;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+.forward-summary-row {
+  display: flex;
+  align-items: center;
+  padding: 5px 0;
+}
+.forward-summary-row:last-child {
+  padding-bottom: 0;
+}
+.forward-label {
+  width: 80px;
   flex-shrink: 0;
+  font-size: 13px;
+  color: #909399;
+}
+.forward-value {
+  font-size: 13px;
+  color: #303133;
+  min-width: 0;
+}
+.forward-order-no {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+  letter-spacing: 0.3px;
+}
+.forward-warehouse {
+  color: #e6a23c;
+  font-weight: 500;
+}
+.forward-goods-title {
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+.forward-goods-list {
+  background: #fafafa;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.forward-product-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #f0f1f3;
+}
+.forward-product-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.forward-product-item:first-child {
+  padding-top: 0;
+}
+.forward-product-img {
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid #ebeef5;
+  background: #fff;
+}
+.forward-product-img-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
+}
+.forward-product-info {
+  flex: 1;
+  min-width: 0;
+}
+.forward-product-name {
+  font-size: 13px;
+  color: #303133;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.forward-product-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+.forward-product-price {
+  font-size: 14px;
+  color: #f56c6c;
+  font-weight: 600;
+}
+.forward-product-qty {
+  font-size: 12px;
+  color: #909399;
+}
+.forward-empty {
+  text-align: center;
+  color: #c0c4cc;
+  padding: 40px 0;
+  font-size: 14px;
 }
 
 .expand-product-qty {

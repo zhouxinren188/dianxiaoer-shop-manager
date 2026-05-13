@@ -2852,11 +2852,12 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (req.user.user_type === 'sub') {
       // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
           AND (upa.id IS NOT NULL
@@ -2874,11 +2875,12 @@ app.get('/api/purchase-orders', async (req, res) => {
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
         WHERE po.owner_id=?
       `
       countSql = `
@@ -3040,13 +3042,20 @@ app.get('/api/purchase-orders/:id/binding-check', async (req, res) => {
 app.put('/api/purchase-orders/:id/status', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { status, actual_quantity } = req.body
+    const { status, actual_quantity, purchase_type } = req.body
 
     // 更新状态和实际收货数量
-    if (actual_quantity != null) {
-      await pool.execute('UPDATE purchase_orders SET status=?, actual_quantity=? WHERE id=? AND owner_id=?', [status, actual_quantity, req.params.id, ownerId])
-    } else {
-      await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+    if (status) {
+      if (actual_quantity != null) {
+        await pool.execute('UPDATE purchase_orders SET status=?, actual_quantity=? WHERE id=? AND owner_id=?', [status, actual_quantity, req.params.id, ownerId])
+      } else {
+        await pool.execute('UPDATE purchase_orders SET status=? WHERE id=? AND owner_id=?', [status, req.params.id, ownerId])
+      }
+    }
+
+    // 更新采购类型（如：标记为已转发）
+    if (purchase_type) {
+      await pool.execute('UPDATE purchase_orders SET purchase_type=? WHERE id=? AND owner_id=?', [purchase_type, req.params.id, ownerId])
     }
 
     // 仓库采购单入库时，自动增加库存数量

@@ -45,7 +45,7 @@ const PDD_STATUS_MAP = {
  * Phase 1: 搜索页提取订单基础信息 + shippingId/goods_id
  * Phase 2: 已发货订单导航到物流页，从 store.traceData.shipping 提取快递公司名称和物流轨迹
  */
-function syncSingle(accountId, platformOrderNo, options = {}) {
+function syncSingle(accountId, platformOrderNo) {
   return new Promise(async (resolve, reject) => {
     const syncKey = `${accountId}-pinduoduo`
     let resolved = false

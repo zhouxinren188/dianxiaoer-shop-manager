@@ -394,7 +394,7 @@ function findOrderByOrderNo(platformOrderNo, allResponses) {
 
 // ============ 单个订单同步 ============
 
-function syncSingle(accountId, platformOrderNo, options = {}) {
+function syncSingle(accountId, platformOrderNo) {
   return new Promise(async (resolve, reject) => {
     const syncKey = `${accountId}-1688`
     let resolved = false
