@@ -140,7 +140,7 @@ async function main() {
     console.log('\n[1/5] 跳过构建（使用已有产物）')
   } else {
     console.log('\n[1/5] 构建安装程序...')
-    execSync('npx electron-vite build && npx electron-builder --win', { cwd: ROOT, stdio: 'inherit' })
+    execSync('npx electron-vite build && node scripts/compile-bytecode.js && npx electron-builder --win', { cwd: ROOT, stdio: 'inherit' })
   }
 
   // 检查产物

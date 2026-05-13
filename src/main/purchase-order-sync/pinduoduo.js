@@ -116,7 +116,7 @@ function syncSingle(accountId, platformOrderNo) {
           nodeIntegration: false,
           sandbox: true,
           backgroundThrottling: false,
-          preload: path.join(__dirname, '..', 'purchase-preload.js')
+          preload: path.join(__dirname, 'purchase-preload.js')
         }
       })
 
