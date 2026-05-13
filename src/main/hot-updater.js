@@ -20,7 +20,9 @@ function getCurrentVersion() {
 }
 
 // 获取热更新 renderer 路径（如存在）
+// 开发模式不使用热更新 renderer
 function getHotUpdateRendererPath() {
+  if (!app.isPackaged) return null
   const indexHtml = path.join(HOT_UPDATE_DIR, 'renderer', 'index.html')
   if (fs.existsSync(indexHtml)) {
     return indexHtml
@@ -29,7 +31,9 @@ function getHotUpdateRendererPath() {
 }
 
 // 获取热更新 preload 路径（如存在）
+// 开发模式不使用热更新 preload，避免损坏的热更新覆盖 dev 版本
 function getHotUpdatePreloadPath() {
+  if (!app.isPackaged) return null
   const preloadJs = path.join(HOT_UPDATE_DIR, 'preload', 'index.js')
   if (fs.existsSync(preloadJs)) {
     return preloadJs
@@ -40,6 +44,10 @@ function getHotUpdatePreloadPath() {
 // 解析应用资源路径：优先从热更新目录查找，否则从 app.asar 内查找
 // relativePath: 相对于 app 根目录的路径，如 'out/main/purchase-preload.js'
 function resolveAppPath(relativePath) {
+  // 开发模式不使用热更新
+  if (!app.isPackaged) {
+    return path.join(app.getAppPath(), relativePath)
+  }
   // 优先从热更新目录查找
   const hotPath = path.join(HOT_UPDATE_DIR, relativePath)
   if (fs.existsSync(hotPath)) {
@@ -50,7 +58,9 @@ function resolveAppPath(relativePath) {
 }
 
 // 检查主进程热更新是否存在且有效
+// 开发模式下不使用热更新
 function hasMainProcessUpdate() {
+  if (!app.isPackaged) return false
   try {
     if (!fs.existsSync(VERSION_FILE)) return false
     const data = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'))

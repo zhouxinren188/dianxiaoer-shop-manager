@@ -220,7 +220,7 @@ function uploadToServer(filePath, ver, sha256) {
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/zip\r\n\r\n`)
 
   const tail = `\r\n--${boundary}--\r\n`
-  const head = parts.join('\r\n') + '\r\n'
+  const head = parts.join('\r\n')
   const headBuf = Buffer.from(head, 'utf-8')
   const tailBuf = Buffer.from(tail, 'utf-8')
   const bodyLength = headBuf.length + fileData.length + tailBuf.length

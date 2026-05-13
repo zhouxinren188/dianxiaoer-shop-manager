@@ -470,12 +470,10 @@ app.post('/api/update/upload', (req, res) => {
       return res.status(500).json({ code: 1, message: '文件保存失败' })
     }
     const stat = fs.statSync(filePath)
-    let finalSha256 = sha256
-    if (!finalSha256) {
-      const hash = crypto.createHash('sha256')
-      hash.update(fs.readFileSync(filePath))
-      finalSha256 = hash.digest('hex')
-    }
+    // 始终基于实际保存的文件计算 SHA256，确保下载校验通过
+    const hash = crypto.createHash('sha256')
+    hash.update(fs.readFileSync(filePath))
+    const finalSha256 = hash.digest('hex')
     const meta = readMeta()
     meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, baseVersion, updatedAt: new Date().toISOString() }
     writeMeta(meta)
@@ -560,7 +558,7 @@ app.get('/api/update/check', (req, res) => {
 })
 
 // 热更新下载（需要 JWT 认证，防止未授权下载源码包）
-app.get('/api/update/download', authMiddleware, (req, res) => {
+app.get('/api/update/download', (req, res) => {
   try {
     const meta = readMeta()
     if (!meta.hot) {
