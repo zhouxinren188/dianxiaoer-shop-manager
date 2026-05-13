@@ -32,11 +32,16 @@ const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
   port: process.env.DB_PORT || 3307,
   user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'jd123456',
+  password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'dianxiaoer',
   waitForConnections: true,
   connectionLimit: 5,
   queueLimit: 0
+}
+
+if (!dbConfig.password) {
+  console.error('[FATAL] 环境变量 DB_PASSWORD 未设置')
+  process.exit(1)
 }
 
 const dbPool = mysql.createPool(dbConfig)
@@ -73,7 +78,11 @@ if (!fs.existsSync(DATA_DIR)) {
 const UPDATE_DIR = path.join(__dirname, 'updates')
 const HOT_DIR = path.join(UPDATE_DIR, 'hot')
 const META_FILE = path.join(UPDATE_DIR, 'update-meta.json')
-const ADMIN_PASSWORD = 'dianxiaoer2026'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
+if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 8) {
+  console.error('[FATAL] 环境变量 ADMIN_PASSWORD 未设置或长度不足8字符')
+  process.exit(1)
+}
 
 if (!fs.existsSync(UPDATE_DIR)) fs.mkdirSync(UPDATE_DIR, { recursive: true })
 if (!fs.existsSync(HOT_DIR)) fs.mkdirSync(HOT_DIR, { recursive: true })
@@ -143,16 +152,17 @@ function clearFailAttempts(username) {
 }
 
 // ========== 初始化管理员账号 ==========
+const INITIAL_ADMIN_PASSWORD = process.env.INITIAL_ADMIN_PASSWORD || 'Dxe@2026!Init'
 function initAdmin() {
   const users = readJson(USERS_FILE, {})
   if (!users['admin']) {
     users['admin'] = {
-      password: bcrypt.hashSync('admin', 10),
+      password: bcrypt.hashSync(INITIAL_ADMIN_PASSWORD, 10),
       phone: '',
       createdAt: new Date().toISOString()
     }
     writeJson(USERS_FILE, users)
-    console.log('[API] 初始化管理员账号: admin')
+    console.log('[API] 初始化管理员账号: admin（请尽快修改默认密码）')
   }
 }
 initAdmin()
@@ -165,8 +175,9 @@ const corsOptions = {
     // Electron 客户端无 origin，允许 null/undefined
     if (!origin) return callback(null, true)
     if (ALLOWED_ORIGINS.length === 0) {
-      // 未配置白名单时，仅允许服务器自身IP（开发调试）
-      if (origin.includes('150.158.54.108')) return callback(null, true)
+      // 未配置白名单时，仅允许服务器自身IP的精确来源
+      const allowed = ['http://150.158.54.108:3001', 'http://150.158.54.108:3002', 'http://localhost:3001', 'http://localhost:3002']
+      if (allowed.some(a => origin.startsWith(a))) return callback(null, true)
       return callback(new Error('CORS 未配置允许的来源'))
     }
     if (ALLOWED_ORIGINS.includes(origin)) {
@@ -256,10 +267,10 @@ app.post('/api/register', registerLimiter, async (req, res) => {
 
     const hashedPassword = bcrypt.hashSync(password, 10)
 
-    // 写入MySQL数据库（注册用户默认为主账号 master）
+    // 写入MySQL数据库（注册用户默认为子账号 staff，防止注册即获得管理权限）
     const [result] = await dbPool.execute(
       `INSERT INTO users (username, phone, password_hash, user_type, role, parent_id, status, real_name)
-       VALUES (?, ?, ?, 'master', 'admin', NULL, 'enabled', ?)`,
+       VALUES (?, ?, ?, 'sub', 'staff', NULL, 'enabled', ?)`,
       [username, phone, hashedPassword, username]
     )
 
@@ -548,8 +559,8 @@ app.get('/api/update/check', (req, res) => {
   }
 })
 
-// 热更新下载
-app.get('/api/update/download', (req, res) => {
+// 热更新下载（需要 JWT 认证，防止未授权下载源码包）
+app.get('/api/update/download', authMiddleware, (req, res) => {
   try {
     const meta = readMeta()
     if (!meta.hot) {

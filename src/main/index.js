@@ -1,5 +1,5 @@
-// 信任自签名证书（必须在任何 HTTPS 请求之前设置）
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
+// 注意：不再全局禁用 TLS 证书验证（process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'）
+// 改为仅对特定自签名服务器在请求级别设置 rejectUnauthorized: false
 
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')

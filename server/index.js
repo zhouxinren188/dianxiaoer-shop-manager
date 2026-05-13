@@ -53,12 +53,26 @@ function startLockCleanup(intervalMs = 10 * 60 * 1000) {
 }
 
 // JWT 密钥（与 dianxiaoer-api 保持一致）
-// 优先从环境变量读取，否则使用默认值
-const JWT_SECRET = process.env.JWT_SECRET || 'bfb3079104c65c88d55b4ed46624c07b171d8254c87ec40a2f485370d10ee159a7115459fc9d249051bcd60bc0849633c47c4a8d1a4f167cce27aabfd152effd'
-console.log(`[Server] JWT_SECRET source: ${process.env.JWT_SECRET ? 'ENV' : 'DEFAULT'}`)
+// 必须通过环境变量设置，禁止硬编码（防止源码泄露导致令牌伪造）
+const JWT_SECRET = process.env.JWT_SECRET
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  console.error('[FATAL] 环境变量 JWT_SECRET 未设置或长度不足32字符')
+  process.exit(1)
+}
+console.log(`[Server] JWT_SECRET source: ENV`)
 
 const app = express()
-app.use(cors())
+// CORS：仅允许本机和中转代理访问，禁止任意来源
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true)
+    const allowed = ['http://localhost:3002', 'http://127.0.0.1:3002', 'http://150.158.54.108:3002']
+    if (allowed.some(a => origin.startsWith(a))) return callback(null, true)
+    console.warn(`[CORS] 未知来源: ${origin}`)
+    callback(null, true)
+  },
+  credentials: true
+}))
 app.use(express.json())
 
 function ok(data) {

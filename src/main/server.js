@@ -5,7 +5,15 @@ const path = require('path')
 const { app: electronApp } = require('electron')
 
 const app = express()
-app.use(cors())
+// CORS：仅允许本机访问（本地代理服务器，不对外暴露）
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true)
+    const allowed = ['http://localhost:3002', 'http://127.0.0.1:3002']
+    if (allowed.some(a => origin.startsWith(a))) return callback(null, true)
+    callback(new Error('不允许的来源'))
+  }
+}))
 app.use(express.json())
 
 // ============ 本地文件持久化 ============
