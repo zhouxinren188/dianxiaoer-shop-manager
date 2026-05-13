@@ -1407,15 +1407,15 @@ function handlePageChange(val) {
 async function loadData() {
   loading.value = true
   try {
-    const data = await fetchPurchaseOrders({ pageSize: 500 })
+    const data = await fetchPurchaseOrders({ pageSize: 50 })
     const orders = data.list || data || []
     
-    // 为每个订单填充account_name
+    // 为每个订单填充account_name（accountList可能还在加载中，兼容空列表）
     tableData.value = orders.map(order => {
       const account = accountList.value.find(acc => acc.id === order.account_id)
       return {
         ...order,
-        account_name: account ? account.username : null
+        account_name: account ? (account.username || account.account) : (order.account_name || null)
       }
     })
   } catch (err) {
@@ -2152,8 +2152,9 @@ async function handleSyncSingle(row) {
 // ==================== 生命周期 ====================
 
 onMounted(async () => {
-  await loadAccounts()  // 先加载账号列表
-  await loadData()       // 再加载采购订单数据
+  // 并行加载账号列表和订单数据（不再串行等待）
+  // 服务器端 purchase_orders 查询已 LEFT JOIN account_name，前端只需补充匹配
+  await Promise.all([loadAccounts(), loadData()])
 
   // 监听采购账号登录成功事件
   if (window.electronAPI) {

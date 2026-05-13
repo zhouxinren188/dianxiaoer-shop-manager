@@ -422,6 +422,18 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // ======== 采购相关索引优化 ========
+    // purchase_orders 表缺少的关键索引（全表扫描是首页加载慢的主因）
+    try { await connection.execute('CREATE INDEX idx_owner_id ON purchase_orders(owner_id)') } catch(e) { /* 索引已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_owner_status ON purchase_orders(owner_id, status)') } catch(e) { /* 索引已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_owner_platform ON purchase_orders(owner_id, platform)') } catch(e) { /* 索引已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_created_by ON purchase_orders(created_by)') } catch(e) { /* 索引已存在 */ }
+    // purchase_accounts 表缺少的索引
+    try { await connection.execute('CREATE INDEX idx_pa_owner_id ON purchase_accounts(owner_id)') } catch(e) { /* 索引已存在 */ }
+    // user_purchase_accounts 表缺少的索引（子账号权限查询核心）
+    try { await connection.execute('CREATE INDEX idx_upa_user_id ON user_purchase_accounts(user_id)') } catch(e) { /* 索引已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_upa_account_id ON user_purchase_accounts(account_id)') } catch(e) { /* 索引已存在 */ }
+
     console.log('[DB] 数据库初始化完成')
   } finally {
     connection.release()

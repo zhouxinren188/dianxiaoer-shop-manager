@@ -2838,31 +2838,43 @@ app.get('/api/purchase-orders', async (req, res) => {
     const { page=1, pageSize=20, status, platform } = req.query
     let sql, countSql, params
 
+    // ★ 列表查询：排除 logistics_tracking 等大字段（详情页单独获取），减少数据传输量
+    // 不用 SELECT po.*，改用具体字段列表
+    // goods_image 保留（列表缩略图需要），logistics_tracking 排除（详情页按需获取）
+    const listFields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
+      po.goods_name, po.goods_image, po.sku, po.quantity, po.actual_quantity, po.source_url,
+      po.platform, po.purchase_price, po.remark, po.purchase_type,
+      po.shipping_name, po.shipping_phone, po.shipping_address,
+      po.account_id, po.status, po.platform_order_no,
+      po.logistics_no, po.logistics_company, po.logistics_status,
+      po.owner_id, po.created_by, po.created_at, po.updated_at`
+
     if (req.user.user_type === 'sub') {
-      // 子账号：只看自己被分配的采购账号创建的订单 + 自己手动创建的订单(account_id为空)
-      // created_by IS NULL 表示迁移前的老订单，对同owner下所有用户可见
+      // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
       sql = `
-        SELECT po.*, pa.account as account_name, w.name as warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
-          AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
+          AND (upa.id IS NOT NULL
                OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
       countSql = `
         SELECT COUNT(*) as total
         FROM purchase_orders po
+        LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
-          AND (po.account_id IN (SELECT account_id FROM user_purchase_accounts WHERE user_id=?)
+          AND (upa.id IS NOT NULL
                OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
-      params = [ownerId, req.user.id, req.user.id]
+      params = [req.user.id, ownerId, req.user.id]
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT po.*, pa.account as account_name, w.name as warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -2881,7 +2893,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (platform) { sql += ' AND po.platform=?'; countSql += ' AND po.platform=?'; params.push(platform) }
 
     const [[{ total }]] = await pool.execute(countSql, params)
-    const limit = Math.max(1, parseInt(pageSize,10)||20)
+    const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))  // ★ 限制最大100条
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
     sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
