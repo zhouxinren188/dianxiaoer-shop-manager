@@ -85,26 +85,17 @@
           <!-- 注册表单 -->
           <template v-else>
             <h2 class="login-title">注册账号</h2>
-            <p class="login-subtitle">请填写以下信息完成注册</p>
+            <p class="login-subtitle">创建一个新的子账号</p>
             <el-form
               ref="registerFormRef"
               :model="registerForm"
               :rules="registerRules"
               @keyup.enter="handleRegister"
             >
-              <el-form-item prop="phone">
-                <el-input
-                  v-model="registerForm.phone"
-                  placeholder="请输入手机号"
-                  :prefix-icon="Phone"
-                  clearable
-                  maxlength="11"
-                />
-              </el-form-item>
               <el-form-item prop="username">
                 <el-input
                   v-model="registerForm.username"
-                  placeholder="请输入账号"
+                  placeholder="请输入账号（2-20个字符）"
                   :prefix-icon="User"
                   clearable
                 />
@@ -113,19 +104,17 @@
                 <el-input
                   v-model="registerForm.password"
                   type="password"
-                  placeholder="请输入密码"
+                  placeholder="请输入密码（6-20个字符）"
                   :prefix-icon="Lock"
                   show-password
                   clearable
                 />
               </el-form-item>
-              <el-form-item prop="confirmPassword">
+              <el-form-item prop="phone">
                 <el-input
-                  v-model="registerForm.confirmPassword"
-                  type="password"
-                  placeholder="请再次输入密码"
-                  :prefix-icon="Lock"
-                  show-password
+                  v-model="registerForm.phone"
+                  placeholder="请输入手机号"
+                  :prefix-icon="Phone"
                   clearable
                 />
               </el-form-item>
@@ -164,8 +153,8 @@ const router = useRouter()
 const loginFormRef = ref(null)
 const registerFormRef = ref(null)
 const loading = ref(false)
-const isRegister = ref(false)
 const appVersion = ref('...')
+const isRegister = ref(false)
 
 const rememberMe = ref(false)
 
@@ -174,43 +163,29 @@ const loginForm = reactive({
   password: ''
 })
 
-const registerForm = reactive({
-  username: '',
-  phone: '',
-  password: '',
-  confirmPassword: ''
-})
-
 const loginRules = {
   username: [{ required: true, message: '请输入账号', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }]
 }
 
+const registerForm = reactive({
+  username: '',
+  password: '',
+  phone: ''
+})
+
 const registerRules = {
   username: [
     { required: true, message: '请输入账号', trigger: 'blur' },
-    { min: 2, max: 20, message: '账号长度为 2-20 个字符', trigger: 'blur' }
-  ],
-  phone: [
-    { required: true, message: '请输入手机号', trigger: 'blur' },
-    { pattern: /^1[3-9]\d{9}$/, message: '请输入正确的手机号', trigger: 'blur' }
+    { min: 2, max: 20, message: '账号长度为2-20个字符', trigger: 'blur' }
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 6, max: 20, message: '密码长度为 6-20 个字符', trigger: 'blur' }
+    { min: 6, max: 20, message: '密码长度为6-20个字符', trigger: 'blur' }
   ],
-  confirmPassword: [
-    { required: true, message: '请再次输入密码', trigger: 'blur' },
-    {
-      validator: (rule, value, callback) => {
-        if (value !== registerForm.password) {
-          callback(new Error('两次输入的密码不一致'))
-        } else {
-          callback()
-        }
-      },
-      trigger: 'blur'
-    }
+  phone: [
+    { required: true, message: '请输入手机号', trigger: 'blur' },
+    { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }
   ]
 }
 
@@ -233,6 +208,36 @@ onMounted(async () => {
 
 const API_BASE = 'http://150.158.54.108:3001'
 // const API_BASE = 'http://localhost:3001'  // 本地开发
+
+async function handleRegister() {
+  registerFormRef.value?.validate(async (valid) => {
+    if (!valid) return
+    loading.value = true
+    try {
+      const response = await fetch(`${API_BASE}/api/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: registerForm.username,
+          password: registerForm.password,
+          phone: registerForm.phone
+        })
+      })
+      const res = await response.json()
+      if (res.success) {
+        ElMessage.success('注册成功，请登录')
+        isRegister.value = false
+        loginForm.username = registerForm.username
+        loginForm.password = ''
+      } else {
+        ElMessage.error(res.message || '注册失败')
+      }
+    } catch (e) {
+      ElMessage.error('注册失败：' + (e.message || '网络错误'))
+    }
+    loading.value = false
+  })
+}
 
 async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
@@ -326,39 +331,6 @@ async function handleLogin() {
         errorMsg = `${e.message || '未知错误'}`
       }
       ElMessage.error(errorMsg)
-    }
-    loading.value = false
-  })
-}
-
-async function handleRegister() {
-  registerFormRef.value?.validate(async (valid) => {
-    if (!valid) return
-    loading.value = true
-    try {
-      const response = await fetch(`${API_BASE}/api/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: registerForm.username,
-          password: registerForm.password,
-          phone: registerForm.phone
-        })
-      })
-      const res = await response.json()
-      if (res && res.success) {
-        ElMessage.success('注册成功，请登录')
-        isRegister.value = false
-        loginForm.username = registerForm.username
-        registerForm.username = ''
-        registerForm.phone = ''
-        registerForm.password = ''
-        registerForm.confirmPassword = ''
-      } else {
-        ElMessage.error(res?.message || '注册失败')
-      }
-    } catch (e) {
-      ElMessage.error('网络错误，无法连接服务器')
     }
     loading.value = false
   })
