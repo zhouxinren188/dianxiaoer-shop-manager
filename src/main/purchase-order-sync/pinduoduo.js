@@ -58,14 +58,16 @@ function syncSingle(accountId, platformOrderNo) {
 
     console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
 
-    // partition 无有效平台 cookie 时，尝试从服务器恢复
-    if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
-      console.log(`[PDD-SearchSync] partition 无有效 PDD cookie，尝试从服务器恢复...`)
-      const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
-      if (restoreResult.restored) {
-        cookies = await ses.cookies.get({})
-        console.log(`[PDD-SearchSync] cookie 恢复成功，当前 cookies:${cookies.length}`)
-      }
+    // 同步前始终尝试从服务器恢复 cookie
+    // 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
+    // 解决：partition 有结构性有效但实际已过期的 cookie 时，hasValidPlatformCookies 返回 true
+    //       导致跳过服务器恢复，使用过期 cookie 被 PDD 拒绝（"采购账号登录已过期"）
+    const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
+    if (restoreResult.restored) {
+      cookies = await ses.cookies.get({})
+      console.log(`[PDD-SearchSync] cookie 从服务器恢复成功，当前 cookies:${cookies.length}`)
+    } else if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
+      console.log(`[PDD-SearchSync] partition 无有效 PDD cookie 且服务器无数据`)
     }
 
     if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {

@@ -98,7 +98,14 @@ async function startDownload() {
 
 // 全量更新下载（通过 electron-updater）
 function startFullDownload() {
-  const autoUpdater = getAutoUpdater()
+  let autoUpdater
+  try {
+    autoUpdater = getAutoUpdater()
+  } catch (err) {
+    state = 'error'
+    send('um-update-error', { message: '全量更新不可用: ' + err.message })
+    return
+  }
 
   // 先触发 electron-updater 的 checkForUpdates，它会验证 latest.yml
   // 然后自动触发 download-progress 和 update-downloaded 事件
@@ -156,7 +163,14 @@ async function startHotDownload() {
 // 热更新失败 → 降级到全量更新
 async function fallbackToFullUpdate(hotError) {
   try {
-    const autoUpdater = getAutoUpdater()
+    let autoUpdater
+    try {
+      autoUpdater = getAutoUpdater()
+    } catch (err) {
+      state = 'error'
+      send('um-update-error', { message: '更新失败: ' + hotError })
+      return
+    }
     const fullResult = await autoUpdater.checkForUpdates()
 
     if (fullResult && fullResult.updateInfo) {
@@ -193,8 +207,14 @@ async function fallbackToFullUpdate(hotError) {
 // 安装并重启
 function installAndRestart() {
   if (currentUpdateType === 'full') {
-    const autoUpdater = getAutoUpdater()
-    autoUpdater.quitAndInstall(true, true)
+    try {
+      const autoUpdater = getAutoUpdater()
+      autoUpdater.quitAndInstall(true, true)
+    } catch (err) {
+      console.error('[UpdateManager] 全量更新安装失败:', err.message)
+      app.relaunch()
+      app.exit(0)
+    }
   } else if (currentUpdateType === 'hot') {
     // 先启动新实例，延迟退出当前实例，确保新进程成功启动
     app.relaunch()
@@ -231,26 +251,33 @@ function initUpdateManager(win) {
   // 配置 electron-updater
   configureUpdater()
 
-  // 代理 electron-updater 事件到统一事件流
-  const autoUpdater = getAutoUpdater()
+  // 代理 electron-updater 事件到统一事件流（autoUpdater 初始化失败则跳过）
+  let autoUpdater = null
+  try {
+    autoUpdater = getAutoUpdater()
+  } catch (err) {
+    console.error('[UpdateManager] autoUpdater 不可用，全量更新功能禁用:', err.message)
+  }
 
-  autoUpdater.on('download-progress', (progressObj) => {
-    send('um-update-progress', { percent: Math.round(progressObj.percent) })
-  })
+  if (autoUpdater) {
+    autoUpdater.on('download-progress', (progressObj) => {
+      send('um-update-progress', { percent: Math.round(progressObj.percent) })
+    })
 
-  autoUpdater.on('update-downloaded', (info) => {
-    console.log('[UpdateManager] 全量更新下载完成:', info.version)
-    state = 'ready'
-    send('um-update-ready', { type: 'full' })
-  })
+    autoUpdater.on('update-downloaded', (info) => {
+      console.log('[UpdateManager] 全量更新下载完成:', info.version)
+      state = 'ready'
+      send('um-update-ready', { type: 'full' })
+    })
 
-  autoUpdater.on('error', (err) => {
-    console.error('[UpdateManager] electron-updater 错误:', err.message)
-    if (state === 'downloading') {
-      state = 'error'
-      send('um-update-error', { message: '全量更新失败: ' + err.message })
-    }
-  })
+    autoUpdater.on('error', (err) => {
+      console.error('[UpdateManager] electron-updater 错误:', err.message)
+      if (state === 'downloading') {
+        state = 'error'
+        send('um-update-error', { message: '全量更新失败: ' + err.message })
+      }
+    })
+  }
 
   // 清理过期热更新
   cleanupStaleHotUpdate()

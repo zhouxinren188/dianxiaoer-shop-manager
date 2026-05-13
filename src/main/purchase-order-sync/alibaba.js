@@ -408,14 +408,14 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-1688] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-1688] Cookies: ${cookies.length} 条`)
 
-    // partition 无有效平台 cookie 时，尝试从服务器恢复
-    if (!hasValidPlatformCookies(cookies, '1688')) {
-      console.log(`[PurchaseSync-1688] partition 无有效1688 cookie，尝试从服务器恢复...`)
-      const restoreResult = await restoreCookiesFromServer(accountId, '1688')
-      if (restoreResult.restored) {
-        cookies = await ses.cookies.get({})
-        console.log(`[PurchaseSync-1688] cookie 恢复成功，当前 Cookies: ${cookies.length} 条`)
-      }
+    // 同步前始终尝试从服务器恢复 cookie
+    // 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
+    const restoreResult = await restoreCookiesFromServer(accountId, '1688')
+    if (restoreResult.restored) {
+      cookies = await ses.cookies.get({})
+      console.log(`[PurchaseSync-1688] cookie 从服务器恢复成功，当前 Cookies: ${cookies.length} 条`)
+    } else if (!hasValidPlatformCookies(cookies, '1688')) {
+      console.log(`[PurchaseSync-1688] partition 无有效1688 cookie 且服务器无数据`)
     }
 
     if (!hasValidPlatformCookies(cookies, '1688')) {

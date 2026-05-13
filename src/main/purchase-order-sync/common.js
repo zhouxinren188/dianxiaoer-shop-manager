@@ -447,16 +447,35 @@ function hasValidPlatformCookies(cookies, platform) {
     return true
   })
 
-  return validPlatformCookies.length > 0
+  if (validPlatformCookies.length === 0) return false
+
+  // PDD 平台额外检查：PDDAccessToken 是必要条件
+  // 只有 api_uid 等非认证 cookie 而无 PDDAccessToken，PDD 服务器会拒绝请求
+  if (platform === 'pinduoduo') {
+    const cookieNames = new Set(validPlatformCookies.map(c => c.name))
+    if (!cookieNames.has('PDDAccessToken')) {
+      console.warn('[CookieCheck] PDD 缺少 PDDAccessToken，视为无效')
+      return false
+    }
+  }
+
+  return true
 }
 
 // ============ Cookie 从服务器恢复到 Partition ============
 
 /**
  * 从服务器恢复 cookie 到 Electron partition
- * 当 partition 无有效 cookie 时调用此函数，从 purchase_cookies 表恢复 cookie
- * 解决：子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"的问题
- * 也解决：本地 cookie 过期失效但仍有残留 cookie 导致跳过服务器恢复的问题
+ * 同步前始终调用此函数，无论 partition 是否已有 cookie
+ * 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
+ *
+ * 解决场景：
+ * - 子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"
+ * - partition 有结构性有效但实际已过期的旧 cookie（如 PDDAccessToken 过期但未超 expirationDate）
+ *   导致 hasValidPlatformCookies 返回 true 跳过恢复，平台拒绝请求
+ * - 删除账号后重新添加，partition 为空需要从服务器恢复
+ *
+ * 注意：ses.cookies.set() 会自动覆盖同名/同域的旧 cookie，无需手动清除
  *
  * @param {string} accountId - 采购账号 ID
  * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)

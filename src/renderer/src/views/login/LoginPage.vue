@@ -1,7 +1,16 @@
 <template>
   <div class="login-page">
-    <!-- 顶部拖拽区域，覆盖整个窗口顶部 -->
-    <div class="drag-region-top"></div>
+    <!-- 顶部拖拽区域 + 窗口控制按钮（按钮必须在 drag 区域内部，no-drag 才生效） -->
+    <div class="drag-region-top">
+      <div class="win-controls">
+        <button class="ctrl-btn" @click="handleMinimize">
+          <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
+        </button>
+        <button class="ctrl-btn close-btn" @click="handleClose">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
+        </button>
+      </div>
+    </div>
     <div class="login-body">
       <div class="login-left">
         <div class="brand-area">
@@ -25,15 +34,6 @@
         </div>
       </div>
       <div class="login-right">
-        <!-- 窗口控制按钮 -->
-        <div class="win-controls">
-          <button class="ctrl-btn" @click="handleMinimize">
-            <svg width="10" height="1" viewBox="0 0 10 1"><rect width="10" height="1" fill="currentColor"/></svg>
-          </button>
-          <button class="ctrl-btn close-btn" @click="handleClose">
-            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
-          </button>
-        </div>
         <div class="login-form-wrapper">
           <!-- 登录表单 -->
           <template v-if="!isRegister">
@@ -302,14 +302,10 @@ async function handleLogin() {
           localStorage.removeItem('rememberedPassword')
         }
         // 同步 auth token 到主进程（供 platform-window / cookie-heartbeat 等使用）
-        window.electronAPI?.invoke('set-auth-token', token).catch(() => {})
-        window.electronAPI?.invoke('window-set-main-size').then(() => {
-          ElMessage.success('登录成功')
-          router.replace('/')
-        }).catch(() => {
-          ElMessage.success('登录成功')
-          router.replace('/')
-        })
+        try { await window.electronAPI?.invoke('set-auth-token', token) } catch {}
+        try { await window.electronAPI?.invoke('window-set-main-size') } catch {}
+        ElMessage.success('登录成功')
+        router.replace('/')
       } else {
         ElMessage.error(res?.message || '账号或密码错误')
       }
@@ -370,6 +366,15 @@ if (rememberedPassword) {
   height: 30px;
   -webkit-app-region: drag;
   z-index: 100;
+}
+
+/* 窗口控制按钮（必须在 drag 区域内部，no-drag 才生效） */
+.win-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  -webkit-app-region: no-drag;
 }
 
 /* 主体 */
@@ -471,15 +476,6 @@ if (rememberedPassword) {
   position: relative;
 }
 
-/* 右上角窗口控制按钮 */
-.win-controls {
-  position: absolute;
-  top: 0;
-  right: 0;
-  display: flex;
-  z-index: 101;
-  -webkit-app-region: no-drag;
-}
 .ctrl-btn {
   width: 36px;
   height: 28px;

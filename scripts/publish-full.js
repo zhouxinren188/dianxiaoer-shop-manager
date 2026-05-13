@@ -144,16 +144,23 @@ async function main() {
   }
 
   // 检查产物
-  const exeFile = path.join(DIST_DIR, `dianxiaoer-setup-${version}.exe`)
+  // electron-builder 会将版本号规范化（如 1.4.01 → 1.4.1），所以用 latest.yml 确定实际文件名
   const ymlFile = path.join(DIST_DIR, 'latest.yml')
-  const blockmapFile = path.join(DIST_DIR, `dianxiaoer-setup-${version}.exe.blockmap`)
+  if (!fs.existsSync(ymlFile)) {
+    console.error('构建失败：未找到 latest.yml')
+    process.exit(1)
+  }
+
+  // 从 latest.yml 读取实际版本号
+  const ymlContent = fs.readFileSync(ymlFile, 'utf-8')
+  const ymlVersionMatch = ymlContent.match(/version:\s*(.+)/)
+  const actualVersion = ymlVersionMatch ? ymlVersionMatch[1].trim() : version
+
+  const exeFile = path.join(DIST_DIR, `dianxiaoer-setup-${actualVersion}.exe`)
+  const blockmapFile = path.join(DIST_DIR, `dianxiaoer-setup-${actualVersion}.exe.blockmap`)
 
   if (!fs.existsSync(exeFile)) {
     console.error('构建失败：未找到', exeFile)
-    process.exit(1)
-  }
-  if (!fs.existsSync(ymlFile)) {
-    console.error('构建失败：未找到 latest.yml')
     process.exit(1)
   }
 
@@ -164,7 +171,7 @@ async function main() {
   console.log('\n[2/5] 连接服务器...')
   console.log('\n[3/5] 上传安装包到服务器...')
   await uploadFiles([
-    { local: exeFile, remote: `${REMOTE_UPDATE_DIR}/dianxiaoer-setup-${version}.exe` }
+    { local: exeFile, remote: `${REMOTE_UPDATE_DIR}/dianxiaoer-setup-${actualVersion}.exe` }
   ])
   console.log('  安装包上传完成，断开连接')
 
@@ -177,7 +184,7 @@ async function main() {
     { local: ymlFile, remote: `${REMOTE_UPDATE_DIR}/latest.yml` }
   ]
   if (fs.existsSync(blockmapFile)) {
-    smallFiles.push({ local: blockmapFile, remote: `${REMOTE_UPDATE_DIR}/dianxiaoer-setup-${version}.exe.blockmap` })
+    smallFiles.push({ local: blockmapFile, remote: `${REMOTE_UPDATE_DIR}/dianxiaoer-setup-${actualVersion}.exe.blockmap` })
   }
   const localServerFile = path.join(ROOT, 'server-api', 'index.js')
   const localPkgFile = path.join(ROOT, 'server-api', 'package.json')
@@ -219,7 +226,7 @@ async function main() {
 
     meta.fullUpdate = {
       version: version,
-      url: `http://${HOST}:3001/updates/dianxiaoer-setup-${version}.exe`,
+      url: `http://${HOST}:3001/updates/dianxiaoer-setup-${actualVersion}.exe`,
       sha512: '',
       size: exeSize,
       changelog: `全量更新 v${version}`

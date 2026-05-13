@@ -987,6 +987,14 @@ function registerPurchaseAccountIpc(mainWindow) {
     let loginDetected = false
     let h5WarmupDone = false
 
+    // 各平台关键认证 cookie 名称（缺失则 PDD 会报"未登录"，淘宝会无法调 H5 API）
+    const PLATFORM_CRITICAL_COOKIES = {
+      pinduoduo: ['PDDAccessToken', 'pdd_user_uin', 'pdd_user_id'],
+      taobao: ['_m_h5_tk', 'cookie2', '_nk_'],
+      '1688': ['cookie2', '_nk_', 'csg_token'],
+      douyin: ['sessionid', 'uid_tt']
+    }
+
     // 保存 cookies 到服务器的通用函数
     async function saveCookiesToServer() {
       if (win.isDestroyed()) return null
@@ -1001,6 +1009,16 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
           })
           console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
+
+          // 验证关键 cookie 是否齐全
+          const criticalNames = PLATFORM_CRITICAL_COOKIES[platform] || []
+          const cookieNames = new Set(cookies.map(c => c.name))
+          const missing = criticalNames.filter(n => !cookieNames.has(n))
+          if (missing.length > 0) {
+            console.warn(`[PurchaseWindow] 关键 cookie 缺失: ${missing.join(', ')}，将在 8 秒后重试保存`)
+            return { count: cookies.length, hasH5Tk, missingCritical: missing }
+          }
+
           return { count: cookies.length, hasH5Tk }
         }
         return { count: 0, hasH5Tk: false }
@@ -1011,12 +1029,26 @@ function registerPurchaseAccountIpc(mainWindow) {
     }
 
     // 淘宝账号需要 _m_h5_tk：如果没有则导航到已买到的商品页面来获取
+    // PDD 账号如果关键 cookie 缺失，延迟重试等待 JS 异步设置 cookie
     async function ensureH5TokenAndSave() {
       if (win.isDestroyed() || h5WarmupDone) return
       h5WarmupDone = true
 
       // 第一次保存
       const result = await saveCookiesToServer()
+
+      // PDD：关键 cookie 缺失时延迟重试（pdd_user_uin/pdd_user_id 由 JS 异步设置）
+      if (platform === 'pinduoduo' && result && result.missingCritical) {
+        setTimeout(async () => {
+          if (win.isDestroyed()) return
+          const retry = await saveCookiesToServer()
+          if (retry && !retry.missingCritical) {
+            console.log('[PurchaseWindow] PDD 关键 cookie 重试保存成功')
+          } else if (retry && retry.missingCritical) {
+            console.warn(`[PurchaseWindow] PDD 关键 cookie 仍缺失: ${retry.missingCritical.join(', ')}`)
+          }
+        }, 8000)
+      }
 
       // 淘宝平台：如果没有 _m_h5_tk，需要导航到商品列表页触发 H5 API 来获取
       if (platform === 'taobao' && result && !result.hasH5Tk) {
@@ -1106,6 +1138,30 @@ function registerPurchaseAccountIpc(mainWindow) {
       // 2. 保存 Cookie 到服务器
       if (cookies && cookies.length > 0) {
         try {
+          // 验证关键 cookie 是否齐全，缺失则等待 3 秒后重读（等待 JS 异步设置）
+          const criticalNames = PLATFORM_CRITICAL_COOKIES[platform] || []
+          const cookieNames = new Set(cookies.map(c => c.name))
+          const missing = criticalNames.filter(n => !cookieNames.has(n))
+          if (missing.length > 0 && loginDetected) {
+            console.warn(`[PurchaseWindow] 窗口关闭时关键 cookie 缺失: ${missing.join(', ')}，等待 3 秒后重读...`)
+            await new Promise(r => setTimeout(r, 3000))
+            try {
+              const ses2 = session.fromPartition(partitionName)
+              const retryCookies = await ses2.cookies.get({})
+              if (retryCookies.length > cookies.length) {
+                console.log(`[PurchaseWindow] 重读后 cookie 增加: ${cookies.length} → ${retryCookies.length}`)
+                cookies = retryCookies
+              }
+              const retryNames = new Set(retryCookies.map(c => c.name))
+              const stillMissing = criticalNames.filter(n => !retryNames.has(n))
+              if (stillMissing.length < missing.length) {
+                console.log(`[PurchaseWindow] 重读后关键 cookie 补回: ${missing.filter(n => retryNames.has(n)).join(', ')}`)
+              }
+            } catch (e) {
+              console.warn('[PurchaseWindow] 重读 cookie 失败:', e.message)
+            }
+          }
+
           const cookieData = JSON.stringify(cookies)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',

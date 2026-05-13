@@ -47,7 +47,9 @@ function createWindow() {
     backgroundColor: '#001529',
     icon: path.join(process.resourcesPath, 'app.asar', 'resources', 'icon.ico'),
     webPreferences: {
-      preload: getHotUpdatePreloadPath() || path.join(process.resourcesPath, 'app.asar', 'out', 'preload', 'index.js'),
+      // 开发模式: __dirname 指向 out/main/，用相对路径找到 out/preload/index.js
+      // 生产模式: __dirname 指向 app.asar/out/main/，同样用相对路径找到 app.asar/out/preload/index.js
+      preload: getHotUpdatePreloadPath() || path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false

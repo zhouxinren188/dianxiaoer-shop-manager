@@ -4496,15 +4496,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         doBindAndNotify()
       }
 
-      // 淘宝/1688不自动关闭窗口（用户需要在支付页面完成支付后手动关闭）
-      // 拼多多5秒后自动关闭窗口
-      if (platform === 'pinduoduo') {
-        setTimeout(() => {
-          if (win && !win.isDestroyed()) {
-            win.destroy()
-          }
-        }, 5000)
-      }
+      // 所有平台均不自动关闭窗口，用户手动关闭
+      // （拼多多原来5秒自动关闭，改为手动关闭，方便用户继续操作）
     }
 
     function onWindowClosed() {
