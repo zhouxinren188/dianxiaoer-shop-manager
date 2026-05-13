@@ -197,3 +197,10 @@ if (window.outerHeight === 0) {
 
 // 17. 保存原生 window.open 引用（页面 JS 可能覆盖 window.open，preload 在页面 JS 之前执行）
 window.__dxeOpen = window.open.bind(window)
+
+// 18. 页面可见性伪装（在 preload 中执行，早于 dom-ready，消除竞态）
+try {
+  Object.defineProperty(document, 'hidden', { get: () => false, configurable: true })
+  Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true })
+  document.hasFocus = function () { return true }
+} catch (e) {}
