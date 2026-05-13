@@ -46,8 +46,11 @@ const PDD_STATUS_MAP = {
  * Phase 2: 已发货订单导航到物流页，从 store.traceData.shipping 提取快递公司名称和物流轨迹
  */
 function syncSingle(accountId, platformOrderNo) {
-  return new Promise(async (resolve) => {
+  return new Promise(async (resolve, reject) => {
     const syncKey = `${accountId}-pinduoduo`
+    let resolved = false
+    let win = null
+  try {
     if (activeSyncs.has(syncKey)) {
       return resolve({ success: false, message: '该账号正在同步中，请等待完成' })
     }
@@ -58,24 +61,18 @@ function syncSingle(accountId, platformOrderNo) {
 
     console.log(`[PDD-SearchSync] accountId:${accountId} orderNo:${platformOrderNo} cookies:${cookies.length}`)
 
-    // 同步前始终尝试从服务器恢复 cookie
-    // 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
-    // 解决：partition 有结构性有效但实际已过期的 cookie 时，hasValidPlatformCookies 返回 true
-    //       导致跳过服务器恢复，使用过期 cookie 被 PDD 拒绝（"采购账号登录已过期"）
+    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
+    console.log(`[PDD-SearchSync] 从服务器恢复 cookie（合并模式）...`)
     const restoreResult = await restoreCookiesFromServer(accountId, 'pinduoduo')
     if (restoreResult.restored) {
       cookies = await ses.cookies.get({})
-      console.log(`[PDD-SearchSync] cookie 从服务器恢复成功，当前 cookies:${cookies.length}`)
-    } else if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
-      console.log(`[PDD-SearchSync] partition 无有效 PDD cookie 且服务器无数据`)
+      console.log(`[PDD-SearchSync] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 cookies:${cookies.length}`)
     }
 
     if (!hasValidPlatformCookies(cookies, 'pinduoduo')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 
-    let win = null
-    let resolved = false
     let overallTimer = null
     let phase = 1
     let phase1Result = null // Phase 1 的部分结果，等 Phase 2 补充
@@ -139,6 +136,16 @@ function syncSingle(accountId, platformOrderNo) {
 
       win.webContents.setBackgroundThrottling(false)
       activeSyncs.set(syncKey, win)
+
+      // BrowserWindow 意外关闭时清理 activeSyncs，防止残留阻塞后续同步
+      win.on('closed', () => {
+        if (!resolved) {
+          console.log('[PDD-SearchSync] BrowserWindow 被意外关闭')
+          activeSyncs.delete(syncKey)
+          win = null
+          finish({ success: false, message: '同步窗口意外关闭' })
+        }
+      })
 
       // 检测登录重定向
       win.webContents.on('did-navigate', (event, url) => {
@@ -365,6 +372,14 @@ function syncSingle(accountId, platformOrderNo) {
     } catch (err) {
       finish({ success: false, message: '同步失败: ' + err.message })
     }
+  } catch (err) {
+    if (!resolved) {
+      resolved = true
+      activeSyncs.delete(syncKey)
+      if (win && !win.isDestroyed()) win.destroy()
+      reject(err)
+    }
+  }
   })
 }
 

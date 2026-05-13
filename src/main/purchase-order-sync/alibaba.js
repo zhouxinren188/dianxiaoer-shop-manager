@@ -395,8 +395,11 @@ function findOrderByOrderNo(platformOrderNo, allResponses) {
 // ============ 单个订单同步 ============
 
 function syncSingle(accountId, platformOrderNo) {
-  return new Promise(async (resolve) => {
+  return new Promise(async (resolve, reject) => {
     const syncKey = `${accountId}-1688`
+    let resolved = false
+    let win = null
+  try {
     if (activeSyncs.has(syncKey)) {
       return resolve({ success: false, message: '该账号正在同步中，请等待完成' })
     }
@@ -408,23 +411,19 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-1688] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-1688] Cookies: ${cookies.length} 条`)
 
-    // 同步前始终尝试从服务器恢复 cookie
-    // 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
+    // 始终从服务器恢复 cookie（合并模式：只补充缺失的，不覆盖已有的）
+    console.log(`[PurchaseSync-1688] 从服务器恢复 cookie（合并模式）...`)
     const restoreResult = await restoreCookiesFromServer(accountId, '1688')
     if (restoreResult.restored) {
       cookies = await ses.cookies.get({})
-      console.log(`[PurchaseSync-1688] cookie 从服务器恢复成功，当前 Cookies: ${cookies.length} 条`)
-    } else if (!hasValidPlatformCookies(cookies, '1688')) {
-      console.log(`[PurchaseSync-1688] partition 无有效1688 cookie 且服务器无数据`)
+      console.log(`[PurchaseSync-1688] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
     }
 
     if (!hasValidPlatformCookies(cookies, '1688')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 
-    let win = null
     let overallTimer = null
-    let resolved = false
     let cdpCapture = null
     let allCapturedResponses = []
 
@@ -476,6 +475,16 @@ function syncSingle(accountId, platformOrderNo) {
 
       win.webContents.setBackgroundThrottling(false)
       activeSyncs.set(syncKey, win)
+
+      // BrowserWindow 意外关闭时清理 activeSyncs，防止残留阻塞后续同步
+      win.on('closed', () => {
+        if (!resolved) {
+          console.log('[PurchaseSync-1688] BrowserWindow 被意外关闭')
+          activeSyncs.delete(syncKey)
+          win = null
+          finish({ success: false, message: '同步窗口意外关闭' })
+        }
+      })
 
       let cdpAttached = false
 
@@ -693,6 +702,14 @@ function syncSingle(accountId, platformOrderNo) {
     } catch (err) {
       finish({ success: false, message: '同步失败: ' + err.message })
     }
+  } catch (err) {
+    if (!resolved) {
+      resolved = true
+      activeSyncs.delete(syncKey)
+      if (win && !win.isDestroyed()) win.destroy()
+      reject(err)
+    }
+  }
   })
 }
 

@@ -2893,7 +2893,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (platform) { sql += ' AND po.platform=?'; countSql += ' AND po.platform=?'; params.push(platform) }
 
     const [[{ total }]] = await pool.execute(countSql, params)
-    const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))  // ★ 限制最大100条
+    const limit = Math.min(5000, Math.max(1, parseInt(pageSize,10)||20))
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
     sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
@@ -3496,7 +3496,9 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       '交易关闭': 'cancelled',
       '已取消': 'cancelled',
       '退款成功': 'refunded',
-      '退款中': 'refunded'
+      '退款中': 'refunded',
+      '已拒收': 'rejected',
+      '拒收': 'rejected'
     }
 
     // PDD combinedOrderStatus 数字映射
@@ -3518,7 +3520,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
     }
 
     // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
-    const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+    const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'rejected', 'stocked', 'cancelled', 'refunded']
     if (!newStatus && validStatuses.includes(order_info.status)) {
       newStatus = order_info.status
     }
@@ -3656,7 +3658,9 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
       '交易关闭': 'cancelled',
       '已取消': 'cancelled',
       '退款成功': 'refunded',
-      '退款中': 'refunded'
+      '退款中': 'refunded',
+      '已拒收': 'rejected',
+      '拒收': 'rejected'
     }
 
     // PDD combinedOrderStatus 数字映射
@@ -3684,7 +3688,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         }
       }
       // 如果状态已经是系统标准状态值（主进程已完成映射），直接使用
-      const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+      const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'rejected', 'stocked', 'cancelled', 'refunded']
       if (!statusMap[platformOrder.status] && validStatuses.includes(platformOrder.status)) {
         newStatus = platformOrder.status
       }

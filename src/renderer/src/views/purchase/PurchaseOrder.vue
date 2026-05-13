@@ -304,7 +304,7 @@
           v-model:page-size="pageInfo.pageSize"
           :total="pageInfo.total"
           layout="total, sizes, prev, pager, next, jumper"
-          :page-sizes="[10, 20, 50]"
+          :page-sizes="[10, 20, 50, 100, 500, 5000]"
           @size-change="handleSizeChange"
           @current-change="handlePageChange"
         />
@@ -919,6 +919,7 @@ const statusOptions = [
   { label: '已发货', value: 'shipped' },
   { label: '运输中', value: 'in_transit' },
   { label: '已签收', value: 'received' },
+  { label: '已拒收', value: 'rejected' },
   { label: '已入库', value: 'stocked' },
   { label: '已取消', value: 'cancelled' }
 ]
@@ -1264,7 +1265,7 @@ function statusLabel(val) {
 }
 
 function statusTagType(val) {
-  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', stocked: 'success', cancelled: 'danger' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', rejected: 'danger', stocked: 'success', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
@@ -1407,7 +1408,7 @@ function handlePageChange(val) {
 async function loadData() {
   loading.value = true
   try {
-    const data = await fetchPurchaseOrders({ pageSize: 50 })
+    const data = await fetchPurchaseOrders({ pageSize: 5000 })
     const orders = data.list || data || []
     
     // 为每个订单填充account_name（accountList可能还在加载中，兼容空列表）

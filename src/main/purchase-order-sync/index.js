@@ -4,7 +4,7 @@
  */
 
 const { ipcMain } = require('./common')
-const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus, refineStatusByTracking } = require('./common')
+const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus, refineStatusByTracking, OVERALL_TIMEOUT } = require('./common')
 
 const taobao = require('./taobao')
 const alibaba = require('./alibaba')
@@ -18,8 +18,30 @@ const PLATFORM_MODULES = {
   pinduoduo
 }
 
-// 需要逐个同步的订单状态（已下单、待发货、已发货）
-const SYNC_STATUSES = ['ordered', 'pending', 'shipped']
+// 需要逐个同步的订单状态（已下单、待发货、已发货、运输中）
+const SYNC_STATUSES = ['ordered', 'pending', 'shipped', 'in_transit']
+
+// IPC handler 超时（比平台模块的 OVERALL_TIMEOUT 多 30 秒）
+const IPC_SYNC_TIMEOUT = (OVERALL_TIMEOUT || 90000) + 30000
+
+// ============ 超时安全包装 ============
+
+/**
+ * 为 Promise 添加超时保护，防止 IPC "reply was never sent"
+ * 如果 Promise 在 timeout 内未结算，返回 fallback 结果
+ */
+function withTimeout(promise, timeoutMs, fallbackMessage) {
+  let timer = null
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      console.error(`[PurchaseSync IPC] ⚠️ 超时保护触发: ${fallbackMessage} (${timeoutMs}ms)`)
+      resolve({ success: false, message: fallbackMessage })
+    }, timeoutMs)
+  })
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
 
 // ============ 单个订单同步 + 数据库更新 ============
 
@@ -38,9 +60,13 @@ async function syncSingleAndUpdate(platformModule, accountId, platformOrderNo, p
         }
       }
 
-      // 根据物流轨迹修正状态：有真实揽收/已取件时 shipped → in_transit
-      if (mappedOrderInfo.status === 'shipped' && mappedOrderInfo.logistics_tracking) {
-        const refined = refineStatusByTracking(mappedOrderInfo.status, mappedOrderInfo.logistics_tracking)
+      // 根据物流轨迹修正状态：shipped/in_transit → received/rejected/in_transit
+      if (['shipped', 'in_transit'].includes(mappedOrderInfo.status)) {
+        const refined = refineStatusByTracking(
+          mappedOrderInfo.status,
+          mappedOrderInfo.logistics_tracking,
+          mappedOrderInfo.logistics_status
+        )
         if (refined !== mappedOrderInfo.status) {
           console.log(`[PurchaseSync IPC] 轨迹修正状态: "${mappedOrderInfo.status}" → "${refined}"`)
           mappedOrderInfo.status = refined
@@ -85,7 +111,16 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
       return { success: false, message: `不支持的平台: ${platform}` }
     }
 
-    return await syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform)
+    try {
+      return await withTimeout(
+        syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform),
+        IPC_SYNC_TIMEOUT,
+        `同步超时（${Math.round(IPC_SYNC_TIMEOUT / 1000)}秒无响应），请重试`
+      )
+    } catch (e) {
+      console.error(`[PurchaseSync IPC] 单个同步异常:`, e.message)
+      return { success: false, message: `同步失败: ${e.message}` }
+    }
   })
 
   // 批量同步
@@ -102,10 +137,6 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
     }
 
     // 所有平台：逐个同步模式
-    // 1. 从后端获取该账号下已绑定订单号的采购单
-    // 2. 过滤出"已下单/待发货/已发货"状态的订单
-    // 3. 逐个调用 syncSingle 同步并更新数据库
-    // 4. 实时推送进度到前端
     try {
       const orderListResult = await httpPostJson(`${BUSINESS_SERVER}/api/purchase-orders/by-account-platform`, {
         account_id: accountId,
@@ -144,7 +175,11 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
 
         let syncSuccess = false
         try {
-          const result = await syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform)
+          const result = await withTimeout(
+            syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform),
+            IPC_SYNC_TIMEOUT,
+            `订单 ${platformOrderNo} 同步超时`
+          )
           syncSuccess = result.success
           if (syncSuccess) {
             syncedCount++

@@ -54,7 +54,9 @@ const ORDER_STATUS_MAP = {
   '交易关闭': 'cancelled',
   '已取消': 'cancelled',
   '退款成功': 'refunded',
-  '退款中': 'refunded'
+  '退款中': 'refunded',
+  '已拒收': 'rejected',
+  '拒收': 'rejected'
 }
 
 /**
@@ -65,7 +67,7 @@ const ORDER_STATUS_MAP = {
 function mapOrderStatus(status) {
   if (!status) return status
   // 已经是标准英文状态码，直接返回
-  const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'stocked', 'cancelled', 'refunded']
+  const validStatuses = ['ordered', 'pending', 'shipped', 'in_transit', 'received', 'rejected', 'stocked', 'cancelled', 'refunded']
   if (validStatuses.includes(status)) return status
   // 中文 → 英文映射
   return ORDER_STATUS_MAP[status] || status
@@ -390,20 +392,56 @@ function httpPostJson(url, body) {
 
 /**
  * 根据物流轨迹内容修正订单状态
- * 如果状态为 shipped 且物流轨迹中有真实揽收/取件记录，升级为 in_transit
  *
- * 真实揽收关键词：揽收、已取件
- * 排除：通知取件、通知快递取件（商家只是点了发货，快递还没取件）
+ * 检测逻辑（优先级从高到低）：
+ * 1. logisticsStatus（平台原始物流状态字段，最可靠）
+ *    - 拒收关键词 → rejected
+ *    - 签收关键词 → received
+ * 2. tracking 轨迹文本（逐条检查，匹配即返回）
+ *    - 拒收关键词 → rejected
+ *    - 签收关键词 → received
+ *    - 揽收关键词（仅 shipped → in_transit）
+ *
+ * @param {string} status - 当前英文状态码 (shipped/in_transit)
+ * @param {Array} tracking - 归一化轨迹数组 [{time, context}]
+ * @param {string} logisticsStatus - 平台原始物流状态（中文，如"已签收"）
+ * @returns {string} 修正后的状态码
  */
-function refineStatusByTracking(status, tracking) {
-  if (status !== 'shipped' || !Array.isArray(tracking) || tracking.length === 0) {
-    return status
+function refineStatusByTracking(status, tracking, logisticsStatus) {
+  if (status !== 'shipped' && status !== 'in_transit') return status
+
+  // 优先检查 logisticsStatus（平台原始字段，最可靠）
+  if (logisticsStatus) {
+    if (/已拒收|拒收|拒签/.test(logisticsStatus)) {
+      console.log(`[StatusRefine] ${status} → rejected (物流状态: ${logisticsStatus})`)
+      return 'rejected'
+    }
+    if (/已签收|已投递|已妥投|家人签收|代收/.test(logisticsStatus)) {
+      console.log(`[StatusRefine] ${status} → received (物流状态: ${logisticsStatus})`)
+      return 'received'
+    }
   }
+
+  // 其次检查轨迹文本
+  if (!Array.isArray(tracking) || tracking.length === 0) return status
+
   for (const item of tracking) {
     const ctx = (item.context || '') + (item.desc || '')
     // 排除"通知取件"类伪揽收（如"正在通知中通快递取件"）
     if (/通知.*取件|取件.*通知/.test(ctx)) continue
-    if (/揽收|已取件/.test(ctx)) {
+
+    // 拒收检测
+    if (/拒收|拒签|拒绝签收|退回/.test(ctx)) {
+      console.log(`[StatusRefine] ${status} → rejected (轨迹: ${ctx.substring(0, 50)})`)
+      return 'rejected'
+    }
+    // 签收检测
+    if (/已签收|已投递|已妥投|家人签收|代收|本人签收/.test(ctx)) {
+      console.log(`[StatusRefine] ${status} → received (轨迹: ${ctx.substring(0, 50)})`)
+      return 'received'
+    }
+    // 揽收检测（仅 shipped → in_transit）
+    if (status === 'shipped' && /揽收|已取件/.test(ctx)) {
       console.log(`[StatusRefine] shipped → in_transit (真实揽收: ${ctx.substring(0, 50)})`)
       return 'in_transit'
     }
@@ -464,33 +502,53 @@ function hasValidPlatformCookies(cookies, platform) {
 
 // ============ Cookie 从服务器恢复到 Partition ============
 
+// cookie 恢复短期缓存：同一 accountId+platform 在 CACHE_TTL 内不重复请求服务器
+const _cookieRestoreCache = new Map() // key: `${accountId}|${platform}` → { result, timestamp }
+const COOKIE_RESTORE_CACHE_TTL = 600000 // 10 分钟缓存有效期（批量同步时每个订单约30秒，10分钟内无需重复请求）
+
 /**
- * 从服务器恢复 cookie 到 Electron partition
+ * 从服务器恢复 cookie 到 Electron partition（合并模式）
  * 同步前始终调用此函数，无论 partition 是否已有 cookie
- * 服务器 cookie 来自最近一次验证登录，优先于 partition 中可能过期的旧 cookie
+ *
+ * 合并策略：只补充 partition 中缺失的 cookie，不覆盖已有的
+ * - 如果 partition 已有同名/同域/同路径的 cookie，跳过（保留 partition 的新鲜版本）
+ * - 如果 partition 缺少该 cookie，从服务器补充（确保多用户共享同一份 cookie）
+ *
+ * 缓存策略：同一 accountId+platform 在 60 秒内不重复请求服务器（批量同步场景优化）
  *
  * 解决场景：
  * - 子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"
  * - partition 有结构性有效但实际已过期的旧 cookie（如 PDDAccessToken 过期但未超 expirationDate）
  *   导致 hasValidPlatformCookies 返回 true 跳过恢复，平台拒绝请求
  * - 删除账号后重新添加，partition 为空需要从服务器恢复
- *
- * 注意：ses.cookies.set() 会自动覆盖同名/同域的旧 cookie，无需手动清除
+ * - 覆盖策略的问题：partition 有新鲜 cookie（如刚登录后平台轮换的 _m_h5_tk），
+ *   服务器保存的是登录 5 秒后的快照，覆盖会替换新 token 为旧 token，导致同步失败
  *
  * @param {string} accountId - 采购账号 ID
  * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)
- * @returns {Promise<{restored: boolean, count: number}>} 恢复结果
+ * @returns {Promise<{restored: boolean, count: number, skipped: number}>} 恢复结果
  */
 async function restoreCookiesFromServer(accountId, platform) {
-  const partitionName = `persist:purchase-${accountId}`
-  const ses = session.fromPartition(partitionName)
+  const RESTORE_TIMEOUT = 15000 // 15 秒总超时，防止 HTTP 请求挂起阻塞同步
+
+  // 检查缓存：同一 accountId+platform 在 CACHE_TTL 内不重复请求
+  const cacheKey = `${accountId}|${platform}`
+  const cached = _cookieRestoreCache.get(cacheKey)
+  if (cached && Date.now() - cached.timestamp < COOKIE_RESTORE_CACHE_TTL) {
+    console.log(`[CookieRestore] 命中缓存，跳过服务器请求 (accountId=${accountId}, 缓存剩余${Math.round((COOKIE_RESTORE_CACHE_TTL - (Date.now() - cached.timestamp)) / 1000)}秒)`)
+    return cached.result
+  }
+
+  const doRestore = async () => {
+    const partitionName = `persist:purchase-${accountId}`
+    const ses = session.fromPartition(partitionName)
 
   try {
     // 1. 从服务器获取 cookie
     const token = getAuthToken()
     if (!token) {
       console.warn('[CookieRestore] 主进程没有 auth token，无法从服务器恢复 cookie')
-      return { restored: false, count: 0 }
+      return { restored: false, count: 0, skipped: 0 }
     }
 
     const urlObj = new URL(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`)
@@ -517,7 +575,7 @@ async function restoreCookiesFromServer(accountId, platform) {
 
     if (!result || result.code !== 0 || !result.data || !result.data.cookie_data) {
       console.log(`[CookieRestore] 服务器无 cookie 数据 (accountId=${accountId})`)
-      return { restored: false, count: 0 }
+      return { restored: false, count: 0, skipped: 0 }
     }
 
     // 2. 解析 cookie 数据
@@ -527,7 +585,7 @@ async function restoreCookiesFromServer(accountId, platform) {
 
     if (!Array.isArray(raw) || raw.length === 0) {
       console.log(`[CookieRestore] cookie 数据为空 (accountId=${accountId})`)
-      return { restored: false, count: 0 }
+      return { restored: false, count: 0, skipped: 0 }
     }
 
     // 3. 过滤过期 cookie
@@ -539,12 +597,25 @@ async function restoreCookiesFromServer(accountId, platform) {
 
     if (validCookies.length === 0) {
       console.log(`[CookieRestore] 所有 cookie 已过期 (accountId=${accountId}, total=${raw.length})`)
-      return { restored: false, count: 0 }
+      return { restored: false, count: 0, skipped: 0 }
     }
 
-    // 4. 写入 partition
+    // 4. 获取 partition 已有 cookie，构建 key 集合用于合并判断
+    const existingCookies = await ses.cookies.get({})
+    const existingKeys = new Set()
+    for (const ck of existingCookies) {
+      existingKeys.add(`${ck.name}|${ck.domain}|${ck.path}`)
+    }
+
+    // 5. 只补充 partition 中缺失的 cookie，不覆盖已有的
     let setOk = 0
+    let skipped = 0
     for (const ck of validCookies) {
+      const key = `${ck.name}|${ck.domain || ''}|${ck.path || '/'}`
+      if (existingKeys.has(key)) {
+        skipped++
+        continue
+      }
       try {
         const sameSite = ck.sameSite || undefined
         const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
@@ -565,16 +636,31 @@ async function restoreCookiesFromServer(accountId, platform) {
       }
     }
 
-    // 5. 刷盘持久化
+    // 6. 刷盘持久化
     await new Promise(resolve => ses.flushStorageData(resolve))
 
-    console.log(`[CookieRestore] 恢复完成: accountId=${accountId}, ${setOk}/${validCookies.length} 条写入成功 (平台: ${platform})`)
-    return { restored: setOk > 0, count: setOk }
+    console.log(`[CookieRestore] 合并完成: accountId=${accountId}, ${setOk} 条补充/${skipped} 条保留/${validCookies.length} 条服务器总有效 (平台: ${platform})`)
+    return { restored: setOk > 0, count: setOk, skipped }
 
   } catch (err) {
     console.warn(`[CookieRestore] 恢复失败: accountId=${accountId}, ${err.message}`)
-    return { restored: false, count: 0 }
+    return { restored: false, count: 0, skipped: 0 }
   }
+  }
+
+  // 用 Promise.race 防止整个恢复流程挂起（如 DNS 解析卡住、服务器无响应等）
+  const timeoutPromise = new Promise(resolve => {
+    setTimeout(() => {
+      console.warn(`[CookieRestore] 恢复超时(${RESTORE_TIMEOUT}ms)，跳过，使用 partition 已有 cookie (accountId=${accountId})`)
+      resolve({ restored: false, count: 0, skipped: 0, timedOut: true })
+    }, RESTORE_TIMEOUT)
+  })
+  const finalResult = await Promise.race([doRestore(), timeoutPromise])
+  // 缓存结果（超时的结果不缓存，下次重试时重新请求）
+  if (!finalResult.timedOut) {
+    _cookieRestoreCache.set(cacheKey, { result: finalResult, timestamp: Date.now() })
+  }
+  return finalResult
 }
 
 // ============ 页面可见性覆盖 ============
