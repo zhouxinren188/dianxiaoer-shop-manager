@@ -918,7 +918,7 @@ const syncStatusText = computed(() => {
 const funcSettings = reactive({
   autoOutbound: false,
   largeLogistics: false,
-  syncJdOrder: false,  // 默认关闭，30秒后自动开启
+  syncJdOrder: localStorage.getItem('jdAutoSyncEnabled') === 'true',  // 记住上次状态
   syncPurchaseOrder: true
 })
 
@@ -926,6 +926,8 @@ function onFuncChange(key, value) {
   console.log(`[功能区开关] ${key}: ${value}`)
 
   if (key === 'syncJdOrder') {
+    // 记住开关状态到 localStorage，重启软件后恢复上次设置
+    localStorage.setItem('jdAutoSyncEnabled', value ? 'true' : 'false')
     if (value) {
       autoSyncStatus.value = '正在启动自动同步...'
       const syncTimeout = setTimeout(() => {
@@ -2427,19 +2429,35 @@ onMounted(async () => {
 
   // 监听自动同步事件
   if (window.electronAPI) {
-    // 恢复自动同步开关状态（主进程定时器不随组件卸载而停止）
+    // 恢复自动同步开关状态：优先用主进程实际运行状态，再用localStorage记忆
     try {
-      const { running } = await window.electronAPI.invoke('jd-auto-sync-status')
-      funcSettings.syncJdOrder = running
-    } catch (e) {}
-
-    // 30秒后自动开启京东订单同步（如果当前未开启）
-    if (!funcSettings.syncJdOrder) {
-      jdSyncAutoStartTimer = setTimeout(() => {
-        jdSyncAutoStartTimer = null
+      const { running, syncing } = await window.electronAPI.invoke('jd-auto-sync-status')
+      if (running) {
+        // 主进程定时器还在跑，只需恢复UI状态，不要重新启动（避免打断正在进行的同步）
         funcSettings.syncJdOrder = true
-        onFuncChange('syncJdOrder', true)
-      }, 30000)
+        if (syncing) {
+          // 当前有同步轮次正在执行，显示状态提示
+          mainProcessSyncStatus.value = '自动同步进行中...'
+        }
+      } else {
+        // 主进程定时器已停止，按localStorage记忆恢复
+        funcSettings.syncJdOrder = localStorage.getItem('jdAutoSyncEnabled') === 'true'
+        // 只有主进程没在运行且上次状态是开启时，才需要重新启动同步
+        if (funcSettings.syncJdOrder) {
+          jdSyncAutoStartTimer = setTimeout(() => {
+            jdSyncAutoStartTimer = null
+            onFuncChange('syncJdOrder', true)
+          }, 2000)
+        }
+      }
+    } catch (e) {
+      funcSettings.syncJdOrder = localStorage.getItem('jdAutoSyncEnabled') === 'true'
+      if (funcSettings.syncJdOrder) {
+        jdSyncAutoStartTimer = setTimeout(() => {
+          jdSyncAutoStartTimer = null
+          onFuncChange('syncJdOrder', true)
+        }, 2000)
+      }
     }
 
     unsubAutoSyncStart = window.electronAPI.onUpdate('auto-sync-start', (data) => {

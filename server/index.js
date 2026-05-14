@@ -86,12 +86,13 @@ function fail(message) {
 
 // ============ 全局认证中间件 ============
 
-// 不需要认证的路径
-const publicPaths = ['/health', '/api/sync-lock', '/api/auth/login']
+// 不需要认证的路径（支持前缀匹配，如 /api/sync-lock/123）
+const publicPaths = ['/health', '/api/auth/login']
+const publicPathPrefixes = ['/api/sync-lock']
 
 app.use(async (req, res, next) => {
   // 公开接口跳过认证
-  if (publicPaths.includes(req.path)) {
+  if (publicPaths.includes(req.path) || publicPathPrefixes.some(prefix => req.path.startsWith(prefix + '/') || req.path === prefix)) {
     return next()
   }
 
@@ -156,6 +157,117 @@ app.use(async (req, res, next) => {
   } catch (err) {
     console.error('[Auth] 认证失败:', err.message)
     return res.status(500).json({ code: 1, message: '认证服务异常' })
+  }
+})
+
+// ============ 同步锁（基于MySQL持久化，跨设备+跨重启） ============
+
+const SYNC_LOCK_MINUTES = 10  // 10分钟最小同步间隔
+
+// 请求同步锁：基于 stores 表的 last_sync_at 判断是否允许同步
+app.post('/api/sync-lock/:storeId', async (req, res) => {
+  const storeId = +req.params.storeId
+  const { deviceId } = req.body || {}
+
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, last_sync_at, last_sync_device_id FROM stores WHERE id = ?',
+      [storeId]
+    )
+    if (!rows.length) {
+      return res.json(ok({ granted: true }))  // 店铺不存在时不阻塞
+    }
+
+    const store = rows[0]
+    if (store.last_sync_at) {
+      const lastSyncTime = new Date(store.last_sync_at).getTime()
+      const elapsed = Date.now() - lastSyncTime
+      const remainingMs = SYNC_LOCK_MINUTES * 60 * 1000 - elapsed
+
+      if (remainingMs > 0) {
+        // 10分钟内已同步，拒绝
+        const waitMinutes = Math.ceil(remainingMs / 60000)
+        console.log(`[SyncLock] 拒绝: storeId=${storeId}, 上次同步=${store.last_sync_at}, 设备=${store.last_sync_device_id || 'unknown'}, 需等待${waitMinutes}分钟`)
+        return res.json(ok({
+          granted: false,
+          lastSyncAt: store.last_sync_at,
+          lockedBy: store.last_sync_device_id || 'unknown',
+          remainingMs,
+          message: `该店铺${waitMinutes}分钟内已同步，请等待后再试`
+        }))
+      }
+    }
+
+    // 授予锁：更新 last_sync_at 和 last_sync_device_id
+    const deviceIdStr = deviceId || 'unknown'
+    await pool.execute(
+      'UPDATE stores SET last_sync_at = NOW(), last_sync_device_id = ? WHERE id = ?',
+      [deviceIdStr, storeId]
+    )
+    console.log(`[SyncLock] 授予锁: storeId=${storeId}, 设备: ${deviceIdStr}`)
+    res.json(ok({ granted: true }))
+  } catch (err) {
+    console.error('[SyncLock] 锁服务异常:', err.message)
+    // 数据库异常时降级允许同步
+    res.json(ok({ granted: true, message: '锁服务异常，降级允许同步' }))
+  }
+})
+
+// 释放同步锁：同步失败时重置 last_sync_at，允许立即重试
+app.delete('/api/sync-lock/:storeId', async (req, res) => {
+  const storeId = +req.params.storeId
+  const { success } = req.body || {}
+
+  try {
+    if (success === false) {
+      // 同步失败，清除 last_sync_at 允许重试
+      await pool.execute(
+        'UPDATE stores SET last_sync_at = NULL, last_sync_device_id = NULL WHERE id = ?',
+        [storeId]
+      )
+      console.log(`[SyncLock] 同步失败，释放锁允许重试: storeId=${storeId}`)
+    } else {
+      // 同步成功，锁自然保留（等10分钟过期）
+      console.log(`[SyncLock] 同步成功，锁保留等待自然过期: storeId=${storeId}`)
+    }
+    res.json(ok(true))
+  } catch (err) {
+    console.error('[SyncLock] 释放锁异常:', err.message)
+    res.json(ok(true))
+  }
+})
+
+// 查询同步锁状态
+app.get('/api/sync-lock/:storeId', async (req, res) => {
+  const storeId = +req.params.storeId
+
+  try {
+    const [rows] = await pool.execute(
+      'SELECT last_sync_at, last_sync_device_id FROM stores WHERE id = ?',
+      [storeId]
+    )
+    if (!rows.length) {
+      return res.json(ok({ locked: false }))
+    }
+
+    const store = rows[0]
+    if (store.last_sync_at) {
+      const lastSyncTime = new Date(store.last_sync_at).getTime()
+      const remainingMs = SYNC_LOCK_MINUTES * 60 * 1000 - (Date.now() - lastSyncTime)
+
+      if (remainingMs > 0) {
+        return res.json(ok({
+          locked: true,
+          lockedAt: store.last_sync_at,
+          lockedBy: store.last_sync_device_id || 'unknown',
+          remainingMs
+        }))
+      }
+    }
+
+    res.json(ok({ locked: false }))
+  } catch (err) {
+    res.json(ok({ locked: false }))
   }
 })
 

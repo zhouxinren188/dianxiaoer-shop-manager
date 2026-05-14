@@ -144,6 +144,14 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN owner_id INT DEFAULT NULL`)
     } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 stores 表：添加 last_sync_at 字段（同步锁时间戳）
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN last_sync_at DATETIME DEFAULT NULL`)
+    } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 stores 表：添加 last_sync_device_id 字段（同步锁设备标识）
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN last_sync_device_id VARCHAR(100) DEFAULT NULL AFTER last_sync_at`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 兼容已存在的 warehouses 表：添加 owner_id 字段（归属主账号）
     try {

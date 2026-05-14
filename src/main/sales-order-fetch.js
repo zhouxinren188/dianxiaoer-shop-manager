@@ -2770,7 +2770,7 @@ function registerSalesOrderIpc(mainWindow) {
 
   // 查询自动同步是否正在运行（组件重新挂载时恢复开关状态用）
   ipcMain.handle('jd-auto-sync-status', () => {
-    return { running: !!autoSyncTimer }
+    return { running: !!autoSyncTimer, syncing: autoSyncRunning }
   })
 
   // 保存买家真实信息到服务器（使用批量保存接口，已验证可靠）
@@ -3128,6 +3128,70 @@ function httpGetJsonAuth(url, token) {
   })
 }
 
+// 带认证的 HTTP POST JSON（用于请求远程服务器）
+function httpPostJsonAuth(url, body, token) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const data = JSON.stringify(body)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(data)
+    req.end()
+  })
+}
+
+// 带认证的 HTTP DELETE JSON（用于请求远程服务器）
+function httpDeleteJsonAuth(url, body, token) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const data = JSON.stringify(body)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)) } catch (e) { reject(e) }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(data)
+    req.end()
+  })
+}
+
 // 获取指定店铺的活跃订单号（待付款/待出库/已出库/暂停），用于二次同步更新状态
 async function getActiveOrderIds(storeId) {
   const token = getAuthToken()
@@ -3211,80 +3275,44 @@ async function updateSyncTimeOnServer(storeId) {
   })
 }
 
-// ============ 分布式同步锁机制 ============
+// ============ 分布式同步锁机制（远程服务器） ============
 // 设计目标：
-// 1. 首次同步：登录后60秒自动同步（由 startAutoSync 控制）
-// 2. 单一同步：同一时间只有1个账号在同步（多店铺逐个同步）
-// 3. 频率限制：每个店铺10分钟内只能发起一次同步
-
-const SYNC_LOCKS = new Map() // storeId -> { lockTime: number, deviceId: string }
-const SYNC_HISTORY = new Map() // storeId -> { lastSyncTime: number, syncCount: number }
-const MIN_SYNC_INTERVAL = 10 * 60 * 1000 // 10分钟最小同步间隔
-const LOCK_TIMEOUT = 5 * 60 * 1000 // 5分钟锁超时（防止死锁）
+// 1. 跨设备互斥：两台电脑同步同一店铺时互斥
+// 2. 重启持久：应用重启后锁状态不丢失（锁存在远程服务器上）
+// 3. 自动超时：10分钟后锁自动过期，防止死锁
 
 async function requestSyncLock(storeId, type = 'sales') {
-  const lockKey = `${storeId}-${type}`
-  const now = Date.now()
-  
   console.log(`[SyncLock] 请求锁: storeId=${storeId}, type=${type}`)
-  
-  // 1. 检查频率限制（10分钟内只能同步一次）
-  const history = SYNC_HISTORY.get(storeId)
-  if (history && (now - history.lastSyncTime) < MIN_SYNC_INTERVAL) {
-    const waitMinutes = Math.ceil((MIN_SYNC_INTERVAL - (now - history.lastSyncTime)) / 60000)
-    const waitSeconds = Math.ceil((MIN_SYNC_INTERVAL - (now - history.lastSyncTime)) / 1000)
-    console.log(`[SyncLock] ❌ 频率限制: 距上次同步仅 ${waitSeconds} 秒，需等待 ${waitMinutes} 分钟`)
-    return { 
-      granted: false, 
-      message: `该店铺10分钟内只能同步一次，请等待 ${waitMinutes} 分钟后再试`,
-      lastSyncAt: new Date(history.lastSyncTime).toLocaleTimeString()
+  try {
+    const res = await httpPostJsonAuth(
+      `http://150.158.54.108:3002/api/sync-lock/${storeId}`,
+      { deviceId: DEVICE_ID, type },
+      null  // sync-lock 是公开接口，不需要认证
+    )
+    if (res && res.code === 0 && res.data) {
+      console.log(`[SyncLock] 远程服务器返回:`, JSON.stringify(res.data))
+      return res.data  // { granted: true/false, message, ... }
     }
+    return { granted: false, message: '锁服务响应异常' }
+  } catch (err) {
+    console.log('[SyncLock] 远程锁服务不可用:', err.message)
+    // 降级策略：锁服务不可用时，允许继续同步（单机模式）
+    return { granted: true, message: '锁服务不可用，使用降级模式' }
   }
-  
-  // 2. 检查全局锁（防止多设备/多账号同时同步）
-  const existingLock = SYNC_LOCKS.get(lockKey)
-  if (existingLock && (now - existingLock.lockTime) < LOCK_TIMEOUT) {
-    console.log(`[SyncLock] ❌ 全局锁冲突: 设备 ${existingLock.deviceId} 正在同步`)
-    return { 
-      granted: false, 
-      message: `该店铺正在其他设备同步中，请稍后再试`,
-      lockedBy: existingLock.deviceId
-    }
-  }
-  
-  // 3. 获取锁
-  SYNC_LOCKS.set(lockKey, {
-    lockTime: now,
-    deviceId: DEVICE_ID
-  })
-
-  // 注意：SYNC_HISTORY 不在此处更新，改为在 releaseSyncLock 中根据同步结果决定是否更新
-
-  console.log(`[SyncLock] ✅ 锁已获取 (设备: ${DEVICE_ID})`)
-  console.log(`[SyncLock] 全局锁状态:`, Array.from(SYNC_LOCKS.entries()).map(([k, v]) => `${k}=${v.deviceId}`))
-  console.log(`[SyncLock] 同步历史:`, Array.from(SYNC_HISTORY.entries()).map(([k, v]) => `${k}=${v.syncCount}次`))
-
-  return { granted: true }
 }
 
 async function releaseSyncLock(storeId, type = 'sales', success = true) {
-  const lockKey = `${storeId}-${type}`
-  SYNC_LOCKS.delete(lockKey)
-
-  // 仅在同步成功时更新历史，失败则不更新（允许立即重试）
-  if (success) {
-    const history = SYNC_HISTORY.get(storeId)
-    SYNC_HISTORY.set(storeId, {
-      lastSyncTime: Date.now(),
-      syncCount: (history?.syncCount || 0) + 1
-    })
-    console.log(`[SyncLock] 同步成功，已更新历史: ${storeId}`)
-  } else {
-    console.log(`[SyncLock] 同步失败，不更新历史，允许重试: ${storeId}`)
+  try {
+    await httpDeleteJsonAuth(
+      `http://150.158.54.108:3002/api/sync-lock/${storeId}`,
+      { type, success },
+      null
+    )
+    console.log(`[SyncLock] 🔓 远程锁已释放: storeId=${storeId}, success=${success}`)
+  } catch (err) {
+    console.log('[SyncLock] 释放远程锁失败:', err.message)
+    // 锁释放失败不影响主流程，因为锁会自动超时
   }
-
-  console.log(`[SyncLock] 🔓 锁已释放: ${lockKey}`)
-  console.log(`[SyncLock] 剩余全局锁:`, Array.from(SYNC_LOCKS.entries()).map(([k, v]) => `${k}=${v.deviceId}`))
 }
 
 async function autoSyncAllStores(mainWindow) {

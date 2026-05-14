@@ -45,6 +45,22 @@ conn.on('ready', async () => {
     })
     console.log('[2] server/index.js uploaded')
 
+    // Step 2b: 上传 server/db.js 到两个服务目录
+    console.log('\n[2b] Uploading server/db.js...')
+    const localDbJs = path.join(__dirname, '..', 'server', 'db.js')
+    try {
+      await new Promise((resolve, reject) => {
+        sftp.fastPut(localDbJs, 'C:/dianxiaoer-server/db.js', err => err ? reject(err) : resolve())
+      })
+      console.log('[2b] server/db.js uploaded to C:/dianxiaoer-server/')
+    } catch (e) { console.log('[2b] Failed to upload to dianxiaoer-server:', e.message) }
+    try {
+      await new Promise((resolve, reject) => {
+        sftp.fastPut(localDbJs, 'C:/dianxiaoer-api/db.js', err => err ? reject(err) : resolve())
+      })
+      console.log('[2b] server/db.js uploaded to C:/dianxiaoer-api/')
+    } catch (e) { console.log('[2b] Failed to upload to dianxiaoer-api:', e.message) }
+
     // Step 3: 上传 server-api/index.js 到 dianxiaoer-api（C:\ 根目录，已从旧路径迁移）
     console.log('\n[3] Uploading server-api/index.js...')
     const localApiIndex = path.join(__dirname, '..', 'server-api', 'index.js')
