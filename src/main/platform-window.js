@@ -1,9 +1,10 @@
-const { BrowserWindow, ipcMain, session, dialog } = require('electron')
+const { BrowserWindow, ipcMain, session, dialog, app } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
+const { resolveAppPath } = require('./hot-updater')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 
@@ -188,8 +189,7 @@ function buildLoginAutoFillScript(accountName, password) {
 }
 
 function registerPlatformWindowIpc(mainWindow) {
-  const preloadPath = path.join(process.resourcesPath, 'app.asar', 'resources', 'platform-login-preload.js')
-  console.log('[PlatformWindow] preload path:', preloadPath)
+  const preloadPath = resolveAppPath('resources/platform-login-preload.js')
 
   // 判断是否为后台 URL（排除登录页）
   function isBackendUrl(url) {
@@ -519,7 +519,11 @@ function registerPlatformWindowIpc(mainWindow) {
         // 避免 win.destroy() 后内存中 session 数据丢失导致心跳检测不到 Cookie
         try {
           const ses = session.fromPartition(`persist:platform-${storeId}`)
-          await new Promise(resolve => ses.flushStorageData(resolve))
+          // 刷盘持久化（5秒超时防止卡死）
+          await Promise.race([
+            new Promise(resolve => ses.flushStorageData(resolve)),
+            new Promise(resolve => setTimeout(resolve, 5000))
+          ])
           console.log('[PlatformWindow] Session数据已刷盘 storeId=', storeId)
         } catch (e) {
           console.error('[PlatformWindow] Session刷盘失败:', e.message)
@@ -784,8 +788,62 @@ const PURCHASE_BACKEND_URLS = {
 // 已打开的采购账号窗口 Map<accountId, BrowserWindow>
 const purchaseWindows = new Map()
 
+// 后台恢复采购账号 cookie（不阻塞窗口加载，消除白屏等待）
+async function restorePurchaseCookiesInBackground(accountId, platform, partitionName) {
+  try {
+    const ses = session.fromPartition(partitionName)
+    const now = Date.now() / 1000
+    const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+      method: 'GET'
+    })
+    if (cookieRes.statusCode === 200 && cookieRes.data) {
+      const json = JSON.parse(cookieRes.data)
+      if (json.code === 0 && json.data && json.data.cookie_data) {
+        const raw = typeof json.data.cookie_data === 'string'
+          ? JSON.parse(json.data.cookie_data)
+          : json.data.cookie_data
+        if (Array.isArray(raw) && raw.length > 0) {
+          const serverCookies = raw.filter(ck => {
+            if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
+            return true
+          })
+          console.log(`[PurchaseWindow] 后台恢复cookie: ${serverCookies.length}/${raw.length} 条, accountId=${accountId}`)
+          let setOk = 0
+          for (const ck of serverCookies) {
+            try {
+              const sameSite = ck.sameSite || undefined
+              const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
+              await ses.cookies.set({
+                url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                name: ck.name,
+                value: ck.value || '',
+                domain: ck.domain,
+                path: ck.path || '/',
+                secure,
+                httpOnly: ck.httpOnly || false,
+                expirationDate: ck.expirationDate || undefined,
+                sameSite
+              })
+              setOk++
+            } catch (e2) {
+              // ignore individual cookie set errors
+            }
+          }
+          // 非阻塞刷盘（不 await，与 purchase-order-capture 一致）
+          ses.flushStorageData(() => {
+            console.log(`[PurchaseWindow] 后台刷盘完成, accountId=${accountId}`)
+          })
+          console.log(`[PurchaseWindow] 后台恢复写入: ${setOk} 成功, accountId=${accountId}`)
+        }
+      }
+    }
+  } catch (restoreErr) {
+    console.warn(`[PurchaseWindow] 后台恢复cookie失败: accountId=${accountId}`, restoreErr.message)
+  }
+}
+
 function registerPurchaseAccountIpc(mainWindow) {
-  const preloadPath = path.join(process.resourcesPath, 'app.asar', 'resources', 'platform-login-preload.js')
+  const preloadPath = resolveAppPath('resources/platform-login-preload.js')
 
   // 打开采购账号登录窗口
   ipcMain.handle('open-purchase-login-window', async (event, { accountId, platform, account, password }) => {
@@ -839,17 +897,17 @@ function registerPurchaseAccountIpc(mainWindow) {
       callback({ requestHeaders: details.requestHeaders })
     })
 
-    // ★ 已有账号（非新建）：检查 partition 是否有有效 cookie
-    // 如果有，加载个人主页而不是登录页（避免强制重新登录）
-    // PDD 的 login.html 不会因有 cookie 自动跳转，永远显示登录页
+    // ★ 快速检查 partition 现有 cookie → 确定初始 URL → 立即加载（消除白屏等待）
+    // 后台再从服务器恢复 cookie（PDD 始终恢复，非 PDD 仅在无有效 cookie 时恢复）
     let targetUrl = loginUrl
+    let needServerRestore = false
+
     if (account) {
       try {
         const ses = session.fromPartition(partitionName)
-        let cookies = await ses.cookies.get({})
+        const cookies = await ses.cookies.get({})
         const now = Date.now() / 1000
 
-        // 各平台关键 cookie 名和域名
         const PLATFORM_COOKIE_CONFIG = {
           pinduoduo: {
             domains: ['pinduoduo.com', 'yangkeduo.com'],
@@ -870,15 +928,12 @@ function registerPurchaseAccountIpc(mainWindow) {
         }
 
         const cookieConfig = PLATFORM_COOKIE_CONFIG[platform]
-        let hasValidCookie = false
-        let platformCookieCount = 0
-
         if (cookieConfig) {
           const { domains, keys } = cookieConfig
-          platformCookieCount = cookies.filter(c =>
+          const platformCookieCount = cookies.filter(c =>
             c.domain && domains.some(d => c.domain.includes(d))
           ).length
-          hasValidCookie = cookies.some(c => {
+          let hasValidCookie = cookies.some(c => {
             if (!c.domain || !domains.some(d => c.domain.includes(d))) return false
             if (keys.includes(c.name) && c.value && c.value.length > 5) {
               if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
@@ -886,108 +941,33 @@ function registerPurchaseAccountIpc(mainWindow) {
             }
             return false
           })
-          // 兜底：如果没有找到关键cookie名，但有大量该平台域cookie（>5条），也认为可能有效
-          // 但 PDD 平台除外：PDDAccessToken 是必要条件，没有它 PDD 服务器会拒绝请求
+          // 兜底：大量平台域cookie（>5条）可能有效，但 PDD 除外
           if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo') {
             hasValidCookie = true
           }
-        }
 
-        // ★ PDD 平台：即使 partition 有有效 cookie（含 PDDAccessToken），也必须从服务器恢复
-        //   因为 PDDAccessToken 可能本地未过期但 PDD 服务器端已失效
-        // ★ 非 PDD 平台：partition 无有效 cookie 时才从服务器恢复
-        if (!hasValidCookie || platform === 'pinduoduo') {
-          console.log(`[PurchaseWindow] ${platform === 'pinduoduo' ? `PDD平台始终从服务器恢复cookie（即使partition有PDDAccessToken，可能服务端已失效）` : `Partition无${platform}有效cookie (platformCount=${platformCookieCount})，尝试从服务器恢复...`}`)
-          try {
-            const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
-              method: 'GET'
-            })
-            if (cookieRes.statusCode === 200 && cookieRes.data) {
-              const json = JSON.parse(cookieRes.data)
-              if (json.code === 0 && json.data && json.data.cookie_data) {
-                const raw = typeof json.data.cookie_data === 'string'
-                  ? JSON.parse(json.data.cookie_data)
-                  : json.data.cookie_data
-                if (Array.isArray(raw) && raw.length > 0) {
-                  const serverCookies = raw.filter(ck => {
-                    if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
-                    return true
-                  })
-                  console.log(`[PurchaseWindow] 从服务器恢复cookie: ${serverCookies.length}/${raw.length} 条`)
-                  // 写入 partition
-                  let setOk = 0
-                  for (const ck of serverCookies) {
-                    try {
-                      const sameSite = ck.sameSite || undefined
-                      const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
-                      await ses.cookies.set({
-                        url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
-                        name: ck.name,
-                        value: ck.value || '',
-                        domain: ck.domain,
-                        path: ck.path || '/',
-                        secure,
-                        httpOnly: ck.httpOnly || false,
-                        expirationDate: ck.expirationDate || undefined,
-                        sameSite
-                      })
-                      setOk++
-                    } catch (e2) {
-                      // ignore individual cookie set errors
-                    }
-                  }
-                  // 刷盘持久化
-                  await new Promise(resolve => ses.flushStorageData(resolve))
-                  console.log(`[PurchaseWindow] Cookie恢复写入: ${setOk} 成功`)
+          // PDD 始终需要从服务器恢复（即使 partition 有有效 cookie）
+          // 非 PDD 仅在无有效 cookie 时恢复
+          needServerRestore = !hasValidCookie || platform === 'pinduoduo'
 
-                  // 重新检测恢复后的 cookie 是否有效
-                  cookies = await ses.cookies.get({})
-                  if (cookieConfig) {
-                    const { domains, keys } = cookieConfig
-                    platformCookieCount = cookies.filter(c =>
-                      c.domain && domains.some(d => c.domain.includes(d))
-                    ).length
-                    hasValidCookie = cookies.some(c => {
-                      if (!c.domain || !domains.some(d => c.domain.includes(d))) return false
-                      if (keys.includes(c.name) && c.value && c.value.length > 5) {
-                        if (c.expirationDate && c.expirationDate > 0 && c.expirationDate < now) return false
-                        return true
-                      }
-                      return false
-                    })
-                    if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo') hasValidCookie = true
-                    console.log(`[PurchaseWindow] 恢复后重新检测: hasValidCookie=${hasValidCookie}, platformCookieCount=${platformCookieCount}, platform=${platform}`)
-                  }
-                }
-              }
-            }
-          } catch (restoreErr) {
-            console.warn('[PurchaseWindow] 从服务器恢复cookie失败:', restoreErr.message)
+          if (hasValidCookie) {
+            const backendUrl = PURCHASE_BACKEND_URLS[platform]
+            if (backendUrl) targetUrl = backendUrl
           }
         }
-
-        console.log(`[PurchaseWindow] 最终判定: hasValidCookie=${hasValidCookie}, targetUrl=${hasValidCookie ? PURCHASE_BACKEND_URLS[platform] : loginUrl}`)
-        if (hasValidCookie) {
-          // 有有效 cookie 时加载后台页面（所有平台统一逻辑）
-          const backendUrl = PURCHASE_BACKEND_URLS[platform]
-          if (backendUrl) {
-            targetUrl = backendUrl
-            console.log(`[PurchaseWindow] Account has cookies (keyCookie=${hasValidCookie}, platformCount=${platformCookieCount}), loading backend URL: ${backendUrl}`)
-          }
-        } else {
-          console.log(`[PurchaseWindow] No valid cookies found (platformCount=${platformCookieCount}), loading login URL`)
-        }
-      } catch(e) {
-        console.log(`[PurchaseWindow] Cookie check failed: ${e.message}`)
+      } catch (e) {
+        needServerRestore = true
       }
     }
 
-    console.log(`[PurchaseWindow] loadURL: ${targetUrl}`)
+    // ★ 立即加载 URL（页面开始渲染，不再白屏等待）
     win.loadURL(targetUrl)
 
-    win.webContents.on('did-navigate', (e, url) => {
-      console.log(`[PurchaseWindow] did-navigate: ${url}`)
-    })
+    // ★ 后台从服务器恢复 cookie（不阻塞页面加载）
+    if (needServerRestore && account) {
+      restorePurchaseCookiesInBackground(accountId, platform, partitionName)
+    }
+
     win.webContents.on('did-fail-load', (e, code, desc, url) => {
       console.log(`[PurchaseWindow] did-fail-load: code=${code}, desc=${desc}, url=${url}`)
     })
@@ -1215,9 +1195,13 @@ function registerPurchaseAccountIpc(mainWindow) {
       purchaseWindows.delete(accountId)
 
       // 5. 刷盘确保 persist:partition 数据持久化到磁盘（关键！否则重启后cookie丢失）
+      // 5秒超时防止卡死
       try {
         const purchaseSes = session.fromPartition(partitionName)
-        await new Promise(resolve => purchaseSes.flushStorageData(resolve))
+        await Promise.race([
+          new Promise(resolve => purchaseSes.flushStorageData(resolve)),
+          new Promise(resolve => setTimeout(resolve, 5000))
+        ])
         console.log('[PurchaseWindow] Purchase partition数据已刷盘 accountId=', accountId)
       } catch (e) {
         console.error('[PurchaseWindow] Purchase partition刷盘失败:', e.message)
@@ -1457,8 +1441,11 @@ function registerPurchaseAccountIpc(mainWindow) {
         }
       }
 
-      // 刷盘确保持久化
-      await new Promise(resolve => ses.flushStorageData(resolve))
+      // 刷盘确保持久化（5秒超时防止卡死）
+      await Promise.race([
+        new Promise(resolve => ses.flushStorageData(resolve)),
+        new Promise(resolve => setTimeout(resolve, 5000))
+      ])
 
       // 同步保存到服务器数据库
       try {
