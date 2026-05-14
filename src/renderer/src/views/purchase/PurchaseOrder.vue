@@ -406,7 +406,7 @@
       <template v-if="currentReceiveRow?.purchase_type === 'warehouse'" #footer>
         <div class="receive-confirm-footer">
           <el-button type="primary" @click="handleForward">云仓发货</el-button>
-          <el-button disabled>店铺发货</el-button>
+          <el-button type="primary" plain @click="handleStoreShip">店铺发货</el-button>
           <el-button type="danger" @click="handleMarkAfterSale">标记售后</el-button>
         </div>
       </template>
@@ -1648,6 +1648,38 @@ async function handleMarkAfterSale() {
     ElMessage.success('已标记为待处理售后')
   } catch (err) {
     ElMessage.error('标记售后失败: ' + (err.message || ''))
+  }
+}
+
+// 点击"店铺发货"按钮 — 用店铺cookie打开京东出库页面并自动点击出库按钮
+async function handleStoreShip() {
+  const row = currentReceiveRow.value
+  if (!row) return
+
+  try {
+    const salesData = await fetchRelatedSales(row.id)
+    if (!salesData || !salesData.storeId) {
+      ElMessage.warning('未找到关联销售单的店铺信息')
+      return
+    }
+    if (salesData.storePlatform !== 'jd') {
+      ElMessage.warning('店铺发货目前仅支持京东店铺')
+      return
+    }
+    if (salesData.storeType !== 'pop') {
+      ElMessage.warning('店铺发货仅支持POP店铺，供应商店铺不可用')
+      return
+    }
+
+    await window.electronAPI.invoke('open-jd-outbound', {
+      storeId: salesData.storeId,
+      orderId: salesData.orderId || '',
+      title: `店铺发货 - ${salesData.storeName || '京东'}`
+    })
+
+    receiveDialogVisible.value = false
+  } catch (err) {
+    ElMessage.error('店铺发货失败: ' + (err.message || ''))
   }
 }
 

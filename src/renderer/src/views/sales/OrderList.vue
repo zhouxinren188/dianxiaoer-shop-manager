@@ -339,6 +339,7 @@
               <div class="ot-col ot-col-action">
                 <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
                   <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
+                  <el-button v-if="isConsignmentOrder(order)" type="warning" link size="small" @click="handleGongxiaoDetail(order)">采购单详情</el-button>
                   <el-button type="success" link size="small" @click="handleSmsNotify(order)">
                     <el-icon><Message /></el-icon>
                     <span>短信</span>
@@ -962,7 +963,7 @@ function onFuncChange(key, value) {
 
 async function loadStores() {
   try {
-    const data = await fetchStores({ platform: 'jd', store_type: 'pop', status: 'enabled', pageSize: 100 })
+    const data = await fetchStores({ platform: 'jd', store_type: 'pop,consignment', status: 'enabled', pageSize: 100 })
     storeOptions.value = data.list || []
     // 默认不选中任何店铺，即"全部店铺"
   } catch (err) {
@@ -2246,6 +2247,42 @@ const currentOrder = ref(null)
 function handleView(row) {
   currentOrder.value = row
   drawerVisible.value = true
+}
+
+// 判断订单是否为代销订单（代销店铺中，warehouse_name 为"供应商仓库"或"官方货源"的是代销单，排除待付款状态）
+function isConsignmentOrder(order) {
+  const store = storeOptions.value.find(s => s.id === order.storeId)
+  if (!store || store.store_type !== 'consignment') return false
+  // 待付款订单不显示采购单详情
+  if (order.orderStatus === '待付款') return false
+  const wh = order.warehouseName || ''
+  // 全国仓和具体仓库名（如"宿迁沭阳九问云仓1号库"）不是代销单
+  // 供应商仓库、官方货源 是代销单
+  return wh === '供应商仓库' || wh === '官方货源'
+}
+
+// 点击"采购单详情" — 用代销店铺cookie打开京东供销订单详情页
+async function handleGongxiaoDetail(order) {
+  const store = storeOptions.value.find(s => s.id === order.storeId)
+  if (!store) {
+    ElMessage.warning('未找到订单所属店铺')
+    return
+  }
+  const jdOrderId = order.orderNo || ''
+  if (!jdOrderId) {
+    ElMessage.warning('订单编号为空，无法打开采购单详情')
+    return
+  }
+  const gongxiaoUrl = `https://shop.jd.com/jdm/gongxiao/shopEmbed/seller/orderDetail?orderId=${jdOrderId}`
+  try {
+    await window.electronAPI.invoke('open-store-backend-url', {
+      storeId: store.id,
+      url: gongxiaoUrl,
+      title: `采购单详情 - ${store.name || '京东代销'}`
+    })
+  } catch (err) {
+    ElMessage.error('打开采购单详情失败: ' + (err.message || ''))
+  }
 }
 
 function handleSmsNotify(order) {

@@ -23,6 +23,7 @@
         <el-select v-model="form.store_type" placeholder="请选择店铺类型" style="width: 100%">
           <el-option label="POP店铺" value="pop" />
           <el-option label="供应商店铺" value="supplier" />
+          <el-option label="代销店铺" value="consignment" />
         </el-select>
       </el-form-item>
       <el-form-item label="登录账号">

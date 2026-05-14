@@ -656,7 +656,16 @@ app.get('/api/stores', async (req, res) => {
 
     if (name) { sql += ' AND name LIKE ?'; params.push(`%${name}%`) }
     if (platform) { sql += ' AND platform = ?'; params.push(platform) }
-    if (store_type) { sql += ' AND store_type = ?'; params.push(store_type) }
+    if (store_type) {
+      if (store_type.includes(',')) {
+        const types = store_type.split(',').map(t => t.trim())
+        const typePh = types.map(() => '?').join(',')
+        sql += ` AND store_type IN (${typePh})`
+        params.push(...types)
+      } else {
+        sql += ' AND store_type = ?'; params.push(store_type)
+      }
+    }
     if (status) { sql += ' AND status = ?'; params.push(status) }
     if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
     if (merchant_id) { sql += ' AND merchant_id = ?'; params.push(merchant_id) }
@@ -2983,7 +2992,7 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
     if (sales_order_id) {
       const [rows] = await pool.execute(
         `SELECT so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
-                so.store_id, s.name AS store_name, s.platform AS store_platform, so.warehouse_name
+                so.store_id, s.name AS store_name, s.platform AS store_platform, s.store_type, so.warehouse_name
          FROM sales_orders so
          LEFT JOIN stores s ON so.store_id = s.id
          WHERE so.id = ?`,
@@ -2995,7 +3004,7 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
     if (!soRows.length && sales_order_no) {
       const [rows] = await pool.execute(
         `SELECT so.id, so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
-                so.store_id, s.name AS store_name, s.platform AS store_platform, so.warehouse_name
+                so.store_id, s.name AS store_name, s.platform AS store_platform, s.store_type, so.warehouse_name
          FROM sales_orders so
          LEFT JOIN stores s ON so.store_id = s.id
          WHERE so.order_id = ?`,
@@ -3040,6 +3049,7 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
       storeId: row.store_id || '',
       storeName: row.store_name || '',
       storePlatform: row.store_platform || '',
+      storeType: row.store_type || '',
       orderId: row.order_id || '',
       statusText: row.status_text || '',
       warehouseName: row.warehouse_name || '',

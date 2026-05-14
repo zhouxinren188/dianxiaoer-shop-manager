@@ -532,10 +532,10 @@ app.get('/api/update/check', (req, res) => {
     if (hot) {
       const hotNum = parseVersion(hot.version)
       if (hotNum > currentNum) {
-        // 校验 baseVersion：热更新只能应用于匹配的基础版本
-        if (hot.baseVersion && appVersion && parseVersion(appVersion) !== parseVersion(hot.baseVersion)) {
-          // 用户的基础版本与热更新要求的不匹配，不返回热更新
-          console.log(`[Update] 热更新 baseVersion 不匹配: 用户appVersion=${appVersion}, 要求baseVersion=${hot.baseVersion}`)
+        // 校验 baseVersion：热更新只能应用于不低于最低基础版本的版本
+        if (hot.baseVersion && appVersion && parseVersion(appVersion) < parseVersion(hot.baseVersion)) {
+          // 用户的基础版本低于热更新要求的最低版本，不返回热更新
+          console.log(`[Update] 热更新 baseVersion 不兼容: 用户appVersion=${appVersion}, 最低要求baseVersion=${hot.baseVersion}`)
         } else {
           return res.json({
             needUpdate: true,

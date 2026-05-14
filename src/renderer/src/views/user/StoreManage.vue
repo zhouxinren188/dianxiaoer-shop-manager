@@ -165,7 +165,8 @@ import StoreEditDialog from './components/StoreEditDialog.vue'
 
 const STORE_TYPE_MAP = {
   pop: 'POP店铺',
-  supplier: '供应商店铺'
+  supplier: '供应商店铺',
+  consignment: '代销店铺'
 }
 
 function storeTypeLabel(type) {

@@ -39,7 +39,8 @@ const validInvokeChannels = [
   'import-purchase-cookies',
   'fetch-aftersale-metrics',
   'check-aftersale-sync-stores',
-  'open-store-backend-url'
+  'open-store-backend-url',
+  'open-jd-outbound'
 ]
 
 const validOnChannels = [
