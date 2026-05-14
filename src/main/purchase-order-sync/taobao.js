@@ -540,8 +540,10 @@ function syncSingle(accountId, platformOrderNo) {
 
           // 映射后的英文状态码
           const mappedStatus = mapOrderStatus(orderInfo.status)
-          // shipped/in_transit 状态需要物流轨迹，即使已有基本信息
-          const needTracking = (mappedStatus === 'shipped' || mappedStatus === 'in_transit') && !orderInfo.logistics_tracking
+          // 同步范围内的订单，只要有物流单号就必须去物流页获取完整轨迹，
+          // 不管详情页是否已有轨迹数据（详情页轨迹可能不完整）
+          // 没有物流单号说明还没发货，去物流页也没数据，不需要
+          const needTracking = !!orderInfo.logistics_no
 
           // 如果已有物流单号和快递公司，且不需要轨迹，则不去物流页面
           const hasLogisticsInfo = orderInfo.logistics_no && (orderInfo.logistics_company || orderInfo.logistics_company_code)

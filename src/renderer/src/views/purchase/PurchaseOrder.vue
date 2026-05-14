@@ -400,15 +400,14 @@
       <!-- 仓库转发 -->
       <div v-if="currentReceiveRow?.purchase_type === 'warehouse'" class="receive-confirm-content">
         <p class="receive-confirm-text">
-          该订单类型为<strong class="receive-confirm-type">仓库转发</strong>，归属<strong class="receive-confirm-warehouse">{{ currentReceiveRow.sales_warehouse_name || '未知仓库' }}</strong>，是否立即转发？
+          该订单类型为<strong class="receive-confirm-type">仓库转发</strong>，归属<strong class="receive-confirm-warehouse">{{ currentReceiveRow.sales_warehouse_name || '未知仓库' }}</strong><template v-if="currentReceiveRow.sales_order_status">，关联销售单目前处于<strong class="receive-confirm-sales">{{ currentReceiveRow.sales_order_status }}</strong></template>，是否立即转发？
         </p>
       </div>
       <template v-if="currentReceiveRow?.purchase_type === 'warehouse'" #footer>
         <div class="receive-confirm-footer">
-          <el-tooltip content="开发中，敬请期待" placement="top">
-            <span><el-button disabled>店铺打单发货</el-button></span>
-          </el-tooltip>
-          <el-button type="primary" @click="handleForward">云仓打单发货</el-button>
+          <el-button type="primary" @click="handleForward">云仓发货</el-button>
+          <el-button disabled>店铺发货</el-button>
+          <el-button type="danger" @click="handleMarkAfterSale">标记售后</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1636,6 +1635,20 @@ async function loadWarehouses() {
 function handleReceive(row) {
   currentReceiveRow.value = row
   receiveDialogVisible.value = true
+}
+
+// 点击"标记售后"按钮 — 将采购单状态变更为待处理售后
+async function handleMarkAfterSale() {
+  const row = currentReceiveRow.value
+  if (!row) return
+  try {
+    await updatePurchaseStatus(row.id, { status: 'pending_after_sale' })
+    row.status = 'pending_after_sale'
+    receiveDialogVisible.value = false
+    ElMessage.success('已标记为待处理售后')
+  } catch (err) {
+    ElMessage.error('标记售后失败: ' + (err.message || ''))
+  }
 }
 
 // 点击"云仓打单发货"按钮 — 加载关联销售订单并打开弹窗
@@ -3198,7 +3211,7 @@ function handleImportDialogClose() {
 
 /* 收货确认弹窗 */
 .receive-confirm-content {
-  text-align: center;
+  text-align: left;
   padding: 16px;
   background: #f8f9fb;
   border-radius: 10px;
@@ -3217,10 +3230,14 @@ function handleImportDialogClose() {
   color: #e6a23c;
   font-weight: 600;
 }
+.receive-confirm-sales {
+  color: #f56c6c;
+  font-weight: 600;
+}
 .receive-confirm-footer {
   display: flex;
-  justify-content: center;
-  gap: 16px;
+  justify-content: flex-start;
+  gap: 12px;
 }
 
 /* 云仓打单发货弹窗 */

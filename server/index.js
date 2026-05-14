@@ -2852,7 +2852,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (req.user.user_type === 'sub') {
       // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -2875,7 +2875,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
