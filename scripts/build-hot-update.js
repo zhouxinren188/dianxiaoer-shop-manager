@@ -115,19 +115,24 @@ if (hasRenderer) {
 
 // 添加主进程文件
 if (includeMain) {
-  // main/index.jsc + main/index.js (loader stub)
+  // main/index.jsc
   const mainJscPath = path.join(OUT_DIR, 'main', 'index.jsc')
-  const mainJsPath = path.join(OUT_DIR, 'main', 'index.js')
   const purchasePreloadPath = path.join(OUT_DIR, 'main', 'purchase-preload.js')
 
   if (fs.existsSync(mainJscPath)) {
     zip.addLocalFile(mainJscPath, 'main')
     console.log('  添加 main/index.jsc')
   }
-  if (fs.existsSync(mainJsPath)) {
-    zip.addLocalFile(mainJsPath, 'main')
-    console.log('  添加 main/index.js (loader stub)')
-  }
+  // 生成简单的 main/index.js 加载器（仅加载同目录 index.jsc，不包含热更新检查逻辑）
+  // 热更新检查已由 app 内置的 bootstrap.js 完成，此处不能再重复检查，否则会循环 require 自身
+  const simpleLoader = `// 主进程热更新加载器 — 由 build-hot-update.js 自动生成
+// 仅加载同目录下的 index.jsc，不包含热更新检查逻辑（检查已在 bootstrap.js 中完成）
+try { require('bytenode') } catch (e) { require(require('path').join(require('electron').app.getAppPath(), 'out', 'main', 'node_modules', 'bytenode')) }
+module.exports = require('./index.jsc')
+`
+  zip.addFile('main/index.js', Buffer.from(simpleLoader))
+  console.log('  添加 main/index.js (简单加载器)')
+
   if (fs.existsSync(purchasePreloadPath)) {
     zip.addLocalFile(purchasePreloadPath, 'main')
     console.log('  添加 main/purchase-preload.js')
@@ -151,7 +156,7 @@ const versionData = {
 }
 if (includeMain) {
   versionData.mainUpdate = true
-  versionData.electronVersion = pkg.devDependencies?.electron || process.versions?.electron || ''
+  versionData.electronVersion = (pkg.devDependencies?.electron || process.versions?.electron || '').replace(/^[\^~]/, '')
   versionData.mainSha256 = mainJscSha256
   versionData.preloadSha256 = preloadJscSha256
 }

@@ -73,6 +73,13 @@ async function checkForUpdates(manual = false) {
       sha256: result.sha256 || '',
       force: result.force || false
     })
+
+    // 全量更新：主进程自动下载，不依赖渲染进程
+    // 渲染进程可能因热更新损坏导致 electronAPI 不可用，无法手动触发下载
+    if (result.updateType === 'full') {
+      console.log('[UpdateManager] 检测到全量更新，自动开始下载...')
+      startDownload()
+    }
   } catch (e) {
     state = 'idle'
     console.log('[UpdateManager] 检查更新失败:', e.message)
@@ -206,6 +213,7 @@ async function fallbackToFullUpdate(hotError) {
 
 // 安装并重启
 function installAndRestart() {
+  state = 'installing' // 防止定时器重复触发
   if (currentUpdateType === 'full') {
     try {
       const autoUpdater = getAutoUpdater()
@@ -268,6 +276,14 @@ function initUpdateManager(win) {
       console.log('[UpdateManager] 全量更新下载完成:', info.version)
       state = 'ready'
       send('um-update-ready', { type: 'full' })
+      // 自救：15 秒后如果渲染进程未触发安装，主进程自动安装重启
+      // 应对 electronAPI 损坏导致渲染进程无法调用 um-install 的场景
+      setTimeout(() => {
+        if (state === 'ready' && currentUpdateType === 'full') {
+          console.log('[UpdateManager] 渲染进程未响应安装请求，自动安装重启...')
+          installAndRestart()
+        }
+      }, 15000)
     })
 
     autoUpdater.on('error', (err) => {

@@ -2835,7 +2835,7 @@ app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { page=1, pageSize=20, status, platform } = req.query
+    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, purchaseType, accountId } = req.query
     let sql, countSql, params
 
     // ★ 列表查询：排除 logistics_tracking 等大字段（详情页单独获取），减少数据传输量
@@ -2846,7 +2846,7 @@ app.get('/api/purchase-orders', async (req, res) => {
       po.platform, po.purchase_price, po.remark, po.purchase_type,
       po.shipping_name, po.shipping_phone, po.shipping_address,
       po.account_id, po.status, po.platform_order_no,
-      po.logistics_no, po.logistics_company, po.logistics_status,
+      po.logistics_no, po.logistics_company,
       po.owner_id, po.created_by, po.created_at, po.updated_at`
 
     if (req.user.user_type === 'sub') {
@@ -2860,7 +2860,7 @@ app.get('/api/purchase-orders', async (req, res) => {
         LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
-          AND (upa.id IS NOT NULL
+          AND (upa.user_id IS NOT NULL
                OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
       countSql = `
@@ -2868,7 +2868,7 @@ app.get('/api/purchase-orders', async (req, res) => {
         FROM purchase_orders po
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
-          AND (upa.id IS NOT NULL
+          AND (upa.user_id IS NOT NULL
                OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
       `
       params = [req.user.id, ownerId, req.user.id]
@@ -2893,13 +2893,75 @@ app.get('/api/purchase-orders', async (req, res) => {
 
     if (status) { sql += ' AND po.status=?'; countSql += ' AND po.status=?'; params.push(status) }
     if (platform) { sql += ' AND po.platform=?'; countSql += ' AND po.platform=?'; params.push(platform) }
+    if (purchaseNo) { sql += ' AND po.purchase_no LIKE ?'; countSql += ' AND po.purchase_no LIKE ?'; params.push(`%${purchaseNo}%`) }
+    if (logisticsNo) { sql += ' AND po.logistics_no LIKE ?'; countSql += ' AND po.logistics_no LIKE ?'; params.push(`%${logisticsNo}%`) }
+    if (platformOrderNo) { sql += ' AND po.platform_order_no LIKE ?'; countSql += ' AND po.platform_order_no LIKE ?'; params.push(`%${platformOrderNo}%`) }
+    if (salesOrderNo) { sql += ' AND so.order_id LIKE ?'; countSql += ' AND po.sales_order_no LIKE ?'; params.push(`%${salesOrderNo}%`) }
+    if (purchaseType) { sql += ' AND po.purchase_type=?'; countSql += ' AND po.purchase_type=?'; params.push(purchaseType) }
+    if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
 
     const [[{ total }]] = await pool.execute(countSql, params)
-    const limit = Math.min(5000, Math.max(1, parseInt(pageSize,10)||20))
+    const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
     sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
-    res.json(ok({ list: rows, total }))
+
+    // 同时获取各状态数量（用于 Tab 标签，合并到列表响应避免单独请求失败）
+    // ★ statusCounts 需应用与列表相同的筛选条件（除 status 外），这样 tab 数量才与筛选结果对应
+    let statusCounts = {}
+    try {
+      let countByStatusSql, countByStatusParams
+      if (req.user.user_type === 'sub') {
+        countByStatusSql = `SELECT po.status, COUNT(*) as count FROM purchase_orders po
+          LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
+          WHERE po.owner_id=? AND (upa.user_id IS NOT NULL OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))`
+        countByStatusParams = [req.user.id, ownerId, req.user.id]
+      } else {
+        countByStatusSql = 'SELECT po.status, COUNT(*) as count FROM purchase_orders po WHERE po.owner_id=?'
+        countByStatusParams = [ownerId]
+      }
+      // 应用与列表相同的筛选条件（除 status 外）
+      if (platform) { countByStatusSql += ' AND po.platform=?'; countByStatusParams.push(platform) }
+      if (purchaseNo) { countByStatusSql += ' AND po.purchase_no LIKE ?'; countByStatusParams.push(`%${purchaseNo}%`) }
+      if (logisticsNo) { countByStatusSql += ' AND po.logistics_no LIKE ?'; countByStatusParams.push(`%${logisticsNo}%`) }
+      if (platformOrderNo) { countByStatusSql += ' AND po.platform_order_no LIKE ?'; countByStatusParams.push(`%${platformOrderNo}%`) }
+      if (salesOrderNo) { countByStatusSql += ' AND po.sales_order_no LIKE ?'; countByStatusParams.push(`%${salesOrderNo}%`) }
+      if (purchaseType) { countByStatusSql += ' AND po.purchase_type=?'; countByStatusParams.push(purchaseType) }
+      if (accountId) { countByStatusSql += ' AND po.account_id=?'; countByStatusParams.push(parseInt(accountId)) }
+      countByStatusSql += ' GROUP BY po.status'
+      const [countRows] = await pool.execute(countByStatusSql, countByStatusParams)
+      for (const row of countRows) {
+        statusCounts[row.status] = row.count
+      }
+    } catch (e) {
+      console.warn('[PurchaseOrders] statusCounts query failed:', e.message)
+    }
+
+    res.json(ok({ list: rows, total, statusCounts }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// 采购订单各状态数量（用于 Tab 标签）
+app.get('/api/purchase-orders/count-by-status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    let sql = 'SELECT status, COUNT(*) as count FROM purchase_orders WHERE owner_id=?'
+    const params = [ownerId]
+    // 子账号权限过滤
+    if (req.user.user_type === 'sub') {
+      sql = `SELECT po.status, COUNT(*) as count FROM purchase_orders po
+        LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
+        WHERE po.owner_id=? AND (upa.user_id IS NOT NULL OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))`
+      params.length = 0
+      params.push(req.user.id, ownerId, req.user.id)
+    }
+    sql += ' GROUP BY status'
+    const [rows] = await pool.execute(sql, params)
+    const counts = {}
+    for (const row of rows) {
+      counts[row.status] = row.count
+    }
+    res.json(ok(counts))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 

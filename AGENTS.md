@@ -12,10 +12,16 @@
 
 | 变更类型 | 发布方式 | 命令 | 包体积 |
 |---------|---------|------|-------|
-| 仅 renderer（前端）变更 | 渲染层热更新 | `node scripts/build-hot-update.js --upload` | ~1MB |
-| 仅 main 进程变更 | 主进程热更新 | `node scripts/build-hot-update.js --main-only --upload` | ~600KB |
-| main + renderer 都变更 | 全量热更新 | `node scripts/build-hot-update.js --main --upload` | ~1.5MB |
+| 任何客户端变更（不论仅 renderer 还是仅 main） | **统一热更新（main+renderer 同步）** | `node scripts/build-hot-update.js --main --upload` | ~1.5MB |
 | Electron 版本升级/重大架构变更 | 全量发布 | `node scripts/publish-full.js` | ~112MB |
+
+> **重要：热更新必须始终使用 `--main --upload`，确保 main 和 renderer 始终同步。**
+> 禁止使用 `--upload`（仅 renderer）或 `--main-only --upload`（仅 main），因为：
+> - 服务器只保留最新的一个热更新包，旧包会被覆盖
+> - 如果连续发布 renderer-only 和 main-only，用户只会拿到最新的那个，导致 main/renderer 版本不同步
+> - `--main --upload` 多出的几百 KB 可忽略，但彻底杜绝不同步问题
+
+> **全量更新优先于热更新**：服务器 check 接口先检查全量更新，有全量更新时优先返回全量，确保旧基础版本用户先升级到最新全量包。
 
 ### 热更新发布步骤
 1. 确认 `package.json` 版本号已更新
@@ -110,6 +116,13 @@ version.json                版本元数据
 ### el-table 事件冒泡
 el-table 上的 `@row-click` 会拦截子元素的点击事件。原生 HTML 元素（span、a 等）需要 `@click.stop` 阻止冒泡；el-button 等组件内部已处理，无需额外修饰。
 
+### 远程服务器部署路径
+- **dianxiaoer-server**（业务服务 port 3002）：`C:/dianxiaoer-server/`
+- **dianxiaoer-api**（认证服务 port 3001）：`C:/dianxiaoer-api/`
+- 两个服务路径已统一，都在 `C:\` 根目录下
+- SFTP 上传目标用正斜杠：`C:/dianxiaoer-server/`、`C:/dianxiaoer-api/`
+- 部署后务必用 curl 验证远程 API 返回数据是否符合预期，不能仅靠文件上传成功判断
+
 ---
 
 ## 常用命令速查
@@ -127,10 +140,8 @@ npm run compile
 # 打包安装程序（不发布）
 npm run dist
 
-# 热更新发布
-npm run publish:hot          # 仅前端
-node scripts/build-hot-update.js --main-only --upload  # 仅主进程
-node scripts/build-hot-update.js --main --upload        # 主进程+前端
+# 热更新发布（统一使用 --main --upload，确保 main+renderer 同步）
+node scripts/build-hot-update.js --main --upload
 
 # 全量发布
 node scripts/publish-full.js

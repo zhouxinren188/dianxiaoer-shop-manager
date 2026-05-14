@@ -303,7 +303,7 @@
           v-model:page-size="pageInfo.pageSize"
           :total="pageInfo.total"
           layout="total, sizes, prev, pager, next, jumper"
-          :page-sizes="[10, 20, 50, 100, 500, 5000]"
+          :page-sizes="[20, 50, 100]"
           @size-change="handleSizeChange"
           @current-change="handlePageChange"
         />
@@ -387,27 +387,29 @@
       align-center
       :close-on-click-modal="false"
     >
-      <!-- 仓库进货：保持原有提示和入库按钮 -->
-      <div v-if="currentReceiveRow?.purchase_type === 'warehouse_in'" style="text-align: center; padding: 10px 0">
-        <p style="font-size: 15px; line-height: 1.8">
-          温馨提示，该订单类型为<strong>仓库进货</strong>，是否立即入库？
+      <!-- 仓库进货 -->
+      <div v-if="currentReceiveRow?.purchase_type === 'warehouse_in'" class="receive-confirm-content">
+        <p class="receive-confirm-text">
+          该订单类型为<strong class="receive-confirm-type">仓库进货</strong>，是否立即入库？
         </p>
       </div>
       <template v-if="currentReceiveRow?.purchase_type === 'warehouse_in'" #footer>
         <el-button type="primary" @click="handleStockIn">入库</el-button>
       </template>
 
-      <!-- 仓库转发：新提示语 + 云仓打单发货 + 店铺打单发货 -->
-      <div v-if="currentReceiveRow?.purchase_type === 'warehouse'" style="text-align: center; padding: 10px 0">
-        <p style="font-size: 15px; line-height: 1.8">
-          温馨提示，该订单类型为<strong>仓库转发</strong>，归属<strong>{{ currentReceiveRow.sales_warehouse_name || '未知仓库' }}</strong>，是否立即转发？
+      <!-- 仓库转发 -->
+      <div v-if="currentReceiveRow?.purchase_type === 'warehouse'" class="receive-confirm-content">
+        <p class="receive-confirm-text">
+          该订单类型为<strong class="receive-confirm-type">仓库转发</strong>，归属<strong class="receive-confirm-warehouse">{{ currentReceiveRow.sales_warehouse_name || '未知仓库' }}</strong>，是否立即转发？
         </p>
       </div>
       <template v-if="currentReceiveRow?.purchase_type === 'warehouse'" #footer>
-        <el-tooltip content="开发中，敬请期待" placement="top">
-          <span><el-button disabled>店铺打单发货</el-button></span>
-        </el-tooltip>
-        <el-button type="primary" @click="handleForward">云仓打单发货</el-button>
+        <div class="receive-confirm-footer">
+          <el-tooltip content="开发中，敬请期待" placement="top">
+            <span><el-button disabled>店铺打单发货</el-button></span>
+          </el-tooltip>
+          <el-button type="primary" @click="handleForward">云仓打单发货</el-button>
+        </div>
       </template>
     </el-dialog>
 
@@ -464,8 +466,8 @@
         <div v-else-if="!forwardLoading" class="forward-empty">暂无关联销售订单信息</div>
       </div>
       <template #footer>
-        <el-button @click="forwardDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="handleConfirmForward">我已转发</el-button>
+        <el-button @click="forwardDialogVisible = false">取消</el-button>
       </template>
     </el-dialog>
 
@@ -1374,35 +1376,12 @@ function formatTime(val) {
 
 // ==================== 状态Tab ====================
 
-const statusTabs = computed(() => {
-  // 基于除 status 外的其他筛选条件过滤后的数据来计算计数
-  let data = tableData.value
-  if (filterForm.purchaseNo) {
-    data = data.filter(r => r.purchase_no && r.purchase_no.includes(filterForm.purchaseNo))
-  }
-  if (filterForm.logisticsNo) {
-    data = data.filter(r => r.logistics_no && r.logistics_no.includes(filterForm.logisticsNo))
-  }
-  if (filterForm.platformOrderNo) {
-    data = data.filter(r => r.platform_order_no && r.platform_order_no.includes(filterForm.platformOrderNo))
-  }
-  if (filterForm.salesOrderNo) {
-    data = data.filter(r => r.sales_order_no && r.sales_order_no.includes(filterForm.salesOrderNo))
-  }
-  if (filterForm.platform) {
-    data = data.filter(r => r.platform === filterForm.platform)
-  }
-  if (filterForm.accountId) {
-    data = data.filter(r => r.account_id === filterForm.accountId)
-  }
+// 各状态数量（从后端获取，精确且不受分页影响）
+const statusCounts = ref({})
 
-  const all = data.length
-  const counts = {}
-  for (const row of data) {
-    if (row.status) {
-      counts[row.status] = (counts[row.status] || 0) + 1
-    }
-  }
+const statusTabs = computed(() => {
+  const counts = statusCounts.value
+  const all = Object.values(counts).reduce((sum, c) => sum + c, 0)
   return [
     { label: '全部', value: '', count: all },
     ...statusOptions.map(s => ({ label: s.label, value: s.value, count: counts[s.value] || 0 }))
@@ -1417,54 +1396,20 @@ function handleStatusTab(val) {
 
 // ==================== 筛选与分页 ====================
 
-const filteredData = computed(() => {
-  let data = tableData.value
+// 后端已分页，tableData 即为当前页数据，无需前端再筛选
+// pagedData 直接等于 tableData（后端已分页）
+const pagedData = computed(() => tableData.value)
 
-  if (filterForm.purchaseNo) {
-    data = data.filter(r => r.purchase_no && r.purchase_no.includes(filterForm.purchaseNo))
-  }
-  if (filterForm.logisticsNo) {
-    data = data.filter(r => r.logistics_no && r.logistics_no.includes(filterForm.logisticsNo))
-  }
-  if (filterForm.platformOrderNo) {
-    data = data.filter(r => r.platform_order_no && r.platform_order_no.includes(filterForm.platformOrderNo))
-  }
-  if (filterForm.salesOrderNo) {
-    data = data.filter(r => r.sales_order_no && r.sales_order_no.includes(filterForm.salesOrderNo))
-  }
-  if (filterForm.platform) {
-    data = data.filter(r => r.platform === filterForm.platform)
-  }
-  if (filterForm.purchaseType) {
-    data = data.filter(r => r.purchase_type === filterForm.purchaseType)
-  }
-  if (filterForm.status) {
-    data = data.filter(r => r.status === filterForm.status)
-  }
-  if (filterForm.accountId) {
-    data = data.filter(r => r.account_id === filterForm.accountId)
-  }
-
-  return data
-})
-
-// 通过 watch 更新分页总数，避免在 computed 内产生响应式副作用（会导致 Vue 调度器递归更新，UI冻结）
-watch(filteredData, (data) => {
-  pageInfo.total = data.length
-}, { immediate: true })
-
-// 顶部采购账号下拉框切换时，同步到筛选条件
+// 顶部采购账号下拉框切换时，同步到筛选条件并重新加载
 watch(selectedAccount, (val) => {
   filterForm.accountId = val
-})
-
-const pagedData = computed(() => {
-  const start = (pageInfo.page - 1) * pageInfo.pageSize
-  return filteredData.value.slice(start, start + pageInfo.pageSize)
+  pageInfo.page = 1
+  loadData()
 })
 
 function handleSearch() {
   pageInfo.page = 1
+  loadData()
 }
 
 function handleReset() {
@@ -1473,16 +1418,21 @@ function handleReset() {
   filterForm.platformOrderNo = ''
   filterForm.salesOrderNo = ''
   filterForm.platform = ''
+  filterForm.purchaseType = ''
   filterForm.status = ''
   pageInfo.page = 1
+  loadData()
 }
 
 function handleSizeChange(val) {
   pageInfo.pageSize = val
+  pageInfo.page = 1
+  loadData()
 }
 
 function handlePageChange(val) {
   pageInfo.page = val
+  loadData()
 }
 
 // ==================== 数据加载 ====================
@@ -1490,17 +1440,30 @@ function handlePageChange(val) {
 async function loadData() {
   loading.value = true
   try {
-    const data = await fetchPurchaseOrders({ pageSize: 5000 })
-    const orders = data.list || data || []
-    
-    // 为每个订单填充account_name（accountList可能还在加载中，兼容空列表）
-    tableData.value = orders.map(order => {
-      const account = accountList.value.find(acc => acc.id === order.account_id)
-      return {
-        ...order,
-        account_name: account ? (account.username || account.account) : (order.account_name || null)
-      }
-    })
+    // 服务端分页+筛选：传递所有筛选参数给后端
+    const params = {
+      page: pageInfo.page,
+      pageSize: pageInfo.pageSize
+    }
+    if (filterForm.status) params.status = filterForm.status
+    if (filterForm.platform) params.platform = filterForm.platform
+    if (filterForm.purchaseNo) params.purchaseNo = filterForm.purchaseNo
+    if (filterForm.logisticsNo) params.logisticsNo = filterForm.logisticsNo
+    if (filterForm.platformOrderNo) params.platformOrderNo = filterForm.platformOrderNo
+    if (filterForm.salesOrderNo) params.salesOrderNo = filterForm.salesOrderNo
+    if (filterForm.purchaseType) params.purchaseType = filterForm.purchaseType
+    if (filterForm.accountId) params.accountId = filterForm.accountId
+
+    const orderData = await fetchPurchaseOrders(params)
+
+    // 后端 LEFT JOIN 已提供 account_name，无需前端映射
+    tableData.value = orderData.list || []
+    pageInfo.total = orderData.total || 0
+
+    // 后端已将 statusCounts 合并到列表响应中，直接提取
+    if (orderData.statusCounts) {
+      statusCounts.value = orderData.statusCounts
+    }
   } catch (err) {
     console.warn('加载采购订单失败:', err.message)
     tableData.value = []
@@ -3231,6 +3194,33 @@ function handleImportDialogClose() {
   color: #f56c6c;
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* 收货确认弹窗 */
+.receive-confirm-content {
+  text-align: center;
+  padding: 16px;
+  background: #f8f9fb;
+  border-radius: 10px;
+}
+.receive-confirm-text {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #303133;
+  margin: 0;
+}
+.receive-confirm-type {
+  color: #409eff;
+  font-weight: 600;
+}
+.receive-confirm-warehouse {
+  color: #e6a23c;
+  font-weight: 600;
+}
+.receive-confirm-footer {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
 }
 
 /* 云仓打单发货弹窗 */

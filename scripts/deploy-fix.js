@@ -33,7 +33,7 @@ conn.on('ready', async () => {
     const r1 = await execCmd('dir /b C:\\Users\\Administrator\\dianxiaoer-server 2>nul & echo === & dir /b C:\\Users\\Administrator\\dianxiaoer-api 2>nul & echo === & ' + NSSM + ' get dianxiaoer-server AppDirectory 2>&1 & echo === & ' + NSSM + ' get dianxiaoer-api AppDirectory 2>&1')
     console.log(r1.stdout)
 
-    // Step 2: 上传 server/index.js 到 dianxiaoer-server
+    // Step 2: 上传 server/index.js 到 dianxiaoer-server（C:\ 根目录，已从旧路径迁移）
     console.log('\n[2] Uploading server/index.js...')
     const sftp = await new Promise((resolve, reject) => {
       conn.sftp((err, sftp) => err ? reject(err) : resolve(sftp))
@@ -41,33 +41,35 @@ conn.on('ready', async () => {
 
     const localServerIndex = path.join(__dirname, '..', 'server', 'index.js')
     await new Promise((resolve, reject) => {
-      sftp.fastPut(localServerIndex, 'C:/Users/Administrator/dianxiaoer-server/index.js', err => err ? reject(err) : resolve())
+      sftp.fastPut(localServerIndex, 'C:/dianxiaoer-server/index.js', err => err ? reject(err) : resolve())
     })
     console.log('[2] server/index.js uploaded')
 
-    // Step 3: 上传 server-api/index.js 到 dianxiaoer-api
+    // Step 3: 上传 server-api/index.js 到 dianxiaoer-api（C:\ 根目录，已从旧路径迁移）
     console.log('\n[3] Uploading server-api/index.js...')
     const localApiIndex = path.join(__dirname, '..', 'server-api', 'index.js')
 
-    // 先尝试 dianxiaoer-api 目录
     let apiUploaded = false
     try {
       await new Promise((resolve, reject) => {
-        sftp.fastPut(localApiIndex, 'C:/Users/Administrator/dianxiaoer-api/index.js', err => err ? reject(err) : resolve())
+        sftp.fastPut(localApiIndex, 'C:/dianxiaoer-api/index.js', err => err ? reject(err) : resolve())
       })
       apiUploaded = true
-      console.log('[3] server-api/index.js uploaded to dianxiaoer-api/')
+      console.log('[3] server-api/index.js uploaded to C:/dianxiaoer-api/')
     } catch (e) {
-      console.log('[3] dianxiaoer-api directory not found, trying other locations...')
+      console.log('[3] C:/dianxiaoer-api/ not found, trying old path...')
     }
 
     if (!apiUploaded) {
-      // 查找 server-api 的实际位置
-      const findResult = await execCmd('dir /s /b C:\\Users\\Administrator\\index.js 2>nul | findstr /i "api"')
-      console.log('[3] Found api-related index.js files:', findResult.stdout.trim())
-      // 也检查 dianxiaoer-server 下是否有 server-api 子目录
-      const checkSub = await execCmd('dir /b C:\\Users\\Administrator\\dianxiaoer-server\\server-api 2>nul & dir /b C:\\Users\\Administrator\\dianxiaoer-server\\api 2>nul')
-      console.log('[3] Subdirs:', checkSub.stdout.trim())
+      try {
+        await new Promise((resolve, reject) => {
+          sftp.fastPut(localApiIndex, 'C:/Users/Administrator/dianxiaoer-api/index.js', err => err ? reject(err) : resolve())
+        })
+        apiUploaded = true
+        console.log('[3] server-api/index.js uploaded to old path')
+      } catch (e) {
+        console.error('[3] Failed to upload server-api/index.js:', e.message)
+      }
     }
 
     sftp.end()
@@ -93,10 +95,10 @@ conn.on('ready', async () => {
 
     // Step 6: 验证 JWT_SECRET 配置
     console.log('\n[6] Verifying JWT_SECRET config...')
-    const jwt1 = await execCmd('findstr "JWT_SECRET" C:\\Users\\Administrator\\dianxiaoer-server\\index.js 2>nul')
+    const jwt1 = await execCmd('findstr "JWT_SECRET" C:\\dianxiaoer-server\\index.js 2>nul')
     console.log('[6] server JWT_SECRET:', jwt1.stdout.trim().substring(0, 150))
 
-    const jwt2 = await execCmd('findstr "JWT_SECRET" C:\\Users\\Administrator\\dianxiaoer-api\\index.js 2>nul')
+    const jwt2 = await execCmd('findstr "JWT_SECRET" C:\\dianxiaoer-api\\index.js 2>nul')
     console.log('[6] api JWT_SECRET:', jwt2.stdout.trim().substring(0, 150))
 
     console.log('\n[Deploy] Deployment complete!')

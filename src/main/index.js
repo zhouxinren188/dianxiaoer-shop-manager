@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err)
 })
 
-const { getHotUpdateRendererPath, getHotUpdatePreloadPath } = require('./hot-updater')
+const { getHotUpdateRendererPath, getHotUpdatePreloadPath, getCurrentVersion } = require('./hot-updater')
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
@@ -128,7 +128,7 @@ ipcMain.handle('window-maximize', (event) => {
 ipcMain.handle('window-close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
-ipcMain.handle('get-app-version', () => app.getVersion())
+ipcMain.handle('get-app-version', () => getCurrentVersion())
 ipcMain.handle('open-external-url', (event, { url }) => {
   if (!url) return { success: false, message: '网址为空' }
 

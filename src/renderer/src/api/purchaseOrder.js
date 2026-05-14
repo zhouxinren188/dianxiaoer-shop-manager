@@ -15,6 +15,11 @@ export function fetchPurchaseOrders(params) {
   return get('/api/purchase-orders', params)
 }
 
+// 获取各状态订单数量（用于 Tab 标签）
+export function fetchPurchaseOrderCounts() {
+  return get('/api/purchase-orders/count-by-status')
+}
+
 // 获取采购订单详情
 export function fetchPurchaseOrder(id) {
   return get(`/api/purchase-orders/${id}`)
@@ -55,9 +60,9 @@ export function batchImportPurchaseOrders(orders) {
   return post('/api/purchase-orders/batch-import', { orders }, 30000)
 }
 
-// 获取采购订单关联的销售商品信息（通过本地代理服务器转发）
+// 获取采购订单关联的销售商品信息
 export function fetchRelatedSales(id) {
-  return get(`/api/purchase-orders/${id}/related-sales`, null, 'http://localhost:3002')
+  return get(`/api/purchase-orders/${id}/related-sales`)
 }
 
 // 删除采购订单

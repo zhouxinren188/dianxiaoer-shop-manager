@@ -3900,12 +3900,15 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
           )
         : partitionCookies.filter(c => !c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
-      if (validPlatformCookies.length > 0) {
+      // PDD 平台：即使 partition 有 PDDAccessToken 也必须从服务器恢复
+      // 因为 PDDAccessToken 可能本地未过期但 PDD 服务器端已失效，必须用服务器最新 cookie 更新 partition
+      // 非 PDD 平台：partition 有有效 cookie 时信任 partition（更新鲜），跳过服务器恢复
+      if (validPlatformCookies.length > 0 && platform !== 'pinduoduo') {
         needServerRestore = false
         console.log(`[PurchaseCapture] Partition已有 ${validPlatformCookies.length} 条有效${platform} cookie，跳过服务器恢复`)
         flushStorageDataAsync(ses)
       } else {
-        console.log(`[PurchaseCapture] Partition无有效${platform} cookie，需从服务器恢复`)
+        console.log(`[PurchaseCapture] ${platform === 'pinduoduo' ? `Partition有 ${validPlatformCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）` : `Partition无有效${platform} cookie，需从服务器恢复`}`)
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
@@ -5717,10 +5720,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         c.domain && (c.domain.includes('pinduoduo.com') || c.domain.includes('yangkeduo.com')) &&
         (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
       )
+      // PDD 平台：即使有 PDDAccessToken 也必须从服务器恢复
+      // 因为 PDDAccessToken 可能本地未过期但 PDD 服务器端已失效
       if (validPddCookies.length > 0) {
-        needServerRestore = false
-        console.log(`[PddBrowsing] Partition已有 ${validPddCookies.length} 条有效PDD cookie，跳过服务器恢复`)
-        flushStorageDataAsync(ses)
+        console.log(`[PddBrowsing] Partition有 ${validPddCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）`)
       } else {
         console.log(`[PddBrowsing] Partition无有效PDD cookie，需从服务器恢复`)
       }

@@ -887,14 +887,17 @@ function registerPurchaseAccountIpc(mainWindow) {
             return false
           })
           // 兜底：如果没有找到关键cookie名，但有大量该平台域cookie（>5条），也认为可能有效
-          if (!hasValidCookie && platformCookieCount > 5) {
+          // 但 PDD 平台除外：PDDAccessToken 是必要条件，没有它 PDD 服务器会拒绝请求
+          if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo') {
             hasValidCookie = true
           }
         }
 
-        // ★ partition 无有效 cookie 时，尝试从服务器恢复（防止 partition 数据丢失后需要重新登录）
-        if (!hasValidCookie) {
-          console.log(`[PurchaseWindow] Partition无${platform}有效cookie (platformCount=${platformCookieCount})，尝试从服务器恢复...`)
+        // ★ PDD 平台：即使 partition 有有效 cookie（含 PDDAccessToken），也必须从服务器恢复
+        //   因为 PDDAccessToken 可能本地未过期但 PDD 服务器端已失效
+        // ★ 非 PDD 平台：partition 无有效 cookie 时才从服务器恢复
+        if (!hasValidCookie || platform === 'pinduoduo') {
+          console.log(`[PurchaseWindow] ${platform === 'pinduoduo' ? `PDD平台始终从服务器恢复cookie（即使partition有PDDAccessToken，可能服务端已失效）` : `Partition无${platform}有效cookie (platformCount=${platformCookieCount})，尝试从服务器恢复...`}`)
           try {
             const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
               method: 'GET'
@@ -952,7 +955,8 @@ function registerPurchaseAccountIpc(mainWindow) {
                       }
                       return false
                     })
-                    if (!hasValidCookie && platformCookieCount > 5) hasValidCookie = true
+                    if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo') hasValidCookie = true
+                    console.log(`[PurchaseWindow] 恢复后重新检测: hasValidCookie=${hasValidCookie}, platformCookieCount=${platformCookieCount}, platform=${platform}`)
                   }
                 }
               }
@@ -962,7 +966,9 @@ function registerPurchaseAccountIpc(mainWindow) {
           }
         }
 
+        console.log(`[PurchaseWindow] 最终判定: hasValidCookie=${hasValidCookie}, targetUrl=${hasValidCookie ? PURCHASE_BACKEND_URLS[platform] : loginUrl}`)
         if (hasValidCookie) {
+          // 有有效 cookie 时加载后台页面（所有平台统一逻辑）
           const backendUrl = PURCHASE_BACKEND_URLS[platform]
           if (backendUrl) {
             targetUrl = backendUrl
@@ -976,7 +982,15 @@ function registerPurchaseAccountIpc(mainWindow) {
       }
     }
 
+    console.log(`[PurchaseWindow] loadURL: ${targetUrl}`)
     win.loadURL(targetUrl)
+
+    win.webContents.on('did-navigate', (e, url) => {
+      console.log(`[PurchaseWindow] did-navigate: ${url}`)
+    })
+    win.webContents.on('did-fail-load', (e, code, desc, url) => {
+      console.log(`[PurchaseWindow] did-fail-load: code=${code}, desc=${desc}, url=${url}`)
+    })
 
     win.once('ready-to-show', () => { win.focus() })
     setTimeout(() => { if (!win.isDestroyed()) win.focus() }, 500)

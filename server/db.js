@@ -428,6 +428,8 @@ async function initDB() {
     try { await connection.execute('CREATE INDEX idx_owner_status ON purchase_orders(owner_id, status)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_owner_platform ON purchase_orders(owner_id, platform)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_created_by ON purchase_orders(created_by)') } catch(e) { /* 索引已存在 */ }
+    // 复合索引：服务端分页筛选优化（owner_id + status + platform 三条件联合查询）
+    try { await connection.execute('CREATE INDEX idx_owner_status_platform ON purchase_orders(owner_id, status, platform)') } catch(e) { /* 索引已存在 */ }
     // purchase_accounts 表缺少的索引
     try { await connection.execute('CREATE INDEX idx_pa_owner_id ON purchase_accounts(owner_id)') } catch(e) { /* 索引已存在 */ }
     // user_purchase_accounts 表缺少的索引（子账号权限查询核心）
