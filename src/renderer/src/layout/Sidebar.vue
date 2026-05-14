@@ -99,75 +99,16 @@
         <el-icon><OfficeBuilding /></el-icon>
         <span>店铺管理</span>
       </el-menu-item>
-
-      <!-- 工具 分组 -->
-      <div class="menu-group-title">工具</div>
-      <el-menu-item index="open-url" @click="handleOpenUrl">
-        <el-icon><Link /></el-icon>
-        <span>打开网址</span>
-      </el-menu-item>
-      <el-menu-item index="packet-capture" @click="handlePacketCapture" :class="{ 'capturing': isCapturing }">
-        <el-icon><Monitor /></el-icon>
-        <span>{{ isCapturing ? '停止抓包' : '抓包工具' }}</span>
-        <span v-if="isCapturing" class="capture-indicator"></span>
-      </el-menu-item>
     </el-menu>
 
-    <!-- 打开网址弹窗 -->
-    <el-dialog
-      v-model="openUrlDialogVisible"
-      title="打开网址"
-      width="460px"
-      :append-to-body="true"
-    >
-      <el-input
-        v-model="inputUrl"
-        placeholder="请输入网址，如 https://www.example.com"
-        clearable
-        @keyup.enter="confirmOpenUrl"
-      >
-        <template #prepend>URL</template>
-      </el-input>
-      <template #footer>
-        <el-button @click="openUrlDialogVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!inputUrl.trim()" @click="confirmOpenUrl">打开</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 抓包风险提示弹窗 -->
-    <el-dialog
-      v-model="riskDialogVisible"
-      title="风险提示"
-      width="480px"
-      :show-close="false"
-      :close-on-click-modal="false"
-      :append-to-body="true"
-    >
-      <div style="color: #f56c6c; font-size: 14px; line-height: 1.8;">
-        <p style="font-weight: bold; margin-bottom: 8px;">抓包工具使用须知</p>
-        <p>1. 抓包功能仅用于调试分析，请勿用于非法用途。</p>
-        <p>2. 京麦等电商平台风控严格，高频或异常请求可能导致账号受限。</p>
-        <p>3. 抓取的接口数据请谨慎使用，避免触发平台安全机制。</p>
-        <p>4. 单次抓包最长 5 分钟，超时将自动停止。</p>
-      </div>
-      <template #footer>
-        <el-button @click="riskDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="confirmStartCapture">我已了解风险，开始抓包</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 抓包结果弹窗 -->
-    <PacketResultDialog
-      v-model:visible="packetDialogVisible"
-      :data="packetData"
-    />
+    <!-- 版本号 -->
+    <div class="sidebar-version">v{{ appVersion }}</div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import {
   HomeFilled,
   List,
@@ -179,21 +120,19 @@ import {
   Ticket,
   UserFilled,
   OfficeBuilding,
-  Link,
-  Monitor,
   Setting,
   TrendCharts,
   Money
 } from '@element-plus/icons-vue'
-import PacketResultDialog from '@/views/user/components/PacketResultDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 
 const activeMenu = computed(() => route.path)
 
+const appVersion = __APP_VERSION__
+
 function onMenuSelect(index) {
-  if (index === 'open-url' || index === 'packet-capture') return
   if (route.path === index) return
 
   router.push(index).then(failure => {
@@ -204,92 +143,6 @@ function onMenuSelect(index) {
     console.error('[Navigate] 路由跳转失败:', err)
   })
 }
-
-// --- 打开网址功能 ---
-const openUrlDialogVisible = ref(false)
-const inputUrl = ref('')
-
-async function handleOpenUrl() {
-  if (!window.electronAPI) {
-    ElMessage.warning('请在 Electron 环境中使用此功能')
-    return
-  }
-  inputUrl.value = ''
-  openUrlDialogVisible.value = true
-}
-
-async function confirmOpenUrl() {
-  const url = inputUrl.value.trim()
-  if (!url) return
-
-  let finalUrl = url
-  if (!/^https?:\/\//i.test(finalUrl)) {
-    finalUrl = 'https://' + finalUrl
-  }
-
-  try {
-    await window.electronAPI.invoke('open-external-url', { url: finalUrl })
-    openUrlDialogVisible.value = false
-  } catch (err) {
-    ElMessage.error('打开网址失败: ' + err.message)
-  }
-}
-
-// --- 抓包工具功能 ---
-const isCapturing = ref(false)
-const packetDialogVisible = ref(false)
-const packetData = ref([])
-const riskDialogVisible = ref(false)
-
-async function handlePacketCapture() {
-  if (!window.electronAPI) {
-    ElMessage.warning('请在 Electron 环境中使用此功能')
-    return
-  }
-
-  if (!isCapturing.value) {
-    riskDialogVisible.value = true
-  } else {
-    try {
-      const result = await window.electronAPI.invoke('packet-capture-stop')
-      isCapturing.value = false
-      packetData.value = result.data || []
-      if (packetData.value.length > 0) {
-        packetDialogVisible.value = true
-      } else {
-        ElMessage.info('未捕获到任何请求')
-      }
-    } catch (err) {
-      ElMessage.error('停止抓包失败: ' + err.message)
-    }
-  }
-}
-
-async function confirmStartCapture() {
-  riskDialogVisible.value = false
-  try {
-    await window.electronAPI.invoke('packet-capture-start')
-    isCapturing.value = true
-    ElMessage.success('抓包已开始，最长持续 5 分钟')
-  } catch (err) {
-    ElMessage.error('启动抓包失败: ' + err.message)
-  }
-}
-
-// 监听主进程超时自动停止事件
-let unsubPacketCapture = null
-onMounted(() => {
-  if (window.electronAPI?.onUpdate) {
-    unsubPacketCapture = window.electronAPI.onUpdate('packet-capture-auto-stopped', () => {
-      isCapturing.value = false
-      ElMessage.warning('抓包已超时自动停止')
-    })
-  }
-})
-
-onUnmounted(() => {
-  if (unsubPacketCapture) { unsubPacketCapture(); unsubPacketCapture = null }
-})
 </script>
 
 <style scoped>
@@ -340,6 +193,14 @@ onUnmounted(() => {
   border-radius: 2px;
 }
 
+.sidebar-version {
+  padding: 12px 20px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+  text-align: center;
+  letter-spacing: 1px;
+}
+
 .menu-group-title {
   padding: 16px 16px 8px;
   font-size: 12px;
@@ -378,26 +239,5 @@ onUnmounted(() => {
 :deep(.el-sub-menu .el-menu-item) {
   padding-left: 52px !important;
   min-width: auto;
-}
-
-/* 抓包中状态样式 */
-:deep(.el-menu-item.capturing) {
-  background-color: rgba(245, 108, 108, 0.15) !important;
-  color: #f56c6c !important;
-}
-
-.capture-indicator {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  background-color: #f56c6c;
-  border-radius: 50%;
-  margin-left: 8px;
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.8); }
 }
 </style>
