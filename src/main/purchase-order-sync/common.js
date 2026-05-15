@@ -600,19 +600,42 @@ async function restoreCookiesFromServer(accountId, platform) {
       return { restored: false, count: 0, skipped: 0 }
     }
 
-    // 4. 获取 partition 已有 cookie，构建 key 集合用于合并判断
-    const existingCookies = await ses.cookies.get({})
-    const existingKeys = new Set()
-    for (const ck of existingCookies) {
-      existingKeys.add(`${ck.name}|${ck.domain}|${ck.path}`)
+    // 4. PDD 平台：恢复前先清除 partition 中该平台域名的旧 cookie
+    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点），与服务器的新格式（有前导点）不同
+    // 合并模式用 name|domain|path 做 key，新旧 domain 不同导致旧 cookie 不被覆盖，新旧并存 PDD 优先使用旧的失效 cookie
+    if (platform === 'pinduoduo') {
+      try {
+        const pddDomains = ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
+        const existingPddCookies = await ses.cookies.get({})
+        const oldPddCookies = existingPddCookies.filter(c =>
+          pddDomains.some(d => c.domain && c.domain.includes(d))
+        )
+        for (const old of oldPddCookies) {
+          try {
+            const secure = old.secure || false
+            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+            await ses.cookies.remove(url, old.name)
+          } catch (e) { /* ignore */ }
+        }
+        if (oldPddCookies.length > 0) console.log(`[CookieRestore] PDD 旧 cookie 已清除: ${oldPddCookies.length} 条, accountId=${accountId}`)
+      } catch (clearErr) {
+        console.warn(`[CookieRestore] PDD 旧 cookie 清除失败:`, clearErr.message)
+      }
     }
 
-    // 5. 只补充 partition 中缺失的 cookie，不覆盖已有的
+    // 5. 写入服务器 cookie（PDD 已清除旧 cookie，全量写入；其他平台仍为合并模式）
+    const existingKeysAfter = new Set()
+    if (platform !== 'pinduoduo') {
+      const currentCookies = await ses.cookies.get({})
+      for (const ck of currentCookies) {
+        existingKeysAfter.add(`${ck.name}|${ck.domain}|${ck.path}`)
+      }
+    }
     let setOk = 0
     let skipped = 0
     for (const ck of validCookies) {
       const key = `${ck.name}|${ck.domain || ''}|${ck.path || '/'}`
-      if (existingKeys.has(key)) {
+      if (existingKeysAfter.has(key)) {
         skipped++
         continue
       }
@@ -636,8 +659,11 @@ async function restoreCookiesFromServer(accountId, platform) {
       }
     }
 
-    // 6. 刷盘持久化
-    await new Promise(resolve => ses.flushStorageData(resolve))
+    // 6. 刷盘持久化（5秒超时防止卡死）
+    await Promise.race([
+      new Promise(resolve => ses.flushStorageData(resolve)),
+      new Promise(resolve => setTimeout(resolve, 5000))
+    ])
 
     console.log(`[CookieRestore] 合并完成: accountId=${accountId}, ${setOk} 条补充/${skipped} 条保留/${validCookies.length} 条服务器总有效 (平台: ${platform})`)
     return { restored: setOk > 0, count: setOk, skipped }

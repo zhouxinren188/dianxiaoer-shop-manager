@@ -23,7 +23,7 @@ const HOST = '150.158.54.108'
 const SSH_PORT = 22
 const USERNAME = 'administrator'
 const PASSWORD = 'K9#m2$vL5@zQ'
-const REMOTE_DIR = 'C:/Users/Administrator/dianxiaoer-api'
+const REMOTE_DIR = 'C:/dianxiaoer-api'
 const REMOTE_UPDATE_DIR = `${REMOTE_DIR}/updates`
 const NSSM = 'C:/nssm/nssm.exe'
 const UPDATE_SERVER = 'https://150.158.54.108:3001'
@@ -199,7 +199,10 @@ async function main() {
   try {
     await execCmd(conn3, `cd /d "${REMOTE_DIR}" && npm install --production`)
     console.log('  重启服务...')
-    await execCmd(conn3, `${NSSM} restart dianxiaoer-api`)
+    // nssm restart 会挂起 SSH 会话，改用 stop + start
+    await execCmd(conn3, `${NSSM} stop dianxiaoer-api`)
+    await new Promise(r => setTimeout(r, 3000))
+    await execCmd(conn3, `${NSSM} start dianxiaoer-api`)
     await new Promise(r => setTimeout(r, 5000))
     const health = await execCmd(conn3, 'curl -sk https://localhost:3001/api/health')
     console.log('  Health:', health.stdout.trim())

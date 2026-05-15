@@ -21,7 +21,12 @@
 > - 如果连续发布 renderer-only 和 main-only，用户只会拿到最新的那个，导致 main/renderer 版本不同步
 > - `--main --upload` 多出的几百 KB 可忽略，但彻底杜绝不同步问题
 
-> **全量更新优先于热更新**：服务器 check 接口先检查全量更新，有全量更新时优先返回全量，确保旧基础版本用户先升级到最新全量包。
+> **更新优先级规则v2（2026-05-16）**：服务器 check 接口按以下顺序判断：
+> 1. 基础版本落后（appVersion < fullVersion）→ 优先返回全量更新，确保旧 app.asar 的 bootstrap 等底层问题被修复
+> 2. 基础版本已达标（appVersion >= fullVersion）→ 检查热更新，返回最新补丁
+> - 客户端传参：`version`=当前运行版本（含热更新），`appVersion`=基础版本（app.asar 的 package.json 版本）
+> - 原因：热更新不修改 app.asar 内的 bootstrap，跳过全量更新会导致功能异常
+> - 发布全量更新时，版本号应 >= 当前热更新版本号，确保全量包包含所有最新修复
 
 ### 热更新发布步骤
 1. 确认 `package.json` 版本号已更新
@@ -30,17 +35,23 @@
 4. 验证：`curl http://150.158.54.108:3001/api/update/check?version=0.0.0&appVersion=当前基础版本`
 
 ### 全量发布步骤
-1. 确认 `package.json` 版本号已更新
+1. 确认 `package.json` 版本号已更新（版本号应 >= 当前热更新版本号）
 2. 提交代码到 git
 3. 执行 `node scripts/publish-full.js`
 4. 脚本自动完成：构建 → bytenode 编译 → 打包 → SFTP 上传 → 服务端代码部署 → 重启 API 服务 → 登记全量版本
 5. 验证：`curl http://150.158.54.108:3001/api/health`
+6. 验证更新接口：`curl http://150.158.54.108:3001/api/update/check?version=0.0.0&appVersion=0.0.0` 应返回全量更新
+
+> **全量发布注意事项**：
+> - `publish-full.js` 的 REMOTE_DIR 必须是 `C:/dianxiaoer-api`（不是 `C:/Users/Administrator/dianxiaoer-api`）
+> - `nssm restart` 会挂SSH会话，必须用 `nssm stop` + 等待 + `nssm start`，或 `taskkill /F /IM node.exe` 后 `nssm start`
+> - 全量发布后必须确认 `latest.yml` 和 `update-meta.json` 的 fullUpdate 版本已同步更新，否则 electron-updater 会拒绝下载
 
 ### 热更新参数说明
 - `--upload`：自动上传到服务器（不加则只生成本地 ZIP）
 - `--main`：包含主进程字节码（同时包含 renderer）
 - `--main-only`：仅包含主进程字节码（不含 renderer）
-- `--base=x.y.z`：指定 baseVersion（热更新仅对匹配基础版本的客户端生效）
+- `--base=x.y.z`：指定 baseVersion（热更新仅对匹配基础版本的客户端生效）。已统一 `--main --upload` 后意义弱化，但作为安全兜底防止 .jsc 与过旧 V8 不兼容
 
 ---
 

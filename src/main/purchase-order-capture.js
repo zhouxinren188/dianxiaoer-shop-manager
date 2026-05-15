@@ -4066,6 +4066,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
+          // PDD domain 规范化：hostOnly 的 mobile.yangkeduo.com 必须加前导点
+          if (platform === 'pinduoduo') cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -4899,8 +4901,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           }
           try {
             const ses = session.fromPartition(partitionName)
-            const cookies = await ses.cookies.get({})
+            let cookies = await ses.cookies.get({})
             if (cookies && cookies.length > 0) {
+              // PDD domain 规范化：hostOnly 的 mobile.yangkeduo.com 必须加前导点变为 .mobile.yangkeduo.com
+              const pddNormCount = cookies.filter(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly).length
+              cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
+              if (pddNormCount > 0) console.log(`[PurchaseCapture] PDD domain 规范化: ${pddNormCount} 条 cookie 加前导点`)
               await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -5854,8 +5860,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
         // 1. 保存cookie到服务器
         try {
-          const cookies = await ses.cookies.get({})
+          let cookies = await ses.cookies.get({})
           if (cookies && cookies.length > 0) {
+            // PDD domain 规范化
+            cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
             await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -5868,8 +5876,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }
 
         // 2. 刷盘确保持久化到磁盘（关键！persist:分区的数据必须flush才能在重启后保留）
+        // 5秒超时防止卡死
         try {
-          await new Promise(resolve => ses.flushStorageData(resolve))
+          await Promise.race([
+            new Promise(resolve => ses.flushStorageData(resolve)),
+            new Promise(resolve => setTimeout(resolve, 5000))
+          ])
           console.log('[PddBrowsing] Session数据已刷盘')
         } catch (err) {
           console.error('[PddBrowsing] 刷盘失败:', err.message)
@@ -5900,8 +5912,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         return
       }
       try {
-        const cookies = await ses.cookies.get({})
+        let cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
+          // PDD domain 规范化
+          cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

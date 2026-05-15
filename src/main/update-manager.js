@@ -49,6 +49,12 @@ function checkServerForUpdate() {
 async function checkForUpdates(manual = false) {
   if (state === 'downloading' || state === 'ready') return // 下载中或已就绪不重复检查
 
+  // 从 error 状态恢复，允许重试
+  if (state === 'error') {
+    console.log('[UpdateManager] 从 error 状态恢复，重新检查更新')
+    state = 'idle'
+  }
+
   state = 'checking'
   try {
     const result = await checkServerForUpdate()

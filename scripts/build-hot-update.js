@@ -125,9 +125,41 @@ if (includeMain) {
   }
   // 生成简单的 main/index.js 加载器（仅加载同目录 index.jsc，不包含热更新检查逻辑）
   // 热更新检查已由 app 内置的 bootstrap.js 完成，此处不能再重复检查，否则会循环 require 自身
+  //
+  // bytenode 加载策略（多级 fallback）：
+  // 1. 直接 require('bytenode') — 如果 bootstrap 已预加载（新版本），此步成功
+  // 2. 从 app.asar.unpacked 加载 — electron-builder 自动将原生模块解压到此目录
+  // 3. 从 app.asar 加载 index.js 入口 — Electron 修补了 require 支持 asar 路径
+  //
+  // 背景：此文件位于 userData/hot-update/main/index.js，不在 app.asar 内，
+  // 因此 Node.js 模块解析无法自动找到 asar 内的 bytenode。
   const simpleLoader = `// 主进程热更新加载器 — 由 build-hot-update.js 自动生成
 // 仅加载同目录下的 index.jsc，不包含热更新检查逻辑（检查已在 bootstrap.js 中完成）
-try { require('bytenode') } catch (e) { require(require('path').join(require('electron').app.getAppPath(), 'out', 'main', 'node_modules', 'bytenode')) }
+;(function loadBytenode() {
+  // 如果 .jsc 扩展处理器已注册，说明 bytenode 已加载，无需再加载
+  if (require.extensions['.jsc']) return
+  try { require('bytenode'); return } catch (_) {}
+  var path = require('path')
+  var app = require('electron').app
+  var appPath = app.getAppPath()
+  // electron-builder 将含原生模块的包自动解压到 app.asar.unpacked
+  // app.getAppPath() 返回如 "D:\\...\\resources\\app.asar"，需替换为 .asar.unpacked
+  var unpackedPath = appPath.replace(/\\.asar\\b/, '.asar.unpacked')
+  var bytenodeDir = path.join('out', 'main', 'node_modules', 'bytenode')
+  var tried = [appPath, unpackedPath]
+  try { require(path.join(unpackedPath, bytenodeDir)); return } catch (_) {}
+  try { require(path.join(appPath, bytenodeDir)); return } catch (_) {}
+  // 尝试通过 process.resourcesPath 构建路径（更可靠）
+  var resPath = process.resourcesPath
+  if (resPath) {
+    var resUnpacked = path.join(resPath, 'app.asar.unpacked')
+    var resAsar = path.join(resPath, 'app.asar')
+    tried.push(resUnpacked, resAsar)
+    try { require(path.join(resUnpacked, bytenodeDir)); return } catch (_) {}
+    try { require(path.join(resAsar, bytenodeDir)); return } catch (_) {}
+  }
+  throw new Error('[HotUpdate] cannot load bytenode, tried: ' + tried.join('; '))
+})()
 module.exports = require('./index.jsc')
 `
   zip.addFile('main/index.js', Buffer.from(simpleLoader))

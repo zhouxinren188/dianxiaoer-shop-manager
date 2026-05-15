@@ -2717,10 +2717,67 @@ app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
     const { cookie_data, platform } = req.body
     const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [accountId, ownerId])
     if (!check.length) return res.status(403).json(fail('无权操作此账号'))
-    await pool.execute(
-      'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
-      [accountId, typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data||[]), platform||'']
-    )
+
+    // 解析并规范化 cookie 数据
+    let newCookies = typeof cookie_data === 'string' ? JSON.parse(cookie_data || '[]') : (cookie_data || [])
+
+    // PDD domain 规范化：mobile.yangkeduo.com（hostOnly）必须加前导点变为 .mobile.yangkeduo.com（非hostOnly）
+    // 否则其他电脑恢复后 cookie 不跨子域共享，PDD 无法识别登录状态
+    if (platform === 'pinduoduo' && Array.isArray(newCookies)) {
+      let normCount = 0
+      newCookies = newCookies.map(c => {
+        if (c.domain === 'mobile.yangkeduo.com' && c.hostOnly) {
+          normCount++
+          return { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false }
+        }
+        return c
+      })
+      if (normCount > 0) console.log(`[CookieSave] PDD domain 规范化: account=${accountId}, ${normCount} 条 cookie 加前导点`)
+    }
+
+    if (Array.isArray(newCookies) && newCookies.length > 0) {
+      const [existing] = await pool.execute('SELECT cookie_data FROM purchase_cookies WHERE account_id=?', [accountId])
+      let mergedCookies = newCookies
+      if (existing.length && existing[0].cookie_data) {
+        let existingCookies = typeof existing[0].cookie_data === 'string'
+          ? JSON.parse(existing[0].cookie_data)
+          : existing[0].cookie_data
+        if (Array.isArray(existingCookies) && existingCookies.length > 0) {
+          // 对已有数据也做 PDD domain 规范化，确保合并 key 一致
+          if (platform === 'pinduoduo') {
+            existingCookies = existingCookies.map(c => {
+              if (c.domain === 'mobile.yangkeduo.com' && c.hostOnly) {
+                return { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false }
+              }
+              return c
+            })
+          }
+          // 以 name|domain|path 为合并 key，新数据优先，已有数据中不在新数据的保留
+          const newCookieMap = new Map()
+          for (const c of newCookies) {
+            newCookieMap.set(`${c.name}|${c.domain || ''}|${c.path || '/'}`, c)
+          }
+          const merged = [...newCookies]
+          for (const c of existingCookies) {
+            const key = `${c.name}|${c.domain || ''}|${c.path || '/'}`
+            if (!newCookieMap.has(key)) {
+              merged.push(c)
+            }
+          }
+          mergedCookies = merged
+        }
+      }
+      await pool.execute(
+        'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
+        [accountId, JSON.stringify(mergedCookies), platform || '']
+      )
+    } else {
+      await pool.execute(
+        'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
+        [accountId, JSON.stringify(newCookies), platform || '']
+      )
+    }
+
     await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }

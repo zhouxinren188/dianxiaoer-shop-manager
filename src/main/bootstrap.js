@@ -83,6 +83,14 @@ function bootstrap() {
     }
 
     // 所有校验通过，加载热更新版本
+    // 关键：先加载 bytenode，注册 .jsc 扩展处理器
+    // 因为 hot-update/main/index.js 在 app.asar 外部，无法自行 require('bytenode')
+    // 必须由 bootstrap（在 asar 内）预先加载，这样后续 require('./index.jsc') 才能工作
+    try {
+      require('bytenode')
+    } catch (e) {
+      log('[Bootstrap] 预加载 bytenode 失败: ' + e.message)
+    }
     log('[Bootstrap] 加载主进程热更新: ' + hotMainJs)
     try {
       require(hotMainJs)

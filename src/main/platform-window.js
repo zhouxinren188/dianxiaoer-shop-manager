@@ -789,7 +789,7 @@ const PURCHASE_BACKEND_URLS = {
 const purchaseWindows = new Map()
 
 // 后台恢复采购账号 cookie（不阻塞窗口加载，消除白屏等待）
-async function restorePurchaseCookiesInBackground(accountId, platform, partitionName) {
+async function restorePurchaseCookiesInBackground(accountId, platform, partitionName, win) {
   try {
     const ses = session.fromPartition(partitionName)
     const now = Date.now() / 1000
@@ -808,6 +808,30 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
             return true
           })
           console.log(`[PurchaseWindow] 后台恢复cookie: ${serverCookies.length}/${raw.length} 条, accountId=${accountId}`)
+
+          // PDD：恢复前先清除 partition 中该平台域名的旧 cookie
+          // 原因：旧 cookie 可能是 hostOnly（domain 无前导点），与服务器的新格式（有前导点）不同
+          // ses.cookies.set() 不会删除旧格式 cookie，导致新旧并存，PDD 优先使用旧的失效 cookie
+          if (platform === 'pinduoduo') {
+            try {
+              const existing = await ses.cookies.get({})
+              const pddDomains = ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
+              const oldPddCookies = existing.filter(c =>
+                pddDomains.some(d => c.domain && c.domain.includes(d))
+              )
+              for (const old of oldPddCookies) {
+                try {
+                  const secure = old.secure || false
+                  const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+                  await ses.cookies.remove(url, old.name)
+                } catch (e) { /* ignore */ }
+              }
+              console.log(`[PurchaseWindow] PDD 旧 cookie 已清除: ${oldPddCookies.length} 条, accountId=${accountId}`)
+            } catch (clearErr) {
+              console.warn(`[PurchaseWindow] PDD 旧 cookie 清除失败:`, clearErr.message)
+            }
+          }
+
           let setOk = 0
           for (const ck of serverCookies) {
             try {
@@ -834,6 +858,31 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
             console.log(`[PurchaseWindow] 后台刷盘完成, accountId=${accountId}`)
           })
           console.log(`[PurchaseWindow] 后台恢复写入: ${setOk} 成功, accountId=${accountId}`)
+
+          // 恢复成功后：如果窗口还显示登录页，刷新到后台页面
+          // 时序问题：win.loadURL 先执行（加载登录页），后台恢复后 cookie 已写入但页面不知道
+          // 需要让页面重新加载才能使用新 cookie
+          if (win && !win.isDestroyed() && setOk > 0) {
+            try {
+              const currentUrl = win.webContents.getURL()
+              const loginUrls = [
+                'yangkeduo.com/proxy/api/login',
+                'pinduoduo.com/login',
+                'login.yangkeduo.com'
+              ]
+              const isOnLoginPage = loginUrls.some(u => currentUrl.includes(u))
+              const backendUrl = platform === 'pinduoduo' ? 'https://mobile.yangkeduo.com' : null
+              if (isOnLoginPage && backendUrl) {
+                console.log(`[PurchaseWindow] Cookie恢复成功，刷新页面到后台: ${backendUrl}`)
+                win.loadURL(backendUrl)
+              } else if (currentUrl.includes('yangkeduo.com') || currentUrl.includes('pinduoduo.com')) {
+                console.log(`[PurchaseWindow] Cookie恢复成功，刷新当前页面`)
+                win.webContents.reload()
+              }
+            } catch (e) {
+              // 忽略刷新失败
+            }
+          }
         }
       }
     }
@@ -965,7 +1014,7 @@ function registerPurchaseAccountIpc(mainWindow) {
 
     // ★ 后台从服务器恢复 cookie（不阻塞页面加载）
     if (needServerRestore && account) {
-      restorePurchaseCookiesInBackground(accountId, platform, partitionName)
+      restorePurchaseCookiesInBackground(accountId, platform, partitionName, win)
     }
 
     win.webContents.on('did-fail-load', (e, code, desc, url) => {
@@ -989,13 +1038,30 @@ function registerPurchaseAccountIpc(mainWindow) {
       douyin: ['sessionid', 'uid_tt']
     }
 
+    // PDD cookie domain 规范化：mobile.yangkeduo.com（hostOnly）必须加前导点变为 .mobile.yangkeduo.com（非hostOnly）
+    // 否则其他电脑恢复后 cookie 不跨子域共享，PDD 无法识别登录状态
+    function normalizePddCookieDomain(cookies) {
+      if (platform !== 'pinduoduo') return cookies
+      let normalized = 0
+      const result = cookies.map(c => {
+        if (c.domain === 'mobile.yangkeduo.com' && c.hostOnly) {
+          normalized++
+          return { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false }
+        }
+        return c
+      })
+      if (normalized > 0) console.log(`[PurchaseWindow] PDD domain 规范化: ${normalized} 条 cookie 加前导点 (platform=${platform})`)
+      return result
+    }
+
     // 保存 cookies 到服务器的通用函数
     async function saveCookiesToServer() {
       if (win.isDestroyed()) return null
       try {
         const ses = session.fromPartition(partitionName)
-        const cookies = await ses.cookies.get({})
+        let cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
+          cookies = normalizePddCookieDomain(cookies)
           const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
@@ -1156,6 +1222,7 @@ function registerPurchaseAccountIpc(mainWindow) {
             }
           }
 
+          cookies = normalizePddCookieDomain(cookies)
           const cookieData = JSON.stringify(cookies)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
@@ -1243,8 +1310,9 @@ function registerPurchaseAccountIpc(mainWindow) {
     try {
       const partitionName = `persist:purchase-${accountId}`
       const ses = session.fromPartition(partitionName)
-      const cookies = await ses.cookies.get({})
+      let cookies = await ses.cookies.get({})
       if (cookies && cookies.length > 0) {
+        if (platform === 'pinduoduo') cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
         await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1449,8 +1517,10 @@ function registerPurchaseAccountIpc(mainWindow) {
 
       // 同步保存到服务器数据库
       try {
-        const allCookies = await ses.cookies.get({})
+        let allCookies = await ses.cookies.get({})
         if (allCookies.length > 0) {
+          // PDD domain 规范化
+          if (platform === 'pinduoduo') allCookies = allCookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

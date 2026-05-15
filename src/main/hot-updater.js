@@ -151,14 +151,28 @@ function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
           const AdmZip = require('adm-zip')
           const zip = new AdmZip(tmpFile)
 
-          // 清除旧的热更新目录
-          if (fs.existsSync(HOT_UPDATE_DIR)) {
-            fs.rmSync(HOT_UPDATE_DIR, { recursive: true, force: true })
-          }
-          fs.mkdirSync(HOT_UPDATE_DIR, { recursive: true })
+          // 清除旧的热更新目录（使用临时目录实现原子性）
+          // 先解压到临时目录，成功后再替换，避免解压失败导致旧数据丢失
+          const stagingDir = HOT_UPDATE_DIR + '-staging'
+          try {
+            if (fs.existsSync(stagingDir)) {
+              fs.rmSync(stagingDir, { recursive: true, force: true })
+            }
+            fs.mkdirSync(stagingDir, { recursive: true })
 
-          // 解压到热更新目录
-          zip.extractAllTo(HOT_UPDATE_DIR, true)
+            // 解压到临时目录
+            zip.extractAllTo(stagingDir, true)
+
+            // 解压成功后，替换旧目录
+            if (fs.existsSync(HOT_UPDATE_DIR)) {
+              fs.rmSync(HOT_UPDATE_DIR, { recursive: true, force: true })
+            }
+            fs.renameSync(stagingDir, HOT_UPDATE_DIR)
+          } catch (extractErr) {
+            // 解压或替换失败，清理临时目录
+            try { fs.rmSync(stagingDir, { recursive: true, force: true }) } catch (e2) {}
+            throw extractErr
+          }
 
           // 删除临时文件
           try { fs.unlinkSync(tmpFile) } catch (e) {}
@@ -171,9 +185,18 @@ function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
         }
       })
 
-      ws.on('error', reject)
-      res.on('error', reject)
-    }).on('error', reject)
+      ws.on('error', (err) => {
+        try { fs.unlinkSync(tmpFile) } catch (e) {}
+        reject(err)
+      })
+      res.on('error', (err) => {
+        try { fs.unlinkSync(tmpFile) } catch (e) {}
+        reject(err)
+      })
+    }).on('error', (err) => {
+      try { fs.unlinkSync(path.join(app.getPath('temp'), 'dianxiaoer-update.zip')) } catch (e) {}
+      reject(err)
+    })
       .on('timeout', function () { this.destroy(); reject(new Error('下载超时')) })
   })
 }

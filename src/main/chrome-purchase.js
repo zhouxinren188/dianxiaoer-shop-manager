@@ -113,12 +113,14 @@ function ensureLocalServer(mainWindow, deps) {
         if (cookies && cookies.length > 0) {
           const state = activeChromeWindows.get(purchaseNo)
           if (state && state.accountId) {
+            // PDD domain 规范化：hostOnly 的 mobile.yangkeduo.com 必须加前导点
+            const normalized = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
             httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${state.accountId}/cookies`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform: 'pinduoduo' })
+              body: JSON.stringify({ cookie_data: JSON.stringify(normalized), platform: 'pinduoduo' })
             }).then(() => {
-              console.log(`[ChromePurchase] Cookies saved: ${cookies.length}`)
+              console.log(`[ChromePurchase] Cookies saved: ${normalized.length}`)
             }).catch(e => {
               console.warn('[ChromePurchase] Cookie save failed:', e.message)
             })

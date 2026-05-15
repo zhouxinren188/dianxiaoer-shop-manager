@@ -513,40 +513,42 @@ app.get('/api/update/check', (req, res) => {
 
     // 支持两种字段名格式：fullUpdate 和 full
     const full = meta.fullUpdate || meta.full
-    if (appVersion && full) {
-      const appNum = parseVersion(appVersion)
-      const fullNum = parseVersion(full.version)
-      if (fullNum > appNum) {
-        return res.json({
-          needUpdate: true,
-          updateType: 'full',
-          version: full.version,
-          changelog: full.changelog || '',
-          force: false
-        })
-      }
-    }
-
     // 支持两种字段名格式：hotfix 和 hot
     const hot = meta.hotfix || meta.hot
-    if (hot) {
-      const hotNum = parseVersion(hot.version)
-      if (hotNum > currentNum) {
-        // 校验 baseVersion：热更新只能应用于不低于最低基础版本的版本
-        if (hot.baseVersion && appVersion && parseVersion(appVersion) < parseVersion(hot.baseVersion)) {
-          // 用户的基础版本低于热更新要求的最低版本，不返回热更新
-          console.log(`[Update] 热更新 baseVersion 不兼容: 用户appVersion=${appVersion}, 最低要求baseVersion=${hot.baseVersion}`)
-        } else {
-          return res.json({
-            needUpdate: true,
-            updateType: 'hot',
-            version: hot.version,
-            changelog: hot.changelog || '',
-            size: hot.size || 0,
-            sha256: hot.sha256 || '',
-            updatedAt: hot.updatedAt
-          })
-        }
+
+    const fullNum = full ? parseVersion(full.version) : 0
+    const hotNum = hot ? parseVersion(hot.version) : 0
+    const appNum = appVersion ? parseVersion(appVersion) : 0
+
+    // 更新优先级规则（v2）：基础版本落后时优先全量更新
+    // 1. appVersion < fullVersion → 返回全量更新（替换旧 app.asar，修复 bootstrap 等）
+    // 2. appVersion >= fullVersion → 返回热更新（基础已达标，只需补丁）
+    // 原因：热更新不修改 app.asar 内的 bootstrap，旧 bootstrap 缺少关键修复
+    if (appVersion && full && fullNum > appNum) {
+      console.log('[Update] base outdated: appVersion=' + appVersion + ', fullVersion=' + full.version + ', returning full update')
+      return res.json({
+        needUpdate: true,
+        updateType: 'full',
+        version: full.version,
+        changelog: full.changelog || '',
+        force: false
+      })
+    }
+
+    // 基础版本已达标，检查热更新
+    if (hot && hotNum > currentNum) {
+      if (hot.baseVersion && appVersion && parseVersion(appVersion) < parseVersion(hot.baseVersion)) {
+        console.log('[Update] hot baseVersion incompatible: appVersion=' + appVersion + ', baseVersion=' + hot.baseVersion)
+      } else {
+        return res.json({
+          needUpdate: true,
+          updateType: 'hot',
+          version: hot.version,
+          changelog: hot.changelog || '',
+          size: hot.size || 0,
+          sha256: hot.sha256 || '',
+          updatedAt: hot.updatedAt
+        })
       }
     }
 
