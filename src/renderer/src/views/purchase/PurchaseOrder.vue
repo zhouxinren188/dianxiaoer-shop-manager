@@ -187,7 +187,7 @@
           </template>
         </el-table-column>
 
-        <el-table-column prop="purchase_no" label="采购编号" width="140" align="center">
+        <el-table-column prop="purchase_no" label="采购编号" width="90" align="center">
           <template #default="{ row }">
             <span class="cell-purchase-no">{{ row.purchase_no }}</span>
           </template>

@@ -933,6 +933,11 @@ function fetchSalesOrders(storeId, options = {}) {
           order.allItems = []
         }
 
+        // 买家留言（京东 queryOrderPage 实际字段名：remark，在订单顶层）
+        order.buyerMessage = raw.remark || ''
+        // 订单备注（商家在京东后台填写的备注，实际字段名：orderVenderRemark.remark，嵌套对象）
+        order.orderRemark = (raw.orderVenderRemark && raw.orderVenderRemark.remark) || ''
+
         return order
       }
 
@@ -2928,6 +2933,275 @@ function registerSalesOrderIpc(mainWindow) {
       return { success: false, message: '解析保存响应失败: ' + e.message }
     }
   })
+  // ============ 提交商家备注到京东 ============
+  ipcMain.handle('submit-vendor-remark', async (event, { storeId, orderId, remark }) => {
+    console.log('[VendorRemark] 提交商家备注: storeId=' + storeId + ', orderId=' + orderId + ', remark=' + remark)
+    if (!storeId || !orderId) return { success: false, message: '缺少参数' }
+
+    const partitionName = 'persist:platform-' + storeId
+    const { platformWindows } = require('./platform-window')
+    const existingWin = platformWindows.get(Number(storeId))
+
+    // ===== 路径1：注入拦截器 + 等待页面SFF请求 + 平台窗口（较快）=====
+    if (existingWin && !existingWin.isDestroyed()) {
+      try {
+        const url = existingWin.webContents.getURL()
+        if (url && !url.includes('passport.jd.com') && !url.includes('login.jd.com')) {
+          console.log('[VendorRemark] 复用平台窗口，注入拦截器:', url.substring(0, 100))
+          await _injectSffHeaderInterceptor(existingWin)
+          const headersReady = await _waitForSffHeaders(existingWin, 5000)
+          if (headersReady) {
+            const result = await _executeVendorRemarkApi(existingWin, orderId, remark)
+            return result
+          }
+          console.log('[VendorRemark] 平台窗口未捕获到安全头，回退到临时窗口')
+        }
+      } catch (e) {
+        console.log('[VendorRemark] 平台窗口失败，回退到临时窗口:', e.message)
+      }
+    }
+
+    // ===== 路径2：创建临时窗口（较慢，但保证可用）=====
+    console.log('[VendorRemark] 创建临时窗口')
+    const ses = session.fromPartition(partitionName)
+    const cookies = await ses.cookies.get({})
+    const jdCookies = cookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+
+    if (jdCookies.length === 0) {
+      try {
+        const { restoreCookiesFromDB } = require('./cookie-heartbeat')
+        const restored = await restoreCookiesFromDB(storeId, { skipFlush: true })
+        if (restored) {
+          const retryCookies = await ses.cookies.get({})
+          const retryJd = retryCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+          if (retryJd.length === 0) {
+            return { success: false, message: '店铺未登录，请先登录京东后台' }
+          }
+        } else {
+          return { success: false, message: '店铺未登录，请先登录京东后台' }
+        }
+      } catch (e) {
+        return { success: false, message: '店铺未登录，请先登录京东后台' }
+      }
+    }
+
+    let tempWin = null
+    try {
+      tempWin = new BrowserWindow({
+        show: false,
+        width: 1200,
+        height: 800,
+        webPreferences: {
+          partition: partitionName,
+          contextIsolation: true,
+          nodeIntegration: false
+        }
+      })
+
+      // 在dom-ready时注入SFF请求头拦截器（需要在页面JS环境建立后才能执行）
+      tempWin.webContents.on('dom-ready', () => {
+        if (tempWin.isDestroyed()) return
+        _injectSffHeaderInterceptor(tempWin).catch(() => {})
+      })
+
+      // 加载京东商家后台页面，建立会话上下文并捕获安全头
+      await new Promise((resolve, reject) => {
+        let loaded = false
+        const timer = setTimeout(() => {
+          if (!loaded) { loaded = true; resolve() }
+        }, 20000)
+
+        tempWin.webContents.on('did-finish-load', () => {
+          if (loaded) return
+          const url = tempWin.webContents.getURL()
+          console.log('[VendorRemark] 页面加载完成:', url.substring(0, 150))
+          if (!url.includes('passport.jd.com') && !url.includes('login.jd.com')) {
+            setTimeout(() => {
+              clearTimeout(timer)
+              loaded = true
+              resolve()
+            }, 5000)
+          }
+        })
+
+        tempWin.webContents.on('did-navigate', (event, url) => {
+          if (url.includes('passport.jd.com') || url.includes('login.jd.com')) {
+            clearTimeout(timer)
+            loaded = true
+            reject(new Error('店铺登录已过期，请重新登录京东后台'))
+          }
+        })
+
+        tempWin.loadURL('https://shop.jd.com/jdm/trade/orders/order-list')
+      })
+
+      // 等待安全头被捕获（最多等10秒）
+      await _waitForSffHeaders(tempWin, 10000)
+
+      const result = await _executeVendorRemarkApi(tempWin, orderId, remark)
+      return result
+
+    } catch (err) {
+      console.log('[VendorRemark] 异常:', err.message)
+      return { success: false, message: err.message }
+    } finally {
+      if (tempWin && !tempWin.isDestroyed()) {
+        tempWin.destroy()
+      }
+    }
+  })
+
+  // 注入SFF请求头拦截器：拦截XMLHttpRequest和fetch的sff.jd.com请求，捕获安全头（dsm-eid等）
+  async function _injectSffHeaderInterceptor(win) {
+    if (win.isDestroyed()) return
+    await win.webContents.executeJavaScript(`
+      (function() {
+        if (window.__sffHeaderInterceptorInstalled) return;
+        window.__sffHeaderInterceptorInstalled = true;
+        window.__capturedSffHeaders = null;
+
+        // === 拦截 XMLHttpRequest ===
+        var origSetReqHeader = XMLHttpRequest.prototype.setRequestHeader;
+        var origOpen = XMLHttpRequest.prototype.open;
+        var origSend = XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open = function(method, url) {
+          this.__captureUrl = (url || '').toString();
+          this.__captureHeaders = {};
+          return origOpen.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
+          if (this.__captureHeaders) {
+            this.__captureHeaders[name] = value;
+          }
+          return origSetReqHeader.apply(this, arguments);
+        };
+
+        XMLHttpRequest.prototype.send = function(body) {
+          var xhr = this;
+          var url = xhr.__captureUrl || '';
+          if (url.indexOf('sff.jd.com') !== -1 && url.indexOf('appId=COCX0HBWR4BA7RDVDBIQ') !== -1 && !window.__capturedSffHeaders) {
+            window.__capturedSffHeaders = Object.assign({}, xhr.__captureHeaders);
+            console.log('[SFF-XHR] 捕获到安全头:', Object.keys(window.__capturedSffHeaders).join(','));
+          }
+          return origSend.apply(this, arguments);
+        };
+
+        // === 拦截 fetch ===
+        var origFetch = window.fetch;
+        window.fetch = function(input, init) {
+          var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
+          if (url.indexOf('sff.jd.com') !== -1 && url.indexOf('appId=COCX0HBWR4BA7RDVDBIQ') !== -1) {
+            var fetchHeaders = {};
+            if (init && init.headers) {
+              if (typeof init.headers.forEach === 'function') {
+                init.headers.forEach(function(v, k) { fetchHeaders[k] = v; });
+              } else if (typeof init.headers === 'object') {
+                for (var k in init.headers) {
+                  if (init.headers.hasOwnProperty(k)) fetchHeaders[k] = init.headers[k];
+                }
+              }
+            }
+            if (!window.__capturedSffHeaders && Object.keys(fetchHeaders).length > 0) {
+              window.__capturedSffHeaders = fetchHeaders;
+              console.log('[SFF-Fetch] 捕获到安全头:', Object.keys(fetchHeaders).join(','));
+            }
+          }
+          return origFetch.apply(this, arguments);
+        };
+      })()
+    `).catch(() => {})
+  }
+
+  // 等待SFF安全头被捕获（页面自身的SFF请求触发拦截器）
+  // timeout: 最大等待毫秒数，interval: 轮询间隔毫秒
+  async function _waitForSffHeaders(win, timeout = 10000, interval = 500) {
+    const startTime = Date.now()
+    while (Date.now() - startTime < timeout) {
+      if (win.isDestroyed()) return false
+      try {
+        const captured = await win.webContents.executeJavaScript('window.__capturedSffHeaders || null')
+        if (captured && Object.keys(captured).length > 0) {
+          console.log('[VendorRemark] 安全头已捕获:', JSON.stringify(captured).substring(0, 300))
+          return true
+        }
+      } catch (e) {
+        console.log('[VendorRemark] 检查安全头异常:', e.message)
+        return false
+      }
+      await new Promise(r => setTimeout(r, interval))
+    }
+    console.log('[VendorRemark] 等待安全头超时(' + timeout + 'ms)，尝试不带安全头继续')
+    return false
+  }
+
+  // 在指定BrowserWindow中执行batchSubmitVenderRemark API调用
+  async function _executeVendorRemarkApi(win, orderId, remark) {
+    const escapedRemark = remark.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n')
+    const apiResult = await win.webContents.executeJavaScript(`
+      (function() {
+        return new Promise(function(resolve) {
+          var requestBody = {
+            request: {
+              source: '2000',
+              data: {
+                orderIds: ['${orderId}'],
+                remark: '${escapedRemark}',
+                level: 0,
+                levelDesc: ''
+              }
+            }
+          };
+
+          console.log('[VendorRemark] 请求体:', JSON.stringify(requestBody));
+
+          var headers = { 'Content-Type': 'application/json' };
+          if (window.__capturedSffHeaders) {
+            for (var k in window.__capturedSffHeaders) {
+              if (window.__capturedSffHeaders.hasOwnProperty(k)) {
+                headers[k] = window.__capturedSffHeaders[k];
+              }
+            }
+          }
+          if (headers['dsm-file-path']) {
+            headers['dsm-file-path'] = 'vender-remark';
+          }
+
+          fetch('https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderVenderRemarkBffService.batchSubmitVenderRemark', {
+            method: 'POST',
+            credentials: 'include',
+            headers: headers,
+            body: JSON.stringify(requestBody)
+          }).then(function(resp) {
+            return resp.json();
+          }).then(function(data) {
+            resolve({ success: true, data: data });
+          }).catch(function(err) {
+            resolve({ success: false, error: err.message });
+          });
+        });
+      })()
+    `)
+
+    console.log('[VendorRemark] API返回:', JSON.stringify(apiResult).substring(0, 500))
+
+    if (!apiResult.success) {
+      return { success: false, message: '请求失败: ' + (apiResult.error || '未知错误') }
+    }
+
+    // JD SFF API响应结构: {success: true, data: {msg: "成功", code: 200, data: [...]}}
+    // code在apiResult.data上，apiResult.data.data是业务数据
+    const jdResp = apiResult.data
+    if (jdResp && jdResp.code === 200) {
+      console.log('[VendorRemark] 提交成功:', JSON.stringify(jdResp.data).substring(0, 300))
+      return { success: true, data: jdResp.data }
+    } else {
+      const msg = jdResp ? (jdResp.msg || jdResp.message || `code=${jdResp.code}`) : '未知错误'
+      console.log('[VendorRemark] 提交失败:', msg)
+      return { success: false, message: '京东返回失败: ' + msg }
+    }
+  }
 }
 
 // ============ 解析敏感信息 ============

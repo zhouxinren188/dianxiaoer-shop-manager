@@ -29,6 +29,16 @@ export function updateRemark(orderId, remark) {
   return put(`/api/sales-orders/${orderId}/remark`, { remark })
 }
 
+// 提交商家备注到京东平台
+export function submitVendorRemark(storeId, orderId, remark) {
+  return window.electronAPI.invoke('submit-vendor-remark', { storeId, orderId, remark })
+}
+
+// 更新订单的order_remark（平台同步的备注）到本地数据库
+export function updateOrderRemark(orderId, orderRemark) {
+  return put(`/api/sales-orders/${orderId}/order-remark`, { order_remark: orderRemark })
+}
+
 export function updateSalesOrderPurchaseStatus(orderId, purchaseStatus) {
   return put(`/api/sales-orders/${orderId}/purchase-status`, { purchase_status: purchaseStatus })
 }

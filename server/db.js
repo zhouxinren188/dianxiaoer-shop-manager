@@ -247,6 +247,8 @@ async function initDB() {
         item_count INT DEFAULT 1,
         all_items JSON,
         raw_data LONGTEXT,
+        buyer_message TEXT DEFAULT NULL COMMENT '买家留言（从平台同步）',
+        order_remark TEXT DEFAULT NULL COMMENT '订单备注（商家在平台填写的备注，从平台同步）',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_store_order (store_id, order_id),
@@ -254,6 +256,15 @@ async function initDB() {
         KEY idx_order_time (order_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    // 兼容已存在的 sales_orders 表：添加买家留言字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN buyer_message TEXT DEFAULT NULL COMMENT '买家留言（从平台同步）' AFTER raw_data`)
+    } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 sales_orders 表：添加订单备注字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN order_remark TEXT DEFAULT NULL COMMENT '订单备注（商家在平台填写的备注，从平台同步）' AFTER buyer_message`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")

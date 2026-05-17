@@ -1303,8 +1303,9 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            buyer_name, buyer_phone, buyer_address,
            logistics_company, logistics_no, warehouse_name,
            sku_id, product_name, product_image, unit_price, quantity,
-           item_count, all_items, raw_data)
-         VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?,?,?,?, ?,?,?)
+           item_count, all_items, raw_data,
+           buyer_message, order_remark)
+         VALUES (?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?, ?,?,?,?,?, ?,?,?, ?,?)
          ON DUPLICATE KEY UPDATE
            store_id=VALUES(store_id),
            order_state=VALUES(order_state), status_text=VALUES(status_text),
@@ -1321,6 +1322,8 @@ app.post('/api/sales-orders/batch', async (req, res) => {
            product_image=VALUES(product_image), unit_price=VALUES(unit_price),
            quantity=VALUES(quantity), item_count=VALUES(item_count),
            all_items=VALUES(all_items), raw_data=VALUES(raw_data),
+           buyer_message=IF(VALUES(buyer_message) IS NOT NULL AND VALUES(buyer_message)!='', VALUES(buyer_message), buyer_message),
+           order_remark=IF(VALUES(order_remark) IS NOT NULL AND VALUES(order_remark)!='', VALUES(order_remark), order_remark),
            updated_at=NOW()`,
         [
           store_id, o.orderId, o.orderState || 0, o.statusText || '',
@@ -1330,7 +1333,8 @@ app.post('/api/sales-orders/batch', async (req, res) => {
           o.logisticsCompany || '', o.logisticsNo || '', o.warehouseName || '',
           o.skuId || '', o.productName || '', o.productImage || '',
           o.unitPrice || 0, o.quantity || 0,
-          o.itemCount || 1, JSON.stringify(o.allItems || null), JSON.stringify(o)
+          o.itemCount || 1, JSON.stringify(o.allItems || null), JSON.stringify(o),
+          o.buyerMessage || null, o.orderRemark || null
         ]
       )
       saved++
@@ -1435,6 +1439,33 @@ app.put('/api/sales-orders/:orderId/sys-remark', async (req, res) => {
       ;[result] = await pool.execute(
         'UPDATE sales_orders SET sys_remark=?, updated_at=NOW() WHERE id=?',
         [sys_remark || '', orderId]
+      )
+    }
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 更新销售订单的平台备注（order_remark，商家在京东后台填写的备注）
+app.put('/api/sales-orders/:orderId/order-remark', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { order_remark } = req.body
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    let result
+    if (storeIds.length > 0) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      ;[result] = await pool.execute(
+        `UPDATE sales_orders SET order_remark=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+        [order_remark || '', orderId, ...storeIds]
+      )
+    } else {
+      ;[result] = await pool.execute(
+        'UPDATE sales_orders SET order_remark=?, updated_at=NOW() WHERE id=?',
+        [order_remark || '', orderId]
       )
     }
     res.json(ok({ updated: result.affectedRows }))

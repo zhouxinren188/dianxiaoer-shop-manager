@@ -326,14 +326,24 @@
               <div class="ot-col ot-col-remark">
                 <div class="remark-cell">
                   <div class="remark-item">
-                    <span class="remark-label">商:</span>
-                    <span class="remark-text remark-text-merchant" @click.stop="handleEditRemark(order)">{{ order.remark || '点击编辑' }}</span>
+                    <span class="remark-label">留言:</span>
+                    <span class="remark-text remark-text-buyer">{{ order.buyerMessage || '' }}</span>
                   </div>
-                  <div v-if="order.sysRemark" class="remark-item">
-                    <span class="remark-label">系:</span>
-                    <span class="remark-text">{{ order.sysRemark }}</span>
+                  <div class="remark-item">
+                    <span class="remark-label">备注:</span>
+                    <span class="remark-text remark-text-order">{{ order.orderRemark || '' }}</span>
+                    <el-icon class="remark-edit-icon" @click.stop="handleEditOrderRemark(order)"><Edit /></el-icon>
                   </div>
-                  <span v-if="!order.remark && !order.sysRemark" class="text-muted" style="display:none;">--</span>
+                  <div class="remark-divider"></div>
+                  <div class="remark-item">
+                    <span class="remark-label">系统:</span>
+                    <span class="remark-text">{{ order.sysRemark || '' }}</span>
+                  </div>
+                  <div class="remark-item">
+                    <span class="remark-label">本地:</span>
+                    <span class="remark-text remark-text-merchant">{{ order.remark || '' }}</span>
+                    <el-icon class="remark-edit-icon" @click.stop="handleEditRemark(order)"><Edit /></el-icon>
+                  </div>
                 </div>
               </div>
               <div class="ot-col ot-col-action">
@@ -477,12 +487,20 @@
         <div class="detail-section">
           <h4 class="detail-section-title">备注信息</h4>
           <div class="detail-remark-box">
-            <div class="detail-remark-label">商家备注：</div>
-            <div class="detail-remark-content">{{ currentOrder.remark || '暂无商家备注' }}</div>
+            <div class="detail-remark-label">买家留言：</div>
+            <div class="detail-remark-content remark-text-buyer">{{ currentOrder.buyerMessage || '暂无买家留言' }}</div>
+          </div>
+          <div class="detail-remark-box">
+            <div class="detail-remark-label">订单备注：<el-icon class="detail-remark-edit-icon" @click="handleEditOrderRemark(currentOrder)"><Edit /></el-icon></div>
+            <div class="detail-remark-content remark-text-order">{{ currentOrder.orderRemark || '暂无订单备注' }}</div>
           </div>
           <div class="detail-remark-box">
             <div class="detail-remark-label">系统备注：</div>
             <div class="detail-remark-content">{{ currentOrder.sysRemark || '暂无系统备注' }}</div>
+          </div>
+          <div class="detail-remark-box">
+            <div class="detail-remark-label">本地备注：<el-icon class="detail-remark-edit-icon" @click="handleEditRemark(currentOrder)"><Edit /></el-icon></div>
+            <div class="detail-remark-content">{{ currentOrder.remark || '暂无本地备注' }}</div>
           </div>
         </div>
 
@@ -861,7 +879,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
-import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase } from '@/api/salesOrder'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark } from '@/api/salesOrder'
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
@@ -1053,6 +1071,8 @@ function mapServerOrder(row) {
     issueEvent: null,
     remark: row.remark || '',
     sysRemark: row.sys_remark || '',
+    buyerMessage: row.buyer_message || '',
+    orderRemark: row.order_remark || '',
     timeoutStatus: 'normal',
     purchaseLockedBy: row.purchase_locked_by || null,
     purchaseLockedName: row.purchase_locked_name || null
@@ -2293,7 +2313,7 @@ function handleSmsNotify(order) {
 }
 
 function handleEditRemark(order) {
-  ElMessageBox.prompt('请输入备注内容', '编辑商家备注', {
+  ElMessageBox.prompt('请输入备注内容', '编辑本地备注', {
     confirmButtonText: '保存',
     cancelButtonText: '取消',
     inputValue: order.remark || '',
@@ -2307,6 +2327,47 @@ function handleEditRemark(order) {
     } catch (err) {
       console.error('[备注] 保存失败:', err.message)
       ElMessage.error('备注保存失败：' + (err.message || '未知错误'))
+    }
+  }).catch(() => {})
+}
+
+function handleEditOrderRemark(order) {
+  const storeId = order.storeId || searchForm.storeId
+  if (!storeId) {
+    ElMessage.warning('无法获取店铺信息，请先选择店铺')
+    return
+  }
+  ElMessageBox.prompt('请输入商家备注内容', '编辑商家备注', {
+    confirmButtonText: '提交到京东',
+    cancelButtonText: '取消',
+    inputValue: order.orderRemark || '',
+    inputType: 'textarea'
+  }).then(async ({ value }) => {
+    const remark = (value || '').trim()
+    if (!remark) {
+      ElMessage.warning('备注内容不能为空')
+      return
+    }
+    const loading = ElMessage({ message: '正在提交备注到京东...', type: 'info', duration: 0 })
+    try {
+      const result = await submitVendorRemark(storeId, order.orderNo, remark)
+      loading.close()
+      if (result.success) {
+        // 提交成功后更新本地数据库
+        order.orderRemark = remark
+        try {
+          await updateOrderRemark(order.id, remark)
+        } catch (e) {
+          console.error('[商家备注] 本地更新失败:', e.message)
+        }
+        ElMessage.success('商家备注已提交到京东')
+      } else {
+        ElMessage.error('提交失败：' + (result.message || '未知错误'))
+      }
+    } catch (err) {
+      loading.close()
+      console.error('[商家备注] 提交失败:', err.message)
+      ElMessage.error('提交失败：' + (err.message || '未知错误'))
     }
   }).catch(() => {})
 }
@@ -2944,9 +3005,9 @@ onUnmounted(() => {
   width: 340px;
   flex-shrink: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
+  align-items: flex-start;
+  justify-content: flex-start;
+  text-align: left;
   padding: 0 4px;
 }
 
@@ -3326,11 +3387,19 @@ onUnmounted(() => {
 
 /* 右侧订单级信息列样式 */
 .order-body-right .ot-col-amount,
-.order-body-right .ot-col-logistics,
-.order-body-right .ot-col-remark {
+.order-body-right .ot-col-logistics {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
+  padding: 12px 8px;
+  position: relative;
+}
+
+.order-body-right .ot-col-remark {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   justify-content: center;
   padding: 12px 8px;
   position: relative;
@@ -3445,14 +3514,52 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-/* 商家备注蓝色字体 */
+/* 可编辑备注的编辑图标 */
+.remark-edit-icon {
+  flex-shrink: 0;
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 12px;
+  margin-top: 2px;
+  &:hover {
+    color: #2b5aed;
+  }
+}
+
+/* 本地备注蓝色字体 */
 .remark-text-merchant {
   color: #2b5aed;
   font-weight: 500;
+}
+
+/* 买家留言橙色字体 */
+.remark-text-buyer {
+  color: #e6a23c;
+  font-weight: 500;
+}
+
+/* 订单备注红色字体 */
+.remark-text-order {
+  color: #f56c6c;
+  font-weight: 500;
+}
+
+/* 详情面板-备注编辑图标 */
+.detail-remark-edit-icon {
+  color: #9ca3af;
   cursor: pointer;
+  font-size: 13px;
+  vertical-align: middle;
+  margin-left: 4px;
   &:hover {
-    text-decoration: underline;
+    color: #2b5aed;
   }
+}
+
+/* 备注区域虚线分隔 */
+.remark-divider {
+  border-top: 1px dashed #dcdfe6;
+  margin: 3px 0;
 }
 
 /* 分页 */

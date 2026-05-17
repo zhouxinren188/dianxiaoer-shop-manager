@@ -40,7 +40,8 @@ const validInvokeChannels = [
   'fetch-aftersale-metrics',
   'check-aftersale-sync-stores',
   'open-store-backend-url',
-  'open-jd-outbound'
+  'open-jd-outbound',
+  'submit-vendor-remark'
 ]
 
 const validOnChannels = [
