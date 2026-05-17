@@ -3,11 +3,15 @@
  * 包含 CDP 网络捕获、HTTP 工具、常量、物流映射等共享代码
  */
 
-const { BrowserWindow, ipcMain, session } = require('electron')
+const { BrowserWindow, ipcMain, session, app } = require('electron')
 const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('../auth-store')
-const { resolveAppPath } = require('../hot-updater')
+
+// 解析应用资源路径（直接从 app 根目录查找）
+function resolveAppPath(relativePath) {
+  return path.join(app.getAppPath(), relativePath)
+}
 
 const OVERALL_TIMEOUT = 90000 // 90 秒总超时
 const POLL_INTERVAL = 3000   // 3 秒轮询 CDP 捕获结果

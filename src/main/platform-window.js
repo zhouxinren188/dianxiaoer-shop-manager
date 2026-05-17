@@ -4,7 +4,11 @@ const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
-const { resolveAppPath } = require('./hot-updater')
+
+// 解析应用资源路径（直接从 app 根目录查找）
+function resolveAppPath(relativePath) {
+  return path.join(app.getAppPath(), relativePath)
+}
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 

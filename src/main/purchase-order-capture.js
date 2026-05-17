@@ -1,9 +1,13 @@
-const { BrowserWindow, ipcMain, session, webFrameMain } = require('electron')
+const { BrowserWindow, ipcMain, session, webFrameMain, app } = require('electron')
 const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
-const { resolveAppPath } = require('./hot-updater')
 const ProvinceData = require('./province-data')
+
+// 解析应用资源路径（直接从 app 根目录查找）
+function resolveAppPath(relativePath) {
+  return path.join(app.getAppPath(), relativePath)
+}
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 

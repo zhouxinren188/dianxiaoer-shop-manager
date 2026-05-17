@@ -30,73 +30,6 @@ function getHotUpdateRendererPath() {
   return null
 }
 
-// 获取热更新 preload 路径（如存在）
-// 开发模式不使用热更新 preload
-// 拒绝 bytenode 存根（包含 require('bytenode') 的文件），因为在热更新目录中无法解析
-function getHotUpdatePreloadPath() {
-  if (!app.isPackaged) return null
-  const preloadJs = path.join(HOT_UPDATE_DIR, 'preload', 'index.js')
-  if (!fs.existsSync(preloadJs)) return null
-  // 安全检查：拒绝 bytenode 存根
-  try {
-    const content = fs.readFileSync(preloadJs, 'utf-8')
-    if (content.includes('bytenode')) {
-      console.warn('[HotUpdater] 跳过 bytenode 存根 preload，回退到内置版本')
-      return null
-    }
-  } catch (e) {
-    return null
-  }
-  return preloadJs
-}
-
-// 解析应用资源路径：优先从热更新目录查找，否则从 app.asar 内查找
-// relativePath: 相对于 app 根目录的路径，如 'out/main/purchase-preload.js'
-function resolveAppPath(relativePath) {
-  // 开发模式不使用热更新
-  if (!app.isPackaged) {
-    return path.join(app.getAppPath(), relativePath)
-  }
-  // 优先从热更新目录查找
-  const hotPath = path.join(HOT_UPDATE_DIR, relativePath)
-  if (fs.existsSync(hotPath)) {
-    return hotPath
-  }
-  // 回退到 app.asar 内路径
-  return path.join(app.getAppPath(), relativePath)
-}
-
-// 检查主进程热更新是否存在且有效
-// 开发模式下不使用热更新
-function hasMainProcessUpdate() {
-  if (!app.isPackaged) return false
-  try {
-    if (!fs.existsSync(VERSION_FILE)) return false
-    const data = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'))
-    if (!data.mainUpdate) return false
-    const mainJsc = path.join(HOT_UPDATE_DIR, 'main', 'index.jsc')
-    const mainJs = path.join(HOT_UPDATE_DIR, 'main', 'index.js')
-    return fs.existsSync(mainJsc) && fs.existsSync(mainJs)
-  } catch (e) {
-    return false
-  }
-}
-
-// 标记主进程热更新无效（不删除文件，保留用于排查）
-function invalidateMainProcessUpdate(reason) {
-  try {
-    if (!fs.existsSync(VERSION_FILE)) return
-    const data = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf-8'))
-    data.mainUpdate = false
-    data.invalidationReason = reason
-    data.invalidatedAt = new Date().toISOString()
-    fs.writeFileSync(VERSION_FILE, JSON.stringify(data, null, 2), 'utf-8')
-    console.log('[HotUpdater] 主进程热更新已标记无效:', reason)
-  } catch (e) {
-    console.error('[HotUpdater] 标记主进程热更新无效失败:', e.message)
-  }
-}
-
 // 清除热更新目录（全量更新安装后首次启动时调用）
 function clearHotUpdate() {
   try {
@@ -204,10 +137,6 @@ function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
 module.exports = {
   getCurrentVersion,
   getHotUpdateRendererPath,
-  getHotUpdatePreloadPath,
-  resolveAppPath,
-  hasMainProcessUpdate,
-  invalidateMainProcessUpdate,
   clearHotUpdate,
   downloadAndApplyUpdate
 }

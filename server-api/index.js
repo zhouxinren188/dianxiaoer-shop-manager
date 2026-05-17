@@ -461,7 +461,6 @@ app.post('/api/update/upload', (req, res) => {
     const version = req.body.version
     const changelog = req.body.changelog || ''
     const sha256 = req.body.sha256 || ''
-    const baseVersion = req.body.baseVersion || ''
     if (!version) {
       return res.status(400).json({ code: 1, message: 'version 不能为空' })
     }
@@ -475,7 +474,7 @@ app.post('/api/update/upload', (req, res) => {
     hash.update(fs.readFileSync(filePath))
     const finalSha256 = hash.digest('hex')
     const meta = readMeta()
-    meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, baseVersion, updatedAt: new Date().toISOString() }
+    meta.hot = { version, changelog, filename: `update-${version}.zip`, size: stat.size, sha256: finalSha256, updatedAt: new Date().toISOString() }
     writeMeta(meta)
     console.log(`[Update] 热更新包已上传: v${version} (${(stat.size / 1024).toFixed(1)} KB)`)
     res.json({ code: 0, message: '上传成功', version, size: stat.size, sha256: finalSha256 })
@@ -504,6 +503,10 @@ app.post('/api/update/notify-full', (req, res) => {
 })
 
 // 统一检查更新
+// 更新优先级规则（v3）：热更新仅 renderer，必须先全量再热更新
+// 1. appVersion < fullVersion → 返回全量更新（必须先升级主进程）
+// 2. appVersion >= fullVersion 且 hotVersion > currentVersion → 返回热更新
+// 3. 热更新之间可跳版本，但不可跳过主进程全量更新
 app.get('/api/update/check', (req, res) => {
   try {
     const meta = readMeta()
@@ -520,10 +523,7 @@ app.get('/api/update/check', (req, res) => {
     const hotNum = hot ? parseVersion(hot.version) : 0
     const appNum = appVersion ? parseVersion(appVersion) : 0
 
-    // 更新优先级规则（v2）：基础版本落后时优先全量更新
-    // 1. appVersion < fullVersion → 返回全量更新（替换旧 app.asar，修复 bootstrap 等）
-    // 2. appVersion >= fullVersion → 返回热更新（基础已达标，只需补丁）
-    // 原因：热更新不修改 app.asar 内的 bootstrap，旧 bootstrap 缺少关键修复
+    // 规则1：appVersion < fullVersion → 必须全量更新
     if (appVersion && full && fullNum > appNum) {
       console.log('[Update] base outdated: appVersion=' + appVersion + ', fullVersion=' + full.version + ', returning full update')
       return res.json({
@@ -535,21 +535,17 @@ app.get('/api/update/check', (req, res) => {
       })
     }
 
-    // 基础版本已达标，检查热更新
+    // 规则2：基础版本已达标，检查热更新（hotVersion > currentVersion）
     if (hot && hotNum > currentNum) {
-      if (hot.baseVersion && appVersion && parseVersion(appVersion) < parseVersion(hot.baseVersion)) {
-        console.log('[Update] hot baseVersion incompatible: appVersion=' + appVersion + ', baseVersion=' + hot.baseVersion)
-      } else {
-        return res.json({
-          needUpdate: true,
-          updateType: 'hot',
-          version: hot.version,
-          changelog: hot.changelog || '',
-          size: hot.size || 0,
-          sha256: hot.sha256 || '',
-          updatedAt: hot.updatedAt
-        })
-      }
+      return res.json({
+        needUpdate: true,
+        updateType: 'hot',
+        version: hot.version,
+        changelog: hot.changelog || '',
+        size: hot.size || 0,
+        sha256: hot.sha256 || '',
+        updatedAt: hot.updatedAt
+      })
     }
 
     res.json({ needUpdate: false, updateType: 'none' })

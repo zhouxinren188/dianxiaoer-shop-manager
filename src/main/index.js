@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err)
 })
 
-const { getHotUpdateRendererPath, getHotUpdatePreloadPath, getCurrentVersion, clearHotUpdate } = require('./hot-updater')
+const { getHotUpdateRendererPath, getCurrentVersion, clearHotUpdate } = require('./hot-updater')
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
@@ -49,7 +49,7 @@ function createWindow() {
     webPreferences: {
       // 开发模式: __dirname 指向 out/main/，用相对路径找到 out/preload/index.js
       // 生产模式: __dirname 指向 app.asar/out/main/，同样用相对路径找到 app.asar/out/preload/index.js
-      preload: getHotUpdatePreloadPath() || path.join(__dirname, '..', 'preload', 'index.js'),
+      preload: path.join(__dirname, '..', 'preload', 'index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
