@@ -623,9 +623,33 @@ async function restoreCookiesFromServer(accountId, platform) {
       }
     }
 
-    // 5. 写入服务器 cookie（PDD 已清除旧 cookie，全量写入；其他平台仍为合并模式）
+    // 淘宝平台：恢复前先清除 partition 中该平台域名的旧 cookie
+    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点如 taobao.com），与服务器新格式（有前导点如 .taobao.com）不同
+    // Chromium 视为不同 cookie，新旧并存时淘宝优先使用旧的失效 cookie，导致滑块验证或登录重定向
+    if (platform === 'taobao') {
+      try {
+        const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
+        const existingTbCookies = await ses.cookies.get({})
+        const oldTbCookies = existingTbCookies.filter(c =>
+          tbDomains.some(d => c.domain && c.domain.includes(d))
+        )
+        for (const old of oldTbCookies) {
+          try {
+            const secure = old.secure || false
+            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+            await ses.cookies.remove(url, old.name)
+          } catch (e) { /* ignore */ }
+        }
+        if (oldTbCookies.length > 0) console.log(`[CookieRestore] 淘宝旧 cookie 已清除: ${oldTbCookies.length} 条, accountId=${accountId}`)
+      } catch (clearErr) {
+        console.warn(`[CookieRestore] 淘宝旧 cookie 清除失败:`, clearErr.message)
+      }
+    }
+
+    // 5. 写入服务器 cookie
+    // PDD/淘宝已清除旧 cookie，全量写入；其他平台仍为合并模式（只补充缺失的，不覆盖已有的）
     const existingKeysAfter = new Set()
-    if (platform !== 'pinduoduo') {
+    if (platform !== 'pinduoduo' && platform !== 'taobao') {
       const currentCookies = await ses.cookies.get({})
       for (const ck of currentCookies) {
         existingKeysAfter.add(`${ck.name}|${ck.domain}|${ck.path}`)

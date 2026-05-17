@@ -40,11 +40,17 @@ const mainOnly = process.argv.includes('--main-only')
 const shouldUpload = process.argv.includes('--upload')
 
 // baseVersion: 热更新所依赖的最低基础版本，支持 --base=1.3.11 指定
-let baseVersion = pkg.version
+// 注意：不要默认为 pkg.version（即当前热更新版本），因为发布流程通常是先递增 package.json 再构建，
+// 此时 pkg.version 已是新版本号，会导致 baseVersion 与热更新版本相同，旧客户端因 baseVersion 检查而无法检测到更新。
+// 正确做法：baseVersion 应为该热更新兼容的最低 app.asar 基础版本，通常等于上次全量发布版本。
+// 如果未指定 --base，则不设置 baseVersion（让服务器跳过兼容性检查）
+let baseVersion = ''
 const baseArg = process.argv.find(arg => arg.startsWith('--base='))
 if (baseArg) {
   baseVersion = baseArg.split('=')[1]
-  console.log('baseVersion override:', baseVersion)
+  console.log('baseVersion:', baseVersion)
+} else {
+  console.log('baseVersion: 未指定（不限制最低基础版本）')
 }
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) {

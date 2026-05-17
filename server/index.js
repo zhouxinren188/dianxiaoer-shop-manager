@@ -2227,7 +2227,7 @@ app.get('/api/inventory', async (req, res) => {
       `SELECT i.*, w.name AS warehouse_name,
         (SELECT COALESCE(SUM(po.quantity),0) FROM purchase_orders po
          WHERE po.inventory_id=i.id AND po.purchase_type IN ('warehouse','warehouse_in')
-         AND po.status NOT IN ('stocked','cancelled')) AS in_transit_qty,
+         AND po.status NOT IN ('stocked','completed','cancelled')) AS in_transit_qty,
         (SELECT COALESCE(SUM(so.quantity),0) FROM sku_bindings sb
          INNER JOIN sales_orders so ON so.store_id=sb.store_id AND so.sku_id=sb.sku_id
          WHERE sb.inventory_id=i.id AND so.purchase_status='未采购') AS unpurchased_qty,

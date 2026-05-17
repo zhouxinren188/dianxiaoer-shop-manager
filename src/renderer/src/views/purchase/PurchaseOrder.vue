@@ -284,6 +284,9 @@
             <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" link type="primary" size="small" @click="handleReceive(row)">
               收货
             </el-button>
+            <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" link type="success" size="small" @click="handleComplete(row)">
+              完成
+            </el-button>
             <el-button v-if="row.status === 'stocked'" link type="warning" size="small" @click="handleOutbound(row)">
               出库
             </el-button>
@@ -408,6 +411,27 @@
           <el-button type="primary" @click="handleForward">云仓发货</el-button>
           <el-button type="primary" plain @click="handleStoreShip">店铺发货</el-button>
           <el-button type="danger" @click="handleMarkAfterSale">标记售后</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 完成确认对话框 -->
+    <el-dialog
+      v-model="completeDialogVisible"
+      title="确认完成"
+      width="460px"
+      align-center
+      :close-on-click-modal="false"
+    >
+      <div class="receive-confirm-content">
+        <p class="receive-confirm-text">
+          该订单类型为<strong class="receive-confirm-type">三方代发</strong>，确认将采购单 <strong>{{ currentCompleteRow?.purchase_no }}</strong> 标记为已完成？
+        </p>
+      </div>
+      <template #footer>
+        <div class="receive-confirm-footer">
+          <el-button type="success" @click="handleConfirmComplete">确认完成</el-button>
+          <el-button type="danger" @click="handleCompleteMarkAfterSale">标记售后</el-button>
         </div>
       </template>
     </el-dialog>
@@ -990,6 +1014,7 @@ const statusOptions = [
   { label: '已签收', value: 'received' },
   { label: '已转发', value: 'forwarded' },
   { label: '已入库', value: 'stocked' },
+  { label: '已完成', value: 'completed' },
   { label: '待处理售后', value: 'pending_after_sale' },
   { label: '已拒收', value: 'rejected' },
   { label: '已取消', value: 'cancelled' }
@@ -1337,7 +1362,7 @@ function statusLabel(val) {
 }
 
 function statusTagType(val) {
-  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', pending_after_sale: 'danger', rejected: 'danger', cancelled: 'danger' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', completed: 'success', pending_after_sale: 'danger', rejected: 'danger', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
@@ -1572,6 +1597,35 @@ async function handleConfirmReceive(row) {
   }
 }
 
+async function handleComplete(row) {
+  currentCompleteRow.value = row
+  completeDialogVisible.value = true
+}
+
+async function handleConfirmComplete() {
+  if (!currentCompleteRow.value) return
+  try {
+    await updatePurchaseStatus(currentCompleteRow.value.id, { status: 'completed' })
+    currentCompleteRow.value.status = 'completed'
+    completeDialogVisible.value = false
+    ElMessage.success('已标记为完成')
+  } catch (err) {
+    ElMessage.error('操作失败: ' + (err.message || ''))
+  }
+}
+
+async function handleCompleteMarkAfterSale() {
+  if (!currentCompleteRow.value) return
+  try {
+    await updatePurchaseStatus(currentCompleteRow.value.id, { status: 'pending_after_sale' })
+    currentCompleteRow.value.status = 'pending_after_sale'
+    completeDialogVisible.value = false
+    ElMessage.success('已标记为待处理售后')
+  } catch (err) {
+    ElMessage.error('操作失败: ' + (err.message || ''))
+  }
+}
+
 async function handleConfirmStock(row) {
   try {
     await ElMessageBox.confirm(`确认将采购单 ${row.purchase_no} 的商品入库？入库后将增加对应仓库库存。`, '确认入库', { type: 'warning' })
@@ -1593,6 +1647,10 @@ function handleOutbound(row) {
 
 const receiveDialogVisible = ref(false)
 const currentReceiveRow = ref(null)
+
+// 完成确认对话框
+const completeDialogVisible = ref(false)
+const currentCompleteRow = ref(null)
 
 // 云仓打单发货弹窗
 const forwardDialogVisible = ref(false)

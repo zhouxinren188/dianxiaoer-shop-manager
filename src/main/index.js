@@ -12,7 +12,7 @@ process.on('uncaughtException', (err) => {
   console.error('[UncaughtException]', err)
 })
 
-const { getHotUpdateRendererPath, getHotUpdatePreloadPath, getCurrentVersion } = require('./hot-updater')
+const { getHotUpdateRendererPath, getHotUpdatePreloadPath, getCurrentVersion, clearHotUpdate } = require('./hot-updater')
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
@@ -615,6 +615,27 @@ app.whenReady().then(async () => {
     await session.defaultSession.clearCache()
   } catch (e) {
     // 忽略清理失败
+  }
+
+  // ★ 全量更新后清理过期热更新（必须在 createWindow 之前！）
+  // 原因：全量更新安装后重启，旧版本的热更新 renderer/main 仍留在 hot-update 目录，
+  // createWindow() 会优先加载热更新 renderer，旧 renderer 与新主进程不兼容导致白屏
+  // cleanupStaleHotUpdate 在 initUpdateManager 中也会调用，但那时窗口已加载旧 renderer，为时已晚
+  try {
+    if (app.isPackaged) {
+      const hotVersion = getCurrentVersion()
+      const appVersion = app.getVersion()
+      const parseVersion = (v) => {
+        const parts = String(v || '0.0.0').split('.').map(Number)
+        return parts[0] * 10000 + (parts[1] || 0) * 100 + (parts[2] || 0)
+      }
+      if (parseVersion(appVersion) >= parseVersion(hotVersion) && hotVersion !== appVersion) {
+        clearHotUpdate()
+        console.log('[Main] 全量更新后清理过期热更新 (app:', appVersion, 'hot:', hotVersion, ')')
+      }
+    }
+  } catch (e) {
+    console.warn('[Main] 清理过期热更新失败:', e.message)
   }
 
   const mainWindow = createWindow()

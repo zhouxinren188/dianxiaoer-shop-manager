@@ -3880,7 +3880,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
     // ========== Cookie 恢复策略 ==========
-    // partition 有有效平台 cookie 时信任 partition（更新鲜），否则从服务器恢复
+    // PDD 平台：始终从服务器恢复（PDDAccessToken 可能在本地未过期但服务端已失效）
+    // 淘宝平台：始终从服务器恢复（SUB/cookie2 可能在本地未过期但服务端已撤销/轮换，
+    //   导致滑块验证或重定向到登录页；多台电脑共享时需获取最新 cookie）
+    // 其他平台：partition 有有效 cookie 时信任 partition（更新鲜），否则从服务器恢复
     const ses = session.fromPartition(partitionName)
     let needServerRestore = true
     try {
@@ -3900,18 +3903,70 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
           )
         : partitionCookies.filter(c => !c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
+
       // PDD 平台：即使 partition 有 PDDAccessToken 也必须从服务器恢复
-      // 因为 PDDAccessToken 可能本地未过期但 PDD 服务器端已失效，必须用服务器最新 cookie 更新 partition
-      // 非 PDD 平台：partition 有有效 cookie 时信任 partition（更新鲜），跳过服务器恢复
-      if (validPlatformCookies.length > 0 && platform !== 'pinduoduo') {
+      if (platform === 'pinduoduo') {
+        console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）`)
+      // 淘宝平台：即使 partition 有有效 cookie 也必须从服务器恢复
+      } else if (platform === 'taobao') {
+        console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条淘宝 cookie，但仍需服务器恢复（SUB/cookie2可能服务端已失效）`)
+      // 其他平台：partition 有有效 cookie 时信任 partition，跳过服务器恢复
+      } else if (validPlatformCookies.length > 0) {
         needServerRestore = false
         console.log(`[PurchaseCapture] Partition已有 ${validPlatformCookies.length} 条有效${platform} cookie，跳过服务器恢复`)
         flushStorageDataAsync(ses)
       } else {
-        console.log(`[PurchaseCapture] ${platform === 'pinduoduo' ? `Partition有 ${validPlatformCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）` : `Partition无有效${platform} cookie，需从服务器恢复`}`)
+        console.log(`[PurchaseCapture] Partition无有效${platform} cookie，需从服务器恢复`)
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
+    }
+
+    // PDD 平台：恢复前先清除 partition 中该平台域名的旧 cookie
+    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点），与服务器的新格式（有前导点）不同
+    // ses.cookies.set() 不会删除旧格式 cookie，导致新旧并存，PDD 优先使用旧的失效 cookie
+    if (needServerRestore && platform === 'pinduoduo') {
+      try {
+        const pddDomains = ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
+        const existing = await ses.cookies.get({})
+        const oldPddCookies = existing.filter(c =>
+          pddDomains.some(d => c.domain && c.domain.includes(d))
+        )
+        for (const old of oldPddCookies) {
+          try {
+            const secure = old.secure || false
+            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+            await ses.cookies.remove(url, old.name)
+          } catch (e) { /* ignore */ }
+        }
+        if (oldPddCookies.length > 0) console.log(`[PurchaseCapture] PDD 旧 cookie 已清除: ${oldPddCookies.length} 条`)
+      } catch (clearErr) {
+        console.warn(`[PurchaseCapture] PDD 旧 cookie 清除失败:`, clearErr.message)
+      }
+    }
+
+    // 淘宝平台：恢复前先清除 partition 中该平台域名的旧 cookie
+    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点如 taobao.com），
+    // 与服务器新格式（有前导点如 .taobao.com）不同，Chromium 视为不同 cookie
+    // 新旧并存时淘宝优先使用旧的失效 cookie，导致滑块验证或登录重定向
+    if (needServerRestore && platform === 'taobao') {
+      try {
+        const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
+        const existing = await ses.cookies.get({})
+        const oldTbCookies = existing.filter(c =>
+          tbDomains.some(d => c.domain && c.domain.includes(d))
+        )
+        for (const old of oldTbCookies) {
+          try {
+            const secure = old.secure || false
+            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+            await ses.cookies.remove(url, old.name)
+          } catch (e) { /* ignore */ }
+        }
+        if (oldTbCookies.length > 0) console.log(`[PurchaseCapture] 淘宝旧 cookie 已清除: ${oldTbCookies.length} 条`)
+      } catch (clearErr) {
+        console.warn(`[PurchaseCapture] 淘宝旧 cookie 清除失败:`, clearErr.message)
+      }
     }
 
     if (needServerRestore) {

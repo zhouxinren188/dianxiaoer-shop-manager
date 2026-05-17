@@ -832,6 +832,29 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
             }
           }
 
+          // 淘宝：恢复前先清除 partition 中该平台域名的旧 cookie
+          // 原因：旧 cookie 可能是 hostOnly（domain 无前导点如 taobao.com），与服务器新格式（有前导点如 .taobao.com）不同
+          // Chromium 视为不同 cookie，新旧并存时淘宝优先使用旧的失效 cookie，导致滑块验证或登录重定向
+          if (platform === 'taobao') {
+            try {
+              const existing = await ses.cookies.get({})
+              const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
+              const oldTbCookies = existing.filter(c =>
+                tbDomains.some(d => c.domain && c.domain.includes(d))
+              )
+              for (const old of oldTbCookies) {
+                try {
+                  const secure = old.secure || false
+                  const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+                  await ses.cookies.remove(url, old.name)
+                } catch (e) { /* ignore */ }
+              }
+              console.log(`[PurchaseWindow] 淘宝旧 cookie 已清除: ${oldTbCookies.length} 条, accountId=${accountId}`)
+            } catch (clearErr) {
+              console.warn(`[PurchaseWindow] 淘宝旧 cookie 清除失败:`, clearErr.message)
+            }
+          }
+
           let setOk = 0
           for (const ck of serverCookies) {
             try {
@@ -862,21 +885,41 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
           // 恢复成功后：如果窗口还显示登录页，刷新到后台页面
           // 时序问题：win.loadURL 先执行（加载登录页），后台恢复后 cookie 已写入但页面不知道
           // 需要让页面重新加载才能使用新 cookie
-          if (win && !win.isDestroyed() && setOk > 0) {
+
+          // PDD 平台：检测 PDD 登录页并刷新到后台
+          if (platform === 'pinduoduo' && win && !win.isDestroyed() && setOk > 0) {
             try {
               const currentUrl = win.webContents.getURL()
-              const loginUrls = [
+              const pddLoginUrls = [
                 'yangkeduo.com/proxy/api/login',
                 'pinduoduo.com/login',
                 'login.yangkeduo.com'
               ]
-              const isOnLoginPage = loginUrls.some(u => currentUrl.includes(u))
-              const backendUrl = platform === 'pinduoduo' ? 'https://mobile.yangkeduo.com' : null
-              if (isOnLoginPage && backendUrl) {
-                console.log(`[PurchaseWindow] Cookie恢复成功，刷新页面到后台: ${backendUrl}`)
-                win.loadURL(backendUrl)
+              const isOnPddLoginPage = pddLoginUrls.some(u => currentUrl.includes(u))
+              if (isOnPddLoginPage) {
+                console.log(`[PurchaseWindow] PDD Cookie恢复成功，刷新页面到后台: https://mobile.yangkeduo.com`)
+                win.loadURL('https://mobile.yangkeduo.com')
               } else if (currentUrl.includes('yangkeduo.com') || currentUrl.includes('pinduoduo.com')) {
-                console.log(`[PurchaseWindow] Cookie恢复成功，刷新当前页面`)
+                console.log(`[PurchaseWindow] PDD Cookie恢复成功，刷新当前页面`)
+                win.webContents.reload()
+              }
+            } catch (e) {
+              // 忽略刷新失败
+            }
+          }
+
+          // 淘宝平台：检测淘宝登录页并刷新到后台（已买到的商品页面）
+          // 淘宝登录页 URL 包含 login.taobao.com，恢复 cookie 后需导航到后台页面才能使用
+          if (platform === 'taobao' && win && !win.isDestroyed() && setOk > 0) {
+            try {
+              const currentUrl = win.webContents.getURL()
+              const isOnTbLoginPage = currentUrl.includes('login.taobao.com') || currentUrl.includes('login.tmall.com')
+              if (isOnTbLoginPage) {
+                const tbBackendUrl = 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm'
+                console.log(`[PurchaseWindow] 淘宝Cookie恢复成功，刷新页面到后台: ${tbBackendUrl}`)
+                win.loadURL(tbBackendUrl)
+              } else if (currentUrl.includes('taobao.com') || currentUrl.includes('tmall.com')) {
+                console.log(`[PurchaseWindow] 淘宝Cookie恢复成功，刷新当前页面`)
                 win.webContents.reload()
               }
             } catch (e) {
@@ -990,14 +1033,17 @@ function registerPurchaseAccountIpc(mainWindow) {
             }
             return false
           })
-          // 兜底：大量平台域cookie（>5条）可能有效，但 PDD 除外
-          if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo') {
+          // 兜底：大量平台域cookie（>5条）可能有效，但 PDD/淘宝除外
+          if (!hasValidCookie && platformCookieCount > 5 && platform !== 'pinduoduo' && platform !== 'taobao') {
             hasValidCookie = true
           }
 
           // PDD 始终需要从服务器恢复（即使 partition 有有效 cookie）
-          // 非 PDD 仅在无有效 cookie 时恢复
-          needServerRestore = !hasValidCookie || platform === 'pinduoduo'
+          // PDDAccessToken 可能在本地未过期但服务端已失效
+          // 淘宝始终需要从服务器恢复（即使 partition 有有效 cookie）
+          // SUB/cookie2 可能在本地未过期但服务端已撤销/轮换，导致滑块验证；多台电脑共享需获取最新 cookie
+          // 其他平台仅在无有效 cookie 时恢复
+          needServerRestore = !hasValidCookie || platform === 'pinduoduo' || platform === 'taobao'
 
           if (hasValidCookie) {
             const backendUrl = PURCHASE_BACKEND_URLS[platform]
