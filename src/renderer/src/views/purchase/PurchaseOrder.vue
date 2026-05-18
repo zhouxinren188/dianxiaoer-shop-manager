@@ -522,6 +522,34 @@
       </template>
     </el-dialog>
 
+    <!-- 售后标记对话框 -->
+    <el-dialog
+      v-model="aftersaleDialogVisible"
+      title="标记售后"
+      width="480px"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <el-form label-width="80px">
+        <el-form-item label="售后状态">
+          <el-select v-model="aftersaleForm.aftersale_status" placeholder="选择售后状态" style="width: 100%">
+            <el-option label="待申请退款" value="pending_refund" />
+            <el-option label="待申请退货退款" value="pending_return_refund" />
+            <el-option label="待退货上传单号" value="pending_return_tracking" />
+            <el-option label="待商家处理" value="pending_merchant_handle" />
+            <el-option label="售后关闭" value="closed" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="售后备注">
+          <el-input type="textarea" v-model="aftersaleForm.aftersale_remark" :rows="3" placeholder="记录售后现状，方便后续处理" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="aftersaleDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="submitAftersale">确认</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 绑定仓库商品对话框 -->
     <el-dialog
       v-model="bindDialogVisible"
@@ -1015,7 +1043,6 @@ const statusOptions = [
   { label: '已转发', value: 'forwarded' },
   { label: '已入库', value: 'stocked' },
   { label: '已完成', value: 'completed' },
-  { label: '待处理售后', value: 'pending_after_sale' },
   { label: '已拒收', value: 'rejected' },
   { label: '已取消', value: 'cancelled' }
 ]
@@ -1362,7 +1389,7 @@ function statusLabel(val) {
 }
 
 function statusTagType(val) {
-  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', completed: 'success', pending_after_sale: 'danger', rejected: 'danger', cancelled: 'danger' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', completed: 'success', rejected: 'danger', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
@@ -1616,14 +1643,12 @@ async function handleConfirmComplete() {
 
 async function handleCompleteMarkAfterSale() {
   if (!currentCompleteRow.value) return
-  try {
-    await updatePurchaseStatus(currentCompleteRow.value.id, { status: 'pending_after_sale' })
-    currentCompleteRow.value.status = 'pending_after_sale'
-    completeDialogVisible.value = false
-    ElMessage.success('已标记为待处理售后')
-  } catch (err) {
-    ElMessage.error('操作失败: ' + (err.message || ''))
-  }
+  // 关闭完成对话框，打开售后标记对话框
+  currentAftersaleRow.value = currentCompleteRow.value
+  aftersaleForm.value.aftersale_status = 'pending_refund'
+  aftersaleForm.value.aftersale_remark = currentCompleteRow.value.aftersale_remark || ''
+  completeDialogVisible.value = false
+  aftersaleDialogVisible.value = true
 }
 
 async function handleConfirmStock(row) {
@@ -1651,6 +1676,28 @@ const currentReceiveRow = ref(null)
 // 完成确认对话框
 const completeDialogVisible = ref(false)
 const currentCompleteRow = ref(null)
+
+// 售后标记对话框
+const aftersaleDialogVisible = ref(false)
+const currentAftersaleRow = ref(null)
+const aftersaleForm = ref({ aftersale_status: 'pending_refund', aftersale_remark: '' })
+
+async function submitAftersale() {
+  const row = currentAftersaleRow.value
+  if (!row) return
+  try {
+    await updatePurchaseStatus(row.id, {
+      aftersale_status: aftersaleForm.value.aftersale_status,
+      aftersale_remark: aftersaleForm.value.aftersale_remark
+    })
+    row.aftersale_status = aftersaleForm.value.aftersale_status
+    row.aftersale_remark = aftersaleForm.value.aftersale_remark
+    aftersaleDialogVisible.value = false
+    ElMessage.success('已标记售后')
+  } catch (err) {
+    ElMessage.error('标记售后失败: ' + (err.message || ''))
+  }
+}
 
 // 云仓打单发货弹窗
 const forwardDialogVisible = ref(false)
@@ -1695,18 +1742,15 @@ function handleReceive(row) {
   receiveDialogVisible.value = true
 }
 
-// 点击"标记售后"按钮 — 将采购单状态变更为待处理售后
-async function handleMarkAfterSale() {
+// 点击"标记售后"按钮 — 打开售后标记对话框
+function handleMarkAfterSale() {
   const row = currentReceiveRow.value
   if (!row) return
-  try {
-    await updatePurchaseStatus(row.id, { status: 'pending_after_sale' })
-    row.status = 'pending_after_sale'
-    receiveDialogVisible.value = false
-    ElMessage.success('已标记为待处理售后')
-  } catch (err) {
-    ElMessage.error('标记售后失败: ' + (err.message || ''))
-  }
+  currentAftersaleRow.value = row
+  aftersaleForm.value.aftersale_status = 'pending_refund'
+  aftersaleForm.value.aftersale_remark = row.aftersale_remark || ''
+  receiveDialogVisible.value = false
+  aftersaleDialogVisible.value = true
 }
 
 // 点击"店铺发货"按钮 — 用店铺cookie打开京东出库页面并自动点击出库按钮
@@ -3076,9 +3120,6 @@ function handleImportDialogClose() {
 
 .cell-status.status-forwarded { color: #409eff; background: #ecf5ff; }
 .cell-status.status-forwarded .status-dot { background: #409eff; }
-
-.cell-status.status-pending_after_sale { color: #f56c6c; background: #fef0f0; }
-.cell-status.status-pending_after_sale .status-dot { background: #f56c6c; }
 
 /* ===== 展开行：关联销售商品信息 ===== */
 

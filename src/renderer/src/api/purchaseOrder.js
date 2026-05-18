@@ -74,3 +74,8 @@ export function deletePurchaseOrder(id) {
 export function checkPurchaseBinding(id) {
   return get(`/api/purchase-orders/${id}/binding-check`)
 }
+
+// 查询售后采购单列表（仅返回 aftersale_status != 'none' 的记录）
+export function fetchPurchaseAftersaleOrders(params) {
+  return get('/api/purchase-orders/aftersale', params)
+}

@@ -455,6 +455,25 @@ async function initDB() {
     try { await connection.execute('CREATE INDEX idx_upa_user_id ON user_purchase_accounts(user_id)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_upa_account_id ON user_purchase_accounts(account_id)') } catch(e) { /* 索引已存在 */ }
 
+    // ======== 采购单售后状态字段 ========
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN aftersale_status VARCHAR(30) DEFAULT 'none' COMMENT '售后状态: none/pending_refund/pending_merchant_handle/pending_return_refund/pending_return_tracking/closed'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute('ALTER TABLE purchase_orders ADD COLUMN aftersale_remark TEXT DEFAULT NULL COMMENT \'售后备注\'')
+    } catch(e) { /* 列已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_owner_aftersale ON purchase_orders(owner_id, aftersale_status)') } catch(e) { /* 索引已存在 */ }
+
+    // 迁移旧数据：将 pending_after_sale 状态拆分为 status=completed + aftersale_status=pending_refund
+    try {
+      const [result] = await connection.execute("UPDATE purchase_orders SET status='completed', aftersale_status='pending_refund' WHERE status='pending_after_sale'")
+      if (result.affectedRows > 0) {
+        console.log(`[DB] 已迁移 ${result.affectedRows} 条 pending_after_sale 记录`)
+      }
+    } catch(e) {
+      console.warn('[DB] 迁移 pending_after_sale 记录失败:', e.message)
+    }
+
     console.log('[DB] 数据库初始化完成')
   } finally {
     connection.release()

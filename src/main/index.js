@@ -202,6 +202,27 @@ ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
   return { success: true }
 })
 
+// 用采购账号cookie打开指定页面（如淘宝退款页面）
+ipcMain.handle('open-purchase-url', (event, { accountId, url, title }) => {
+  if (!url || !accountId) return { success: false, message: '参数不完整' }
+  const partitionName = `persist:purchase-${accountId}`
+  const urlWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: title || new URL(url).hostname,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: partitionName
+    }
+  })
+  urlWin.loadURL(url).catch(err => {
+    console.error('[OpenPurchaseURL] loadURL failed:', err.message)
+  })
+  return { success: true }
+})
+
 // 用店铺cookie打开京东出库页面并自动点击出库按钮
 ipcMain.handle('open-jd-outbound', (event, { storeId, orderId, title }) => {
   if (!storeId) return { success: false, message: '参数不完整' }

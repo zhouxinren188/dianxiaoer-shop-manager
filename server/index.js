@@ -3041,10 +3041,110 @@ app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// ★ 售后采购单列表（必须在 /:id 路由之前，避免 Express 路径冲突）
+app.get('/api/purchase-orders/aftersale', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const { page=1, pageSize=20, aftersaleStatus, platform, purchaseNo, platformOrderNo, accountId } = req.query
+
+    const listFields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
+      po.goods_name, po.goods_image, po.sku, po.quantity, po.actual_quantity, po.source_url,
+      po.platform, po.purchase_price, po.remark, po.purchase_type,
+      po.shipping_name, po.shipping_phone, po.shipping_address,
+      po.account_id, po.status, po.platform_order_no,
+      po.logistics_no, po.logistics_company,
+      po.aftersale_status, po.aftersale_remark,
+      po.owner_id, po.created_by, po.created_at, po.updated_at`
+
+    let sql, countSql, params
+
+    if (req.user.user_type === 'sub') {
+      sql = `
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
+        WHERE po.owner_id=? AND po.aftersale_status != 'none'
+          AND (upa.user_id IS NOT NULL
+               OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
+      `
+      countSql = `
+        SELECT COUNT(*) as total
+        FROM purchase_orders po
+        LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
+        WHERE po.owner_id=? AND po.aftersale_status != 'none'
+          AND (upa.user_id IS NOT NULL
+               OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))
+      `
+      params = [req.user.id, ownerId, req.user.id]
+    } else {
+      sql = `
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        WHERE po.owner_id=? AND po.aftersale_status != 'none'
+      `
+      countSql = `
+        SELECT COUNT(*) as total
+        FROM purchase_orders po
+        WHERE po.owner_id=? AND po.aftersale_status != 'none'
+      `
+      params = [ownerId]
+    }
+
+    if (aftersaleStatus) { sql += ' AND po.aftersale_status=?'; countSql += ' AND po.aftersale_status=?'; params.push(aftersaleStatus) }
+    if (platform) { sql += ' AND po.platform=?'; countSql += ' AND po.platform=?'; params.push(platform) }
+    if (purchaseNo) { sql += ' AND po.purchase_no LIKE ?'; countSql += ' AND po.purchase_no LIKE ?'; params.push(`%${purchaseNo}%`) }
+    if (platformOrderNo) { sql += ' AND po.platform_order_no LIKE ?'; countSql += ' AND po.platform_order_no LIKE ?'; params.push(`%${platformOrderNo}%`) }
+    if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
+
+    const [[{ total }]] = await pool.execute(countSql, params)
+    const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))
+    const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
+    sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
+    const [rows] = await pool.execute(sql, params)
+
+    // 售后状态计数
+    let aftersaleStatusCounts = {}
+    try {
+      let cntSql, cntParams
+      if (req.user.user_type === 'sub') {
+        cntSql = `SELECT po.aftersale_status, COUNT(*) as count FROM purchase_orders po
+          LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
+          WHERE po.owner_id=? AND po.aftersale_status != 'none'
+            AND (upa.user_id IS NOT NULL OR (po.account_id IS NULL AND (po.created_by=? OR po.created_by IS NULL)))`
+        cntParams = [req.user.id, ownerId, req.user.id]
+      } else {
+        cntSql = 'SELECT po.aftersale_status, COUNT(*) as count FROM purchase_orders po WHERE po.owner_id=? AND po.aftersale_status != \'none\''
+        cntParams = [ownerId]
+      }
+      if (platform) { cntSql += ' AND po.platform=?'; cntParams.push(platform) }
+      if (purchaseNo) { cntSql += ' AND po.purchase_no LIKE ?'; cntParams.push(`%${purchaseNo}%`) }
+      if (platformOrderNo) { cntSql += ' AND po.platform_order_no LIKE ?'; cntParams.push(`%${platformOrderNo}%`) }
+      if (accountId) { cntSql += ' AND po.account_id=?'; cntParams.push(parseInt(accountId)) }
+      cntSql += ' GROUP BY po.aftersale_status'
+      const [cntRows] = await pool.execute(cntSql, cntParams)
+      for (const row of cntRows) {
+        aftersaleStatusCounts[row.aftersale_status] = row.count
+      }
+    } catch (e) {
+      console.warn('[PurchaseAftersale] statusCounts query failed:', e.message)
+    }
+
+    res.json(ok({ list: rows, total, aftersaleStatusCounts }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, purchaseType, accountId } = req.query
+    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, purchaseType, accountId, aftersaleStatus } = req.query
     let sql, countSql, params
 
     // ★ 列表查询：排除 logistics_tracking 等大字段（详情页单独获取），减少数据传输量
@@ -3056,6 +3156,7 @@ app.get('/api/purchase-orders', async (req, res) => {
       po.shipping_name, po.shipping_phone, po.shipping_address,
       po.account_id, po.status, po.platform_order_no,
       po.logistics_no, po.logistics_company,
+      po.aftersale_status, po.aftersale_remark,
       po.owner_id, po.created_by, po.created_at, po.updated_at`
 
     if (req.user.user_type === 'sub') {
@@ -3108,6 +3209,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (salesOrderNo) { sql += ' AND so.order_id LIKE ?'; countSql += ' AND po.sales_order_no LIKE ?'; params.push(`%${salesOrderNo}%`) }
     if (purchaseType) { sql += ' AND po.purchase_type=?'; countSql += ' AND po.purchase_type=?'; params.push(purchaseType) }
     if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
+    if (aftersaleStatus) { sql += ' AND po.aftersale_status=?'; countSql += ' AND po.aftersale_status=?'; params.push(aftersaleStatus) }
 
     const [[{ total }]] = await pool.execute(countSql, params)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))
@@ -3314,7 +3416,7 @@ app.get('/api/purchase-orders/:id/binding-check', async (req, res) => {
 app.put('/api/purchase-orders/:id/status', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { status, actual_quantity, purchase_type } = req.body
+    const { status, actual_quantity, purchase_type, aftersale_status, aftersale_remark } = req.body
 
     // 更新状态和实际收货数量
     if (status) {
@@ -3328,6 +3430,18 @@ app.put('/api/purchase-orders/:id/status', async (req, res) => {
     // 更新采购类型（如：标记为已转发）
     if (purchase_type) {
       await pool.execute('UPDATE purchase_orders SET purchase_type=? WHERE id=? AND owner_id=?', [purchase_type, req.params.id, ownerId])
+    }
+
+    // 更新售后状态和备注
+    if (aftersale_status !== undefined || aftersale_remark !== undefined) {
+      const setParts = []
+      const setParams = []
+      if (aftersale_status !== undefined) { setParts.push('aftersale_status=?'); setParams.push(aftersale_status) }
+      if (aftersale_remark !== undefined) { setParts.push('aftersale_remark=?'); setParams.push(aftersale_remark) }
+      if (setParts.length > 0) {
+        setParams.push(req.params.id, ownerId)
+        await pool.execute(`UPDATE purchase_orders SET ${setParts.join(', ')} WHERE id=? AND owner_id=?`, setParams)
+      }
     }
 
     // 仓库采购单入库时，自动增加库存数量
@@ -3359,7 +3473,8 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const { sales_order_no, goods_name, sku, quantity, purchase_price, platform,
-            source_url, remark, logistics_no, logistics_company, account_id } = req.body
+            source_url, remark, logistics_no, logistics_company, account_id,
+            aftersale_status, aftersale_remark } = req.body
 
     console.log(`[Update Purchase Order] id=${req.params.id}, account_id=${account_id}, body=${JSON.stringify(req.body)}`)
 
@@ -3377,6 +3492,8 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     if (logistics_no !== undefined) { fields.push('logistics_no=?'); values.push(logistics_no) }
     if (logistics_company !== undefined) { fields.push('logistics_company=?'); values.push(logistics_company) }
     if (account_id !== undefined) { fields.push('account_id=?'); values.push(account_id || null) }
+    if (aftersale_status !== undefined) { fields.push('aftersale_status=?'); values.push(aftersale_status) }
+    if (aftersale_remark !== undefined) { fields.push('aftersale_remark=?'); values.push(aftersale_remark) }
 
     console.log(`[Update Purchase Order] fields=${fields.join(', ')}, values=${JSON.stringify(values)}`)
 
