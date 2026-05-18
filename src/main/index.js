@@ -23,7 +23,7 @@ const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
 const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
-const { setAuthToken } = require('./auth-store')
+const { setAuthToken, getAuthToken } = require('./auth-store')
 
 // 允许自签名证书（仅用于连接内部服务器API）
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -202,10 +202,18 @@ ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
   return { success: true }
 })
 
-// 用采购账号cookie打开指定页面（如淘宝退款页面）
-ipcMain.handle('open-purchase-url', (event, { accountId, url, title }) => {
+// 用采购账号cookie打开指定页面（如淘宝退款、拼多多订单详情页面）
+const PURCHASE_COOKIE_SERVER = 'http://150.158.54.108:3002'
+
+ipcMain.handle('open-purchase-url', async (event, { accountId, url, title, platform }) => {
   if (!url || !accountId) return { success: false, message: '参数不完整' }
   const partitionName = `persist:purchase-${accountId}`
+  const ses = session.fromPartition(partitionName)
+
+  // ★ 采用和采购账号登录窗口一致的配置（contextIsolation: true，无反检测 preload）
+  const chromeVersion = process.versions.chrome || '134.0.0.0'
+  const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+
   const urlWin = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -217,9 +225,162 @@ ipcMain.handle('open-purchase-url', (event, { accountId, url, title }) => {
       partition: partitionName
     }
   })
+  urlWin.webContents.setUserAgent(cleanUA)
+
+  // PDD 域名请求头注入（和采购登录窗口一致，仅拦截 PDD 域名）
+  if (platform === 'pinduoduo') {
+    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
+    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*.yangkeduo.com/*', '*://*.pinduoduo.com/*', '*://*.pdd.net/*'] }, (details, callback) => {
+      if (details.requestHeaders) {
+        details.requestHeaders['Sec-CH-UA'] = secChUa
+        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        details.requestHeaders['User-Agent'] = cleanUA
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    })
+  }
+
+  // ★ 非阻塞加载：先 loadURL 让页面立即开始渲染，再后台异步恢复 cookie
+  // （和采购登录窗口一致的模式，避免同步等 cookie 恢复导致白屏/延迟）
   urlWin.loadURL(url).catch(err => {
     console.error('[OpenPurchaseURL] loadURL failed:', err.message)
   })
+
+  // 后台异步恢复 cookie（不 await，不阻塞页面加载）
+  ;(async () => {
+    try {
+      const cookieData = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('请求超时')), 10000)
+        const urlObj = new URL(`${PURCHASE_COOKIE_SERVER}/api/purchase-accounts/${accountId}/cookies`)
+        const token = getAuthToken()
+        const headers = {}
+        if (token) headers['Authorization'] = `Bearer ${token}`
+        const req = require('http').request({
+          hostname: urlObj.hostname,
+          port: urlObj.port,
+          path: urlObj.pathname,
+          method: 'GET',
+          headers
+        }, (res) => {
+          let data = ''
+          res.on('data', chunk => data += chunk)
+          res.on('end', () => { clearTimeout(timeout); resolve({ statusCode: res.statusCode, data }) })
+        })
+        req.on('error', (e) => { clearTimeout(timeout); reject(e) })
+        req.end()
+      })
+      if (cookieData.statusCode === 200 && cookieData.data) {
+        const json = JSON.parse(cookieData.data)
+        if (json.code === 0 && json.data && json.data.cookie_data) {
+          const raw = typeof json.data.cookie_data === 'string'
+            ? JSON.parse(json.data.cookie_data)
+            : json.data.cookie_data
+          if (Array.isArray(raw) && raw.length > 0) {
+            const now = Date.now() / 1000
+            const serverCookies = raw.filter(ck => {
+              if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
+              return true
+            })
+
+            // PDD：清除旧 cookie 防止 hostOnly cookie 冲突
+            if (platform === 'pinduoduo') {
+              try {
+                const existing = await ses.cookies.get({})
+                const pddDomains = ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
+                const oldPddCookies = existing.filter(c =>
+                  pddDomains.some(d => c.domain && c.domain.includes(d))
+                )
+                for (const old of oldPddCookies) {
+                  try {
+                    const secure = old.secure || false
+                    const removeUrl = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+                    await ses.cookies.remove(removeUrl, old.name)
+                  } catch (e) { /* ignore */ }
+                }
+              } catch (e) { /* ignore */ }
+            }
+
+            // 淘宝：清除旧 cookie 防止 hostOnly cookie 冲突
+            if (platform === 'taobao') {
+              try {
+                const existing = await ses.cookies.get({})
+                const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
+                const oldTbCookies = existing.filter(c =>
+                  tbDomains.some(d => c.domain && c.domain.includes(d))
+                )
+                for (const old of oldTbCookies) {
+                  try {
+                    const secure = old.secure || false
+                    const removeUrl = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
+                    await ses.cookies.remove(removeUrl, old.name)
+                  } catch (e) { /* ignore */ }
+                }
+              } catch (e) { /* ignore */ }
+            }
+
+            let setOk = 0
+            for (const ck of serverCookies) {
+              try {
+                const sameSite = ck.sameSite || undefined
+                const secure = sameSite === 'no_restriction' ? true : (ck.secure || false)
+                await ses.cookies.set({
+                  url: (secure ? 'https://' : 'http://') + (ck.domain || '').replace(/^\./, '') + (ck.path || '/'),
+                  name: ck.name,
+                  value: ck.value || '',
+                  domain: ck.domain,
+                  path: ck.path || '/',
+                  secure,
+                  httpOnly: ck.httpOnly || false,
+                  expirationDate: ck.expirationDate || undefined,
+                  sameSite
+                })
+                setOk++
+              } catch (e2) { /* ignore */ }
+            }
+            console.log(`[OpenPurchaseURL] 后台cookie恢复: ${setOk} 条, accountId=${accountId}, platform=${platform}`)
+
+            // cookie 恢复成功后：刷新页面让新 cookie 生效
+            if (urlWin && !urlWin.isDestroyed() && setOk > 0) {
+              try {
+                const currentUrl = urlWin.webContents.getURL()
+                if (platform === 'pinduoduo') {
+                  const pddLoginUrls = ['yangkeduo.com/proxy/api/login', 'pinduoduo.com/login', 'login.yangkeduo.com']
+                  const isOnLoginPage = pddLoginUrls.some(u => currentUrl.includes(u))
+                  if (isOnLoginPage) {
+                    console.log('[OpenPurchaseURL] PDD Cookie恢复成功，重新加载目标页面')
+                    urlWin.loadURL(url)
+                  } else if (currentUrl.includes('yangkeduo.com') || currentUrl.includes('pinduoduo.com')) {
+                    console.log('[OpenPurchaseURL] PDD Cookie恢复成功，刷新当前页面')
+                    urlWin.webContents.reload()
+                  }
+                } else if (platform === 'taobao') {
+                  const isOnLoginPage = currentUrl.includes('login.taobao.com') || currentUrl.includes('login.tmall.com')
+                  if (isOnLoginPage) {
+                    console.log('[OpenPurchaseURL] 淘宝Cookie恢复成功，重新加载目标页面')
+                    urlWin.loadURL(url)
+                  } else if (currentUrl.includes('taobao.com') || currentUrl.includes('tmall.com')) {
+                    console.log('[OpenPurchaseURL] 淘宝Cookie恢复成功，刷新当前页面')
+                    urlWin.webContents.reload()
+                  }
+                }
+              } catch (e) { /* ignore */ }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[OpenPurchaseURL] 后台cookie恢复失败:', err.message)
+    }
+  })()
+
+  // 窗口关闭时清理 onBeforeSendHeaders 监听器（防止泄漏到其他窗口）
+  urlWin.on('closed', () => {
+    try {
+      const s = session.fromPartition(partitionName)
+      s.webRequest.onBeforeSendHeaders(null)
+    } catch (e) { /* ignore */ }
+  })
+
   return { success: true }
 })
 

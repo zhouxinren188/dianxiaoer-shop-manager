@@ -540,7 +540,7 @@
             <el-option label="售后关闭" value="closed" />
           </el-select>
         </el-form-item>
-        <el-form-item label="售后备注">
+        <el-form-item label="售后处理日志">
           <el-input type="textarea" v-model="aftersaleForm.aftersale_remark" :rows="3" placeholder="记录售后现状，方便后续处理" />
         </el-form-item>
       </el-form>
