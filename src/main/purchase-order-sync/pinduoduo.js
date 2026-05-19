@@ -220,7 +220,7 @@ function syncSingle(accountId, platformOrderNo) {
         `)
 
         if (searchResult) {
-          console.log(`[PDD-SearchSync] Phase1 API结果: ${searchResult.substring(0, 300)}`)
+          console.log(`[PDD-SearchSync] Phase1 API结果: ${searchResult.substring(0, 500)}`)
           const info = JSON.parse(searchResult)
 
           if (info.error) {
@@ -229,7 +229,17 @@ function syncSingle(accountId, platformOrderNo) {
             return
           }
 
-          const status = PDD_STATUS_MAP[info.combined_status] || ''
+          // 确保 combined_status 为数字类型，PDD可能返回字符串如 "3"
+          const combinedStatus = parseInt(info.combined_status)
+          console.log(`[PDD-SearchSync] combined_status原始值=${info.combined_status}, type=${typeof info.combined_status}, parseInt=${combinedStatus}`)
+          let status = (!isNaN(combinedStatus) && PDD_STATUS_MAP[combinedStatus]) || ''
+
+          // 有物流单号但状态映射为空，说明 combinedOrderStatus 缺失或异常
+          // 此时如果有物流单号，订单必然已发货，fallback 为 shipped
+          if (!status && info.logistics_no) {
+            status = 'shipped'
+            console.log(`[PDD-SearchSync] combined_status缺失/异常但有物流单号，fallback状态=shipped`)
+          }
           const mappedStatus = status
 
           const orderInfo = {
