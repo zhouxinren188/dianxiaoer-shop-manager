@@ -3060,7 +3060,7 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
 
     if (req.user.user_type === 'sub') {
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -3082,7 +3082,7 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
       params = [req.user.id, ownerId, req.user.id]
     } else {
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -3162,7 +3162,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (req.user.user_type === 'sub') {
       // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -3185,7 +3185,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
@@ -3239,6 +3239,7 @@ app.get('/api/purchase-orders', async (req, res) => {
       if (salesOrderNo) { countByStatusSql += ' AND po.sales_order_no LIKE ?'; countByStatusParams.push(`%${salesOrderNo}%`) }
       if (purchaseType) { countByStatusSql += ' AND po.purchase_type=?'; countByStatusParams.push(purchaseType) }
       if (accountId) { countByStatusSql += ' AND po.account_id=?'; countByStatusParams.push(parseInt(accountId)) }
+      if (aftersaleStatus) { countByStatusSql += ' AND po.aftersale_status=?'; countByStatusParams.push(aftersaleStatus) }
       countByStatusSql += ' GROUP BY po.status'
       const [countRows] = await pool.execute(countByStatusSql, countByStatusParams)
       for (const row of countRows) {
@@ -3617,7 +3618,7 @@ app.post('/api/purchase-orders/sync', async (req, res) => {
 
     // 4. 获取本地已绑定的采购订单列表
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, platform_order_no, platform, status FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      'SELECT id, purchase_no, platform_order_no, platform, status, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
       [ownerId, '']
     )
     console.log(`[Sync] Local bound orders: ${localOrders.length}`)
@@ -3668,6 +3669,18 @@ app.post('/api/purchase-orders/sync', async (req, res) => {
           [platformOrder.logistics_no || null, platformOrder.logistics_company || null, localOrder.id]
         )
         console.log(`[Sync] Updated logistics for order ${localOrder.purchase_no}: ${platformOrder.logistics_no}`)
+      }
+
+      // 淘宝价格回填：仅当本地价格为0或NULL且同步获取到价格时更新
+      if (platform === 'taobao') {
+        const syncedPrice = platformOrder.purchase_price
+        if (syncedPrice && parseFloat(syncedPrice) > 0 && (!localOrder.purchase_price || parseFloat(localOrder.purchase_price) === 0)) {
+          await pool.execute(
+            'UPDATE purchase_orders SET purchase_price=? WHERE id=?',
+            [syncedPrice, localOrder.id]
+          )
+          console.log(`[Sync] Backfilled price for order ${localOrder.purchase_no}: ${localOrder.purchase_price} -> ${syncedPrice}`)
+        }
       }
 
       // 如果订单已发货但物流信息为空，抓取物流页面获取单号
@@ -3805,7 +3818,7 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no, logistics_company FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, purchase_no, status, logistics_no, logistics_company, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -3841,6 +3854,17 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       console.log(`[Sync-Single] Updated logistics_company: ${orderInfo.logistics_company}`)
     }
 
+    // 淘宝价格回填：仅当本地价格为0或NULL且同步获取到价格时更新
+    if (platform === 'taobao') {
+      const currentPrice = localOrder.purchase_price
+      const syncedPrice = orderInfo.purchase_price
+      if (syncedPrice && parseFloat(syncedPrice) > 0 && (!currentPrice || parseFloat(currentPrice) === 0)) {
+        updateFields.push('purchase_price=?')
+        updateValues.push(syncedPrice)
+        console.log(`[Sync-Single] Backfilled purchase_price: ${currentPrice} -> ${syncedPrice}`)
+      }
+    }
+
     if (updateFields.length > 0) {
       updateValues.push(localOrder.id)
       await pool.execute(
@@ -3853,7 +3877,8 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       status: newStatus || localOrder.status,
       logistics_no: orderInfo.logistics_no || localOrder.logistics_no,
       logistics_company: orderInfo.logistics_company || localOrder.logistics_company,
-      logistics_status: orderInfo.logistics_status || ''
+      logistics_status: orderInfo.logistics_status || '',
+      purchase_price: orderInfo.purchase_price || ''
     }))
   } catch (err) {
     console.error(`[Sync-Single] Error: ${err.message}`)

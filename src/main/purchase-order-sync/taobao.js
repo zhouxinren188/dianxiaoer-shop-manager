@@ -109,6 +109,25 @@ function parseResponse(responseText) {
           orderMap[orderId].logistics_company = fields.packagePreview.packageViewList[0].cpName
         }
       }
+
+      // PC端详情页：从 itemInfo 提取单价（actualTotalFee）
+      if (key.startsWith('itemInfo_')) {
+        const fields = component.fields || {}
+        const orderId = fields.orderId || component.id
+        if (!orderId) continue
+        if (!orderMap[orderId]) orderMap[orderId] = { order_no: orderId }
+        const item = fields.item || {}
+        const priceInfo = item.priceInfo || {}
+        const fee = priceInfo.actualTotalFee || priceInfo.totalFee || ''
+        if (fee) {
+          const numStr = fee.replace(/[￥¥,]/g, '').trim()
+          if (numStr && parseFloat(numStr) > 0) {
+            orderMap[orderId].purchase_price = numStr
+          }
+        }
+      }
+
+
     }
 
     for (const orderId of Object.keys(orderMap)) {
@@ -120,7 +139,8 @@ function parseResponse(responseText) {
           logistics_no: order.logistics_no || '',
           logistics_company: resolveLogisticsCompany(order.logistics_company || '', order.logistics_company_code || ''),
           logistics_company_code: order.logistics_company_code || '',
-          logistics_status: order.logistics_status || ''
+          logistics_status: order.logistics_status || '',
+          purchase_price: order.purchase_price || ''
         })
       }
     }
@@ -151,7 +171,8 @@ function parseSearchResponse(dataObj) {
         logistics_no: '',
         logistics_company: '',
         logistics_company_code: '',
-        logistics_status: ''
+        logistics_status: '',
+        purchase_price: ''
       }
 
       // 状态信息 - 从 extra.tradeStatus 获取
@@ -224,6 +245,27 @@ function parseSearchResponse(dataObj) {
       // 解析物流公司名称
       result.logistics_company = resolveLogisticsCompany(result.logistics_company, result.logistics_company_code)
 
+      // 提取商品单价（从 payInfo 和 subOrders 中提取）
+      const payInfo = order.payInfo || {}
+      if (payInfo.actualFee && parseFloat(payInfo.actualFee) > 0) {
+        result.purchase_price = String(parseFloat(payInfo.actualFee))
+      } else if (payInfo.shouldPay && parseFloat(payInfo.shouldPay) > 0) {
+        result.purchase_price = String(parseFloat(payInfo.shouldPay))
+      }
+      // 从 subOrders 提取单价（更精确）
+      const subs = order.subOrders || []
+      if (subs.length > 0) {
+        for (const sub of subs) {
+          if (!sub) continue
+          const itemInfo = sub.itemInfo || sub.payInfo || {}
+          const unitPrice = itemInfo.unitPrice || itemInfo.price || itemInfo.actualFee
+          if (unitPrice && parseFloat(unitPrice) > 0) {
+            result.purchase_price = String(parseFloat(unitPrice))
+            break
+          }
+        }
+      }
+
       orders.push(result)
     }
   } catch (e) {
@@ -241,6 +283,17 @@ function findAllOrders(allResponses) {
     try {
       const orders = parseResponse(r.body)
       allOrders.push(...orders)
+    } catch (e) { /* skip */ }
+    try {
+      // parseSearchResponse 期望解析后的 JSON 对象（含 mainOrders 字段）
+      const parsed = tryParseJson(r.body)
+      if (parsed && parsed.data) {
+        const dataObj = typeof parsed.data === 'string' ? tryParseJson(parsed.data) : parsed.data
+        if (dataObj) {
+          const orders = parseSearchResponse(dataObj)
+          allOrders.push(...orders)
+        }
+      }
     } catch (e) { /* skip */ }
   }
   const seen = new Set()
@@ -518,6 +571,11 @@ function syncSingle(accountId, platformOrderNo) {
         // 合并 findAllOrders 和 parseDetailData 的结果
         if (!orderInfo && found) {
           orderInfo = found
+        } else if (orderInfo && found) {
+          // parseDetailData 有结果但可能缺少价格，用 found 补充
+          if (!orderInfo.purchase_price && found.purchase_price) {
+            orderInfo.purchase_price = found.purchase_price
+          }
         }
 
         if (orderInfo) {
@@ -640,7 +698,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company: '',
           logistics_company_code: '',
           logistics_status: '',
-          logistics_tracking: null
+          logistics_tracking: null,
+          purchase_price: ''
         }
 
         // 合并所有解析结果：后面的结果补充前面缺失的字段
@@ -650,6 +709,7 @@ function syncSingle(accountId, platformOrderNo) {
           if (!merged.logistics_company_code && logisticsInfo.logistics_company_code) merged.logistics_company_code = logisticsInfo.logistics_company_code
           if (!merged.status && logisticsInfo.status) merged.status = logisticsInfo.status
           if (!merged.logistics_status && logisticsInfo.logistics_status) merged.logistics_status = logisticsInfo.logistics_status
+          if (!merged.purchase_price && logisticsInfo.purchase_price) merged.purchase_price = logisticsInfo.purchase_price
           // 物流页的轨迹数据优先（更详细）
           if (logisticsInfo.logistics_tracking && logisticsInfo.logistics_tracking.length > 0) {
             merged.logistics_tracking = logisticsInfo.logistics_tracking
@@ -719,7 +779,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company: '',
           logistics_company_code: '',
           logistics_status: '',
-          logistics_tracking: null
+          logistics_tracking: null,
+          purchase_price: ''
         }
         let hasAnyInfo = false
 
@@ -983,7 +1044,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company: '',
           logistics_company_code: '',
           logistics_status: '',
-          logistics_tracking: null
+          logistics_tracking: null,
+          purchase_price: ''
         }
 
         let hasInfo = false
@@ -997,13 +1059,15 @@ function syncSingle(accountId, platformOrderNo) {
           // 额外匹配详情页关键组件：
           //   - statusStep/statusStepTm1：步骤条组件（详情页所有组件属于同一订单，id 可能不是订单号）
           //   - header：订单详情头部组件，fields.content 包含订单状态文本（如"卖家已发货"、"交易关闭"）
+          //   - itemInfo：商品信息组件，fields.item.priceInfo 包含商品价格
           const tag = component.tag || ''
           const componentType = component.type || ''
           const isStatusStep = (tag === 'statusStep' || tag === 'statusStepTm1')
           const isDetailHeader = (tag === 'header' && componentType.includes('order_detail_header'))
+          const isItemInfo = tag === 'itemInfo'
           const idMatch = component.id === targetOrderNo
           const keyMatch = key.includes(targetOrderNo)
-          if (!idMatch && !keyMatch && !isStatusStep && !isDetailHeader) continue
+          if (!idMatch && !keyMatch && !isStatusStep && !isDetailHeader && !isItemInfo) continue
 
           matchedKeys.push(key)
           const fields = component.fields || {}
@@ -1019,13 +1083,28 @@ function syncSingle(accountId, platformOrderNo) {
             console.log(`[PurchaseSync-Taobao] 检测到空statusStep组件，可能为交易关闭订单`)
           }
 
+          // 从 itemInfo 组件提取商品价格（订单详情页格式）
+          // PC详情页: fields.item.priceInfo.actualTotalFee 如 "￥58.00"
+          if (isItemInfo && !result.purchase_price) {
+            const item = fields.item || {}
+            const priceInfo = item.priceInfo || {}
+            const fee = priceInfo.actualTotalFee || priceInfo.totalFee || ''
+            if (fee) {
+              const numStr = fee.replace(/[￥¥,]/g, '').trim()
+              if (numStr && parseFloat(numStr) > 0) {
+                result.purchase_price = numStr
+                console.log(`[PurchaseSync-Taobao] itemInfo组件提取价格: ${fee} → ${numStr}`)
+              }
+            }
+          }
+
           // 递归搜索 fields 内的所有嵌套对象，提取物流和状态字段
           extractFromFields(fields, result, tag, 0)
         }
 
         // 检查是否提取到了有效信息
         if (result.logistics_no || result.logistics_company_code || result.logistics_company ||
-            result.status || result.logistics_status) {
+            result.status || result.logistics_status || result.purchase_price) {
           hasInfo = true
         }
 
@@ -1216,7 +1295,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company: '',
           logistics_company_code: '',
           logistics_status: '',
-          logistics_tracking: null
+          logistics_tracking: null,
+          purchase_price: ''
         }
 
         const extra = order.extra || {}
@@ -1241,6 +1321,14 @@ function syncSingle(accountId, platformOrderNo) {
           if (!result.logistics_company && lo.companyName) result.logistics_company = lo.companyName
           if (!result.logistics_company && lo.logisticsCompany) result.logistics_company = lo.logisticsCompany
           if (!result.logistics_status && lo.statusDesc) result.logistics_status = lo.statusDesc
+        }
+
+        // 提取商品价格（从 payInfo）
+        const payInfo = order.payInfo || {}
+        if (payInfo.actualFee && parseFloat(payInfo.actualFee) > 0) {
+          result.purchase_price = String(parseFloat(payInfo.actualFee))
+        } else if (payInfo.shouldPay && parseFloat(payInfo.shouldPay) > 0) {
+          result.purchase_price = String(parseFloat(payInfo.shouldPay))
         }
 
         // 直接字段
@@ -1303,6 +1391,15 @@ function syncSingle(accountId, platformOrderNo) {
           status = numStatusMap[obj.orderStatus] || ''
         }
 
+        // 提取价格（从 payInfo）
+        let purchase_price = ''
+        const payInfo = obj.payInfo || {}
+        if (payInfo.actualFee && parseFloat(payInfo.actualFee) > 0) {
+          purchase_price = String(parseFloat(payInfo.actualFee))
+        } else if (payInfo.shouldPay && parseFloat(payInfo.shouldPay) > 0) {
+          purchase_price = String(parseFloat(payInfo.shouldPay))
+        }
+
         if (mailNo || cpName || cpCode || status) {
           // 尝试提取物流轨迹
           const tracking = extractTrackingFromData(obj, 2)
@@ -1313,7 +1410,8 @@ function syncSingle(accountId, platformOrderNo) {
             logistics_company: resolveLogisticsCompany(cpName, cpCode),
             logistics_company_code: cpCode,
             logistics_status: lo.statusDesc || '',
-            logistics_tracking: tracking
+            logistics_tracking: tracking,
+            purchase_price
           }
         }
         return null

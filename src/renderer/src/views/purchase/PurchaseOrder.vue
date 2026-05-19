@@ -94,6 +94,16 @@
             </el-option>
           </el-select>
         </el-form-item>
+        <el-form-item label="售后状态">
+          <el-select v-model="filterForm.aftersaleStatus" placeholder="全部" clearable style="width: 150px" @change="handleSearch">
+            <el-option label="无售后" value="none" />
+            <el-option label="待申请退款" value="pending_refund" />
+            <el-option label="待申请退货退款" value="pending_return_refund" />
+            <el-option label="待退货上传单号" value="pending_return_tracking" />
+            <el-option label="待商家处理" value="pending_merchant_handle" />
+            <el-option label="售后关闭" value="closed" />
+          </el-select>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSearch">
             <el-icon><Search /></el-icon>
@@ -130,175 +140,110 @@
     </div>
 
     <!-- 数据表格 -->
-    <el-card class="table-card" shadow="never">
-      <el-table
-        ref="purchaseTableRef"
-        :data="pagedData"
-        stripe
-        v-loading="loading"
-        :header-cell-style="{ background: '#f7f8fa', fontWeight: 600, color: '#909399', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.5px' }"
-        :cell-style="{ padding: '12px 0' }"
-        row-key="id"
-        @expand-change="handleExpandChange"
-        @row-click="handleRowClick"
-      >
-        <!-- 展开行：关联销售商品信息（隐藏展开箭头） -->
-        <el-table-column type="expand" class-name="hide-expand-icon">
-          <template #default="{ row }">
-            <div class="expand-panel">
-              <div class="expand-header">
-                <span class="expand-header-dot"></span>
-                <span class="expand-header-title">关联销售订单</span>
-              </div>
-              <div v-if="relatedSalesLoadingMap[row.id]" class="expand-loading">
-                <el-icon class="is-loading" :size="16" color="#409EFF"><Loading /></el-icon>
-                <span>加载中...</span>
-              </div>
-              <div v-else-if="!relatedSalesDataMap[row.id]" class="expand-empty">暂无关联销售订单</div>
-              <div v-else class="expand-row">
-                <span class="expand-tag store-tag">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-                  {{ relatedSalesDataMap[row.id].storeName || '--' }}
-                </span>
-                <span v-if="relatedSalesDataMap[row.id].warehouseName" class="expand-tag warehouse-tag">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4"/></svg>
-                  {{ relatedSalesDataMap[row.id].warehouseName }}
-                </span>
-                <span class="expand-tag order-tag copyable" @click.stop="copyText(relatedSalesDataMap[row.id].orderId)" title="点击复制订单号">{{ relatedSalesDataMap[row.id].orderId || '--' }}</span>
-                <span class="expand-tag status-tag" :class="getSalesStatusClass(relatedSalesDataMap[row.id].statusText)">
-                  <span class="expand-status-dot"></span>
-                  {{ relatedSalesDataMap[row.id].statusText || '--' }}
-                </span>
-                <div class="expand-divider"></div>
-                <div v-for="(item, idx) in relatedSalesDataMap[row.id].items" :key="idx" class="expand-product-item">
-                  <div class="expand-product-img">
-                    <el-image v-if="item.image" :src="item.image" fit="cover"
-                      :preview-src-list="[item.image]" :preview-teleported="true" />
-                    <div v-else class="expand-product-img-empty">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#c0c4cc" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
-                    </div>
-                  </div>
-                  <span class="expand-product-name">{{ item.name || '--' }}</span>
-                  <span class="expand-product-price">¥{{ Number(item.price || 0).toFixed(2) }}</span>
-                  <span class="expand-product-qty">x{{ item.quantity }}</span>
+    <div class="table-card" v-loading="loading">
+      <el-empty v-if="!loading && tableData.length === 0" description="暂无采购订单" />
+
+      <template v-if="tableData.length > 0">
+        <!-- 全局表头 -->
+        <div class="order-table-header">
+          <div class="ot-col ot-col-goods">商品信息</div>
+          <div class="ot-col ot-col-price">单价/数量</div>
+          <div class="ot-col ot-col-status">售后状态</div>
+          <div class="ot-col ot-col-logistics">物流信息</div>
+          <div class="ot-col ot-col-remark">本地备注</div>
+          <div class="ot-col ot-col-action">操作</div>
+        </div>
+
+        <!-- 订单卡片 -->
+        <div v-for="row in pagedData" :key="row.id" class="order-card">
+          <!-- 头部行：订单级信息 -->
+          <div class="card-header">
+            <div class="header-items">
+              <span class="header-item">
+                <span class="item-label">采购编码</span>
+                <span class="item-value mono">{{ row.purchase_no || '--' }}</span>
+              </span>
+              <span class="header-divider">|</span>
+              <span class="header-item">
+                <span class="item-label">采购订单号</span>
+                <span class="item-value mono">{{ row.platform_order_no || '--' }}</span>
+              </span>
+              <span class="header-divider">|</span>
+              <span class="header-item">
+                <span class="item-value">{{ platformLabel(row.platform) }}</span>
+              </span>
+              <span class="header-divider">|</span>
+              <span class="header-item">
+                <span class="item-label">采购账户</span>
+                <span class="item-value">{{ row.account_name || '--' }}</span>
+              </span>
+              <span class="header-divider">|</span>
+              <span class="header-item">
+                <span class="item-value">{{ formatTime(row.created_at) }}</span>
+              </span>
+              <span class="header-divider">|</span>
+              <span class="header-item">
+                <el-tag :type="orderStatusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+              </span>
+            </div>
+            <span v-if="row.sales_order_status" class="header-item">
+              <span class="item-label">销售状态</span>
+              <span class="sales-status-tag" :style="salesStatusStyle(row.sales_order_status)">{{ row.sales_order_status }}</span>
+            </span>
+          </div>
+
+          <!-- 数据行 -->
+          <div class="card-body">
+            <div class="ot-col ot-col-goods">
+              <div class="product-info">
+                <el-image v-if="row.goods_image" :src="row.goods_image" fit="cover" class="product-image" :preview-src-list="[row.goods_image]" preview-teleported />
+                <div v-else class="product-image placeholder">无图</div>
+                <div class="product-detail">
+                  <div class="product-name">{{ row.goods_name || '--' }}</div>
+                  <el-tag :type="purchaseTypeTagType(row.purchase_type)" size="small" class="type-tag">
+                    {{ purchaseTypeLabel(row.purchase_type) }}
+                  </el-tag>
                 </div>
               </div>
             </div>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="purchase_no" label="采购编号" width="90" align="center">
-          <template #default="{ row }">
-            <span class="cell-purchase-no">{{ row.purchase_no }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="platform_order_no" label="采购订单号" width="180" align="center">
-          <template #default="{ row }">
-            <span v-if="row.platform_order_no" class="cell-order-no">{{ row.platform_order_no }}</span>
-            <span v-else class="cell-empty">--</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="goods_name" label="商品信息" min-width="260">
-          <template #default="{ row }">
-            <div class="cell-product">
-              <div class="cell-product-img">
-                <el-image v-if="row.goods_image" :src="row.goods_image" fit="cover"
-                  :preview-src-list="[row.goods_image]" preview-teleported />
-                <div v-else class="cell-product-img-empty">--</div>
+            <div class="ot-col ot-col-price">
+              <span class="price-line">{{ row.purchase_price ? '¥' + row.purchase_price : '--' }} x{{ row.quantity || 1 }}</span>
+            </div>
+            <div class="ot-col ot-col-status">
+              <el-tag v-if="row.aftersale_status && row.aftersale_status !== 'none'" :type="aftersaleTagType(row.aftersale_status)" size="small">
+                {{ aftersaleStatusLabel(row.aftersale_status) }}
+              </el-tag>
+              <span v-else class="logistics-text">--</span>
+            </div>
+            <div class="ot-col ot-col-logistics">
+              <el-link v-if="row.logistics_no" type="primary" :underline="false" @click="handleViewLogistics(row)" class="logistics-link">{{ row.logistics_company || '' }} {{ row.logistics_no }}</el-link>
+              <span v-else class="logistics-text">/</span>
+            </div>
+            <div class="ot-col ot-col-remark">
+              <span class="remark-text">{{ row.sales_remark || '--' }}</span>
+            </div>
+            <div class="ot-col ot-col-action">
+              <div class="action-buttons">
+                <el-button type="success" size="small" @click="handleSyncSingle(row)">同步订单</el-button>
+                <el-button v-if="row.status === 'shipped'" type="primary" size="small" @click="handleConfirmReceive(row)">确认签收</el-button>
+                <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
+                <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" type="warning" size="small" @click="handleComplete(row)">订单确认</el-button>
+                <el-button v-if="row.status === 'stocked'" type="warning" size="small" @click="handleOutbound(row)">出库</el-button>
+                <!-- 编辑/详情/删除 暂时隐藏，后续维修时恢复 -->
+                <!-- <el-button type="warning" size="small" @click="handleEditPurchase(row)">编辑</el-button>
+                <el-button type="primary" size="small" @click="handleViewDetail(row)">详情</el-button>
+                <el-button type="danger" size="small" @click="handleDeleteOrder(row)">删除</el-button> -->
               </div>
-              <div class="cell-product-name">{{ row.goods_name }}</div>
             </div>
-          </template>
-        </el-table-column>
+          </div>
 
-        <el-table-column prop="quantity" label="数量" width="70" align="center" />
-
-        <el-table-column prop="purchase_price" label="采购单价" width="100" align="center">
-          <template #default="{ row }">
-            <span v-if="row.purchase_price" class="cell-price">¥{{ Number(row.purchase_price).toFixed(2) }}</span>
-            <span v-else class="cell-empty">--</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="platform" label="采购平台" width="100" align="center">
-          <template #default="{ row }">
-            <span class="cell-platform">{{ platformLabel(row.platform) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="account_name" label="采购账号" width="140" align="center">
-          <template #default="{ row }">
-            <span>{{ row.account_name || '-' }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="purchase_type" label="采购类型" width="130" align="center">
-          <template #default="{ row }">
-            <div>
-              <el-tag v-if="row.purchase_type === 'warehouse'" type="warning" size="small">仓库转发</el-tag>
-              <el-tag v-else-if="row.purchase_type === 'warehouse_in'" type="danger" size="small">仓库进货</el-tag>
-              <el-tag v-else type="success" size="small">三方代发</el-tag>
-            </div>
-            <div v-if="row.warehouse_name" class="cell-warehouse">{{ row.warehouse_name }}</div>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="logistics_no" label="物流单号" width="200" align="center">
-          <template #default="{ row }">
-            <div v-if="row.logistics_no">
-              <span class="cell-order-no cell-logistics-no" @click.stop="handleViewLogistics(row)">{{ row.logistics_no }}</span>
-              <div v-if="row.logistics_company" class="cell-logistics-company">{{ row.logistics_company }}</div>
-            </div>
-            <span v-else class="cell-empty">--</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="status" label="订单状态" width="110" align="center">
-          <template #default="{ row }">
-            <span class="cell-status" :class="'status-' + row.status">
-              <span class="status-dot"></span>
-              {{ statusLabel(row.status) }}
-            </span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="created_at" label="创建时间" width="160" align="center">
-          <template #default="{ row }">
-            <span class="cell-time">{{ formatTime(row.created_at) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="操作" width="230" align="center" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="success" size="small" @click="handleSyncSingle(row)">
-              同步
-            </el-button>
-            <el-button link type="warning" size="small" @click="handleEditPurchase(row)">
-              编辑
-            </el-button>
-            <el-button v-if="row.status === 'shipped'" link type="primary" size="small" @click="handleConfirmReceive(row)">
-              确认签收
-            </el-button>
-            <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" link type="primary" size="small" @click="handleReceive(row)">
-              收货
-            </el-button>
-            <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" link type="success" size="small" @click="handleComplete(row)">
-              完成
-            </el-button>
-            <el-button v-if="row.status === 'stocked'" link type="warning" size="small" @click="handleOutbound(row)">
-              出库
-            </el-button>
-            <el-button link type="primary" size="small" @click="handleViewDetail(row)">
-              详情
-            </el-button>
-            <el-button link type="danger" size="small" @click="handleDeleteOrder(row)">
-              删除
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          <!-- 收件地址 -->
+          <div v-if="row.shipping_name || row.shipping_address" class="card-footer">
+            <el-icon :size="12"><Location /></el-icon>
+            <span>收件地址：{{ row.shipping_name || '' }} {{ row.shipping_phone || '' }}，{{ row.shipping_address || '' }}</span>
+          </div>
+        </div>
+      </template>
 
       <div class="pagination-wrap">
         <el-pagination
@@ -311,7 +256,7 @@
           @current-change="handlePageChange"
         />
       </div>
-    </el-card>
+    </div>
 
     <!-- 详情抽屉 -->
     <el-drawer v-model="detailVisible" title="采购订单详情" size="540px" direction="rtl">
@@ -334,7 +279,7 @@
             <span v-else>--</span>
           </el-descriptions-item>
           <el-descriptions-item label="订单状态">
-            <el-tag :type="statusTagType(currentRow.status)" size="small">{{ statusLabel(currentRow.status) }}</el-tag>
+            <el-tag :type="orderStatusTagType(currentRow.status)" size="small">{{ statusLabel(currentRow.status) }}</el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="物流公司">{{ currentRow.logistics_company || '--' }}</el-descriptions-item>
           <el-descriptions-item label="物流单号">{{ currentRow.logistics_no || '--' }}</el-descriptions-item>
@@ -529,6 +474,7 @@
       width="480px"
       :close-on-click-modal="false"
       destroy-on-close
+      align-center
     >
       <el-form label-width="80px">
         <el-form-item label="售后状态">
@@ -545,6 +491,9 @@
         </el-form-item>
       </el-form>
       <template #footer>
+        <el-select v-model="aftersaleQuickPhrase" placeholder="快捷短语" clearable size="small" style="width: 220px; margin-right: auto;" @change="applyAftersaleQuickPhrase">
+          <el-option v-for="p in aftersaleQuickPhrases" :key="p.label" :label="p.label" :value="p.label" />
+        </el-select>
         <el-button @click="aftersaleDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="submitAftersale">确认</el-button>
       </template>
@@ -1026,7 +975,8 @@ import {
   RefreshRight,
   Plus,
   Upload,
-  Download
+  Download,
+  Location
 } from '@element-plus/icons-vue'
 import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales, deletePurchaseOrder, checkPurchaseBinding } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
@@ -1362,7 +1312,8 @@ const filterForm = reactive({
   platform: '',
   purchaseType: '',
   status: '',
-  accountId: ''
+  accountId: '',
+  aftersaleStatus: 'none'
 })
 
 const pageInfo = reactive({
@@ -1388,17 +1339,29 @@ function statusLabel(val) {
   return found ? found.label : val || '--'
 }
 
-function statusTagType(val) {
+function orderStatusTagType(val) {
   const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', completed: 'success', rejected: 'danger', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
-function getSalesStatusClass(statusText) {
-  if (!statusText) return 'status-default'
-  if (statusText.includes('取消') || statusText.includes('关闭')) return 'status-danger'
-  if (statusText.includes('完成') || statusText.includes('已出库')) return 'status-success'
-  if (statusText.includes('待出库') || statusText.includes('待付款')) return 'status-warning'
-  return 'status-default'
+function purchaseTypeLabel(val) {
+  const map = { warehouse: '仓库转发', warehouse_in: '仓库进货', dropship: '三方代发' }
+  return map[val] || val || '--'
+}
+
+function purchaseTypeTagType(val) {
+  const map = { warehouse: 'warning', warehouse_in: 'danger', dropship: 'success' }
+  return map[val] || 'info'
+}
+
+function aftersaleStatusLabel(val) {
+  const map = { pending_refund: '待申请退款', pending_return_refund: '待申请退货退款', pending_return_tracking: '待退货上传单号', pending_merchant_handle: '待商家处理', closed: '售后关闭' }
+  return map[val] || val || '--'
+}
+
+function aftersaleTagType(val) {
+  const map = { pending_refund: 'danger', pending_merchant_handle: 'warning', pending_return_refund: 'warning', pending_return_tracking: '', closed: 'info' }
+  return map[val] || 'info'
 }
 
 function getSalesStatusTagType(statusText) {
@@ -1409,14 +1372,15 @@ function getSalesStatusTagType(statusText) {
   return 'info'
 }
 
-function copyText(text) {
-  if (!text) return
-  navigator.clipboard.writeText(text).then(() => {
-    ElMessage.success('已复制: ' + text)
-  }).catch(() => {
-    ElMessage.error('复制失败')
-  })
+function salesStatusStyle(statusText) {
+  if (!statusText) return {}
+  if (statusText.includes('取消') || statusText.includes('关闭')) return { color: '#c45656', background: '#fef0f0', borderColor: '#fab6b6' }
+  if (statusText.includes('完成') || statusText.includes('已出库')) return { color: '#185abc', background: '#e6f0ff', borderColor: '#b3ccf2' }
+  if (statusText.includes('待出库') || statusText.includes('待付款') || statusText.includes('等待付款')) return { color: '#e53935', background: '#fff0f0', borderColor: '#f5b3b3' }
+  if (statusText.includes('暂停')) return { color: '#c47a2a', background: '#ffe6cc', borderColor: '#f2c682' }
+  return { color: '#606266', background: '#f4f4f5', borderColor: '#d3d4d6' }
 }
+
 
 function formatTime(val) {
   if (!val) return '--'
@@ -1471,6 +1435,7 @@ function handleReset() {
   filterForm.platform = ''
   filterForm.purchaseType = ''
   filterForm.status = ''
+  filterForm.aftersaleStatus = 'none'
   pageInfo.page = 1
   loadData()
 }
@@ -1504,12 +1469,25 @@ async function loadData() {
     if (filterForm.salesOrderNo) params.salesOrderNo = filterForm.salesOrderNo
     if (filterForm.purchaseType) params.purchaseType = filterForm.purchaseType
     if (filterForm.accountId) params.accountId = filterForm.accountId
+    if (filterForm.aftersaleStatus) params.aftersaleStatus = filterForm.aftersaleStatus
 
     const orderData = await fetchPurchaseOrders(params)
 
     // 后端 LEFT JOIN 已提供 account_name，无需前端映射
     tableData.value = orderData.list || []
     pageInfo.total = orderData.total || 0
+
+    // 手动查询单个订单时，检查销售单是否已取消
+    if (tableData.value.length === 1 && tableData.value[0].sales_order_status && tableData.value[0].sales_order_status.includes('取消')) {
+      const msg = '请注意该订单已取消！'
+      ElMessageBox.alert(msg, '提醒', { confirmButtonText: '我知道了', type: 'warning', center: true })
+      try {
+        const utterance = new SpeechSynthesisUtterance(msg)
+        utterance.lang = 'zh-CN'
+        utterance.rate = 1
+        speechSynthesis.speak(utterance)
+      } catch (e) { /* 语音不可用时静默 */ }
+    }
 
     // 后端已将 statusCounts 合并到列表响应中，直接提取
     if (orderData.statusCounts) {
@@ -1553,48 +1531,6 @@ async function handleDeleteOrder(row) {
 const logisticsVisible = ref(false)
 const logisticsData = ref(null)
 const logisticsLoading = ref(false)
-
-// 关联销售商品信息（展开行模式）
-const relatedSalesDataMap = reactive({})
-const relatedSalesLoadingMap = reactive({})
-const purchaseTableRef = ref()
-const expandedRows = ref([])
-
-async function loadRelatedSales(rowId) {
-  relatedSalesLoadingMap[rowId] = true
-  try {
-    const data = await fetchRelatedSales(rowId)
-    relatedSalesDataMap[rowId] = data
-  } catch (e) {
-    relatedSalesDataMap[rowId] = null
-  } finally {
-    relatedSalesLoadingMap[rowId] = false
-  }
-}
-
-function handleExpandChange(row, expandedRowList) {
-  // 手风琴模式：只保留当前展开行
-  if (expandedRowList.includes(row)) {
-    expandedRows.value = [row]
-    loadRelatedSales(row.id)
-  } else {
-    expandedRows.value = []
-  }
-}
-
-function handleRowClick(row) {
-  if (!purchaseTableRef.value) return
-  const isExpanded = expandedRows.value.some(r => r.id === row.id)
-  if (isExpanded) {
-    purchaseTableRef.value.toggleRowExpansion(row, false)
-  } else {
-    // 先折叠其他行
-    expandedRows.value.forEach(r => {
-      purchaseTableRef.value.toggleRowExpansion(r, false)
-    })
-    purchaseTableRef.value.toggleRowExpansion(row, true)
-  }
-}
 
 async function handleViewLogistics(row) {
   logisticsVisible.value = true
@@ -1647,6 +1583,7 @@ async function handleCompleteMarkAfterSale() {
   currentAftersaleRow.value = currentCompleteRow.value
   aftersaleForm.value.aftersale_status = 'pending_refund'
   aftersaleForm.value.aftersale_remark = currentCompleteRow.value.aftersale_remark || ''
+  aftersaleQuickPhrase.value = ''
   completeDialogVisible.value = false
   aftersaleDialogVisible.value = true
 }
@@ -1681,6 +1618,21 @@ const currentCompleteRow = ref(null)
 const aftersaleDialogVisible = ref(false)
 const currentAftersaleRow = ref(null)
 const aftersaleForm = ref({ aftersale_status: 'pending_refund', aftersale_remark: '' })
+const aftersaleQuickPhrase = ref('')
+const aftersaleQuickPhrases = [
+  { label: '用户已退款，商品已拒收，请申请退款。', status: 'pending_refund' },
+  { label: '用户已退款，商品拒收失败，请申请退货退款。', status: 'pending_return_refund' },
+  { label: '用户已退款，请申请退货退款。', status: 'pending_return_refund' }
+]
+
+function applyAftersaleQuickPhrase(val) {
+  if (!val) return
+  const phrase = aftersaleQuickPhrases.find(p => p.label === val)
+  if (phrase) {
+    aftersaleForm.value.aftersale_remark = phrase.label
+    aftersaleForm.value.aftersale_status = phrase.status
+  }
+}
 
 async function submitAftersale() {
   const row = currentAftersaleRow.value
@@ -1749,6 +1701,7 @@ function handleMarkAfterSale() {
   currentAftersaleRow.value = row
   aftersaleForm.value.aftersale_status = 'pending_refund'
   aftersaleForm.value.aftersale_remark = row.aftersale_remark || ''
+  aftersaleQuickPhrase.value = ''
   receiveDialogVisible.value = false
   aftersaleDialogVisible.value = true
 }
@@ -2795,9 +2748,9 @@ function handleImportDialogClose() {
 }
 
 .table-card {
-  margin-bottom: 16px;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .filter-card {
@@ -2805,39 +2758,241 @@ function handleImportDialogClose() {
   box-shadow: 0 1px 3px rgba(0,0,0,.04), 0 1px 2px rgba(0,0,0,.06);
 }
 
-/* 表格行hover效果：蓝色背景 + 左侧指示条 */
-.table-card :deep(.el-table__row) {
-  position: relative;
-  transition: background-color 0.15s;
-}
-.table-card :deep(.el-table__row:hover > td.el-table__cell) {
-  background-color: #f5f9ff !important;
-}
-.table-card :deep(.el-table__row:hover > td:first-child::before) {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: linear-gradient(180deg, #409eff, #66b1ff);
-  border-radius: 0 2px 2px 0;
-  z-index: 1;
-}
-
-.purchase-no {
-  color: #e6a23c;
+/* ====== 全局表头 ====== */
+.order-table-header {
+  display: flex;
+  align-items: center;
+  background: linear-gradient(180deg, #f8f9fb 0%, #f3f4f6 100%);
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 11px 16px;
+  font-size: 13px;
   font-weight: 600;
+  color: #374151;
+}
+
+.order-table-header .ot-col {
+  display: flex;
+  align-items: center;
+}
+
+/* 列宽定义 - 表头和数据行共用 */
+.ot-col-goods {
+  width: 400px;
+  flex-shrink: 0;
+  padding-left: 0;
+  padding-right: 8px;
+}
+
+.ot-col-price {
+  width: 120px;
+  flex-shrink: 0;
+  justify-content: center !important;
+  text-align: center;
+}
+
+.ot-col-status {
+  width: 130px;
+  flex-shrink: 0;
+  justify-content: center !important;
+}
+
+.ot-col-logistics {
+  width: 220px;
+  flex-shrink: 0;
+}
+
+.ot-col-remark {
+  flex: 1;
+  min-width: 80px;
+}
+
+.ot-col-action {
+  width: 140px;
+  flex-shrink: 0;
+  justify-content: center !important;
+}
+
+/* ====== 订单卡片 ====== */
+.order-card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+
+.order-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* 头部行 */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: #fafbfc;
+  border-bottom: 1px solid #f0f2f5;
+  font-size: 13px;
+}
+
+.header-items {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.header-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.header-divider {
+  color: #dcdfe6;
+  margin: 0 4px;
+}
+
+.item-label {
+  color: #909399;
   font-size: 12px;
 }
 
-.sales-order-link {
-  color: #409eff;
+.item-value {
+  color: #303133;
+}
+
+.sales-status-tag {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid;
+  height: 22px;
+  line-height: 22px;
+  box-sizing: border-box;
+}
+
+.item-value.mono {
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
   font-size: 12px;
 }
 
-.text-muted {
+/* 数据行 */
+.card-body {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+}
+
+.card-body .ot-col {
+  display: flex;
+  align-items: center;
+}
+
+/* 商品信息 */
+.product-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.product-image {
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  border: 1px solid #ebeef5;
+}
+
+.product-image.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
   color: #c0c4cc;
+  font-size: 11px;
+}
+
+.product-detail {
+  min-width: 0;
+}
+
+.product-name {
+  font-size: 13px;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 330px;
+}
+
+.type-tag {
+  margin-top: 4px;
+}
+
+/* 单价/数量 */
+.price-line {
+  font-size: 13px;
+  color: #303133;
+}
+
+/* 物流 */
+.logistics-link {
+  font-size: 12px;
+}
+
+.logistics-text {
+  font-size: 12px;
+  color: #606266;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+/* 备注 */
+.remark-text {
+  font-size: 12px;
+  color: #f56c6c;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+
+/* 操作按钮 */
+.action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  width: 100%;
+}
+
+.action-buttons .el-button {
+  margin-left: 0 !important;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+/* 收件地址 footer */
+.card-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px;
+  background: #fafbfc;
+  border-top: 1px solid #f0f2f5;
+  font-size: 12px;
+  color: #909399;
 }
 
 /* 分页器紧凑样式 */
@@ -2897,32 +3052,8 @@ function handleImportDialogClose() {
   color: #909399;
 }
 
-/* ===== 表格单元格样式（参考截图风格） ===== */
-.cell-purchase-no {
-  color: #e6a23c;
-  font-weight: 600;
-  font-size: 13px;
-}
 
-.cell-order-no {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 12px;
-  color: #606266;
-}
-
-.cell-logistics-no {
-  color: var(--el-color-primary);
-  cursor: pointer;
-  &:hover {
-    text-decoration: underline;
-  }
-}
-
-.cell-logistics-company {
-  font-size: 11px;
-  color: #909399;
-  margin-top: 2px;
-}
+/* 收货确认弹窗 */
 
 .logistics-header {
   display: flex;
@@ -3010,335 +3141,8 @@ function handleImportDialogClose() {
   padding-left: 8px;
 }
 
-.cell-empty {
-  color: #c0c4cc;
-  font-size: 12px;
-}
 
-.cell-price {
-  color: #f56c6c;
-  font-weight: 600;
-  font-size: 13px;
-}
 
-.cell-platform {
-  font-size: 12px;
-  color: #606266;
-}
-
-.cell-warehouse {
-  font-size: 11px;
-  color: #909399;
-  margin-top: 2px;
-}
-
-.cell-time {
-  font-size: 12px;
-  color: #909399;
-}
-
-.cell-product {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.cell-product-img {
-  width: 40px;
-  height: 40px;
-  border-radius: 4px;
-  overflow: hidden;
-  flex-shrink: 0;
-  border: 1px solid #f0f0f0;
-}
-
-.cell-product-img .el-image {
-  width: 100%;
-  height: 100%;
-}
-
-.cell-product-img-empty {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f7fa;
-  color: #c0c4cc;
-  font-size: 11px;
-}
-
-.cell-product-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  font-size: 13px;
-  color: #303133;
-  line-height: 1.4;
-}
-
-/* 订单状态标签：圆点+文字（参考截图2风格） */
-.cell-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 2px 10px;
-  border-radius: 12px;
-}
-
-.cell-status .status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.cell-status.status-ordered { color: #409eff; background: #ecf5ff; }
-.cell-status.status-ordered .status-dot { background: #409eff; }
-
-.cell-status.status-pending { color: #909399; background: #f4f4f5; }
-.cell-status.status-pending .status-dot { background: #909399; }
-
-.cell-status.status-shipped { color: #409eff; background: #ecf5ff; }
-.cell-status.status-shipped .status-dot { background: #409eff; }
-
-.cell-status.status-in_transit { color: #e6a23c; background: #fdf6ec; }
-.cell-status.status-in_transit .status-dot { background: #e6a23c; }
-
-.cell-status.status-received { color: #67c23a; background: #f0f9eb; }
-.cell-status.status-received .status-dot { background: #67c23a; }
-
-.cell-status.status-stocked { color: #67c23a; background: #f0f9eb; }
-.cell-status.status-stocked .status-dot { background: #67c23a; }
-
-.cell-status.status-cancelled { color: #f56c6c; background: #fef0f0; }
-.cell-status.status-cancelled .status-dot { background: #f56c6c; }
-
-.cell-status.status-forwarded { color: #409eff; background: #ecf5ff; }
-.cell-status.status-forwarded .status-dot { background: #409eff; }
-
-/* ===== 展开行：关联销售商品信息 ===== */
-
-/* 隐藏展开箭头列 */
-:deep(.el-table__expand-column .cell) {
-  display: none;
-}
-:deep(.el-table__expand-column) {
-  width: 0 !important;
-  min-width: 0 !important;
-  padding: 0 !important;
-}
-:deep(th.el-table__expand-column) {
-  width: 0 !important;
-  min-width: 0 !important;
-  padding: 0 !important;
-  border-right: none !important;
-}
-
-/* 展开行覆盖固定列空白 */
-:deep(.el-table__expanded-cell) {
-  padding: 0 !important;
-}
-:deep(.el-table__expanded-cell .cell) {
-  padding: 0 !important;
-}
-
-/* 展开面板整体 */
-.expand-panel {
-  padding: 10px 20px 12px;
-  background: #fafbfc;
-  border-top: 1px solid #f0f2f5;
-}
-
-/* 标题行：关联销售订单 */
-.expand-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.expand-header-dot {
-  width: 3px;
-  height: 14px;
-  background: #409eff;
-  border-radius: 2px;
-}
-
-.expand-header-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #606266;
-  letter-spacing: 0.3px;
-}
-
-/* 加载状态 */
-.expand-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 20px 0;
-  color: #909399;
-  font-size: 13px;
-}
-
-/* 空状态 */
-.expand-empty {
-  text-align: center;
-  padding: 16px 0;
-  color: #c0c4cc;
-  font-size: 13px;
-}
-
-/* 单行布局：标签 + 分隔线 + 商品卡片 */
-.expand-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow-x: auto;
-}
-
-.expand-row::-webkit-scrollbar { height: 4px; }
-.expand-row::-webkit-scrollbar-track { background: transparent; }
-.expand-row::-webkit-scrollbar-thumb { background: #d0d3d8; border-radius: 2px; }
-
-/* 信息标签 */
-.expand-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 4px;
-  white-space: nowrap;
-  flex-shrink: 0;
-  border: 1px solid #e4e7ed;
-  background: #fff;
-  color: #606266;
-}
-
-.expand-tag svg { flex-shrink: 0; }
-
-.expand-tag.store-tag {
-  color: #303133;
-  font-weight: 500;
-}
-.expand-tag.store-tag svg { color: #909399; }
-
-.expand-tag.warehouse-tag {
-  color: #e6a23c;
-  font-size: 11px;
-  font-weight: 500;
-}
-.expand-tag.warehouse-tag svg { color: #e6a23c; }
-
-.expand-tag.order-tag {
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 11px;
-  color: #409eff;
-  background: #ecf5ff;
-  border-color: #d9ecff;
-}
-
-.expand-tag.copyable {
-  cursor: pointer;
-  user-select: none;
-  transition: all .15s;
-}
-.expand-tag.copyable:hover {
-  background: #d9ecff;
-  border-color: #b3d8ff;
-}
-.expand-tag.copyable:active {
-  transform: scale(0.97);
-}
-
-.expand-tag.status-tag {
-  font-weight: 500;
-  gap: 6px;
-}
-
-/* 状态圆点 */
-.expand-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.expand-tag.status-danger { color: #f56c6c; background: #fef0f0; border-color: #fbc4c4; }
-.expand-tag.status-danger .expand-status-dot { background: #f56c6c; }
-.expand-tag.status-success { color: #67c23a; background: #f0f9eb; border-color: #c2e7b0; }
-.expand-tag.status-success .expand-status-dot { background: #67c23a; }
-.expand-tag.status-warning { color: #e6a23c; background: #fdf6ec; border-color: #f5dab1; }
-.expand-tag.status-warning .expand-status-dot { background: #e6a23c; }
-.expand-tag.status-default { color: #909399; background: #f4f4f5; border-color: #d3d4d6; }
-.expand-tag.status-default .expand-status-dot { background: #909399; }
-
-/* 分隔线 */
-.expand-divider {
-  width: 1px;
-  height: 24px;
-  background: #dcdfe6;
-  flex-shrink: 0;
-  margin: 0 4px;
-}
-
-/* 商品项：图片 + 标题 + 价格 + 数量 单行排列 */
-.expand-product-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-  max-width: 420px;
-  min-width: 0;
-}
-
-/* 商品图片 */
-.expand-product-img {
-  width: 32px;
-  height: 32px;
-  border-radius: 4px;
-  overflow: hidden;
-  flex-shrink: 0;
-  border: 1px solid #f0f0f0;
-}
-
-.expand-product-img .el-image {
-  width: 100%;
-  height: 100%;
-}
-
-.expand-product-img-empty {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f7fa;
-}
-
-.expand-product-name {
-  font-size: 12px;
-  color: #303133;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  max-width: 525px;
-}
-
-.expand-product-price {
-  font-size: 12px;
-  color: #f56c6c;
-  font-weight: 600;
-  white-space: nowrap;
-}
 
 /* 收货确认弹窗 */
 .receive-confirm-content {
@@ -3483,13 +3287,6 @@ function handleImportDialogClose() {
   color: #c0c4cc;
   padding: 40px 0;
   font-size: 14px;
-}
-
-.expand-product-qty {
-  font-size: 11px;
-  color: #909399;
-  white-space: nowrap;
-  flex-shrink: 0;
 }
 
 /* ============ 绑定对话框样式 ============ */

@@ -136,7 +136,8 @@
               <span class="price-line">{{ row.purchase_price ? '¥' + row.purchase_price : '--' }} x{{ row.quantity || 1 }}</span>
             </div>
             <div class="ot-col ot-col-logistics">
-              <span class="logistics-text">{{ row.logistics_company || '' }} {{ row.logistics_no || '/' }}</span>
+              <el-link v-if="row.logistics_no" type="primary" :underline="false" @click="handleViewLogistics(row)" class="logistics-link">{{ row.logistics_company || '' }} {{ row.logistics_no }}</el-link>
+              <span v-else class="logistics-text">/</span>
             </div>
             <div class="ot-col ot-col-aftersale-status">
               <el-tag :type="aftersaleTagType(row.aftersale_status)" size="small">
@@ -184,7 +185,7 @@
     </div>
 
     <!-- 售后处理日志弹窗 -->
-    <el-dialog v-model="logDialogVisible" title="售后处理日志" width="560px" :close-on-click-modal="false" destroy-on-close>
+    <el-dialog v-model="logDialogVisible" title="售后处理日志" width="680px" :close-on-click-modal="false" destroy-on-close align-center>
       <!-- 当前售后状态 -->
       <div class="log-status-bar">
         <span class="log-status-label">当前状态</span>
@@ -195,15 +196,18 @@
 
       <!-- 时间线 -->
       <div class="log-timeline">
-        <div v-for="(log, i) in currentLogs" :key="i" class="log-timeline-item">
-          <div class="timeline-left">
-            <span class="timeline-dot" :class="{ 'latest': i === 0 }"></span>
-            <div class="timeline-meta">
-              <div class="timeline-user">{{ log.user }}</div>
-              <div class="timeline-time">{{ log.time }}</div>
-            </div>
+        <div v-for="(log, i) in currentLogs" :key="i" class="log-timeline-item" :class="{ 'log-timeline-latest': i === 0 }">
+          <div class="timeline-time-col">
+            <div class="timeline-user">{{ log.user }}</div>
+            <div class="timeline-time">{{ log.time }}</div>
           </div>
-          <div class="timeline-content">{{ log.content }}</div>
+          <div class="timeline-dot-col">
+            <span class="timeline-dot" :class="{ 'latest': i === 0 }"></span>
+            <span v-if="i < currentLogs.length - 1" class="timeline-line"></span>
+          </div>
+          <div class="timeline-content-col">
+            <div class="timeline-text">{{ log.content }}</div>
+          </div>
         </div>
         <div v-if="currentLogs.length === 0" class="log-empty">暂无处理日志</div>
       </div>
@@ -237,6 +241,32 @@
         </div>
       </div>
     </el-dialog>
+
+    <!-- 物流轨迹弹窗 -->
+    <el-dialog v-model="logisticsVisible" title="物流轨迹" width="650px" align-center>
+      <div v-if="logisticsData" class="logistics-container">
+        <div class="logistics-header">
+          <span>{{ logisticsData.company || '--' }}</span>
+          <span class="logistics-header-sep">|</span>
+          <span>{{ logisticsData.tracking_no || '--' }}</span>
+          <el-tag size="small" :type="logisticsData.source === 'local' ? 'info' : 'primary'" style="margin-left: 8px">
+            {{ logisticsData.source === 'taobao' ? '淘宝' : logisticsData.source === '1688' ? '阿里巴巴' : logisticsData.source === 'pinduoduo' ? '拼多多' : logisticsData.source === 'local' ? '本地' : '快递100' }}
+          </el-tag>
+        </div>
+        <div v-if="logisticsData.tracks && logisticsData.tracks.length > 0" class="logistics-list">
+          <div v-for="(track, index) in logisticsData.tracks" :key="index" class="logistics-item" :class="{ 'logistics-item-latest': index === 0 }">
+            <div class="logistics-item-time">{{ formatTime(track.time || track.timestamp) }}</div>
+            <div class="logistics-item-dot">
+              <span class="logistics-dot" :class="index === 0 ? 'logistics-dot-active' : ''"></span>
+              <span v-if="index < logisticsData.tracks.length - 1" class="logistics-line"></span>
+            </div>
+            <div class="logistics-item-text">{{ track.context || track.desc || track.message }}</div>
+          </div>
+        </div>
+        <el-empty v-else :description="logisticsData.source === 'local' ? '暂无详细轨迹，可到平台查看物流详情' : '暂无物流轨迹信息'" />
+      </div>
+      <div v-else v-loading="logisticsLoading" style="min-height: 200px"></div>
+    </el-dialog>
   </div>
 </template>
 
@@ -245,7 +275,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Money, Location } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { fetchPurchaseAftersaleOrders, updatePurchaseStatus } from '@/api/purchaseOrder'
+import { fetchPurchaseAftersaleOrders, updatePurchaseStatus, fetchLogisticsTracking } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 
 const router = useRouter()
@@ -498,6 +528,25 @@ async function handleViewOrder(row) {
   }
 }
 
+// 物流轨迹
+const logisticsVisible = ref(false)
+const logisticsLoading = ref(false)
+const logisticsData = ref(null)
+
+async function handleViewLogistics(row) {
+  logisticsVisible.value = true
+  logisticsLoading.value = true
+  logisticsData.value = null
+  try {
+    const data = await fetchLogisticsTracking(row.id)
+    logisticsData.value = data
+  } catch (err) {
+    ElMessage.error('查询物流轨迹失败: ' + err.message)
+  } finally {
+    logisticsLoading.value = false
+  }
+}
+
 onMounted(() => {
   loadAccounts()
   loadData()
@@ -631,7 +680,7 @@ onMounted(() => {
 
 /* 列宽定义 - 表头和数据行共用 */
 .ot-col-goods {
-  width: 340px;
+  width: 400px;
   flex-shrink: 0;
   padding-left: 0;
   padding-right: 8px;
@@ -645,12 +694,12 @@ onMounted(() => {
 }
 
 .ot-col-logistics {
-  width: 160px;
+  width: 220px;
   flex-shrink: 0;
 }
 
 .ot-col-aftersale-status {
-  width: 120px;
+  width: 110px;
   flex-shrink: 0;
   justify-content: center !important;
 }
@@ -661,7 +710,7 @@ onMounted(() => {
 }
 
 .ot-col-action {
-  width: 200px;
+  width: 130px;
   flex-shrink: 0;
   justify-content: center !important;
 }
@@ -726,12 +775,14 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  align-items: stretch;
+  align-items: center;
   width: 100%;
 }
 
 .action-buttons .el-button {
   margin-left: 0 !important;
+  padding: 5px 8px;
+  font-size: 12px;
 }
 
 /* 数据行 */
@@ -780,7 +831,7 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 280px;
+  max-width: 330px;
 }
 
 .type-tag {
@@ -884,57 +935,82 @@ onMounted(() => {
 
 .log-timeline-item {
   display: flex;
-  gap: 16px;
-  padding: 12px 0;
-  border-bottom: 1px solid #f5f5f5;
+  align-items: flex-start;
+  padding: 6px 0;
 }
 
-.log-timeline-item:last-child {
-  border-bottom: none;
-}
-
-.timeline-left {
-  display: flex;
-  gap: 10px;
-  flex-shrink: 0;
+.timeline-time-col {
   width: 120px;
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 12px;
+}
+
+.timeline-user {
+  font-size: 13px;
+  font-weight: 500;
+  color: #303133;
+  line-height: 20px;
+}
+
+.log-timeline-latest .timeline-user {
+  color: #67c23a;
+}
+
+.timeline-time {
+  font-size: 11px;
+  color: #909399;
+  line-height: 16px;
+}
+
+.timeline-dot-col {
+  width: 14px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .timeline-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: #dcdfe6;
   flex-shrink: 0;
-  margin-top: 3px;
+  margin-top: 6px;
 }
 
 .timeline-dot.latest {
   background: #67c23a;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
 }
 
-.timeline-meta {
-  min-width: 0;
-}
-
-.timeline-user {
-  font-size: 14px;
-  font-weight: 500;
-  color: #303133;
-}
-
-.timeline-time {
-  font-size: 12px;
-  color: #909399;
-  margin-top: 2px;
-}
-
-.timeline-content {
+.timeline-line {
+  width: 1px;
   flex: 1;
-  font-size: 14px;
-  color: #303133;
-  line-height: 1.5;
+  min-height: 14px;
+  background: #e4e7ed;
+  margin-top: 4px;
+}
+
+.timeline-content-col {
+  flex: 1;
   min-width: 0;
+  padding-left: 8px;
+}
+
+.timeline-text {
+  font-size: 13px;
+  color: #303133;
+  line-height: 20px;
+  word-break: break-all;
+  text-align: left;
+}
+
+.log-timeline-latest .timeline-text {
+  font-weight: 500;
 }
 
 .log-empty {
@@ -953,13 +1029,14 @@ onMounted(() => {
 .log-input-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   margin-top: 10px;
-  gap: 12px;
+  gap: 8px;
 }
 
 .quick-select {
-  flex: 1;
+  width: 180px;
+  flex-shrink: 0;
 }
 
 /* 底部收件人 */
@@ -979,5 +1056,101 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* 物流轨迹 */
+.logistics-link {
+  font-size: 12px;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
+.logistics-container {
+  padding: 4px 0;
+}
+
+.logistics-header {
+  font-size: 14px;
+  font-weight: 500;
+  color: #303133;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+}
+
+.logistics-header-sep {
+  color: #dcdfe6;
+  margin: 0 8px;
+}
+
+.logistics-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.logistics-item {
+  display: flex;
+  align-items: flex-start;
+  padding: 6px 0;
+  position: relative;
+}
+
+.logistics-item-latest .logistics-item-text {
+  color: #303133;
+  font-weight: 500;
+}
+
+.logistics-item-time {
+  width: 90px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #909399;
+  text-align: right;
+  padding-right: 12px;
+  line-height: 20px;
+}
+
+.logistics-item-latest .logistics-item-time {
+  color: #0bbd87;
+}
+
+.logistics-item-dot {
+  width: 14px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.logistics-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e4e7ed;
+  flex-shrink: 0;
+  margin-top: 6px;
+}
+
+.logistics-dot-active {
+  background: #0bbd87;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+}
+
+.logistics-line {
+  width: 1px;
+  flex: 1;
+  min-height: 14px;
+  background: #e4e7ed;
+  margin-top: 4px;
+}
+
+.logistics-item-text {
+  flex: 1;
+  font-size: 13px;
+  color: #606266;
+  line-height: 20px;
+  padding-left: 8px;
 }
 </style>

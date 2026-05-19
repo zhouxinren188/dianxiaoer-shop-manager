@@ -1208,13 +1208,13 @@ app.get('/api/store-sales-stats', async (req, res) => {
     // 按店铺分组统计
     const storePlaceholders = targetStoreIds.map(() => '?').join(',')
     const [storeRows] = await pool.execute(
-      `SELECT s.id as storeId, s.name as storeName, s.platform, s.tags,
+      `SELECT s.id as storeId, s.name as storeName, s.platform,
               COALESCE(SUM(so.goods_amount), 0) as salesAmount,
               COUNT(so.id) as orderCount
        FROM stores s
        LEFT JOIN sales_orders so ON s.id = so.store_id AND so.status_text NOT IN (${excludePlaceholders}) ${dateJoin}
        WHERE s.id IN (${storePlaceholders})
-       GROUP BY s.id, s.name, s.platform, s.tags
+       GROUP BY s.id, s.name, s.platform
        ORDER BY salesAmount DESC`,
       [...excludeStatuses, ...targetStoreIds]
     )
@@ -1226,7 +1226,6 @@ app.get('/api/store-sales-stats', async (req, res) => {
       storeId: r.storeId,
       storeName: r.storeName,
       platform: r.platform,
-      tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : (r.tags || []),
       salesAmount: Number(r.salesAmount),
       orderCount: Number(r.orderCount),
       avgOrderValue: Number(r.orderCount) > 0 ? Math.round(Number(r.salesAmount) / Number(r.orderCount) * 100) / 100 : 0,
@@ -1343,17 +1342,10 @@ app.post('/api/purchase-accounts', async (req, res) => {
     const { account, password, platform } = req.body
     if (!platform) return res.json(fail('platform 不能为空'))
     const [result] = await pool.execute(
-      `INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)
-       ON DUPLICATE KEY UPDATE password=VALUES(password), online=0`,
+      'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
       [account||'', password||'', platform, ownerId]
     )
-    const [rows] = await pool.execute(
-      'SELECT id FROM purchase_accounts WHERE account = ? AND platform = ? AND owner_id = ?',
-      [account||'', platform, ownerId]
-    )
-    const accountId = rows[0]?.id || result.insertId
-    const isUpdate = result.affectedRows >= 2
-    res.json(ok({ id: accountId, updated: isUpdate }))
+    res.json(ok({ id: result.insertId }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
@@ -1466,11 +1458,12 @@ app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { page=1, pageSize=20, status, platform } = req.query
+    const { page=1, pageSize=20, status, platform, aftersaleStatus } = req.query
     let sql = 'SELECT * FROM purchase_orders WHERE owner_id=?'
     const params = [ownerId]
     if (status) { sql += ' AND status=?'; params.push(status) }
     if (platform) { sql += ' AND platform=?'; params.push(platform) }
+    if (aftersaleStatus) { sql += ' AND aftersale_status=?'; params.push(aftersaleStatus) }
     const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
     const [[{ total }]] = await pool.execute(countSql, params)
     const limit = Math.max(1, parseInt(pageSize,10)||20)
