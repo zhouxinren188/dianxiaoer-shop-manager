@@ -2798,7 +2798,7 @@ function handleImportDialogClose() {
 }
 
 .ot-col-remark {
-  width: 100px;
+  width: 150px;
   flex-shrink: 0;
 }
 
@@ -2922,8 +2922,10 @@ function handleImportDialogClose() {
   color: #303133;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 330px;
+  word-break: break-all;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .type-tag {
