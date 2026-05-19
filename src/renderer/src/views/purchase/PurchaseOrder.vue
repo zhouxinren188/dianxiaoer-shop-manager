@@ -2773,8 +2773,8 @@ function handleImportDialogClose() {
 
 /* 列宽定义 - 表头和数据行共用 */
 .ot-col-goods {
-  width: 400px;
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 280px;
   padding-left: 0;
   padding-right: 8px;
 }
@@ -2798,8 +2798,8 @@ function handleImportDialogClose() {
 }
 
 .ot-col-remark {
-  flex: 1;
-  min-width: 80px;
+  width: 100px;
+  flex-shrink: 0;
 }
 
 .ot-col-action {
