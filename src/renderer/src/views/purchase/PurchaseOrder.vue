@@ -226,10 +226,7 @@
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" type="warning" size="small" @click="handleComplete(row)">订单确认</el-button>
                 <el-button v-if="row.status === 'stocked'" type="warning" size="small" @click="handleOutbound(row)">出库</el-button>
-                <!-- 编辑/详情/删除 暂时隐藏，后续维修时恢复 -->
-                <!-- <el-button type="warning" size="small" @click="handleEditPurchase(row)">编辑</el-button>
-                <el-button type="primary" size="small" @click="handleViewDetail(row)">详情</el-button>
-                <el-button type="danger" size="small" @click="handleDeleteOrder(row)">删除</el-button> -->
+                <el-button size="small" class="btn-edit-order" @click="handleEditPurchase(row)">编辑订单</el-button>
               </div>
             </div>
           </div>
@@ -2979,6 +2976,17 @@ function handleImportDialogClose() {
   margin-left: 0 !important;
   padding: 5px 8px;
   font-size: 12px;
+}
+
+.btn-edit-order {
+  color: #909399;
+  background: #f4f4f5;
+  border-color: #d3d4d6;
+}
+.btn-edit-order:hover {
+  color: #73767a;
+  background: #e9e9eb;
+  border-color: #c8c9cc;
 }
 
 /* 收件地址 footer */
