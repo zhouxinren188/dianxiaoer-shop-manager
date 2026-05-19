@@ -2994,7 +2994,7 @@ function handleImportDialogClose() {
 }
 
 .card-footer .sales-status-tag {
-  margin-left: auto;
+  margin-left: 8px;
   flex-shrink: 0;
 }
 
