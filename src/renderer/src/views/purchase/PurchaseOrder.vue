@@ -186,10 +186,7 @@
                 <el-tag :type="orderStatusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
               </span>
             </div>
-            <span v-if="row.sales_order_status" class="header-item">
-              <span class="item-label">销售状态</span>
-              <span class="sales-status-tag" :style="salesStatusStyle(row.sales_order_status)">{{ row.sales_order_status }}</span>
-            </span>
+
           </div>
 
           <!-- 数据行 -->
@@ -237,10 +234,11 @@
             </div>
           </div>
 
-          <!-- 收件地址 -->
-          <div v-if="row.shipping_name || row.shipping_address" class="card-footer">
+          <!-- 收件地址 + 销售状态标签 -->
+          <div v-if="row.shipping_name || row.shipping_address || row.sales_order_status" class="card-footer">
             <el-icon :size="12"><Location /></el-icon>
             <span>收件地址：{{ row.shipping_name || '' }} {{ row.shipping_phone || '' }}，{{ row.shipping_address || '' }}</span>
+            <span v-if="row.sales_order_status" class="sales-status-tag" :style="salesStatusStyle(row.sales_order_status)">{{ row.sales_order_status }}</span>
           </div>
         </div>
       </template>
@@ -1424,7 +1422,7 @@ watch(selectedAccount, (val) => {
 
 function handleSearch() {
   pageInfo.page = 1
-  loadData()
+  loadData({ checkCancelAlert: true })
 }
 
 function handleReset() {
@@ -1453,7 +1451,7 @@ function handlePageChange(val) {
 
 // ==================== 数据加载 ====================
 
-async function loadData() {
+async function loadData({ checkCancelAlert = false } = {}) {
   loading.value = true
   try {
     // 服务端分页+筛选：传递所有筛选参数给后端
@@ -1477,8 +1475,8 @@ async function loadData() {
     tableData.value = orderData.list || []
     pageInfo.total = orderData.total || 0
 
-    // 手动查询单个订单时，检查销售单是否已取消
-    if (tableData.value.length === 1 && tableData.value[0].sales_order_status && tableData.value[0].sales_order_status.includes('取消')) {
+    // 仅手动查询单个订单时，检查销售单是否已取消（同步、编辑等操作不触发）
+    if (checkCancelAlert && tableData.value.length === 1 && tableData.value[0].sales_order_status && tableData.value[0].sales_order_status.includes('取消')) {
       const msg = '请注意该订单已取消！'
       ElMessageBox.alert(msg, '提醒', { confirmButtonText: '我知道了', type: 'warning', center: true })
       try {
@@ -2993,6 +2991,11 @@ function handleImportDialogClose() {
   border-top: 1px solid #f0f2f5;
   font-size: 12px;
   color: #909399;
+}
+
+.card-footer .sales-status-tag {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* 分页器紧凑样式 */
