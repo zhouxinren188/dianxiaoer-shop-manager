@@ -246,7 +246,7 @@
           v-model:page-size="pageInfo.pageSize"
           :total="pageInfo.total"
           layout="total, sizes, prev, pager, next, jumper"
-          :page-sizes="[20, 50, 100]"
+          :page-sizes="[10, 20, 50]"
           @size-change="handleSizeChange"
           @current-change="handlePageChange"
         />
@@ -1313,7 +1313,7 @@ const filterForm = reactive({
 
 const pageInfo = reactive({
   page: 1,
-  pageSize: 20,
+  pageSize: 10,
   total: 0
 })
 
@@ -1546,8 +1546,8 @@ async function handleConfirmReceive(row) {
   try {
     await ElMessageBox.confirm(`确认签收采购单 ${row.purchase_no}？`, '确认签收', { type: 'info' })
     await updatePurchaseStatus(row.id, { status: 'received' })
-    row.status = 'received'
     ElMessage.success('已确认签收')
+    await loadData()
   } catch (err) {
     if (err !== 'cancel') {
       ElMessage.error('操作失败: ' + (err.message || ''))
@@ -1564,9 +1564,9 @@ async function handleConfirmComplete() {
   if (!currentCompleteRow.value) return
   try {
     await updatePurchaseStatus(currentCompleteRow.value.id, { status: 'completed' })
-    currentCompleteRow.value.status = 'completed'
     completeDialogVisible.value = false
     ElMessage.success('已标记为完成')
+    await loadData()
   } catch (err) {
     ElMessage.error('操作失败: ' + (err.message || ''))
   }
@@ -1587,8 +1587,8 @@ async function handleConfirmStock(row) {
   try {
     await ElMessageBox.confirm(`确认将采购单 ${row.purchase_no} 的商品入库？入库后将增加对应仓库库存。`, '确认入库', { type: 'warning' })
     await updatePurchaseStatus(row.id, { status: 'stocked' })
-    row.status = 'stocked'
     ElMessage.success('已确认入库，库存已更新')
+    await loadData()
   } catch (err) {
     if (err !== 'cancel') {
       ElMessage.error('操作失败: ' + (err.message || ''))
@@ -1637,10 +1637,9 @@ async function submitAftersale() {
       aftersale_status: aftersaleForm.value.aftersale_status,
       aftersale_remark: aftersaleForm.value.aftersale_remark
     })
-    row.aftersale_status = aftersaleForm.value.aftersale_status
-    row.aftersale_remark = aftersaleForm.value.aftersale_remark
     aftersaleDialogVisible.value = false
     ElMessage.success('已标记售后')
+    await loadData()
   } catch (err) {
     ElMessage.error('标记售后失败: ' + (err.message || ''))
   }
@@ -1761,9 +1760,9 @@ async function handleConfirmForward() {
   if (!row) return
   try {
     await updatePurchaseStatus(row.id, { status: 'forwarded' })
-    row.status = 'forwarded'
     forwardDialogVisible.value = false
     ElMessage.success('已标记为转发完成')
+    await loadData()
   } catch (err) {
     ElMessage.error('操作失败: ' + (err.message || ''))
   }
@@ -1819,9 +1818,9 @@ async function confirmStockIn() {
       status: 'stocked',
       actual_quantity: stockInForm.actualQuantity
     })
-    row.status = 'stocked'
     stockInDialogVisible.value = false
     ElMessage.success('已确认入库，库存已更新')
+    await loadData()
   } catch (err) {
     ElMessage.error('入库失败: ' + (err.message || ''))
   } finally {
