@@ -49,8 +49,8 @@ function saveJson(filename, data) {
 // ============ 内存数据库 ============
 let userIdCounter = 3
 const users = [
-  { id: 1, username: 'admin', realName: '系统管理员', phone: '13800138000', userType: 'master', role: 'super_admin', status: 'enabled', createdAt: '2026-04-01 10:00:00' },
-  { id: 2, username: 'staff01', realName: '张三', phone: '13900139000', userType: 'sub', role: 'staff', status: 'enabled', createdAt: '2026-04-15 14:30:00' }
+  { id: 1, username: 'admin', phone: '13800138000', userType: 'master', role: 'admin', status: 'enabled', createdAt: '2026-04-01 10:00:00' },
+  { id: 2, username: 'staff01', phone: '13900139000', userType: 'sub', role: 'staff', status: 'enabled', createdAt: '2026-04-15 14:30:00' }
 ]
 
 const userStores = { 2: [1] }   // userId -> storeIds
@@ -104,11 +104,9 @@ function fail(message) {
 
 // 查询用户列表
 app.get('/api/users', (req, res) => {
-  const { page = 1, pageSize = 10, username, realName, userType, role, status } = req.query
+  const { page = 1, pageSize = 10, username, role, status } = req.query
   let list = users.filter(u => {
     if (username && !u.username.includes(username)) return false
-    if (realName && !u.realName.includes(realName)) return false
-    if (userType && u.userType !== userType) return false
     if (role && u.role !== role) return false
     if (status && u.status !== status) return false
     return true
@@ -140,14 +138,13 @@ app.get('/api/users/:id', (req, res) => {
 
 // 创建用户
 app.post('/api/users', (req, res) => {
-  const { username, realName, phone, password, userType, role, status } = req.body
+  const { username, phone, password, userType, role, status } = req.body
   if (!username) return res.json(fail('用户名不能为空'))
   if (users.find(u => u.username === username)) return res.json(fail('用户名已存在'))
 
   const newUser = {
     id: userIdCounter++,
     username,
-    realName: realName || username,
     phone: phone || '',
     userType: userType || 'sub',
     role: role || 'staff',
@@ -163,8 +160,7 @@ app.put('/api/users/:id', (req, res) => {
   const user = users.find(u => u.id === +req.params.id)
   if (!user) return res.status(404).json(fail('用户不存在'))
 
-  const { realName, phone, userType, role, status } = req.body
-  if (realName !== undefined) user.realName = realName
+  const { phone, userType, role, status } = req.body
   if (phone !== undefined) user.phone = phone
   if (userType !== undefined) user.userType = userType
   if (role !== undefined) user.role = role

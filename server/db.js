@@ -41,11 +41,11 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS users (
         id INT PRIMARY KEY AUTO_INCREMENT,
         username VARCHAR(50) NOT NULL UNIQUE,
-        real_name VARCHAR(50) NOT NULL,
+        real_name VARCHAR(50) DEFAULT '',
         phone VARCHAR(20) DEFAULT '',
         password_hash VARCHAR(255) DEFAULT '',
         user_type ENUM('master', 'sub') DEFAULT 'sub',
-        role ENUM('super_admin', 'admin', 'staff') DEFAULT 'staff',
+        role ENUM('admin', 'staff') DEFAULT 'staff',
         status ENUM('enabled', 'disabled') DEFAULT 'enabled',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -271,8 +271,8 @@ async function initDB() {
     if (rows[0].count === 0) {
       await connection.execute(`
         INSERT INTO users (id, username, real_name, phone, password_hash, user_type, role, status, created_at)
-        VALUES (1, 'admin', '系统管理员', '13800138000', 'admin', 'master', 'super_admin', 'enabled', NOW()),
-               (2, 'staff01', '张三', '13900139000', '123456', 'sub', 'staff', 'enabled', NOW())
+        VALUES (1, 'admin', '', '13800138000', 'admin', 'master', 'admin', 'enabled', NOW()),
+               (2, 'staff01', '', '13900139000', '123456', 'sub', 'staff', 'enabled', NOW())
       `)
     }
 

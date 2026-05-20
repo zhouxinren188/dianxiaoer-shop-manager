@@ -16,9 +16,6 @@
       <el-form-item label="用户名" prop="username">
         <el-input v-model="form.username" placeholder="请输入用户名" :disabled="isEdit" />
       </el-form-item>
-      <el-form-item label="真实姓名" prop="realName">
-        <el-input v-model="form.realName" placeholder="请输入真实姓名" />
-      </el-form-item>
       <el-form-item label="手机号" prop="phone">
         <el-input v-model="form.phone" placeholder="请输入手机号" maxlength="11" />
       </el-form-item>
@@ -33,7 +30,6 @@
       </el-form-item>
       <el-form-item label="角色" prop="role">
         <el-select v-model="form.role" placeholder="请选择角色" style="width: 100%;">
-          <el-option label="超级管理员" value="super_admin" />
           <el-option label="管理员" value="admin" />
           <el-option label="普通员工" value="staff" />
         </el-select>
@@ -76,7 +72,6 @@ const submitting = ref(false)
 
 const form = ref({
   username: '',
-  realName: '',
   phone: '',
   password: '',
   userType: 'sub',
@@ -87,9 +82,6 @@ const form = ref({
 const rules = {
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' }
-  ],
-  realName: [
-    { required: true, message: '请输入真实姓名', trigger: 'blur' }
   ],
   phone: [
     { required: true, message: '请输入手机号', trigger: 'blur' },
@@ -110,7 +102,6 @@ watch(() => props.userData, (val) => {
   if (val) {
     form.value = {
       username: val.username || '',
-      realName: val.realName || '',
       phone: val.phone || '',
       password: '',
       userType: val.userType || 'sub',
@@ -120,7 +111,6 @@ watch(() => props.userData, (val) => {
   } else {
     form.value = {
       username: '',
-      realName: '',
       phone: '',
       password: '',
       userType: 'sub',
@@ -134,11 +124,11 @@ async function handleSubmit() {
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
 
-  // 校验：只有主账号/超级管理员才能创建主账号
+  // 校验：只有主账号才能创建主账号
   if (!isEdit.value && form.value.userType === 'master') {
     const cur = props.currentUser || {}
-    if (cur.userType !== 'master' && cur.role !== 'super_admin') {
-      ElMessage.warning('只有主账号或超级管理员才能创建主账号')
+    if (cur.userType !== 'master') {
+      ElMessage.warning('只有主账号才能创建主账号')
       return
     }
   }

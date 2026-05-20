@@ -82,7 +82,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="采购账号">
-          <el-select v-model="filterForm.accountId" placeholder="全部" clearable style="width: 180px">
+          <el-select v-model="filterForm.accountId" placeholder="全部" clearable style="width: 130px">
             <el-option v-for="acc in accountList" :key="acc.id" :label="acc.username || '未命名'" :value="acc.id">
               <div style="display:flex;align-items:center;justify-content:space-between">
                 <span>{{ acc.username || '未命名' }}</span>
@@ -95,7 +95,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="售后状态">
-          <el-select v-model="filterForm.aftersaleStatus" placeholder="全部" clearable style="width: 150px" @change="handleSearch">
+          <el-select v-model="filterForm.aftersaleStatus" placeholder="全部" clearable style="width: 130px" @change="handleSearch">
             <el-option label="无售后" value="none" />
             <el-option label="待申请退款" value="pending_refund" />
             <el-option label="待申请退货退款" value="pending_return_refund" />
@@ -226,16 +226,20 @@
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" type="warning" size="small" @click="handleComplete(row)">订单确认</el-button>
                 <el-button v-if="row.status === 'stocked'" type="warning" size="small" @click="handleOutbound(row)">出库</el-button>
+                <el-button v-if="row.status !== 'cancelled'" type="danger" size="small" @click="handleDirectMarkAfterSale(row)">标记售后</el-button>
                 <el-button size="small" class="btn-edit-order" @click="handleEditPurchase(row)">编辑订单</el-button>
               </div>
             </div>
           </div>
 
-          <!-- 收件地址 + 销售状态标签 -->
-          <div v-if="row.shipping_name || row.shipping_address || row.sales_order_status" class="card-footer">
+          <!-- 收件地址 + 店铺/销售单号/销售状态 -->
+          <div v-if="row.shipping_name || row.shipping_address || row.sales_order_no || row.store_name || row.sales_order_status" class="card-footer">
             <el-icon :size="12"><Location /></el-icon>
-            <span>收件地址：{{ row.shipping_name || '' }} {{ row.shipping_phone || '' }}，{{ row.shipping_address || '' }}</span>
-            <span v-if="row.sales_order_status" class="sales-status-tag" :style="salesStatusStyle(row.sales_order_status)">{{ row.sales_order_status }}</span>
+            <span v-if="row.shipping_name || row.shipping_address" class="address-text">收件地址：{{ row.shipping_name || '' }} {{ row.shipping_phone || '' }}，{{ row.shipping_address || '' }}</span>
+            <span v-if="row.store_name || row.sales_order_no || row.sales_order_status" class="footer-divider">|</span>
+            <span v-if="row.store_name" class="store-name-text">{{ row.store_name }}</span>
+            <span v-if="row.sales_order_no" class="sales-order-no">{{ row.sales_order_no }}</span>
+            <el-tag v-if="row.sales_order_status" :type="row.sales_order_status === '已取消' ? 'danger' : 'success'" size="small">{{ row.sales_order_status }}</el-tag>
           </div>
         </div>
       </template>
@@ -325,7 +329,7 @@
     <!-- 收货选择对话框 -->
     <el-dialog
       v-model="receiveDialogVisible"
-      title="收货确认"
+      title="收货转发"
       width="460px"
       align-center
       :close-on-click-modal="false"
@@ -350,7 +354,6 @@
         <div class="receive-confirm-footer">
           <el-button type="primary" @click="handleForward">云仓发货</el-button>
           <el-button type="primary" plain @click="handleStoreShip">店铺发货</el-button>
-          <el-button type="danger" @click="handleMarkAfterSale">标记售后</el-button>
         </div>
       </template>
     </el-dialog>
@@ -358,20 +361,19 @@
     <!-- 完成确认对话框 -->
     <el-dialog
       v-model="completeDialogVisible"
-      title="确认完成"
+      title="订单确认"
       width="460px"
       align-center
       :close-on-click-modal="false"
     >
       <div class="receive-confirm-content">
         <p class="receive-confirm-text">
-          该订单类型为<strong class="receive-confirm-type">三方代发</strong>，确认将采购单 <strong>{{ currentCompleteRow?.purchase_no }}</strong> 标记为已完成？
+          该订单类型为<strong class="receive-confirm-type">三方代发</strong>，确认将采购单 <strong>{{ currentCompleteRow?.purchase_no }}</strong> 完成订单？
         </p>
       </div>
       <template #footer>
         <div class="receive-confirm-footer">
-          <el-button type="success" @click="handleConfirmComplete">确认完成</el-button>
-          <el-button type="danger" @click="handleCompleteMarkAfterSale">标记售后</el-button>
+          <el-button type="success" @click="handleConfirmComplete">订单确认</el-button>
         </div>
       </template>
     </el-dialog>
@@ -1367,15 +1369,6 @@ function getSalesStatusTagType(statusText) {
   return 'info'
 }
 
-function salesStatusStyle(statusText) {
-  if (!statusText) return {}
-  if (statusText.includes('取消') || statusText.includes('关闭')) return { color: '#c45656', background: '#fef0f0', borderColor: '#fab6b6' }
-  if (statusText.includes('完成') || statusText.includes('已出库')) return { color: '#185abc', background: '#e6f0ff', borderColor: '#b3ccf2' }
-  if (statusText.includes('待出库') || statusText.includes('待付款') || statusText.includes('等待付款')) return { color: '#e53935', background: '#fff0f0', borderColor: '#f5b3b3' }
-  if (statusText.includes('暂停')) return { color: '#c47a2a', background: '#ffe6cc', borderColor: '#f2c682' }
-  return { color: '#606266', background: '#f4f4f5', borderColor: '#d3d4d6' }
-}
-
 
 function formatTime(val) {
   if (!val) return '--'
@@ -1572,17 +1565,6 @@ async function handleConfirmComplete() {
   }
 }
 
-async function handleCompleteMarkAfterSale() {
-  if (!currentCompleteRow.value) return
-  // 关闭完成对话框，打开售后标记对话框
-  currentAftersaleRow.value = currentCompleteRow.value
-  aftersaleForm.value.aftersale_status = 'pending_refund'
-  aftersaleForm.value.aftersale_remark = currentCompleteRow.value.aftersale_remark || ''
-  aftersaleQuickPhrase.value = ''
-  completeDialogVisible.value = false
-  aftersaleDialogVisible.value = true
-}
-
 async function handleConfirmStock(row) {
   try {
     await ElMessageBox.confirm(`确认将采购单 ${row.purchase_no} 的商品入库？入库后将增加对应仓库库存。`, '确认入库', { type: 'warning' })
@@ -1688,15 +1670,12 @@ function handleReceive(row) {
   receiveDialogVisible.value = true
 }
 
-// 点击"标记售后"按钮 — 打开售后标记对话框
-function handleMarkAfterSale() {
-  const row = currentReceiveRow.value
-  if (!row) return
+// 从卡片直接标记售后
+function handleDirectMarkAfterSale(row) {
   currentAftersaleRow.value = row
-  aftersaleForm.value.aftersale_status = 'pending_refund'
+  aftersaleForm.value.aftersale_status = row.aftersale_status && row.aftersale_status !== 'none' ? row.aftersale_status : 'pending_refund'
   aftersaleForm.value.aftersale_remark = row.aftersale_remark || ''
   aftersaleQuickPhrase.value = ''
-  receiveDialogVisible.value = false
   aftersaleDialogVisible.value = true
 }
 
@@ -3002,9 +2981,22 @@ function handleImportDialogClose() {
   color: #909399;
 }
 
-.card-footer .sales-status-tag {
-  margin-left: 8px;
-  flex-shrink: 0;
+.card-footer .footer-divider {
+  color: #dcdfe6;
+  margin: 0 6px;
+}
+
+.card-footer .store-name-text {
+  color: #606266;
+  font-weight: 500;
+}
+
+.card-footer .sales-order-no {
+  color: #909399;
+}
+
+.card-footer .el-tag {
+  margin-left: 6px;
 }
 
 /* 分页器紧凑样式 */
@@ -3183,7 +3175,7 @@ function handleImportDialogClose() {
 }
 .receive-confirm-footer {
   display: flex;
-  justify-content: flex-start;
+  justify-content: flex-end;
   gap: 12px;
 }
 

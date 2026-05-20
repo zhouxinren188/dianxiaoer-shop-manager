@@ -290,8 +290,7 @@ async function handleLogin() {
         localStorage.setItem('currentUser', user.username)
         localStorage.setItem('userInfo', JSON.stringify({
           userType: user.userType || '',
-          role: user.role || '',
-          realName: user.realName || ''
+          role: user.role || ''
         }))
         if (rememberMe.value) {
           localStorage.setItem('rememberedUser', loginForm.username)

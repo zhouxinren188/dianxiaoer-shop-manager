@@ -332,7 +332,7 @@ async function getAccessibleWarehouseIds(user) {
 // 查询用户列表（主账号看自己和子账号，子账号只看自己）
 app.get('/api/users', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, username, realName, userType, role, status } = req.query
+    const { page = 1, pageSize = 10, username, role, status } = req.query
     const ownerId = getOwnerId(req.user)
 
     let sql = 'SELECT * FROM users WHERE 1=1'
@@ -349,8 +349,6 @@ app.get('/api/users', async (req, res) => {
     }
 
     if (username) { sql += ' AND username LIKE ?'; params.push(`%${username}%`) }
-    if (realName) { sql += ' AND real_name LIKE ?'; params.push(`%${realName}%`) }
-    if (userType) { sql += ' AND user_type = ?'; params.push(userType) }
     if (role) { sql += ' AND role = ?'; params.push(role) }
     if (status) { sql += ' AND status = ?'; params.push(status) }
 
@@ -389,7 +387,6 @@ app.get('/api/users', async (req, res) => {
     const list = rows.map(r => ({
       id: r.id,
       username: r.username,
-      realName: r.real_name,
       phone: r.phone,
       userType: r.user_type,
       role: r.role,
@@ -418,7 +415,7 @@ app.get('/api/users/:id', async (req, res) => {
     if (!rows.length) return res.status(404).json(fail('用户不存在'))
     const r = rows[0]
     res.json(ok({
-      id: r.id, username: r.username, realName: r.real_name, phone: r.phone,
+      id: r.id, username: r.username, phone: r.phone,
       userType: r.user_type, role: r.role, status: r.status, createdAt: r.created_at
     }))
   } catch (err) {
@@ -433,7 +430,7 @@ app.post('/api/users', async (req, res) => {
       return res.status(403).json(fail('只有主账号才能创建用户'))
     }
 
-    const { username, realName, phone, password, userType, role, status } = req.body
+    const { username, phone, password, userType, role, status } = req.body
     if (!username) return res.json(fail('用户名不能为空'))
 
     const [exists] = await pool.execute('SELECT id FROM users WHERE username = ?', [username])
@@ -448,10 +445,10 @@ app.post('/api/users', async (req, res) => {
     const [result] = await pool.execute(
       `INSERT INTO users (username, real_name, phone, password_hash, user_type, role, parent_id, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [username, realName || username, phone || '', passwordHash, userType || 'sub', role || 'staff', parentId, status || 'enabled']
+      [username, username, phone || '', passwordHash, userType || 'sub', role || 'staff', parentId, status || 'enabled']
     )
 
-    res.json(ok({ id: result.insertId, username, realName: realName || username, phone, userType, role, status }))
+    res.json(ok({ id: result.insertId, username, phone, userType, role, status }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -468,11 +465,10 @@ app.put('/api/users/:id', async (req, res) => {
     )
     if (!check.length) return res.status(403).json(fail('无权操作此用户'))
 
-    const { realName, phone, userType, role, status, password } = req.body
+    const { phone, userType, role, status, password } = req.body
     const fields = []
     const values = []
 
-    if (realName !== undefined) { fields.push('real_name = ?'); values.push(realName) }
     if (phone !== undefined) { fields.push('phone = ?'); values.push(phone) }
     if (userType !== undefined) { fields.push('user_type = ?'); values.push(userType) }
     if (role !== undefined) { fields.push('role = ?'); values.push(role) }
@@ -489,7 +485,7 @@ app.put('/api/users/:id', async (req, res) => {
     const [rows] = await pool.execute('SELECT * FROM users WHERE id = ?', [req.params.id])
     const r = rows[0]
     res.json(ok({
-      id: r.id, username: r.username, realName: r.real_name, phone: r.phone,
+      id: r.id, username: r.username, phone: r.phone,
       userType: r.user_type, role: r.role, status: r.status
     }))
   } catch (err) {
@@ -3088,12 +3084,13 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
 
     if (req.user.user_type === 'sub') {
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN stores s ON so.store_id = s.id
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=? AND po.aftersale_status != 'none'
           AND (upa.user_id IS NOT NULL
@@ -3110,12 +3107,13 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
       params = [req.user.id, ownerId, req.user.id]
     } else {
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN stores s ON so.store_id = s.id
         WHERE po.owner_id=? AND po.aftersale_status != 'none'
       `
       countSql = `
@@ -3190,12 +3188,13 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (req.user.user_type === 'sub') {
       // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN stores s ON so.store_id = s.id
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
           AND (upa.user_id IS NOT NULL
@@ -3213,12 +3212,13 @@ app.get('/api/purchase-orders', async (req, res) => {
     } else {
       // 主账号：看自己名下所有订单
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id != '' AND po.sales_order_id IS NOT NULL AND po.sales_order_id = CAST(so.id AS CHAR)) OR (COALESCE(po.sales_order_id, '') = '' AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
+        LEFT JOIN stores s ON so.store_id = s.id
         WHERE po.owner_id=?
       `
       countSql = `
@@ -5928,7 +5928,6 @@ app.post('/api/auth/login', async (req, res) => {
       user: {
         id: user.id,
         username: user.username,
-        realName: user.real_name,
         phone: user.phone,
         userType: user.user_type,
         role: user.role

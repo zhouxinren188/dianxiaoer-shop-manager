@@ -48,8 +48,8 @@
               <el-dropdown-menu>
                 <el-dropdown-item disabled style="padding: 8px 16px;">
                   <div class="user-info-dropdown">
-                    <div class="user-real-name">{{ userInfo.realName || currentUserName }}</div>
-                    <div class="user-role">{{ userInfo.role === 'super_admin' ? '超级管理员' : userInfo.role === 'admin' ? '管理员' : '普通用户' }}</div>
+                    <div class="user-real-name">{{ currentUserName }}</div>
+                    <div class="user-role">{{ userInfo.role === 'admin' ? '管理员' : '普通员工' }}</div>
                   </div>
                 </el-dropdown-item>
                 <el-dropdown-item divided command="logout">

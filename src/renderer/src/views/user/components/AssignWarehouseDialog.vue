@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    :title="`为「${user?.realName || user?.username}」分配仓库`"
+    :title="`为「${user?.username}」分配仓库`"
     width="560px"
     :close-on-click-modal="false"
   >
