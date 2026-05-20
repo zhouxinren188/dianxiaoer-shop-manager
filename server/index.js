@@ -755,7 +755,7 @@ app.get('/api/users/:id/purchase-accounts', async (req, res) => {
 // 查询店铺列表（按权限过滤）
 app.get('/api/stores', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, name, platform, store_type, status, online, merchant_id } = req.query
+    const { page = 1, pageSize = 10, name, platform, store_type, status, online, merchant_id, tag } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
@@ -781,6 +781,7 @@ app.get('/api/stores', async (req, res) => {
     if (status) { sql += ' AND status = ?'; params.push(status) }
     if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
     if (merchant_id) { sql += ' AND merchant_id = ?'; params.push(merchant_id) }
+    if (tag) { sql += ' AND JSON_CONTAINS(tags, ?)'; params.push(JSON.stringify(tag)) }
 
     const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
     const [countRows] = await pool.execute(countSql, params)
@@ -792,6 +793,33 @@ app.get('/api/stores', async (req, res) => {
 
     const [rows] = await pool.execute(sql, params)
     res.json(ok({ list: rows, total }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取所有店铺标签（去重排序）
+app.get('/api/store-tags', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) {
+      return res.json(ok([]))
+    }
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT DISTINCT tags FROM stores WHERE id IN (${placeholders}) AND tags IS NOT NULL AND tags != '[]' AND tags != ''`,
+      [...storeIds]
+    )
+    const tagSet = new Set()
+    for (const row of rows) {
+      try {
+        const tags = typeof row.tags === 'string' ? JSON.parse(row.tags) : row.tags
+        if (Array.isArray(tags)) {
+          tags.forEach(t => { if (t && typeof t === 'string') tagSet.add(t.trim()) })
+        }
+      } catch {}
+    }
+    res.json(ok([...tagSet].sort()))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }

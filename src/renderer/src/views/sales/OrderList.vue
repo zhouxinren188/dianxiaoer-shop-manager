@@ -2267,8 +2267,21 @@ const drawerVisible = ref(false)
 const currentOrder = ref(null)
 
 function handleView(row) {
-  currentOrder.value = row
-  drawerVisible.value = true
+  if (!window.electronAPI) {
+    // 非 Electron 环境，降级为打开抽屉
+    currentOrder.value = row
+    drawerVisible.value = true
+    return
+  }
+  const storeId = row.storeId
+  const orderId = row.orderNo
+  if (!storeId || !orderId) {
+    ElMessage.warning('无法获取订单信息，请重试')
+    return
+  }
+  window.electronAPI.invoke('open-jd-order-detail', { storeId, orderId }).catch(err => {
+    ElMessage.error('打开订单详情失败: ' + err.message)
+  })
 }
 
 // 判断订单是否为代销订单（代销店铺中，warehouse_name 为"供应商仓库"或"官方货源"的是代销单，排除待付款状态）

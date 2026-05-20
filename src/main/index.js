@@ -384,6 +384,34 @@ ipcMain.handle('open-purchase-url', async (event, { accountId, url, title, platf
   return { success: true }
 })
 
+// 用店铺cookie打开京东订单详情页
+ipcMain.handle('open-jd-order-detail', (event, { storeId, orderId }) => {
+  if (!storeId || !orderId) return { success: false, message: '参数不完整' }
+  const partitionName = `persist:platform-${storeId}`
+  const detailUrl = `https://shop.jd.com/jdm/trade/orders/order-details?orderId=${orderId}`
+
+  const detailWin = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    title: `订单详情 - ${orderId}`,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: partitionName
+    }
+  })
+  detailWin.loadURL(detailUrl).catch(err => {
+    console.error('[OpenJdOrderDetail] loadURL failed:', err.message)
+  })
+
+  detailWin.once('ready-to-show', () => {
+    detailWin.focus()
+  })
+
+  return { success: true }
+})
+
 // 用店铺cookie打开京东出库页面并自动点击出库按钮
 ipcMain.handle('open-jd-outbound', (event, { storeId, orderId, title }) => {
   if (!storeId) return { success: false, message: '参数不完整' }

@@ -40,14 +40,20 @@
       </el-form-item>
       <el-form-item label="店铺标签">
         <el-select
+          ref="tagSelectRef"
           v-model="form.tags"
           multiple
           filterable
           allow-create
           default-first-option
-          placeholder="输入后回车添加标签"
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="选择或输入后回车添加标签"
           style="width: 100%"
-        />
+          @change="onTagChange"
+        >
+          <el-option v-for="tag in tagOptions" :key="tag" :label="tag" :value="tag" />
+        </el-select>
       </el-form-item>
       <el-form-item label="经营状态">
         <el-radio-group v-model="form.status">
@@ -70,7 +76,8 @@ import { createStore, updateStore } from '@/api/store'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
-  storeData: { type: Object, default: null }
+  storeData: { type: Object, default: null },
+  tagOptions: { type: Array, default: () => [] }
 })
 
 const emit = defineEmits(['update:visible', 'saved'])
@@ -78,6 +85,14 @@ const emit = defineEmits(['update:visible', 'saved'])
 const isEdit = ref(false)
 const submitting = ref(false)
 const formRef = ref(null)
+const tagSelectRef = ref(null)
+
+function onTagChange() {
+  // 选择标签后自动收起下拉面板，避免遮挡底部按钮
+  nextTick(() => {
+    tagSelectRef.value?.blur()
+  })
+}
 
 const form = reactive({
   name: '',

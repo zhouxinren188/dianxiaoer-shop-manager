@@ -10,14 +10,19 @@
         <el-form-item label="店铺名称">
           <el-input v-model="searchForm.name" placeholder="请输入店铺名称" clearable />
         </el-form-item>
+        <el-form-item label="标签">
+          <el-select v-model="searchForm.tag" placeholder="全部标签" clearable filterable style="width: 160px">
+            <el-option v-for="tag in tagOptions" :key="tag" :label="tag" :value="tag" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="经营状态">
-          <el-select v-model="searchForm.status" placeholder="全部状态" clearable>
+          <el-select v-model="searchForm.status" placeholder="全部状态" clearable style="width: 120px">
             <el-option label="启用" value="enabled" />
             <el-option label="停用" value="disabled" />
           </el-select>
         </el-form-item>
         <el-form-item label="在线状态">
-          <el-select v-model="searchForm.online" placeholder="全部" clearable>
+          <el-select v-model="searchForm.online" placeholder="全部" clearable style="width: 120px">
             <el-option label="在线" :value="1" />
             <el-option label="离线" :value="0" />
           </el-select>
@@ -106,9 +111,13 @@
         </div>
 
         <div class="card-actions">
-          <el-button size="small" type="primary" @click="handleLogin(row)">
+          <el-button size="small" type="primary" @click="handleOpenBackend(row)">
+            <el-icon><Monitor /></el-icon>
+            店铺后台
+          </el-button>
+          <el-button size="small" type="danger" @click="handleLogin(row)">
             <el-icon><Connection /></el-icon>
-            登录后台
+            重新登录
           </el-button>
           <el-button size="small" @click="handleEdit(row)">
             <el-icon><Edit /></el-icon>
@@ -151,16 +160,17 @@
     <StoreEditDialog
       v-model:visible="editDialogVisible"
       :store-data="editStoreData"
-      @saved="loadStores"
+      :tag-options="tagOptions"
+      @saved="onStoreSaved"
     />
   </div>
 </template>
 
 <script setup>
-import { reactive, ref, onMounted, onUnmounted } from 'vue'
-import { Search, Plus, Connection, Edit, Delete } from '@element-plus/icons-vue'
+import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
+import { Search, Plus, Connection, Edit, Delete, Monitor } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchStores, createStore, deleteStore, toggleStoreStatus } from '@/api/store'
+import { fetchStores, createStore, deleteStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
 
 const STORE_TYPE_MAP = {
@@ -175,9 +185,13 @@ function storeTypeLabel(type) {
 
 const searchForm = reactive({
   name: '',
+  tag: '',
   status: '',
   online: ''
 })
+
+const allTagOptions = ref([])
+const tagOptions = computed(() => allTagOptions.value)
 
 const pageInfo = reactive({
   page: 1,
@@ -220,6 +234,15 @@ async function loadStores() {
   }
 }
 
+async function loadAllTagOptions() {
+  try {
+    const data = await fetchStoreTags()
+    allTagOptions.value = Array.isArray(data) ? data : (data?.data || [])
+  } catch (err) {
+    // 非关键功能，静默失败
+  }
+}
+
 function handleSearch() {
   pageInfo.page = 1
   loadStores()
@@ -227,9 +250,15 @@ function handleSearch() {
 
 function handleReset() {
   searchForm.name = ''
+  searchForm.tag = ''
   searchForm.status = ''
   searchForm.online = ''
   handleSearch()
+}
+
+function onStoreSaved() {
+  loadStores()
+  loadAllTagOptions()
 }
 
 async function handleAdd() {
@@ -303,6 +332,33 @@ async function handleToggleStatus(row, val) {
   }
 }
 
+const PLATFORM_BACKEND_URLS = {
+  taobao: 'https://myseller.taobao.com/',
+  tmall: 'https://myseller.taobao.com/',
+  jd: 'https://shop.jd.com/',
+  pdd: 'https://mms.pinduoduo.com/',
+  douyin: 'https://fxg.jinritemai.com/'
+}
+
+function handleOpenBackend(row) {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  const url = PLATFORM_BACKEND_URLS[row.platform]
+  if (!url) {
+    ElMessage.warning('不支持的平台: ' + (row.platform || '未知'))
+    return
+  }
+  window.electronAPI.invoke('open-store-backend-url', {
+    storeId: row.id,
+    url,
+    title: `店铺后台 - ${row.name}`
+  }).catch(err => {
+    ElMessage.error('打开店铺后台失败: ' + err.message)
+  })
+}
+
 function handleLogin(row) {
   if (!window.electronAPI) {
     ElMessage.warning('请在 Electron 环境中使用此功能')
@@ -362,6 +418,8 @@ function handlePageChange() {
 
 onMounted(() => {
   loadStores()
+  // 单独加载全量标签选项（不受分页限制）
+  loadAllTagOptions()
 
   // 监听平台登录成功事件
   if (window.electronAPI?.onUpdate) {

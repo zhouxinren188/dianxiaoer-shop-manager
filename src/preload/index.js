@@ -41,6 +41,7 @@ const validInvokeChannels = [
   'check-aftersale-sync-stores',
   'open-store-backend-url',
   'open-jd-outbound',
+  'open-jd-order-detail',
   'submit-vendor-remark',
   'open-purchase-url'
 ]

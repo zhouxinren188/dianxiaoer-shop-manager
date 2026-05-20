@@ -35,3 +35,7 @@ export function fetchStoreCookie(storeId) {
 export function updateStoreSyncTime(storeId) {
   return put(`/api/stores/${storeId}/sync-time`)
 }
+
+export function fetchStoreTags() {
+  return get('/api/store-tags')
+}
