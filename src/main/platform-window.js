@@ -1219,11 +1219,18 @@ function registerPurchaseAccountIpc(mainWindow) {
     ipcMain.on('platform-login-credentials', credHandler)
 
     // 窗口关闭时保存采购账号 Cookie
-    // ★ 关键修复：必须 event.preventDefault() 防止窗口在异步保存完成前被销毁
+    // ★ 策略：先同步提取 cookie 并隐藏窗口（用户感知立即关闭），再后台异步保存+刷盘+destroy
+    let isClosing = false
     win.on('close', async (event) => {
-      if (win._purchaseSaveDone) return
-      event.preventDefault()  // 阻止立即关闭，等异步保存完成后再 destroy
-      win._purchaseSaveDone = true
+      if (isClosing) {
+        event.preventDefault()
+        return
+      }
+      isClosing = true
+      event.preventDefault()
+
+      // 立即隐藏窗口，用户感知为"已关闭"
+      win.hide()
 
       ipcMain.removeListener('platform-login-credentials', credHandler)
 
@@ -1235,7 +1242,7 @@ function registerPurchaseAccountIpc(mainWindow) {
 
       console.log('[PurchaseWindow] 窗口关闭，保存采购账号 accountId=', accountId)
 
-      // 1. 提取 Cookie
+      // 1. 提取 Cookie（同步完成，窗口已隐藏）
       let cookies = []
       try {
         const ses = session.fromPartition(partitionName)
@@ -1245,10 +1252,9 @@ function registerPurchaseAccountIpc(mainWindow) {
         console.error('[PurchaseWindow] 获取 Cookie 失败:', e.message)
       }
 
-      // 2. 保存 Cookie 到服务器
+      // 2. 关键 cookie 缺失时延迟重读（等待 JS 异步设置）
       if (cookies && cookies.length > 0) {
         try {
-          // 验证关键 cookie 是否齐全，缺失则等待 3 秒后重读（等待 JS 异步设置）
           const criticalNames = PLATFORM_CRITICAL_COOKIES[platform] || []
           const cookieNames = new Set(cookies.map(c => c.name))
           const missing = criticalNames.filter(n => !cookieNames.has(n))
@@ -1262,16 +1268,12 @@ function registerPurchaseAccountIpc(mainWindow) {
                 console.log(`[PurchaseWindow] 重读后 cookie 增加: ${cookies.length} → ${retryCookies.length}`)
                 cookies = retryCookies
               }
-              const retryNames = new Set(retryCookies.map(c => c.name))
-              const stillMissing = criticalNames.filter(n => !retryNames.has(n))
-              if (stillMissing.length < missing.length) {
-                console.log(`[PurchaseWindow] 重读后关键 cookie 补回: ${missing.filter(n => retryNames.has(n)).join(', ')}`)
-              }
             } catch (e) {
               console.warn('[PurchaseWindow] 重读 cookie 失败:', e.message)
             }
           }
 
+          // 保存 Cookie 到服务器
           cookies = normalizePddCookieDomain(cookies)
           const cookieData = JSON.stringify(cookies)
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
@@ -1312,7 +1314,6 @@ function registerPurchaseAccountIpc(mainWindow) {
       purchaseWindows.delete(accountId)
 
       // 5. 刷盘确保 persist:partition 数据持久化到磁盘（关键！否则重启后cookie丢失）
-      // 5秒超时防止卡死
       try {
         const purchaseSes = session.fromPartition(partitionName)
         await Promise.race([

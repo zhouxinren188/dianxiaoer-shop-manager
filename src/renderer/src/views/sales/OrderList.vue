@@ -133,17 +133,7 @@
       </div>
     </div>
 
-    <!-- 2. 操作栏 -->
-    <div class="action-bar">
-      <div class="action-left">
-      </div>
-      <div class="action-center">
-      </div>
-      <div class="action-right">
-      </div>
-    </div>
-
-    <!-- 3. 状态统计栏 -->
+    <!-- 2. 状态统计栏 -->
     <div class="stats-bar">
       <span
         v-for="item in statusTabs"
@@ -2745,25 +2735,7 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-/* ==================== 操作栏 ==================== */
-
-.action-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #f0f0f0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-  gap: 16px;
-}
-
-.action-left {
-  display: flex;
-  gap: 10px;
-  flex-shrink: 0;
-}
+/* ==================== 操作按钮 ==================== */
 
 .action-btn {
   display: inline-flex;
@@ -2822,32 +2794,6 @@ onUnmounted(() => {
 
 .action-btn-green {
   background: #52c41a;
-}
-
-.action-center {
-  display: flex;
-  gap: 20px;
-  flex: 1;
-  justify-content: center;
-}
-
-.action-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.action-right-label {
-  font-size: 13px;
-  color: #606266;
-  white-space: nowrap;
-}
-
-.action-stat {
-  font-size: 13px;
-  color: #606266;
-  white-space: nowrap;
 }
 
 .stat-num {
