@@ -2890,15 +2890,16 @@ app.post('/api/purchase-orders', async (req, res) => {
     const { purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, quantity,
             source_url, platform, purchase_price, remark,
             purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
-            inventory_id } = req.body
+            inventory_id, total_amount, shipping_fee } = req.body
     if (!purchase_no) return res.json(fail('purchase_no 不能为空'))
     await pool.execute(
       `INSERT INTO purchase_orders
         (purchase_no, sales_order_id, sales_order_no, goods_name, goods_image, sku, inventory_id, quantity,
          source_url, platform, purchase_price, remark,
          purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
+         total_amount, shipping_fee,
          status, owner_id, created_by)
-       VALUES (?,?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?, 'pending', ?, ?)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
        ON DUPLICATE KEY UPDATE
          owner_id=VALUES(owner_id),
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
@@ -2908,11 +2909,13 @@ app.post('/api/purchase-orders', async (req, res) => {
          purchase_type=VALUES(purchase_type), shipping_name=VALUES(shipping_name),
          shipping_phone=VALUES(shipping_phone), shipping_address=VALUES(shipping_address),
          account_id=VALUES(account_id),
+         total_amount=VALUES(total_amount), shipping_fee=VALUES(shipping_fee),
          status=IF(platform_order_no IS NULL OR platform_order_no='', 'pending', status),
          updated_at=NOW()`,
       [purchase_no, sales_order_id||'', sales_order_no||'', goods_name||'', goods_image||'', sku||'', inventory_id||null, quantity||0,
        source_url||'', platform||'', purchase_price||0, remark||'',
        purchase_type||'dropship', shipping_name||'', shipping_phone||'', shipping_address||'', account_id||null,
+       total_amount||0, shipping_fee||0,
        ownerId, req.user.id]
     )
     // 创建采购单成功后，自动更新关联销售订单的采购状态并解锁
@@ -3024,7 +3027,7 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
              source_url, platform, purchase_price, remark,
              purchase_type, shipping_name, shipping_phone, shipping_address, account_id,
              status, owner_id, created_by)
-           VALUES (?,?,?,?,?,?,?, ?,?,?,?, ?,?,?,?,?, 'pending', ?, ?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
            ON DUPLICATE KEY UPDATE
              owner_id=VALUES(owner_id),
              sales_order_no=VALUES(sales_order_no), sales_order_id=VALUES(sales_order_id),
@@ -3073,7 +3076,7 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
 
     const listFields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
       po.goods_name, po.goods_image, po.sku, po.quantity, po.actual_quantity, po.source_url,
-      po.platform, po.purchase_price, po.remark, po.purchase_type,
+      po.platform, po.purchase_price, po.total_amount, po.shipping_fee, po.remark, po.purchase_type,
       po.shipping_name, po.shipping_phone, po.shipping_address,
       po.account_id, po.status, po.platform_order_no,
       po.logistics_no, po.logistics_company,
@@ -3178,7 +3181,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     // goods_image 保留（列表缩略图需要），logistics_tracking 排除（详情页按需获取）
     const listFields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
       po.goods_name, po.goods_image, po.sku, po.quantity, po.actual_quantity, po.source_url,
-      po.platform, po.purchase_price, po.remark, po.purchase_type,
+      po.platform, po.purchase_price, po.total_amount, po.shipping_fee, po.remark, po.purchase_type,
       po.shipping_name, po.shipping_phone, po.shipping_address,
       po.account_id, po.status, po.platform_order_no,
       po.logistics_no, po.logistics_company,
@@ -3503,7 +3506,7 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const { sales_order_no, goods_name, sku, quantity, purchase_price, platform,
             source_url, remark, logistics_no, logistics_company, account_id,
-            aftersale_status, aftersale_remark } = req.body
+            aftersale_status, aftersale_remark, total_amount, shipping_fee } = req.body
 
     console.log(`[Update Purchase Order] id=${req.params.id}, account_id=${account_id}, body=${JSON.stringify(req.body)}`)
 
@@ -3523,6 +3526,8 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     if (account_id !== undefined) { fields.push('account_id=?'); values.push(account_id || null) }
     if (aftersale_status !== undefined) { fields.push('aftersale_status=?'); values.push(aftersale_status) }
     if (aftersale_remark !== undefined) { fields.push('aftersale_remark=?'); values.push(aftersale_remark) }
+    if (total_amount !== undefined) { fields.push('total_amount=?'); values.push(total_amount) }
+    if (shipping_fee !== undefined) { fields.push('shipping_fee=?'); values.push(shipping_fee) }
 
     console.log(`[Update Purchase Order] fields=${fields.join(', ')}, values=${JSON.stringify(values)}`)
 
@@ -4042,11 +4047,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       updateValues.push(order_info.quantity)
       console.log(`[Browser-Sync-Update] 数量: ${order_info.quantity}`)
     }
-    if (order_info.purchase_price && (!localOrder.purchase_price || Number(localOrder.purchase_price) === 0)) {
-      updateFields.push('purchase_price=?')
-      updateValues.push(order_info.purchase_price)
-      console.log(`[Browser-Sync-Update] 采购单价: ${order_info.purchase_price}`)
-    }
+    // purchase_price 不再由同步覆盖：下单时已通过asyncBought准确抓取单价
 
     if (updateFields.length > 0) {
       updateValues.push(localOrder.id)
@@ -4185,10 +4186,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         updateFields.push('quantity=?')
         updateValues.push(platformOrder.quantity)
       }
-      if (platformOrder.purchase_price && (!localOrder.purchase_price || Number(localOrder.purchase_price) === 0)) {
-        updateFields.push('purchase_price=?')
-        updateValues.push(platformOrder.purchase_price)
-      }
+      // purchase_price 不再由同步覆盖：下单时已通过asyncBought准确抓取单价
 
       if (updateFields.length > 0) {
         updateValues.push(localOrder.id)

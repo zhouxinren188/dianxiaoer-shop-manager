@@ -148,6 +148,7 @@
         <div class="order-table-header">
           <div class="ot-col ot-col-goods">商品信息</div>
           <div class="ot-col ot-col-price">单价/数量</div>
+          <div class="ot-col ot-col-total">实付总额</div>
           <div class="ot-col ot-col-status">售后状态</div>
           <div class="ot-col ot-col-logistics">物流信息</div>
           <div class="ot-col ot-col-remark">本地备注</div>
@@ -204,7 +205,12 @@
               </div>
             </div>
             <div class="ot-col ot-col-price">
-              <span class="price-line">{{ row.purchase_price ? '¥' + row.purchase_price : '--' }} x{{ row.quantity || 1 }}</span>
+              <span class="price-line">{{ row.purchase_price ? '¥' + Number(row.purchase_price).toFixed(2) : '--' }}</span>
+              <span class="price-qty">x{{ row.quantity || 1 }}</span>
+            </div>
+            <div class="ot-col ot-col-total">
+              <span class="price-total-amount">{{ row.total_amount && Number(row.total_amount) > 0 ? '¥' + Number(row.total_amount).toFixed(2) : '--' }}</span>
+              <span class="price-shipping-fee">含运费¥{{ Number(row.shipping_fee || 0).toFixed(2) }}</span>
             </div>
             <div class="ot-col ot-col-status">
               <el-tag v-if="row.aftersale_status && row.aftersale_status !== 'none'" :type="aftersaleTagType(row.aftersale_status)" size="small">
@@ -273,8 +279,9 @@
             <span v-if="currentRow.purchase_price">¥{{ Number(currentRow.purchase_price).toFixed(2) }}</span>
             <span v-else>--</span>
           </el-descriptions-item>
-          <el-descriptions-item label="采购总额">
-            <span v-if="currentRow.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ (Number(currentRow.purchase_price) * currentRow.quantity).toFixed(2) }}</span>
+          <el-descriptions-item label="订单金额">
+            <span v-if="currentRow.total_amount && Number(currentRow.total_amount) > 0" style="color: #f56c6c; font-weight: 600">¥{{ Number(currentRow.total_amount).toFixed(2) }}<template v-if="currentRow.shipping_fee && Number(currentRow.shipping_fee) > 0">（含运费¥{{ Number(currentRow.shipping_fee).toFixed(2) }}）</template></span>
+            <span v-else-if="currentRow.purchase_price" style="color: #f56c6c; font-weight: 600">¥{{ (Number(currentRow.purchase_price) * currentRow.quantity).toFixed(2) }}</span>
             <span v-else>--</span>
           </el-descriptions-item>
           <el-descriptions-item label="订单状态">
@@ -2758,10 +2765,23 @@ function handleImportDialogClose() {
 }
 
 .ot-col-price {
+  width: 100px;
+  flex-shrink: 0;
+  justify-content: center !important;
+  text-align: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.ot-col-total {
   width: 120px;
   flex-shrink: 0;
   justify-content: center !important;
   text-align: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
 }
 
 .ot-col-status {
@@ -2914,6 +2934,24 @@ function handleImportDialogClose() {
 .price-line {
   font-size: 13px;
   color: #303133;
+  font-weight: 500;
+}
+
+.price-qty {
+  font-size: 12px;
+  color: #909399;
+}
+
+/* 实付总额 */
+.price-total-amount {
+  font-size: 13px;
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.price-shipping-fee {
+  font-size: 11px;
+  color: #909399;
 }
 
 /* 物流 */

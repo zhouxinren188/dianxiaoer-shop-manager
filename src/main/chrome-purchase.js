@@ -82,6 +82,23 @@ function ensureLocalServer(mainWindow, deps) {
       return
     }
 
+    // ========== POST /dxe/price-captured — 扩展上报价格信息 ==========
+    if (url === '/dxe/price-captured' && req.method === 'POST') {
+      readBody(req, (data) => {
+        const { purchaseNo, priceInfo } = data
+        console.log(`[ChromePurchase] Price captured: actualFee=${priceInfo?.actualFee}, goodsPrice=${priceInfo?.goodsPrice}, postFee=${priceInfo?.postFee}`)
+
+        const state = activeChromeWindows.get(purchaseNo)
+        if (state && !state.resolved) {
+          state.capturedPriceInfo = priceInfo
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+      })
+      return
+    }
+
     // ========== POST /dxe/product-cached — 扩展上报商品信息 ==========
     if (url === '/dxe/product-cached' && req.method === 'POST') {
       readBody(req, (data) => {
@@ -241,6 +258,35 @@ async function openChromePurchaseWindow({ accountId, accountName, password, purc
 
     let capturedAmount = amount || null
 
+    // 应用缓存的价格信息（从 asyncBought API 获取）
+    if (state.capturedPriceInfo) {
+      const pi = state.capturedPriceInfo
+      if (pi.actualFee && pi.actualFee > 0) {
+        capturedAmount = pi.actualFee
+        console.log(`[ChromePurchase] 价格信息(actualFee): ¥${pi.actualFee}`)
+      }
+      // 优先使用扩展计算好的 goodsPrice；若没有则用 purchaseInfo.quantity 回退计算
+      if (pi.goodsPrice && pi.goodsPrice > 0) {
+        purchaseInfo.purchasePrice = pi.goodsPrice
+        console.log(`[ChromePurchase] 商品单价(goodsPrice): ¥${pi.goodsPrice}`)
+      } else if (pi.actualFee && pi.actualFee > 0) {
+        // 扩展未算出单价，用 purchaseInfo.quantity 回退计算: 单价 = (actualFee - postFee) / quantity
+        const calcQuantity = pi.quantity || purchaseInfo.quantity || 0
+        const shippingFee = pi.postFee || 0
+        if (calcQuantity > 0) {
+          const goodsTotal = pi.actualFee - shippingFee
+          if (goodsTotal > 0) {
+            purchaseInfo.purchasePrice = Math.round((goodsTotal / calcQuantity) * 100) / 100
+            console.log(`[ChromePurchase] 商品单价(回退计算): (¥${pi.actualFee} - ¥${shippingFee}) / ${calcQuantity} = ¥${purchaseInfo.purchasePrice}`)
+          }
+        }
+      }
+      if (pi.postFee && pi.postFee > 0) {
+        purchaseInfo.shippingFee = pi.postFee
+        console.log(`[ChromePurchase] 运费(postFee): ¥${pi.postFee}`)
+      }
+    }
+
     // 应用缓存的商品信息
     if (cachedProductInfo) {
       if (cachedProductInfo.title && isValidProductTitle(cachedProductInfo.title)) {
@@ -253,8 +299,21 @@ async function openChromePurchaseWindow({ accountId, accountName, password, purc
         purchaseInfo.sku = cachedProductInfo.sku
       }
     }
+
+    // purchasePrice 回退：如果上面没有计算出来，用 capturedAmount / quantity
+    if (!purchaseInfo.purchasePrice && capturedAmount && capturedAmount > 0) {
+      const fallbackQty = purchaseInfo.quantity || 0
+      if (fallbackQty > 0 && (capturedAmount - (purchaseInfo.shippingFee || 0)) > 0) {
+        purchaseInfo.purchasePrice = Math.round(((capturedAmount - (purchaseInfo.shippingFee || 0)) / fallbackQty) * 100) / 100
+        console.log(`[ChromePurchase] 商品单价(最终回退): (¥${capturedAmount} - ¥${purchaseInfo.shippingFee || 0}) / ${fallbackQty} = ¥${purchaseInfo.purchasePrice}`)
+      } else {
+        purchaseInfo.purchasePrice = capturedAmount
+        console.log(`[ChromePurchase] 商品单价(无数量回退): ¥${capturedAmount}`)
+      }
+    }
+    // totalAmount 从 actualFee 取
     if (capturedAmount && capturedAmount > 0) {
-      purchaseInfo.purchasePrice = capturedAmount
+      purchaseInfo.totalAmount = capturedAmount
     }
 
     autoCreateAndBind(purchaseInfo, orderNo, platform, capturedAmount)

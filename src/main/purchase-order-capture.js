@@ -4173,6 +4173,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
       // 先提取实际支付金额和采购商品信息，再执行绑定
       let capturedAmount = null
+      let capturedGoodsPrice = null
+      let capturedShippingFee = null
+      let capturedQuantity = 0
       const doBindAndNotify = () => {
         console.log(`[PurchaseCapture] doBindAndNotify called, starting autoCreateAndBind...`)
         autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
@@ -4244,7 +4247,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               console.log('[PurchaseCapture] No payment amount captured from page/API cache')
 
               // 淘宝/天猫：参照DL系统，直接调用 asyncBought.htm API 获取支付金额
-              // DL做法：在confirm_order页面提取b2c_orid后，立即POST asyncBought获取actualFee
+              // DL做法：提取 payInfo.actualFee(订单总价) + subOrders[0].priceInfo.realTotal(商品单价) + payInfo.postFee(运费)
               if ((platform === 'taobao' || platform === 'tmall') && platformOrderNo && win && !win.isDestroyed()) {
                 try {
                   console.log(`[PurchaseCapture] 淘宝：尝试调用asyncBought API获取支付金额, orderID=${platformOrderNo}`)
@@ -4257,13 +4260,45 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                         body: 'buyerNick=&dateBegin=0&dateEnd=0&itemTitle=${encodeURIComponent(platformOrderNo)}&lastStartRow=&logisticsService=&options=0&orderStatus=&pageNum=1&pageSize=15&queryBizType=&queryOrder=desc&rateStatus=&refund=&sellerNick=&auctionTitle=${encodeURIComponent(platformOrderNo)}&prePageNo=1'
                       }).then(function(r) { return r.text() }).then(function(text) {
                         try {
+                          // ★ 先返回原始API响应的前2000字符（用于调试quantity字段路径）
                           var data = JSON.parse(text);
                           var mainOrders = data.mainOrders;
                           if (!mainOrders || mainOrders.length === 0) return JSON.stringify({error: 'no_orders'});
                           var orderItem = mainOrders[0];
+                          var result = {};
+                          // 实付总额（订单金额）
                           var actualFee = orderItem.payInfo && orderItem.payInfo.actualFee;
                           if (actualFee && parseFloat(actualFee) > 0) {
-                            return JSON.stringify({actualFee: parseFloat(actualFee)});
+                            result.actualFee = parseFloat(actualFee);
+                          }
+                          // 运费
+                          var postFee = orderItem.payInfo && orderItem.payInfo.postFee;
+                          if (postFee && parseFloat(postFee) > 0) {
+                            result.postFee = parseFloat(postFee);
+                          }
+                          // 商品数量：兼容多种字段路径
+                          var subOrders = orderItem.subOrders;
+                          if (subOrders && subOrders.length > 0) {
+                            var goodsItem = subOrders[0];
+                            var buyNum = 0;
+                            // 路径1: goodsItem.quantity.count（对象形式）
+                            if (goodsItem.quantity && goodsItem.quantity.count) {
+                              buyNum = parseInt(goodsItem.quantity.count);
+                            }
+                            // 路径2: goodsItem.quantity 直接取值（和DL一致：可能是数字或字符串如"2"）
+                            if ((!buyNum || buyNum <= 0) && goodsItem.quantity) {
+                              buyNum = parseInt(goodsItem.quantity);
+                            }
+                            // 路径3: goodsItem.buyAmount
+                            if ((!buyNum || buyNum <= 0) && goodsItem.buyAmount) {
+                              buyNum = parseInt(goodsItem.buyAmount);
+                            }
+                            if (buyNum > 0) {
+                              result.quantity = buyNum;
+                            }
+                          }
+                          if (result.actualFee) {
+                            return JSON.stringify(result);
                           }
                           return JSON.stringify({error: 'no_fee', payInfo: JSON.stringify(orderItem.payInfo || {})});
                         } catch(e) {
@@ -4278,10 +4313,29 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                   if (tbAmountResult) {
                     try {
                       const tbData = JSON.parse(tbAmountResult)
+                      console.log(`[PurchaseCapture] 淘宝asyncBought返回: actualFee=${tbData.actualFee}, quantity=${tbData.quantity || '无'}, postFee=${tbData.postFee || 0}`)
                       if (tbData.actualFee && tbData.actualFee > 0) {
                         capturedAmount = tbData.actualFee
-                        console.log(`[PurchaseCapture] 淘宝asyncBought获取支付金额: ¥${capturedAmount}`)
-                      } else {
+                        console.log(`[PurchaseCapture] 淘宝asyncBought获取订单金额(actualFee): ¥${capturedAmount}`)
+                      }
+                      if (tbData.postFee && tbData.postFee > 0) {
+                        capturedShippingFee = tbData.postFee
+                        console.log(`[PurchaseCapture] 淘宝asyncBought获取运费(postFee): ¥${capturedShippingFee}`)
+                      }
+                      // 记录asyncBought返回的数量
+                      if (tbData.quantity && tbData.quantity > 0) {
+                        capturedQuantity = tbData.quantity
+                      }
+                      // 用数量计算单价: 单价 = (actualFee - postFee) / quantity
+                      const calcQuantity = capturedQuantity || purchaseInfo.quantity || 0
+                      if (capturedAmount > 0 && calcQuantity > 0) {
+                        const goodsTotal = capturedAmount - (capturedShippingFee || 0)
+                        if (goodsTotal > 0) {
+                          capturedGoodsPrice = Math.round((goodsTotal / calcQuantity) * 100) / 100
+                          console.log(`[PurchaseCapture] 淘宝asyncBought计算商品单价: (¥${capturedAmount} - ¥${capturedShippingFee || 0}) / ${calcQuantity} = ¥${capturedGoodsPrice}`)
+                        }
+                      }
+                      if (!tbData.actualFee) {
                         console.log(`[PurchaseCapture] 淘宝asyncBought未获取到金额: ${tbAmountResult.substring(0, 200)}`)
                       }
                     } catch (e) {
@@ -4545,10 +4599,28 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
               }
             }
 
-            // 同步实际支付金额到采购价（覆盖初始值）
-            if (capturedAmount && capturedAmount > 0) {
+            // 同步提取的金额到 purchaseInfo（覆盖初始值）
+            // purchasePrice: 优先使用商品单价(goodsPrice)，回退到订单金额(actualFee)
+            // quantity: 从asyncBought提取的实际购买数量
+            // totalAmount: 订单金额(actualFee)
+            // shippingFee: 运费(postFee)
+            if (capturedGoodsPrice && capturedGoodsPrice > 0) {
+              purchaseInfo.purchasePrice = capturedGoodsPrice
+              console.log(`[PurchaseCapture] 采购单价已更新(goodsPrice): ¥${capturedGoodsPrice}`)
+            } else if (capturedAmount && capturedAmount > 0) {
               purchaseInfo.purchasePrice = capturedAmount
-              console.log(`[PurchaseCapture] 采购价已更新: ¥${capturedAmount}`)
+              console.log(`[PurchaseCapture] 采购单价已更新(actualFee回退): ¥${capturedAmount}`)
+            }
+            // 用asyncBought提取的实际购买数量更新purchaseInfo
+            if (capturedQuantity && capturedQuantity > 0) {
+              purchaseInfo.quantity = capturedQuantity
+              console.log(`[PurchaseCapture] 采购数量已更新(asyncBought): ${capturedQuantity}`)
+            }
+            if (capturedAmount && capturedAmount > 0) {
+              purchaseInfo.totalAmount = capturedAmount
+            }
+            if (capturedShippingFee && capturedShippingFee > 0) {
+              purchaseInfo.shippingFee = capturedShippingFee
             }
 
             doBindAndNotify()
@@ -6020,7 +6092,7 @@ function checkApiResponse(res, label) {
  * 自动调用服务端 API 创建采购单并绑定
  */
 async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount) {
-  const { purchaseNo, salesOrderId, salesOrderNo, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress, accountId } = purchaseInfo
+  const { purchaseNo, salesOrderId, salesOrderNo, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress, accountId, totalAmount, shippingFee } = purchaseInfo
 
   console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
 
@@ -6038,6 +6110,8 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, captur
       source_url: sourceUrl,
       platform: platform,
       purchase_price: purchasePrice,
+      total_amount: totalAmount || 0,
+      shipping_fee: shippingFee || 0,
       remark: remark,
       purchase_type: purchaseType || 'dropship',
       shipping_name: shippingName || '',
@@ -6101,7 +6175,7 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, captur
         body: JSON.stringify({
           sku_id: skuId,
           purchase_link: sourceUrl,
-          purchase_price: capturedAmount,
+          purchase_price: purchasePrice || capturedAmount,
           platform: platform
         })
       })

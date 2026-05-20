@@ -77,6 +77,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ ok: true })
   }
 
+  if (msg.type === 'price-captured') {
+    notifyElectron('/dxe/price-captured', {
+      purchaseNo: msg.purchaseNo,
+      priceInfo: msg.priceInfo
+    })
+    sendResponse({ ok: true })
+  }
+
   if (msg.type === 'product-cached') {
     notifyElectron('/dxe/product-cached', {
       purchaseNo: msg.purchaseNo,

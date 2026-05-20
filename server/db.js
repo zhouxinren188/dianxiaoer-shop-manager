@@ -455,6 +455,14 @@ async function initDB() {
     try { await connection.execute('CREATE INDEX idx_upa_user_id ON user_purchase_accounts(user_id)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_upa_account_id ON user_purchase_accounts(account_id)') } catch(e) { /* 索引已存在 */ }
 
+    // ======== 采购单订单金额字段 ========
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN total_amount DECIMAL(12,2) DEFAULT 0 COMMENT '订单金额(实付总额)'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN shipping_fee DECIMAL(12,2) DEFAULT 0 COMMENT '运费'")
+    } catch(e) { /* 列已存在 */ }
+
     // ======== 采购单售后状态字段 ========
     try {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN aftersale_status VARCHAR(30) DEFAULT 'none' COMMENT '售后状态: none/pending_refund/pending_merchant_handle/pending_return_refund/pending_return_tracking/closed'")
