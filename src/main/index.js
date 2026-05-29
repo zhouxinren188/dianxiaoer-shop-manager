@@ -805,7 +805,8 @@ registerSupplyOrderIpc()
 
 app.whenReady().then(async () => {
   // ★ 启动日志：写入桌面运行日志文件，方便用户版问题排查
-  runtimeLog.logStartup(getCurrentVersion())
+  // 使用 app.getVersion()（package.json版本号），不用 getCurrentVersion()（可能被旧热更新覆盖）
+  runtimeLog.logStartup(app.getVersion())
 
   // 启动诊断：检查用户数据目录是否可写（影响localStorage持久化和缓存）
   try {
