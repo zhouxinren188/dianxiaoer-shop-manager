@@ -265,9 +265,10 @@ const PURCHASE_INTERCEPTOR = `
       }
 
       // 2b. 拼多多字段（最小10位，字母数字+连字符，如"260506-070338506260381"）
+      // PDD order_sn 必须包含连字符，不含连字符的值（如XP...支付宝商户号）不是PDD订单号
       var pddFields = ['order_sn', 'orderSn'];
       var pddOrder = searchFields(json, pddFields, 10, 0, /^[A-Za-z0-9\-]+$/);
-      if (pddOrder) {
+      if (pddOrder && pddOrder.indexOf('-') >= 0) {
         console.log('[PURCHASE_ORDER_FOUND]' + pddOrder);
         return;
       }
@@ -2528,19 +2529,8 @@ function extractOrderNoFromUrl(url, platform) {
           console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: ${name}=${val} but doesn't match /^[A-Za-z0-9\\-]{10,}$/`)
         }
       }
-      // ★ 支付宝页面out_trade_no（仅作兜底，不是PDD订单号）
-      // 注意：out_trade_no是支付宝商户单号（如"XP..."），不是PDD的order_sn
-      // 优先从API拦截器获取order_sn，这里仅当API未捕获时使用
-      const isAlipayPage = host.includes('alipay.com')
-      if (isAlipayPage) {
-        const outTradeNo = params.get('out_trade_no') || params.get('outTradeNo')
-        if (outTradeNo && /^[A-Za-z0-9]{10,}$/.test(outTradeNo)) {
-          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: found out_trade_no=${outTradeNo} on Alipay page (FALLBACK - not PDD order_sn)`)
-          return outTradeNo
-        } else if (outTradeNo) {
-          console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: out_trade_no=${outTradeNo} but doesn't match /^[A-Za-z0-9]{10,}$/`)
-        }
-      }
+      // out_trade_no 不再作为PDD兜底：支付宝商户号（XP...格式）不是PDD订单号
+      // PDD order_sn 格式为 YYMMDD-序列号（必须含连字符），XP...不含连字符，永远无法在PDD搜索中匹配
       console.log(`[PurchaseCapture] PDD extractOrderNoFromUrl: no valid order param in URL, all params: ${[...params.keys()].join(',')}`)
     }
 
@@ -3178,6 +3168,11 @@ function detectOrderNo(responses, platform) {
       const pattern = platform === 'pinduoduo' ? pddPattern : undefined
       const orderNo = deepSearch(json, config.fields, config.minLength, 0, pattern)
       if (orderNo) {
+        // PDD order_sn 必须包含连字符（如260529-xxx），不含连字符的值可能是支付宝out_trade_no
+        if (platform === 'pinduoduo' && !orderNo.includes('-')) {
+          console.log(`[PurchaseCapture] PDD detectOrderNo: orderNo=${orderNo} 无连字符，忽略`)
+          continue
+        }
         console.log(`[PurchaseCapture] Order detected! platform=${platform}, orderNo=${orderNo}, url=${r.url.substring(0, 100)}`)
         return orderNo
       } else if (platform === 'pinduoduo') {
@@ -4665,8 +4660,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         const orderNo = message.substring('[PURCHASE_ORDER_FOUND]'.length).trim()
         // 淘宝纯数字（≥10位），拼多多字母数字+连字符（如260506-070338506260381）
         if (orderNo && /^[A-Za-z0-9\-]{10,}$/.test(orderNo)) {
-          console.log(`[PurchaseCapture] Order found via real-time interceptor: ${orderNo} (platform=${platform})`)
-          onOrderCaptured(orderNo)
+          // PDD order_sn 必须包含连字符（如260529-xxx），不含连字符的XP...是支付宝商户号
+          if (platform === 'pinduoduo' && !orderNo.includes('-')) {
+            console.log(`[PurchaseCapture] PDD订单号无连字符，可能是支付宝out_trade_no，忽略: ${orderNo}`)
+          } else {
+            console.log(`[PurchaseCapture] Order found via real-time interceptor: ${orderNo} (platform=${platform})`)
+            onOrderCaptured(orderNo)
+          }
         } else {
           console.log(`[PurchaseCapture] Interceptor found candidate but invalid: "${orderNo}"`)
         }
@@ -5243,25 +5243,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         if (!isAlipayPage && !isPaymentCallback && !isOrderResult && !isPddCheckout) return
 
         // 1. 支付宝支付页：out_trade_no仅作兜底（对齐DL的dlBindPddOrder思路）
-        // 注意：out_trade_no是支付宝商户单号（如"XP..."），不是PDD的order_sn
-        // 优先让API拦截器从/proxy/api/order响应中捕获真正的order_sn
-        // 这里只在API拦截器未捕获时，延迟使用out_trade_no
+        // 注意：不再使用out_trade_no作为PDD兜底（XP...格式不是PDD订单号）
+        // 保留从支付宝页面DOM中提取真实order_sn的逻辑
         if (isAlipayPage) {
-          console.log(`[PurchaseCapture] PDD Alipay payment page detected (DL method: dlBindPddOrder equivalent, out_trade_no as FALLBACK)`)
-          // 先从URL参数提取out_trade_no
+          console.log(`[PurchaseCapture] PDD Alipay payment page detected, extracting order_sn from page DOM only (no out_trade_no fallback)`)
+          // extractOrderNoFromUrl 不再返回XP格式的out_trade_no，此处urlOrderNo可能是空或真实的order_sn
           const urlOrderNo = extractOrderNoFromUrl(url, platform)
           if (urlOrderNo) {
-            // ★ 延迟使用out_trade_no，给API拦截器优先捕获order_sn的机会
-            console.log(`[PurchaseCapture] PDD Alipay: out_trade_no=${urlOrderNo} found, delaying 500ms for API interceptor order_sn...`)
-            setTimeout(() => {
-              if (win.isDestroyed() || resolved) return
-              console.log(`[PurchaseCapture] PDD Alipay fallback: using out_trade_no=${urlOrderNo} (no order_sn from API)`)
-              onOrderCaptured(urlOrderNo)
-            }, 500)
-            // 同时也尝试从DOM提取（可能找到order_sn）
+            // URL中有有效的PDD order_sn（非XP格式），直接使用
+            console.log(`[PurchaseCapture] PDD Alipay: valid order_sn from URL: ${urlOrderNo}`)
+            onOrderCaptured(urlOrderNo)
+            return
           }
-          // 从页面DOM提取（支付宝页面可能通过form POST加载，out_trade_no在DOM中）
-          console.log(`[PurchaseCapture] PDD Alipay: also extracting from page DOM...`)
+          // 从页面DOM提取（支付宝页面可能通过form POST加载，order_sn在DOM中）
+          console.log(`[PurchaseCapture] PDD Alipay: no order_sn in URL, extracting from page DOM...`)
           const extractWithDelay = (delay) => {
             setTimeout(() => {
               if (win.isDestroyed() || resolved) return
@@ -5718,24 +5713,9 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       // 重定向URL中可能有订单号参数
       const urlOrderNo = extractOrderNoFromUrl(url, platform)
       if (urlOrderNo) {
-        // ★ PDD+Alipay: out_trade_no仅作兜底（不是PDD订单号，是支付宝商户单号）
-        // 优先让API拦截器从/proxy/api/order响应中捕获真正的order_sn
-        // 延迟500ms，给console-message处理器时间处理[PURCHASE_ORDER_FOUND]
-        const isPddAlipayFallback = platform === 'pinduoduo' && url.toLowerCase().includes('alipay.com')
-        if (isPddAlipayFallback) {
-          console.log(`[PurchaseCapture] PDD Alipay out_trade_no found: ${urlOrderNo} (delaying 500ms, waiting for order_sn from API interceptor)`)
-          setTimeout(() => {
-            if (win.isDestroyed() || resolved) {
-              console.log(`[PurchaseCapture] PDD Alipay fallback skipped: resolved=${resolved}, destroyed=${win.isDestroyed()}`)
-              return
-            }
-            console.log(`[PurchaseCapture] PDD Alipay fallback: using out_trade_no=${urlOrderNo} (no order_sn from API)`)
-            onOrderCaptured(urlOrderNo)
-          }, 500)
-        } else {
-          console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
-          onOrderCaptured(urlOrderNo)
-        }
+        // extractOrderNoFromUrl 已不再返回PDD的out_trade_no（XP格式），此处urlOrderNo一定是有效的order_sn
+        console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
+        onOrderCaptured(urlOrderNo)
       }
 
       // 重定向到的新页面也可能是订单相关页面
