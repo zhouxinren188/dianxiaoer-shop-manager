@@ -4055,9 +4055,6 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     })
 
     const preloadPath = resolveAppPath('out/main/purchase-preload.js')
-    runtimeLog.writeLog('PurchaseWin', `创建采购窗口: platform=${platform}, purchaseNo=${purchaseNo}`)
-    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED' : 'DISABLED（验证假设）'}`)
-    runtimeLog.writeLog('PurchaseWin', `app.getAppPath: ${app.getAppPath()}`)
 
     // ★★★ 临时禁用 preload 验证假设 ★★★
     // 开发版(electron-vite dev)不加载 purchase-preload.js 但支付宝支付正常，
@@ -4067,6 +4064,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 临时禁用 preload 来验证：如果用户版不加载反检测也能通过支付宝，
     // 则确认根因是反检测脚本，后续需要完善脚本使指纹自洽。
     const PRELOAD_ENABLED = false  // ★ 设为 true 恢复加载反检测脚本
+
+    runtimeLog.writeLog('PurchaseWin', `创建采购窗口: platform=${platform}, purchaseNo=${purchaseNo}`)
+    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED' : 'DISABLED（验证假设）'}`)
+    runtimeLog.writeLog('PurchaseWin', `app.getAppPath: ${app.getAppPath()}`)
 
     const win = new BrowserWindow({
       width: 1280,
