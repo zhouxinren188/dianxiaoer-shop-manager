@@ -4056,13 +4056,16 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     const preloadPath = resolveAppPath('out/main/purchase-preload.js')
 
-    // ★ 反检测策略：v1.9.14 起恢复加载 preload，但改用最小化策略
-    // 经验证：不完整的指纹伪装比没有伪装更危险（支付宝更易识别"伪装者"而非"Electron"）
-    // 新版 preload 只隐藏 webdriver/selenium 等自动化标识，不做浏览器指纹伪装
-    const PRELOAD_ENABLED = true
+    // ★ 采购窗口不加载 purchase-preload.js
+    // 经反复验证：只要 contextIsolation=false + 有 preload 脚本执行，
+    // 即使只做最小化修改（仅隐藏 webdriver），支付宝风控也能检测到并拦截。
+    // 开发版（无 preload）支付宝支付正常通过，说明支付宝当前不检测 Electron 原生指纹。
+    // 因此不加载 preload 是最安全的方案。
+    // window.__dxeOpen（window.open引用）的回退在注入脚本中已有：window.__dxeOpen || window.open
+    const PRELOAD_ENABLED = false
 
     runtimeLog.writeLog('PurchaseWin', `创建采购窗口: platform=${platform}, purchaseNo=${purchaseNo}`)
-    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED（最小化策略）' : 'DISABLED'}`)
+    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED' : 'DISABLED（支付宝兼容）'}`)
     runtimeLog.writeLog('PurchaseWin', `app.getAppPath: ${app.getAppPath()}`)
 
     const win = new BrowserWindow({
