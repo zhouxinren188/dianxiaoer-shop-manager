@@ -390,6 +390,19 @@ ipcMain.handle('open-jd-order-detail', (event, { storeId, orderId }) => {
   const partitionName = `persist:platform-${storeId}`
   const detailUrl = `https://shop.jd.com/jdm/trade/orders/order-details?orderId=${orderId}`
 
+  // 关闭同storeId的旧详情窗口，避免同分区多窗口冲突
+  const allWins = BrowserWindow.getAllWindows()
+  for (const w of allWins) {
+    try {
+      if (!w.isDestroyed()) {
+        const wUrl = w.webContents.getURL()
+        if (wUrl && wUrl.includes('order-details') && wUrl.includes(orderId)) {
+          w.destroy()
+        }
+      }
+    } catch(e) {}
+  }
+
   const detailWin = new BrowserWindow({
     width: 1200,
     height: 800,

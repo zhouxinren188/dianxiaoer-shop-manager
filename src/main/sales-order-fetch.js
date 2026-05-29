@@ -1014,16 +1014,36 @@ function registerSalesOrderIpc(mainWindow) {
       let bindVnResponseData = null  // Electron层面拦截到的bindVirtualNumber响应
 
       try {
+        // 关闭同分区的订单窗口，避免同分区多窗口导致webRequest监听冲突
+        const existingWindows = BrowserWindow.getAllWindows()
+        for (const win of existingWindows) {
+          try {
+            if (!win.isDestroyed() && win !== mainWindow) {
+              const winUrl = win.webContents.getURL()
+              // 关闭订单详情窗口和订单列表窗口（避免同分区冲突）
+              if (winUrl && (winUrl.includes('order-details') || winUrl.includes('order-list'))) {
+                console.log('[SalesFetch] [BuyerInfo] 关闭同分区的订单窗口:', winUrl.substring(0, 80))
+                win.destroy()
+              }
+            }
+          } catch(e) { /* 忽略已销毁窗口 */ }
+        }
+
         tempWin = new BrowserWindow({
-          show: false,
+          show: true,
           width: 1200,
           height: 800,
+          x: -9999,
+          y: -9999,
+          opacity: 0,
           webPreferences: {
             partition: partitionName,
             contextIsolation: true,
-            nodeIntegration: false
+            nodeIntegration: false,
+            backgroundThrottling: false
           }
         })
+        tempWin.webContents.setBackgroundThrottling(false)
 
         // 使用 Electron 的 webRequest API 在网络层监听 bindVirtualNumber 请求
         // webRequest 不能读响应体，但可以监听请求完成，配合页面内拦截器双保险
@@ -1229,9 +1249,10 @@ function registerSalesOrderIpc(mainWindow) {
           tempWin.webContents.executeJavaScript(VISIBILITY_OVERRIDE).catch(() => {})
         })
 
-        // 第一步：直接加载订单页面（跳过入口页，省一次页面加载）
-        console.log('[SalesFetch] [BuyerInfo] 直接加载订单页...')
-        await tempWin.loadURL('https://shop.jd.com/jdm/trade/orders/order-list?tabType=allOrders')
+        // 第一步：直接加载订单详情页（详情页有眼睛图标 I.jd-icon.shop-adv-icon）
+        const detailUrl = 'https://shop.jd.com/jdm/trade/orders/order-details?orderId=' + orderId
+        console.log('[SalesFetch] [BuyerInfo] 加载订单详情页:', detailUrl)
+        await tempWin.loadURL(detailUrl)
 
         const entryUrl = tempWin.webContents.getURL()
         if (isLoginPage(entryUrl)) {
@@ -1239,149 +1260,77 @@ function registerSalesOrderIpc(mainWindow) {
           return { success: false, message: '店铺登录已过期，请重新登录京东后台' }
         }
 
-        // 轮询等待搜索框出现
-        const searchBoxReady = await pollUntil(
+        // 等待详情页微前端渲染（orders微前端异步加载，需要等待 consignee-info-content 出现）
+        // 关键：只等 orders 微前端的内容，不等 header-menu 的内容
+        await new Promise(r => setTimeout(r, 3000))
+        const detailReady = await pollUntil(
           () => tempWin.webContents.executeJavaScript(
-            "!!(document.querySelector('input.jd-input__inner') || document.querySelector('input[placeholder*=\"查询\"]'))"
+            "!!(document.querySelector('i.shop-adv-icon') || document.querySelector('.consignee-info-content') || document.querySelector('.order-info-details-content_item') || document.querySelector('.custom-descriptions__item') || document.querySelector('.card'))"
           ),
-          { timeout: 12000, interval: 400, label: '搜索框加载' }
+          { timeout: 25000, interval: 1000, label: '详情页orders微前端加载' }
         )
-        if (!searchBoxReady) await new Promise(r => setTimeout(r, 2000))
 
-        // 第三步：搜索目标订单号
-        console.log('[SalesFetch] [BuyerInfo] 在搜索框中输入订单号...')
-        const searchResult = await tempWin.webContents.executeJavaScript(`
-          (function() {
-            var orderId = ${JSON.stringify(String(orderId))};
-            var result = { searched: false, logs: [] };
-            var inputs = document.querySelectorAll('input[type="text"], input:not([type]), input[type="search"]');
-            var searchInput = null;
-            for (var i = 0; i < inputs.length; i++) {
-              var inp = inputs[i];
-              var ph = (inp.placeholder || '').toLowerCase();
-              result.logs.push('输入框[' + i + ']: placeholder=' + inp.placeholder + ' name=' + inp.name + ' class=' + inp.className.toString().substring(0, 60));
-              if (ph.match(/订单|order|编号|搜索|查询|search/) || (inp.name || '').toLowerCase().match(/order|keyword|search/)) {
-                searchInput = inp;
-                result.logs.push('选中搜索框: ' + inp.placeholder);
-                break;
+        if (!detailReady) {
+          // 微前端未渲染，诊断页面状态
+          console.log('[SalesFetch] [BuyerInfo] 详情页微前端未渲染，诊断页面状态...')
+          const diagResult = await tempWin.webContents.executeJavaScript(`
+            (function() {
+              var info = { url: location.href, title: document.title, htmlLen: document.documentElement.innerHTML.length };
+              var microApps = document.querySelectorAll('micro-app-jm-sub-system-block');
+              info.microAppCount = microApps.length;
+              var bodies = [];
+              for (var i = 0; i < microApps.length; i++) {
+                var ma = microApps[i];
+                var mBody = ma.querySelector('micro-app-body');
+                bodies.push({
+                  name: ma.getAttribute('name') || '',
+                  bodyLen: mBody ? mBody.innerHTML.length : 0,
+                  bodyTextLen: mBody ? (mBody.innerText || '').length : 0
+                });
               }
-            }
-            if (!searchInput && inputs.length > 0) {
-              for (var i = 0; i < inputs.length; i++) {
-                var rect = inputs[i].getBoundingClientRect();
-                if (rect.width > 50 && rect.height > 10) {
-                  searchInput = inputs[i];
-                  result.logs.push('使用第一个可见输入框: ' + inputs[i].placeholder);
-                  break;
-                }
-              }
-            }
-            if (!searchInput) { result.logs.push('未找到搜索输入框'); return result; }
+              info.microApps = bodies;
+              var allI = document.querySelectorAll('i.jd-icon');
+              info.jdIconCount = allI.length;
+              var allEls = document.querySelectorAll('*');
+              info.totalElements = allEls.length;
+              return info;
+            })()
+          `).catch(() => ({}))
+          console.log('[SalesFetch] [BuyerInfo] 页面诊断:', JSON.stringify(diagResult))
 
-            var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            nativeInputValueSetter.call(searchInput, orderId);
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-            searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-            result.logs.push('已输入订单号');
-
-            var btns = document.querySelectorAll('button, [role="button"]');
-            var searchBtn = null;
-            for (var i = 0; i < btns.length; i++) {
-              if (/^(搜索|查询|查找|Search)$/.test(btns[i].textContent.trim())) { searchBtn = btns[i]; break; }
-            }
-            if (!searchBtn) {
-              var parent = searchInput.parentElement;
-              for (var d = 0; d < 3; d++) {
-                if (!parent) break;
-                var iconBtns = parent.querySelectorAll('[class*="search" i], [class*="icon" i], button');
-                for (var j = 0; j < iconBtns.length; j++) {
-                  if (iconBtns[j] !== searchInput) { searchBtn = iconBtns[j]; break; }
-                }
-                if (searchBtn) break;
-                parent = parent.parentElement;
-              }
-            }
-            if (searchBtn) {
-              searchBtn.click();
-              result.searched = true;
-              result.logs.push('已点击搜索按钮');
-            } else {
-              searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-              searchInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-              result.searched = true;
-              result.logs.push('已模拟回车');
-            }
-            return result;
-          })()
-        `).catch(e => ({ searched: false, logs: ['error: ' + e.message] }))
-
-        console.log('[SalesFetch] [BuyerInfo] 搜索结果:', JSON.stringify(searchResult))
-
-        // 轮询等待搜索结果加载
-        if (searchResult.searched) {
-          const orderFound = await pollUntil(
+          // 尝试刷新页面
+          console.log('[SalesFetch] [BuyerInfo] 尝试刷新详情页...')
+          await tempWin.webContents.reload()
+          await new Promise(r => setTimeout(r, 5000))
+          const retryReady = await pollUntil(
             () => tempWin.webContents.executeJavaScript(
-              "!!(function(){var els=document.querySelectorAll('*');for(var i=0;i<els.length;i++){if(els[i].children.length===0&&els[i].textContent.trim()==='" + orderId + "')return true;}return false;})()"
+              "!!(document.querySelector('i.shop-adv-icon') || document.querySelector('.consignee-info-content') || document.querySelector('.order-info-details-content_item'))"
             ),
-            { timeout: 8000, interval: 400, label: '搜索结果' }
+            { timeout: 20000, interval: 1000, label: '详情页刷新后加载' }
           )
-          if (!orderFound) await new Promise(r => setTimeout(r, 1500))
+          if (!retryReady) {
+            console.log('[SalesFetch] [BuyerInfo] 详情页刷新后仍未渲染')
+          }
         }
 
-        // 第四步：在DOM中查找目标订单并点击小眼睛
+        // 第二步：在详情页中查找并点击小眼睛图标
         // 先启用全量API捕获（在点击眼睛之前开启，确保不漏掉任何响应）
         await tempWin.webContents.executeJavaScript('window.__captureEnabled = true; window.__allCapturedResponses = [];').catch(() => {})
-        console.log('[SalesFetch] [BuyerInfo] 在DOM中查找订单并点击小眼睛...')
+        console.log('[SalesFetch] [BuyerInfo] 在详情页中查找并点击小眼睛...')
         const clickResult = await tempWin.webContents.executeJavaScript(`
           (function() {
-            var orderId = ${JSON.stringify(String(orderId))};
-            var result = { found: false, clicked: false, logs: [] };
+            var result = { found: true, clicked: false, logs: [] };
             try {
             function gc(el) { try { return el.getAttribute('class') || ''; } catch(e) { return ''; } }
 
-            var allEls = document.querySelectorAll('*');
-            var orderEl = null;
-            for (var i = 0; i < allEls.length; i++) {
-              if (allEls[i].children.length === 0 && allEls[i].textContent.trim() === orderId) {
-                orderEl = allEls[i]; break;
-              }
-            }
-            if (!orderEl) {
-              for (var i = 0; i < allEls.length; i++) {
-                if (allEls[i].children.length <= 2 && allEls[i].textContent.indexOf(orderId) !== -1 && allEls[i].textContent.length < orderId.length + 30) {
-                  orderEl = allEls[i]; break;
-                }
-              }
-            }
-            if (!orderEl) { result.logs.push('未找到订单号元素'); return result; }
+            // 先诊断页面元素
+            var allShopAdvIcons = document.querySelectorAll('i.shop-adv-icon');
+            var allConsigneeInfo = document.querySelectorAll('.consignee-info-content');
+            var allOrderDetails = document.querySelectorAll('.order-info-details-content_item');
+            result.logs.push('页面元素: shop-adv-icon=' + allShopAdvIcons.length + ' consignee-info=' + allConsigneeInfo.length + ' order-details-item=' + allOrderDetails.length);
 
-            result.found = true;
-            result.logs.push('找到订单号: ' + orderEl.tagName + '.' + gc(orderEl));
-
-            var container = orderEl;
-            var bestContainer = null;
-            for (var up = 0; up < 20; up++) {
-              container = container.parentElement;
-              if (!container || container === document.body) break;
-              var r = container.getBoundingClientRect();
-              // 优先选择有card/order类名的元素
-              var cls = gc(container);
-              if ((cls.indexOf('card') !== -1 || cls.indexOf('order') !== -1 || cls.indexOf('item') !== -1) && r.width > 300 && r.height > 50 && r.height < 400) {
-                bestContainer = container;
-                result.logs.push('卡片级容器[' + up + ']: ' + cls.substring(0, 30) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height));
-                break;
-              }
-              // 通用条件：宽度够且高度合理（不超过500，避免选到页面级容器）
-              if (r.width > 500 && r.height > 100 && r.height < 500 && !bestContainer) {
-                bestContainer = container;
-              }
-            }
-            var scope = bestContainer || container || document.body;
-            result.logs.push('容器[' + up + ']: ' + scope.tagName + '.' + gc(scope).substring(0, 30) + ' ' + Math.round(scope.getBoundingClientRect().width) + 'x' + Math.round(scope.getBoundingClientRect().height));
-
-            var iconArea = scope;
-            var iconEls = iconArea.querySelectorAll('svg, i, span, div');
-            var eyeEl = null;
+            // 在整个页面搜索眼睛图标候选
+            var iconEls = document.querySelectorAll('svg, i, span, div');
             var candidates = [];
 
             for (var j = 0; j < iconEls.length; j++) {
@@ -1403,6 +1352,7 @@ function registerSalesOrderIpc(mainWindow) {
             result.logs.push('候选总数: ' + candidates.length);
 
             // 智能选择眼睛图标
+            var eyeEl = null;
             var eyeIcons = [];
             var consigneeEyeIcon = null;
             for (var p = 0; p < candidates.length; p++) {
@@ -1414,7 +1364,6 @@ function registerSalesOrderIpc(mainWindow) {
                 }
                 eyeIcons.push({ el: candidates[p], idx: p, cls: pCls });
                 result.logs.push('眼睛候选: 候选[' + p + '] ' + pCls.substring(0, 50));
-                // consignee-info 眼睛能获取完整信息（姓名+手机号+地址）
                 if (pCls.indexOf('consignee-info') !== -1) {
                   consigneeEyeIcon = { el: candidates[p], idx: p, cls: pCls };
                   result.logs.push('收货人信息眼睛: 候选[' + p + '] (含手机号)');
@@ -1424,14 +1373,13 @@ function registerSalesOrderIpc(mainWindow) {
 
             result.logs.push('眼睛候选: ' + eyeIcons.length + '个');
 
-            // 优先选第一个眼睛（eyeIcons[0]，带ml-8的是"后台"眼睛，能触发完整信息API）
-            // consignee-info-pin-filt 眼睛只能获取手机号tooltip，不触发完整API
-            if (eyeIcons.length >= 1) {
+            // 优先选择收货人信息的眼睛（含手机号）
+            if (consigneeEyeIcon) {
+              eyeEl = consigneeEyeIcon.el;
+              result.logs.push('选收货人信息眼睛(候选[' + consigneeEyeIcon.idx + ']) - 含手机号');
+            } else if (eyeIcons.length >= 1) {
               eyeEl = eyeIcons[0].el;
               result.logs.push('选第一个眼睛(候选[' + eyeIcons[0].idx + ']) - 触发完整信息API');
-            } else if (consigneeEyeIcon) {
-              eyeEl = consigneeEyeIcon.el;
-              result.logs.push('无shop-adv-icon眼睛，退而选收货人信息眼睛(候选[' + consigneeEyeIcon.idx + '])');
             } else if (candidates.length >= 1) {
               eyeEl = candidates[candidates.length - 1];
               result.logs.push('无眼睛候选，兜底选最后');
@@ -1439,7 +1387,11 @@ function registerSalesOrderIpc(mainWindow) {
 
             if (eyeEl) {
               result.logs.push('点击: ' + eyeEl.tagName + '.' + gc(eyeEl).substring(0, 60));
-              eyeEl.click();
+              if (typeof eyeEl.click === 'function') {
+                eyeEl.click();
+              } else {
+                eyeEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+              }
               result.clicked = true;
             } else {
               result.logs.push('未找到小眼睛');
@@ -1483,23 +1435,39 @@ function registerSalesOrderIpc(mainWindow) {
           confirmResult = await tempWin.webContents.executeJavaScript(`
             (function() {
               var result = { confirmed: false, logs: [] };
+              try {
+              // 搜索 shadow DOM 中的弹窗和按钮（微前端可能把弹窗渲染在 shadow DOM 内）
+              function queryShadowAll(root, selector) {
+                var results = [];
+                try {
+                  var found = root.querySelectorAll(selector);
+                  for (var i = 0; i < found.length; i++) results.push(found[i]);
+                  var allEls = root.querySelectorAll('*');
+                  for (var j = 0; j < allEls.length; j++) {
+                    var sr = allEls[j].shadowRoot;
+                    if (sr) {
+                      var shadowFound = queryShadowAll(sr, selector);
+                      for (var k = 0; k < shadowFound.length; k++) results.push(shadowFound[k]);
+                    }
+                  }
+                } catch(e) {}
+                return results;
+              }
 
-              // 先记录页面上所有可见弹窗/对话框元素
-              var modals = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="popover"], [class*="Popper"], [role="dialog"]');
+              // 先记录页面上所有可见弹窗/对话框元素（含 shadow DOM）
+              var modals = queryShadowAll(document, '[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="popover"], [class*="Popper"], [role="dialog"]');
               result.logs.push('页面弹窗元素数: ' + modals.length);
 
               // 优先策略：在包含"虚拟号"或"绑定"文字的弹窗中找"确定"按钮
-              // 这是最精准的——京东的虚拟号绑定弹窗包含"点击确定则绑定虚拟号"等文字
-              var allModals = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="Msgbox"], [class*="msgbox"], [role="dialog"]');
+              var allModals = queryShadowAll(document, '[class*="modal"], [class*="dialog"], [class*="Dialog"], [class*="Msgbox"], [class*="msgbox"], [role="dialog"]');
               for (var m = 0; m < allModals.length; m++) {
                 var modal = allModals[m];
                 var mRect = modal.getBoundingClientRect();
                 if (mRect.width < 100 || mRect.height < 30) continue;
-                var modalText = (modal.innerText || '');
-                // 检查弹窗文本是否包含虚拟号绑定相关内容
+                var modalText = '';
+                try { modalText = (modal.innerText || ''); } catch(e) { continue; }
                 if (modalText.indexOf('虚拟号') !== -1 || modalText.indexOf('绑定') !== -1 || modalText.indexOf('脱敏') !== -1) {
                   result.logs.push('找到虚拟号绑定弹窗: ' + modal.className.substring(0, 80) + ' textLen=' + modalText.length);
-                  // 在弹窗内找"确定"按钮
                   var modalBtns = modal.querySelectorAll('button, [role="button"], [class*="btn"], [class*="primary"]');
                   for (var b = 0; b < modalBtns.length; b++) {
                     var btn = modalBtns[b];
@@ -1507,7 +1475,6 @@ function registerSalesOrderIpc(mainWindow) {
                     var btnRect = btn.getBoundingClientRect();
                     if (btnRect.width > 0 && btnRect.height > 0) {
                       result.logs.push('弹窗按钮[' + b + ']: "' + btnText + '" cls=' + btn.className.substring(0, 60) + ' rect=' + Math.round(btnRect.width) + 'x' + Math.round(btnRect.height));
-                      // 优先点击"确定"按钮
                       if (/^(确定|确认|绑定|OK|Confirm)$/.test(btnText)) {
                         result.logs.push('点击虚拟号弹窗确定按钮: "' + btnText + '"');
                         btn.click();
@@ -1517,7 +1484,6 @@ function registerSalesOrderIpc(mainWindow) {
                     }
                   }
                   if (result.confirmed) break;
-                  // 如果没找到"确定"文本按钮，点击弹窗内的primary按钮（第一个）
                   var primaryBtns = modal.querySelectorAll('[class*="primary"]');
                   for (var p = 0; p < primaryBtns.length; p++) {
                     var pBtn = primaryBtns[p];
@@ -1536,7 +1502,6 @@ function registerSalesOrderIpc(mainWindow) {
                 }
               }
 
-              // 方法1a：标准UI库选择器（如果上面没找到虚拟号弹窗）
               if (!result.confirmed) {
                 var selectors = [
                 '.ant-modal .ant-btn-primary',
@@ -1546,7 +1511,6 @@ function registerSalesOrderIpc(mainWindow) {
                 '[class*="modal"] [class*="primary"]',
                 '[class*="dialog"] [class*="primary"]',
                 '[class*="Dialog"] [class*="primary"]',
-                // 京东自定义组件选择器
                 '.jd-modal .jd-btn--primary',
                 '.jd-dialog .jd-btn--primary',
                 '.jd-message-box .jd-btn--primary',
@@ -1556,7 +1520,7 @@ function registerSalesOrderIpc(mainWindow) {
                 '[class*="msgbox"] button'
               ];
               for (var i = 0; i < selectors.length; i++) {
-                var btns = document.querySelectorAll(selectors[i]);
+                var btns = queryShadowAll(document, selectors[i]);
                 if (btns.length > 0) {
                   result.logs.push('找到确认按钮: selector=' + selectors[i] + ' count=' + btns.length);
                   var btn = btns[btns.length - 1];
@@ -1566,17 +1530,15 @@ function registerSalesOrderIpc(mainWindow) {
                   break;
                 }
               }
+              }
 
-              // 方法2：通过按钮文本查找（最可靠的方式）
               if (!result.confirmed) {
-                var allBtns = document.querySelectorAll('button, [role="button"], [class*="btn"]');
+                var allBtns = queryShadowAll(document, 'button, [role="button"], [class*="btn"]');
                 var confirmTexts = /^(确认|确定|同意|OK|Confirm|我已阅读|绑定|获取|查看|立即)$/;
                 for (var i = 0; i < allBtns.length; i++) {
                   var text = allBtns[i].textContent.trim();
-                  // 只匹配短文本（避免匹配到包含这些字的导航按钮）
                   if (text.length <= 6 && confirmTexts.test(text)) {
                     var rect = allBtns[i].getBoundingClientRect();
-                    // 按钮必须可见
                     if (rect.width > 0 && rect.height > 0) {
                       result.logs.push('通过文本确认: "' + text + '" rect=' + Math.round(rect.width) + 'x' + Math.round(rect.height));
                       allBtns[i].click();
@@ -1587,7 +1549,6 @@ function registerSalesOrderIpc(mainWindow) {
                 }
               }
 
-              // 方法3：查找弹窗内的第一个可见按钮（兜底）
               if (!result.confirmed && modals.length > 0) {
                 for (var m = 0; m < modals.length; m++) {
                   var modal = modals[m];
@@ -1595,12 +1556,10 @@ function registerSalesOrderIpc(mainWindow) {
                   if (rect.width < 100 || rect.height < 50) continue;
                   var modalBtns = modal.querySelectorAll('button, [role="button"]');
                   result.logs.push('弹窗[' + m + ']: ' + modal.className.substring(0, 60) + ' 按钮数=' + modalBtns.length);
-                  // 优先点击最后一个按钮（通常是"确认"）
                   for (var b = modalBtns.length - 1; b >= 0; b--) {
                     var btnRect = modalBtns[b].getBoundingClientRect();
                     var btnText = modalBtns[b].textContent.trim();
                     if (btnRect.width > 0 && btnRect.height > 0 && btnText.length <= 10) {
-                      // 跳过"取消"按钮
                       if (/^(取消|Cancel|关闭|Close|拒绝)$/.test(btnText)) continue;
                       result.logs.push('弹窗内点击: "' + btnText + '"');
                       modalBtns[b].click();
@@ -1613,6 +1572,9 @@ function registerSalesOrderIpc(mainWindow) {
               }
 
               if (!result.confirmed) result.logs.push('未找到确认弹窗按钮');
+              } catch(err) {
+                result.logs.push('JS错误: ' + err.message);
+              }
               return result;
             })()
           `).catch(e => ({ confirmed: false, logs: ['error: ' + e.message] }))

@@ -229,9 +229,10 @@ function checkCookieValidity(storeId, cookies) {
   console.log(`[Heartbeat] store_id=${storeId} 关键登录Cookie: ${keyCookies.length}个`, keyCookies.map(c => c.name).join(', ') || '(无)')
 
   if (keyCookies.length === 0) {
-    // 没有找到关键Cookie名，只要有 jd.com Cookie 就认为在线
-    console.log(`[Heartbeat] store_id=${storeId} 未识别关键Cookie名，按Cookie存在判定 → 在线`)
-    return true
+    // 没有找到关键登录Cookie（thor/pin等），说明登录已失效
+    // 即使有其他跟踪Cookie（shop_monkey、__jda等），也无法访问商家后台
+    console.log(`[Heartbeat] store_id=${storeId} 关键登录Cookie不存在 → 离线`)
+    return false
   }
 
   const keyExpired = keyCookies.some(c => 
@@ -269,20 +270,42 @@ async function checkSingleStore(storeId, platform, cookieData) {
     })
     console.log(`[Heartbeat] 响应状态: ${res.statusCode}`)
 
-    // 302 重定向到登录页 = 离线
+    // 302 重定向处理
     if (res.statusCode === 302 || res.statusCode === 301) {
       const location = res.headers.location || ''
-      // 京东的特殊处理：任何重定向都视为Cookie失效
+      console.log(`[Heartbeat] store_id=${storeId} 重定向到: ${location.substring(0, 200)}`)
+      // 所有平台：重定向到登录页 → 离线
+      if (location.includes('login') || location.includes('passport') || location.includes('sign')) {
+        console.log(`[Heartbeat] store_id=${storeId} 重定向到登录页 → 离线`)
+        return false
+      }
+      // 京东：重定向到商家后台（非登录页） → 在线
       if (platform === 'jd') {
-        return false
+        // JD 有效会话访问 index.action 会被重定向到实际后台页面（如 /jdm/home）
+        // 只有重定向到 passport.jd.com 才是 Cookie 失效
+        if (location.includes('passport.jd.com') || location.includes('passport')) {
+          console.log(`[Heartbeat] store_id=${storeId} JD重定向到passport → 离线`)
+          return false
+        }
+        // 其他重定向（到商家后台页面）说明 Cookie 有效
+        console.log(`[Heartbeat] store_id=${storeId} JD重定向到后台页面 → 在线`)
+        return true
       }
-      if (location.includes('login') || location.includes('sign') || location.includes('passport')) {
-        return false
-      }
+      // 其他平台：非登录页的重定向视为在线（可能是正常的页面跳转）
+      return true
     }
 
-    // 401/403/404/500 = 离线
-    if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 404 || res.statusCode === 500) {
+    // 401/403/404 = 离线（认证/权限/页面不存在）
+    // JD 500 = 服务器临时故障，返回null（不确定）而非false（离线），因为Cookie元数据可能有效
+    // 其他平台 500 = 离线
+    if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 404) {
+      return false
+    }
+    if (res.statusCode === 500) {
+      if (platform === 'jd') {
+        console.log(`[Heartbeat] store_id=${storeId} JD返回500（服务器临时故障），视为不确定`)
+        return null
+      }
       return false
     }
 
@@ -345,7 +368,36 @@ async function checkAllStores(mainWindow) {
         console.log(`[Heartbeat] store_id=${storeId} 正在同步中，跳过Cookie检查`)
         online = true  // 同步进行中说明Cookie有效
       } else {
-        online = await checkStoreSession(storeId, store.platform)
+        // 第一步：Cookie 元数据检查（名称、过期时间）
+        const cookieCheck = await checkStoreSession(storeId, store.platform)
+        if (!cookieCheck) {
+          // Cookie 检查已判定离线，不需要再验证
+          online = false
+        } else {
+          // 第二步：Cookie 元数据通过，HTTP 请求验证 Cookie 是否真的有效
+          // JD 可能在服务端销毁了会话，即使 Cookie 本身过期时间未到
+          const ses = session.fromPartition(`persist:platform-${storeId}`)
+          const cookies = await ses.cookies.get({})
+          const httpCheck = await checkSingleStore(storeId, store.platform, cookies)
+          if (httpCheck === null) {
+            // HTTP 验证无法完成（网络错误等），信任 Cookie 元数据检查结果
+            console.log(`[Heartbeat] store_id=${storeId} HTTP验证无法完成，按Cookie元数据判定 → 在线`)
+            online = true
+          } else if (httpCheck === false) {
+            // HTTP 验证判定离线 — 但需要区分是真的失效还是刚启动时网络/会话未就绪
+            // 如果是首次检查且Cookie元数据通过，可能是会话还没加载完，暂判在线
+            // 下一轮heartbeat（5分钟后）会再次验证
+            if (isFirstCheck) {
+              console.log(`[Heartbeat] store_id=${storeId} 首次检查HTTP验证失败，可能是会话未就绪，暂判 → 在线`)
+              online = true
+            } else {
+              console.log(`[Heartbeat] store_id=${storeId} Cookie元数据有效但HTTP验证失败 → 离线`)
+              online = false
+            }
+          } else {
+            online = true
+          }
+        }
       }
       
       console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online}`)
@@ -376,11 +428,14 @@ async function checkAllStores(mainWindow) {
 }
 
 let heartbeatTimer = null
+let isFirstCheck = true
 
 function startHeartbeat(mainWindow) {
-  // 首次延迟检测
-  setTimeout(() => {
-    checkAllStores(mainWindow)
+  isFirstCheck = true
+  // 首次延迟检测（必须await完成后再设置isFirstCheck=false，否则同步代码会在async函数启动后立即执行）
+  setTimeout(async () => {
+    await checkAllStores(mainWindow)
+    isFirstCheck = false
   }, FIRST_CHECK_DELAY)
 
   // 定时检测
