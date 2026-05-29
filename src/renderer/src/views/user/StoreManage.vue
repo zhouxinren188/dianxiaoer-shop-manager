@@ -433,9 +433,12 @@ onMounted(() => {
     )
     // 监听心跳状态变化
     removeListeners.push(
-      window.electronAPI.onUpdate('store-status-changed', ({ storeId, online }) => {
+      window.electronAPI.onUpdate('store-status-changed', ({ storeId, storeName, online, wasOnline }) => {
         const row = tableData.value.find(item => item.id === storeId)
         if (row) row.online = online ? 1 : 0
+        if (online === false && wasOnline === true) {
+          ElMessage.warning(`${storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
+        }
       })
     )
   }

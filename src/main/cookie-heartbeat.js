@@ -389,6 +389,7 @@ async function checkAllStores(mainWindow) {
     // 串行检测，避免并发风控
     for (const store of stores) {
       const storeId = store.id || store.store_id
+      const storeName = store.name || ''
       console.log(`[Heartbeat] 检测 store_id=${storeId} platform='${store.platform}'`)
 
       // 跳过正在同步的店铺，避免 Cookie 恢复干扰同步
@@ -455,7 +456,8 @@ async function checkAllStores(mainWindow) {
         }
       }
 
-      // 更新状态追踪
+      // 更新状态追踪（先记录旧值，用于前端判断在线→离线转场）
+      const wasOnline = storeStatusMap[storeId]
       storeStatusMap[storeId] = online
 
       console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online} httpFailCount=${httpFailCount[storeId] || 0}`)
@@ -476,7 +478,9 @@ async function checkAllStores(mainWindow) {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('store-status-changed', {
           storeId: storeId,
-          online
+          storeName: storeName,
+          online,
+          wasOnline  // undefined=首次检测, true=之前在线, false=之前离线
         })
       }
     }

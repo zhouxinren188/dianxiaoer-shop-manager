@@ -2542,6 +2542,8 @@ onMounted(async () => {
         // 订单已由主进程直接保存到服务器，此处只做刷新
         loadOrdersFromServer()
         loadStatusCounts()
+      } else if (data.cookieFailed) {
+        ElMessage.warning(`${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
       }
     })
     unsubSyncProgress = window.electronAPI.onUpdate('auto-sync-progress', (data) => {
@@ -2549,9 +2551,12 @@ onMounted(async () => {
         mainProcessSyncStatus.value = data.message || `${data.storeName || '店铺'}二次同步中...`
       }
     })
-    // 监听店铺在线状态变化（心跳检测），重新加载店铺列表即可
-    unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', () => {
+    // 监听店铺在线状态变化（心跳检测）
+    unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', (data) => {
       loadStores()
+      if (data.online === false && data.wasOnline === true) {
+        ElMessage.warning(`${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
+      }
     })
   }
 })

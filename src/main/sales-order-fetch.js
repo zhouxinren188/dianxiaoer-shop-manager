@@ -3682,12 +3682,15 @@ async function autoSyncAllStores(mainWindow) {
 
         // 通知渲染进程同步结果（不再传递 orders，避免双重保存）
         if (mainWindow && !mainWindow.isDestroyed()) {
+          const cookieKeywords = ['Cookie', 'cookie', '登录已过期', '请重新登录']
+          const cookieFailed = !result.success && cookieKeywords.some(k => result.message?.includes(k))
           mainWindow.webContents.send('auto-sync-result', {
             storeId: store.store_id,
             storeName: store.store_name,
             success: result.success,
             orderCount: result.data?.pageTotal || 0,
-            message: result.message || ''
+            message: result.message || '',
+            cookieFailed
           })
         }
       } catch (err) {
