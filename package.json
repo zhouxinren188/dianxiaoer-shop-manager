@@ -28,6 +28,10 @@
       "out/**/*",
       "resources/**/*"
     ],
+    "asarUnpack": [
+      "out/main/purchase-preload.js",
+      "resources/platform-login-preload.js"
+    ],
     "afterPack": "./scripts/after-pack.js",
     "win": {
       "target": [
