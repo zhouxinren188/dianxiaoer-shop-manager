@@ -4056,17 +4056,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     const preloadPath = resolveAppPath('out/main/purchase-preload.js')
 
-    // ★★★ 临时禁用 preload 验证假设 ★★★
-    // 开发版(electron-vite dev)不加载 purchase-preload.js 但支付宝支付正常，
-    // 用户版加载了反检测脚本反而被支付宝风控拦截（"网络异常"）。
-    // 假设：不完整的指纹伪装比没有伪装更危险——部分伪装导致指纹不自洽，
-    // 支付宝风控识别出"伪装者"比识别出"Electron"更容易触发拦截。
-    // 临时禁用 preload 来验证：如果用户版不加载反检测也能通过支付宝，
-    // 则确认根因是反检测脚本，后续需要完善脚本使指纹自洽。
-    const PRELOAD_ENABLED = false  // ★ 设为 true 恢复加载反检测脚本
+    // ★ 反检测策略：v1.9.14 起恢复加载 preload，但改用最小化策略
+    // 经验证：不完整的指纹伪装比没有伪装更危险（支付宝更易识别"伪装者"而非"Electron"）
+    // 新版 preload 只隐藏 webdriver/selenium 等自动化标识，不做浏览器指纹伪装
+    const PRELOAD_ENABLED = true
 
     runtimeLog.writeLog('PurchaseWin', `创建采购窗口: platform=${platform}, purchaseNo=${purchaseNo}`)
-    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED' : 'DISABLED（验证假设）'}`)
+    runtimeLog.writeLog('PurchaseWin', `preload: ${PRELOAD_ENABLED ? 'ENABLED（最小化策略）' : 'DISABLED'}`)
     runtimeLog.writeLog('PurchaseWin', `app.getAppPath: ${app.getAppPath()}`)
 
     const win = new BrowserWindow({

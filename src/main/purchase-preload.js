@@ -1,117 +1,32 @@
 /**
  * purchase-preload.js - 采购窗口反检测预加载脚本
  *
- * 在页面 JavaScript 执行前注入，覆盖 navigator/webGL/canvas 等指纹，
- * 隐藏 Electron/自动化标识，伪装为标准 Chrome 浏览器。
+ * ★ v1.9.14 重大策略调整：
+ * 经验证，不完整的指纹伪装比没有伪装更危险。之前版本伪装了 webdriver/plugins/mimeTypes/
+ * hardwareConcurrency/deviceMemory/languages/platform/canvas/webGL/audioContext 等大量指纹，
+ * 但遗漏了 vendor/productSub/maxTouchPoints/prototype chain 等，导致指纹不自洽，
+ * 支付宝风控识别出"伪装者"比识别出"Electron"更容易触发拦截。
+ *
+ * 禁用所有伪装后支付宝支付反而正常通过，说明支付宝当前不检测 Electron 原生指纹。
+ *
+ * 新策略：最小化干预——只隐藏"自动化工具"的直接标识（webdriver、selenium 相关变量），
+ * 不做任何浏览器指纹伪装（plugins/mimeTypes/canvas/webGL 等保持原生值），
+ * 避免引入不一致的指纹导致风控升级。
  *
  * ★ contextIsolation=false：preload 与页面共享同一个 JS 上下文，
- * 所以对 navigator/window 的修改对页面可见，反检测在页面 JS 之前生效。
- * 这和 dl 的 CEF ExecuteJavaScript 效果一致——在页面脚本运行前完成指纹伪装。
+ * 所以对 navigator/window 的修改对页面可见。
  */
 
 // ★★★ 启动确认日志：主进程通过 console-message 事件捕获此消息，确认 preload 已加载 ★★★
-console.log('[PRELOAD_LOADED] purchase-preload.js 已执行，反检测脚本开始注入')
+console.log('[PRELOAD_LOADED] purchase-preload.js 已执行，反检测脚本开始注入（最小化策略）')
 
-// 1. 隐藏 webdriver 标识
+// ====== 最小化反检测：只隐藏"自动化工具"直接标识 ======
+// 这些修改不影响浏览器指纹的自洽性，因为它们是"删除/隐藏"而非"伪装"
+
+// 1. 隐藏 webdriver 标识（最关键的自动化检测点）
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true })
 
-// 2. 伪造 navigator.plugins（模拟 Chrome 默认插件列表）
-const fakePlugins = [
-  { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-  { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-  { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }
-]
-const pluginArray = []
-pluginArray.item = function (i) { return this[i] }
-pluginArray.namedItem = function (name) { for (let i = 0; i < this.length; i++) { if (this[i].name === name) return this[i] } return null }
-pluginArray.refresh = function () {}
-pluginArray.length = fakePlugins.length
-for (let i = 0; i < fakePlugins.length; i++) {
-  const p = {
-    name: fakePlugins[i].name, filename: fakePlugins[i].filename, description: fakePlugins[i].description,
-    length: 0, item: function () { return null }, namedItem: function () { return null }
-  }
-  Object.defineProperty(p, 'length', { value: 0, configurable: false })
-  pluginArray[i] = p
-}
-Object.defineProperty(navigator, 'plugins', { get: () => pluginArray, configurable: true })
-
-// 3. 伪造 navigator.mimeTypes
-const fakeMimes = [
-  { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
-  { type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: 'Portable Document Format' },
-  { type: 'application/x-nacl', suffixes: '', description: 'Native Client Executable' },
-  { type: 'application/x-pnacl', suffixes: '', description: 'Portable Native Client Executable' }
-]
-const mimeArray = []
-mimeArray.item = function (i) { return this[i] }
-mimeArray.namedItem = function (name) { for (let i = 0; i < this.length; i++) { if (this[i].type === name) return this[i] } return null }
-mimeArray.length = fakeMimes.length
-for (let i = 0; i < fakeMimes.length; i++) {
-  const m = {
-    type: fakeMimes[i].type, suffixes: fakeMimes[i].suffixes, description: fakeMimes[i].description,
-    enabledPlugin: pluginArray[0]
-  }
-  mimeArray[i] = m
-}
-Object.defineProperty(navigator, 'mimeTypes', { get: () => mimeArray, configurable: true })
-
-// 4. 伪造 hardwareConcurrency / deviceMemory
-Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true })
-Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true })
-
-// 5. 伪造 navigator.languages
-Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en-US', 'en'], configurable: true })
-
-// 6. 伪造 navigator.platform
-Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true })
-
-// 7. Canvas 指纹噪声
-const origToDataURL = HTMLCanvasElement.prototype.toDataURL
-HTMLCanvasElement.prototype.toDataURL = function () {
-  const ctx = this.getContext('2d')
-  if (ctx && this.width > 0 && this.height > 0) {
-    const imgData = ctx.getImageData(0, 0, 1, 1)
-    imgData.data[3] = imgData.data[3] ^ 1
-    ctx.putImageData(imgData, 0, 0)
-  }
-  return origToDataURL.apply(this, arguments)
-}
-const origToBlob = HTMLCanvasElement.prototype.toBlob
-HTMLCanvasElement.prototype.toBlob = function () {
-  const ctx = this.getContext('2d')
-  if (ctx && this.width > 0 && this.height > 0) {
-    const imgData = ctx.getImageData(0, 0, 1, 1)
-    imgData.data[3] = imgData.data[3] ^ 1
-    ctx.putImageData(imgData, 0, 0)
-  }
-  return origToBlob.apply(this, arguments)
-}
-
-// 8. WebGL 指纹伪装
-const origGetParam = WebGLRenderingContext.prototype.getParameter
-WebGLRenderingContext.prototype.getParameter = function (param) {
-  if (param === 37445) return 'Intel Inc.'           // UNMASKED_VENDOR_WEBGL
-  if (param === 37446) return 'Intel Iris OpenGL Engine'  // UNMASKED_RENDERER_WEBGL
-  return origGetParam.call(this, param)
-}
-if (typeof WebGL2RenderingContext !== 'undefined') {
-  const origGetParam2 = WebGL2RenderingContext.prototype.getParameter
-  WebGL2RenderingContext.prototype.getParameter = function (param) {
-    if (param === 37445) return 'Intel Inc.'
-    if (param === 37446) return 'Intel Iris OpenGL Engine'
-    return origGetParam2.call(this, param)
-  }
-}
-
-// 9. AudioContext 指纹噪声
-const origGetFloatFreq = AnalyserNode.prototype.getFloatFrequencyData
-AnalyserNode.prototype.getFloatFrequencyData = function (arr) {
-  origGetFloatFreq.call(this, arr)
-  for (let i = 0; i < arr.length; i++) { arr[i] += Math.random() * 0.0001 }
-}
-
-// 10. 隐藏 Automation 相关属性
+// 2. 隐藏 Automation/Selenium/PhantomJS 相关全局变量（纯删除，不引入新值）
 delete window.__nightmare
 delete window._phantom
 delete window.__phantomas
@@ -127,66 +42,15 @@ delete window.__driver_evaluate
 delete window.__selenium_unwrapped
 delete window.__fxdriver_unwrapped
 
-// 11. 伪造 permissions API
-if (navigator.permissions && navigator.permissions.query) {
-  const origQuery = navigator.permissions.query.bind(navigator.permissions)
-  navigator.permissions.query = function (params) {
-    if (params.name === 'notifications') {
-      return Promise.resolve({ state: 'default', onchange: null })
-    }
-    return origQuery(params)
-  }
-}
-
-// 12. 伪造 chrome.runtime（Electron 的 chrome.runtime 与真实 Chrome 不同）
-// 真实 Chrome 有 chrome.runtime.connect / sendMessage 等方法
-if (window.chrome) {
-  if (!window.chrome.runtime) {
-    window.chrome.runtime = {
-      connect: function () { return { onMessage: { addListener: function () {} }, postMessage: function () {}, disconnect: function () {} } },
-      sendMessage: function () {},
-      onMessage: { addListener: function () {} },
-      id: undefined
-    }
-  }
-}
-
-// 13. 修复 window.chrome 对象（Electron 可能缺少某些属性）
-if (!window.chrome) {
-  window.chrome = {}
-}
-if (!window.chrome.csi) {
-  window.chrome.csi = function () {}
-}
-if (!window.chrome.loadTimes) {
-  window.chrome.loadTimes = function () {
-    return {
-      commitLoadTime: Date.now() / 1000,
-      connectionInfo: 'h2',
-      finishDocumentLoadTime: 0,
-      finishLoadTime: 0,
-      firstPaintAfterLoadTime: 0,
-      firstPaintTime: 0,
-      navigationType: 'Other',
-      npnNegotiatedProtocol: 'h2',
-      requestTime: Date.now() / 1000 - 0.5,
-      startLoadTime: Date.now() / 1000 - 0.5,
-      wasAlternateProtocolAvailable: false,
-      wasFetchedViaSpdy: true,
-      wasNpnNegotiated: true
-    }
-  }
-}
-
-// 14. 隐藏 Electron 特有的 process 引用（contextIsolation 下本应不可见，以防万一）
+// 3. 隐藏 Electron 特有的 process 引用（sandbox 模式下通常不可见，以防万一）
 if (typeof process !== 'undefined' && process.versions && process.versions.electron) {
   try {
     Object.defineProperty(process.versions, 'electron', { get: () => undefined, configurable: true })
-    Object.defineProperty(process.versions, 'chrome', { get: () => '134.0.0.0', configurable: true })
   } catch (e) { /* sandbox 模式下可能无法修改 */ }
 }
 
-// 15. 修复 outerWidth/outerHeight（Electron 中可能为 0，暴露无头特征）
+// 4. 修复 outerWidth/outerHeight（Electron 中可能为 0，暴露无头特征）
+// 这是"修复异常值"而非"伪装"，不影响指纹自洽
 if (window.outerWidth === 0) {
   Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth, configurable: true })
 }
@@ -194,9 +58,25 @@ if (window.outerHeight === 0) {
   Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight + 85, configurable: true })
 }
 
-// 16. PDD 地址页早期注入 — 已废弃
-// 地址填写逻辑通过 executeJavaScript 在 did-navigate 中注入，
-// 省市区级联通过"先绑定 DOMNodeInserted 监听器再 click"解决时序问题。
-
-// 17. 保存原生 window.open 引用（页面 JS 可能覆盖 window.open，preload 在页面 JS 之前执行）
+// 5. 保存原生 window.open 引用（页面 JS 可能覆盖 window.open，preload 在页面 JS 之前执行）
 window.__dxeOpen = window.open.bind(window)
+
+// ====== 不再伪装的指纹（保持原生值，避免不一致） ======
+// 以下项目在之前的版本中被伪装，但经验证导致支付宝风控拦截，
+// 现在保持 Electron/Chromium 原生值：
+//
+// - navigator.plugins（原生 Electron plugins 列表，虽短但自洽）
+// - navigator.mimeTypes（原生 Electron mimeTypes，同上）
+// - navigator.hardwareConcurrency（原生值）
+// - navigator.deviceMemory（原生值）
+// - navigator.languages（原生值）
+// - navigator.platform（原生值）
+// - navigator.vendor（原生值）
+// - navigator.productSub（原生值）
+// - navigator.maxTouchPoints（原生值）
+// - Canvas 指纹噪声（移除——原生 Canvas 指纹虽可能暴露 Electron，但比伪造后不一致更安全）
+// - WebGL 指纹伪装（移除——同上）
+// - AudioContext 指纹噪声（移除——同上）
+// - chrome.runtime 伪造（移除——保持 Electron 原生 chrome 对象）
+// - chrome.csi / chrome.loadTimes 伪造（移除——保持原生值）
+// - permissions API 伪造（移除——保持原生行为）
