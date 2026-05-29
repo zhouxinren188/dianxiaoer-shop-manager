@@ -2,11 +2,18 @@ const http = require('http')
 const https = require('https')
 const { session } = require('electron')
 const { getAuthToken } = require('./auth-store')
+const runtimeLog = require('./runtime-logger')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const HEARTBEAT_INTERVAL = 5 * 60 * 1000 // 5 分钟
 const FIRST_CHECK_DELAY = 10 * 1000 // 启动后 10 秒
 const REQUEST_TIMEOUT = 10 * 1000
+
+// ★ 心跳状态追踪
+// storeStatusMap: 记录每个店铺上次判定的在线状态，用于 httpCheck===null 时保持原状
+// httpFailCount: 记录每个店铺连续HTTP验证失败的次数，连续2次失败才判定离线
+const storeStatusMap = {}
+const httpFailCount = {}
 
 // 各平台心跳验证 URL
 const HEARTBEAT_URLS = {
@@ -274,9 +281,11 @@ async function checkSingleStore(storeId, platform, cookieData) {
     if (res.statusCode === 302 || res.statusCode === 301) {
       const location = res.headers.location || ''
       console.log(`[Heartbeat] store_id=${storeId} 重定向到: ${location.substring(0, 200)}`)
+      runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} ${res.statusCode}重定向 → ${location.substring(0, 150)}`)
       // 所有平台：重定向到登录页 → 离线
       if (location.includes('login') || location.includes('passport') || location.includes('sign')) {
         console.log(`[Heartbeat] store_id=${storeId} 重定向到登录页 → 离线`)
+        runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} 重定向到登录页 → 离线`)
         return false
       }
       // 京东：重定向到商家后台（非登录页） → 在线
@@ -285,6 +294,7 @@ async function checkSingleStore(storeId, platform, cookieData) {
         // 只有重定向到 passport.jd.com 才是 Cookie 失效
         if (location.includes('passport.jd.com') || location.includes('passport')) {
           console.log(`[Heartbeat] store_id=${storeId} JD重定向到passport → 离线`)
+          runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} JD重定向到passport → 离线`)
           return false
         }
         // 其他重定向（到商家后台页面）说明 Cookie 有效
@@ -299,11 +309,13 @@ async function checkSingleStore(storeId, platform, cookieData) {
     // JD 500 = 服务器临时故障，返回null（不确定）而非false（离线），因为Cookie元数据可能有效
     // 其他平台 500 = 离线
     if (res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 404) {
+      runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} HTTP ${res.statusCode} → 离线`)
       return false
     }
     if (res.statusCode === 500) {
       if (platform === 'jd') {
         console.log(`[Heartbeat] store_id=${storeId} JD返回500（服务器临时故障），视为不确定`)
+        runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} JD返回500 → 不确定(null)`)
         return null
       }
       return false
@@ -312,33 +324,41 @@ async function checkSingleStore(storeId, platform, cookieData) {
     // 200 状态码需要进一步验证
     if (res.statusCode === 200) {
       const body = res.data.toLowerCase()
-      
+
       // 京东特殊处理：检测是否返回了错误页面或登录提示
       if (platform === 'jd') {
-        if (body.includes('login') || 
+        if (body.includes('login') ||
             body.includes('passport.jd.com') ||
             body.includes('wlf-passport') ||
             body.includes('未登录') ||
             body.includes('请先登录')) {
+          console.log(`[Heartbeat] store_id=${storeId} JD 200响应包含登录关键词 → 离线`)
+          runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} JD 200响应包含登录关键词 → 离线`)
           return false
         }
-        
+
         if (body.includes('error') || body.includes('异常') || body.length < 1000) {
+          console.log(`[Heartbeat] store_id=${storeId} JD 200响应异常(error/异常/过短 bodyLen=${body.length}) → 离线`)
+          runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} JD 200响应异常(bodyLen=${body.length}) → 离线`)
           return false
         }
+
+        runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} JD 200响应正常(bodyLen=${body.length}) → 在线`)
       }
-      
+
       // 通用检测：返回的是登录页面
       if (body.includes('login') && body.includes('password') && body.includes('form')) {
         return false
       }
-      
+
       return true
     }
 
+    runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} 未知状态码 ${res.statusCode} → null`)
     return null // 其他状态码，不做判断
   } catch (err) {
     console.error(`[Heartbeat] 网络请求失败 store_id=${storeId}:`, err.message)
+    runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} 网络请求失败: ${err.message} → null`)
     return null // 网络错误，不更新状态
   }
 }
@@ -355,6 +375,16 @@ async function checkAllStores(mainWindow) {
 
     const stores = json.data.list
     console.log(`[Heartbeat] 获取到 ${stores.length} 个店铺`)
+
+    // ★ 初始化：用服务器上的当前在线状态填充 storeStatusMap
+    // 这样首次检查遇到 httpCheck===null 时，可以用服务器的已知状态作为"之前状态"
+    // 避免在HTTP验证不可用时盲目默认为在线
+    for (const store of stores) {
+      const storeId = store.id || store.store_id
+      if (storeStatusMap[storeId] === undefined && store.online !== undefined) {
+        storeStatusMap[storeId] = !!store.online
+      }
+    }
 
     // 串行检测，避免并发风控
     for (const store of stores) {
@@ -373,34 +403,62 @@ async function checkAllStores(mainWindow) {
         if (!cookieCheck) {
           // Cookie 检查已判定离线，不需要再验证
           online = false
+          httpFailCount[storeId] = 0 // Cookie元数据已失败，重置HTTP失败计数
         } else {
           // 第二步：Cookie 元数据通过，HTTP 请求验证 Cookie 是否真的有效
           // JD 可能在服务端销毁了会话，即使 Cookie 本身过期时间未到
           const ses = session.fromPartition(`persist:platform-${storeId}`)
           const cookies = await ses.cookies.get({})
           const httpCheck = await checkSingleStore(storeId, store.platform, cookies)
-          if (httpCheck === null) {
-            // HTTP 验证无法完成（网络错误等），信任 Cookie 元数据检查结果
-            console.log(`[Heartbeat] store_id=${storeId} HTTP验证无法完成，按Cookie元数据判定 → 在线`)
+
+          if (httpCheck === true) {
+            // HTTP验证通过 → 在线
             online = true
+            httpFailCount[storeId] = 0
           } else if (httpCheck === false) {
-            // HTTP 验证判定离线 — 但需要区分是真的失效还是刚启动时网络/会话未就绪
-            // 如果是首次检查且Cookie元数据通过，可能是会话还没加载完，暂判在线
-            // 下一轮heartbeat（5分钟后）会再次验证
-            if (isFirstCheck) {
-              console.log(`[Heartbeat] store_id=${storeId} 首次检查HTTP验证失败，可能是会话未就绪，暂判 → 在线`)
-              online = true
-            } else {
-              console.log(`[Heartbeat] store_id=${storeId} Cookie元数据有效但HTTP验证失败 → 离线`)
+            // HTTP验证明确判定离线 → 累计连续失败次数
+            httpFailCount[storeId] = (httpFailCount[storeId] || 0) + 1
+            if (httpFailCount[storeId] >= 2) {
+              // ★ 连续2次HTTP验证失败 → 确认离线
+              // 旧逻辑用 isFirstCheck 宽限期会在首次检查时强制判在线，导致失效店铺误判
+              console.log(`[Heartbeat] store_id=${storeId} 连续${httpFailCount[storeId]}次HTTP验证失败 → 离线`)
+              runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} 连续${httpFailCount[storeId]}次HTTP验证失败 → 离线`)
               online = false
+            } else {
+              // 首次HTTP验证失败，可能是临时网络波动，保持之前的状态
+              const prevStatus = storeStatusMap[storeId]
+              if (prevStatus !== undefined) {
+                online = prevStatus
+                console.log(`[Heartbeat] store_id=${storeId} HTTP验证首次失败，保持之前状态: ${online ? '在线' : '离线'}`)
+              } else {
+                // 没有之前的状态记录（首次检查），暂判在线，下次检查会再次验证
+                online = true
+                console.log(`[Heartbeat] store_id=${storeId} HTTP验证首次失败，无历史状态，暂判 → 在线`)
+              }
             }
           } else {
-            online = true
+            // httpCheck === null：HTTP验证无法完成（网络错误、JD返回500等）
+            // ★ 旧逻辑直接信任Cookie元数据判在线，这是"百顺仓"等失效店铺误判在线的主因
+            // 新逻辑：保持之前的状态不变，不做任何假设
+            const prevStatus = storeStatusMap[storeId]
+            if (prevStatus !== undefined) {
+              online = prevStatus
+              console.log(`[Heartbeat] store_id=${storeId} HTTP验证无法完成，保持之前状态: ${online ? '在线' : '离线'}`)
+              runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} HTTP验证无法完成(null)，保持之前状态: ${online ? '在线' : '离线'}`)
+            } else {
+              // 首次检查且网络不可用，信任Cookie元数据（下次检查会再次验证）
+              online = true
+              console.log(`[Heartbeat] store_id=${storeId} HTTP验证无法完成，无历史状态，按Cookie元数据判定 → 在线`)
+              runtimeLog.writeLog('HEARTBEAT', `store_id=${storeId} HTTP验证无法完成(null)，无历史状态，暂判在线`)
+            }
           }
         }
       }
-      
-      console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online}`)
+
+      // 更新状态追踪
+      storeStatusMap[storeId] = online
+
+      console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} online=${online} httpFailCount=${httpFailCount[storeId] || 0}`)
 
       // 更新服务器状态
       try {
@@ -428,14 +486,15 @@ async function checkAllStores(mainWindow) {
 }
 
 let heartbeatTimer = null
-let isFirstCheck = true
 
 function startHeartbeat(mainWindow) {
-  isFirstCheck = true
-  // 首次延迟检测（必须await完成后再设置isFirstCheck=false，否则同步代码会在async函数启动后立即执行）
+  // 启动时清空状态追踪（避免残留旧状态）
+  Object.keys(storeStatusMap).forEach(k => delete storeStatusMap[k])
+  Object.keys(httpFailCount).forEach(k => delete httpFailCount[k])
+
+  // 首次延迟检测
   setTimeout(async () => {
     await checkAllStores(mainWindow)
-    isFirstCheck = false
   }, FIRST_CHECK_DELAY)
 
   // 定时检测
