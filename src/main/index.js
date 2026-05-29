@@ -24,6 +24,7 @@ const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
 const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
+const runtimeLog = require('./runtime-logger')
 
 // 允许自签名证书（仅用于连接内部服务器API）
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -803,6 +804,9 @@ registerPacketCaptureIpc()
 registerSupplyOrderIpc()
 
 app.whenReady().then(async () => {
+  // ★ 启动日志：写入桌面运行日志文件，方便用户版问题排查
+  runtimeLog.logStartup(getCurrentVersion())
+
   // 启动诊断：检查用户数据目录是否可写（影响localStorage持久化和缓存）
   try {
     const fs = require('fs')

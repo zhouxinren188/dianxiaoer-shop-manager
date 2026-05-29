@@ -9,6 +9,9 @@
  * 这和 dl 的 CEF ExecuteJavaScript 效果一致——在页面脚本运行前完成指纹伪装。
  */
 
+// ★★★ 启动确认日志：主进程通过 console-message 事件捕获此消息，确认 preload 已加载 ★★★
+console.log('[PRELOAD_LOADED] purchase-preload.js 已执行，反检测脚本开始注入')
+
 // 1. 隐藏 webdriver 标识
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true })
 

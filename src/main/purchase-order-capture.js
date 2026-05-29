@@ -3,6 +3,7 @@ const path = require('path')
 const http = require('http')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
+const runtimeLog = require('./runtime-logger')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -4053,6 +4054,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       platform: platform || ''
     })
 
+    const preloadPath = resolveAppPath('out/main/purchase-preload.js')
+    runtimeLog.writeLog('PurchaseWin', `创建采购窗口: platform=${platform}, purchaseNo=${purchaseNo}`)
+    runtimeLog.writeLog('PurchaseWin', `preload路径: ${preloadPath}`)
+    runtimeLog.writeLog('PurchaseWin', `app.getAppPath: ${app.getAppPath()}`)
+
     const win = new BrowserWindow({
       width: 1280,
       height: 860,
@@ -4066,7 +4072,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         contextIsolation: false,
         nodeIntegration: false,
         sandbox: true,
-        preload: resolveAppPath('out/main/purchase-preload.js')
+        preload: preloadPath
       }
     })
 
@@ -4655,7 +4661,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 拦截器在API响应到达时立即通过 console.log('[PURCHASE_ORDER_FOUND]xxx') 通知
     // 这比轮询快得多，即使页面马上跳转也能捕获到
     win.webContents.on('console-message', (event, level, message, line, sourceId) => {
-      if (!message || resolved) return
+      if (!message) return
+      // ★★★ 捕获 preload 加载确认消息 ★★★
+      if (message.startsWith('[PRELOAD_LOADED]')) {
+        runtimeLog.writeLog('Preload', `✓ purchase-preload.js 已成功加载并执行: ${message}`)
+        console.log(`[PurchaseCapture] ✓ Preload loaded: ${message}`)
+        return
+      }
+      if (resolved) return
       if (message.startsWith('[PURCHASE_ORDER_FOUND]')) {
         const orderNo = message.substring('[PURCHASE_ORDER_FOUND]'.length).trim()
         // 淘宝纯数字（≥10位），拼多多字母数字+连字符（如260506-070338506260381）
@@ -5402,6 +5415,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.webContents.on('did-navigate', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate: ${url.substring(0, 120)}`)
+      // ★ 记录关键页面导航到运行日志
+      const urlLower = url.toLowerCase()
+      if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
+        runtimeLog.writeLog('PurchaseNav', `did-navigate: ${url.substring(0, 200)}`)
+      }
 
       // 尝试从新页面提取订单号（和 dl 一致）
       tryExtractOrderFromPage(url)
@@ -5640,6 +5658,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.webContents.on('will-navigate', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] will-navigate: ${url.substring(0, 120)}`)
+      // ★ 记录支付相关导航到运行日志
+      const urlLower = url.toLowerCase()
+      if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
+        runtimeLog.writeLog('PurchaseNav', `will-navigate: ${url.substring(0, 200)}`)
+      }
 
       if (platform === 'taobao' && !resolved) {
         // 1. 尝试从当前页面HTML提取 b2c_orid
@@ -5698,6 +5721,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.webContents.on('will-redirect', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] will-redirect: ${url.substring(0, 150)}`)
+      // ★ 记录支付重定向到运行日志
+      const urlLower = url.toLowerCase()
+      if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
+        runtimeLog.writeLog('PurchaseNav', `will-redirect: ${url.substring(0, 200)}`)
+      }
 
       // PDD专用：支付回调重定向中可能带order_sn，支付宝页面重定向中可能带out_trade_no
       if (platform === 'pinduoduo') {
@@ -5739,18 +5767,39 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (!isMainFrame) return  // 只关心主框架加载失败
       if (errorCode === -3) return  // ERR_ABORTED：用户导航或重定向导致，非真正错误
       console.error(`[PurchaseCapture] Page load failed: ${errorCode} ${errorDesc} url=${validatedURL}`)
+      runtimeLog.writeLog('PurchaseError', `页面加载失败: errorCode=${errorCode}, errorDesc=${errorDesc}, url=${validatedURL}`)
     })
 
     // 渲染进程崩溃处理
     win.webContents.on('render-process-gone', (event, details) => {
       console.error(`[PurchaseCapture] Render process gone: ${details.reason} ${details.exitCode}`)
+      runtimeLog.writeLog('PurchaseError', `渲染进程崩溃: reason=${details.reason}, exitCode=${details.exitCode}`)
       if (!resolved) {
         onWindowClosed()
       }
     })
 
+    // ★ 监控页面标题变化 — 特别捕获"网络异常"等支付错误页
+    win.on('page-title-updated', (event, title) => {
+      runtimeLog.writeLog('PurchaseTitle', `页面标题: ${title}`)
+      if (title.includes('网络异常') || title.includes('网络错误') || title.includes('风险')) {
+        runtimeLog.writeLog('PurchaseError', `★ 支付页面标题含错误关键词: "${title}"`)
+        console.log(`[PurchaseCapture] ★ 支付页面标题含错误关键词: "${title}"`)
+      }
+    })
+
+    // ★ 监控 dom-ready — 确认页面DOM加载完成（特别记录支付宝相关页面）
+    win.webContents.on('dom-ready', () => {
+      const url = win.webContents.getURL()
+      const urlLower = url.toLowerCase()
+      if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
+        runtimeLog.writeLog('PurchaseDOM', `dom-ready: ${url.substring(0, 200)}`)
+      }
+    })
+
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）
     console.log(`[PurchaseCapture] Loading product page: ${purchaseUrl.substring(0, 120)}`)
+    runtimeLog.writeLog('PurchaseWin', `加载商品页: ${purchaseUrl.substring(0, 200)}`)
 
     // 拼多多：不再需要清除缓存（dl 不做缓存清理，Electron 默认 UA 正常工作）
 
