@@ -2543,7 +2543,14 @@ onMounted(async () => {
         loadOrdersFromServer()
         loadStatusCounts()
       } else if (data.cookieFailed) {
-        ElMessage.warning(`${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
+        const msg = `${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`
+        ElMessage.warning({ message: msg, duration: 8000 })
+        try {
+          const utterance = new SpeechSynthesisUtterance(msg)
+          utterance.lang = 'zh-CN'
+          utterance.rate = 1
+          speechSynthesis.speak(utterance)
+        } catch (e) { /* 语音不可用时静默 */ }
       }
     })
     unsubSyncProgress = window.electronAPI.onUpdate('auto-sync-progress', (data) => {
@@ -2555,7 +2562,14 @@ onMounted(async () => {
     unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', (data) => {
       loadStores()
       if (data.online === false && data.wasOnline === true) {
-        ElMessage.warning(`${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
+        const msg = `${data.storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`
+        ElMessage.warning({ message: msg, duration: 8000 })
+        try {
+          const utterance = new SpeechSynthesisUtterance(msg)
+          utterance.lang = 'zh-CN'
+          utterance.rate = 1
+          speechSynthesis.speak(utterance)
+        } catch (e) { /* 语音不可用时静默 */ }
       }
     })
   }

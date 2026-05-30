@@ -130,6 +130,13 @@ ipcMain.handle('window-close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
 ipcMain.handle('get-app-version', () => getCurrentVersion())
+ipcMain.handle('open-log-file', () => {
+  const { shell } = require('electron')
+  const logPath = runtimeLog.getLogFilePath()
+  // 用系统默认程序打开日志文件所在目录并选中文件
+  shell.showItemInFolder(logPath)
+  return { success: true, path: logPath }
+})
 ipcMain.handle('open-external-url', (event, { url }) => {
   if (!url) return { success: false, message: '网址为空' }
 
@@ -873,11 +880,8 @@ app.whenReady().then(async () => {
   })
 
   // 启动前清除缓存，防止旧缓存导致页面内容错误
-  try {
-    await session.defaultSession.clearCache()
-  } catch (e) {
-    // 忽略清理失败
-  }
+  // 不 await，避免阻塞窗口创建导致登录界面弹出延迟
+  session.defaultSession.clearCache().catch(() => {})
 
   // ★ 全量更新后清理过期热更新（必须在 createWindow 之前！）
   // 原因：全量更新安装后重启，旧版本的热更新 renderer/main 仍留在 hot-update 目录，

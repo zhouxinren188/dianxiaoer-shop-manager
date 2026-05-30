@@ -1,10 +1,10 @@
 /**
  * runtime-logger.js — 运行日志写入模块
  *
- * 将关键运行日志写入桌面上的 "店小二运行日志.txt" 文件，
+ * 将关键运行日志写入用户数据目录下的 "店小二运行日志.txt" 文件，
  * 方便用户版出现问题时导出日志给开发者排查。
  *
- * 日志文件位置: 用户桌面 / 店小二运行日志.txt
+ * 日志文件位置: app.getPath('userData') / 店小二运行日志.txt
  * 每次启动自动追加，不清空旧日志（保留历史上下文）
  * 日志超过 2MB 自动截断保留尾部
  */
@@ -20,8 +20,8 @@ let logFilePath = null
 
 function getLogFilePath() {
   if (logFilePath) return logFilePath
-  // 用户桌面路径
-  logFilePath = path.join(require('os').homedir(), 'Desktop', LOG_FILE_NAME)
+  // 用户数据目录（C:\Users\xxx\AppData\Roaming\dianxiaoer-shop-manager）
+  logFilePath = path.join(app.getPath('userData'), LOG_FILE_NAME)
   return logFilePath
 }
 

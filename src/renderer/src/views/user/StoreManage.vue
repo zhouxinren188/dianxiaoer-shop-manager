@@ -437,7 +437,14 @@ onMounted(() => {
         const row = tableData.value.find(item => item.id === storeId)
         if (row) row.online = online ? 1 : 0
         if (online === false && wasOnline === true) {
-          ElMessage.warning(`${storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`)
+          const msg = `${storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`
+          ElMessage.warning({ message: msg, duration: 8000 })
+          try {
+            const utterance = new SpeechSynthesisUtterance(msg)
+            utterance.lang = 'zh-CN'
+            utterance.rate = 1
+            speechSynthesis.speak(utterance)
+          } catch (e) { /* 语音不可用时静默 */ }
         }
       })
     )
