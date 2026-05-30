@@ -214,16 +214,32 @@ async function handleRegister() {
     if (!valid) return
     loading.value = true
     try {
-      const response = await fetch(`${API_BASE}/api/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: registerForm.username,
-          password: registerForm.password,
-          phone: registerForm.phone
+      let res = null
+      // 优先通过主进程代理请求
+      try {
+        const proxyResult = await window.electronAPI?.invoke('proxy-fetch', {
+          url: `${API_BASE}/api/register`,
+          method: 'POST',
+          body: JSON.stringify({
+            username: registerForm.username,
+            password: registerForm.password,
+            phone: registerForm.phone
+          })
         })
-      })
-      const res = await response.json()
+        if (proxyResult) res = JSON.parse(proxyResult.data)
+      } catch {
+        // fallback 到直接 fetch
+        const response = await fetch(`${API_BASE}/api/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: registerForm.username,
+            password: registerForm.password,
+            phone: registerForm.phone
+          })
+        })
+        res = await response.json()
+      }
       if (res.success) {
         ElMessage.success('注册成功，请登录')
         isRegister.value = false
@@ -243,44 +259,64 @@ async function handleLogin() {
   loginFormRef.value?.validate(async (valid) => {
     if (!valid) return
     loading.value = true
-    
-    const apiUrl = `${API_BASE}/api/login`
-    console.log('[Login] 开始请求:', apiUrl)
-    console.log('[Login] 请求参数:', { username: loginForm.username })
-    
-    try {
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: loginForm.username,
-          password: loginForm.password
-        })
-      })
-      
-      console.log('[Login] 响应状态:', response.status, response.statusText)
-      console.log('[Login] 响应头:', Object.fromEntries(response.headers.entries()))
 
-      // 先读取响应体（即使状态码非200，body中也可能有错误信息）
-      const responseText = await response.text()
+    const apiUrl = `${API_BASE}/api/login`
+    const reqBody = { username: loginForm.username, password: loginForm.password }
+    console.log('[Login] 开始请求:', apiUrl)
+
+    try {
       let res = null
+
+      // ★ 优先通过主进程代理请求（绕过 Electron file:// 协议的 CORS 限制）
+      // 生产模式下页面从 file:// 加载，fetch 的 Origin 为 "null"，
+      // 服务器 CORS 可能拒绝，导致 TypeError: Failed to fetch
       try {
-        res = JSON.parse(responseText)
-      } catch (e) {
-        // 非 JSON 响应
-        if (!response.ok) {
-          throw new Error(`服务器返回异常 (HTTP ${response.status})`)
+        const proxyResult = await window.electronAPI?.invoke('proxy-fetch', {
+          url: apiUrl,
+          method: 'POST',
+          body: JSON.stringify(reqBody)
+        })
+        if (proxyResult) {
+          try {
+            res = JSON.parse(proxyResult.data)
+          } catch {
+            if (proxyResult.status >= 400) {
+              throw new Error(`服务器返回异常 (HTTP ${proxyResult.status})`)
+            }
+            throw new Error('服务器返回格式错误')
+          }
+          console.log('[Login] 主进程代理响应:', proxyResult.status, JSON.stringify(res).substring(0, 200))
         }
-        throw new Error('服务器返回格式错误')
+      } catch (proxyErr) {
+        // 主进程代理失败（非 Electron 环境等），fallback 到直接 fetch
+        console.warn('[Login] 主进程代理失败，fallback 到 fetch:', proxyErr.message)
       }
 
-      console.log('[Login] 服务器响应:', JSON.stringify(res).substring(0, 200))
+      // 主进程代理未返回结果时，使用直接 fetch
+      if (!res) {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reqBody)
+        })
+
+        const responseText = await response.text()
+        try {
+          res = JSON.parse(responseText)
+        } catch (e) {
+          if (!response.ok) {
+            throw new Error(`服务器返回异常 (HTTP ${response.status})`)
+          }
+          throw new Error('服务器返回格式错误')
+        }
+        console.log('[Login] fetch 响应:', response.status, JSON.stringify(res).substring(0, 200))
+      }
 
       // 如果响应包含业务错误信息，优先使用
       if (res && res.success === false && res.message) {
         throw new Error(res.message)
       }
-      
+
       const isOldFormat = res && res.code === 0 && res.data && res.data.accessToken
       const isNewFormat = res && res.success === true && res.accessToken
       if (isOldFormat || isNewFormat) {
@@ -294,7 +330,6 @@ async function handleLogin() {
         }))
         if (rememberMe.value) {
           localStorage.setItem('rememberedUser', loginForm.username)
-          // 使用 encodeURIComponent + btoa 安全编码，支持 Unicode 字符
           localStorage.setItem('rememberedPassword', btoa(encodeURIComponent(loginForm.password)))
         } else {
           localStorage.removeItem('rememberedUser')
@@ -310,13 +345,6 @@ async function handleLogin() {
       }
     } catch (e) {
       console.error('[Login] 登录异常:', e)
-      console.error('[Login] 错误详情:', {
-        name: e.name,
-        message: e.message,
-        stack: e.stack
-      })
-      
-      // 提供更详细的错误信息
       let errorMsg = '登录失败'
       if (e.name === 'TypeError' && e.message.includes('fetch')) {
         errorMsg = '无法连接服务器，请检查网络或服务器状态'

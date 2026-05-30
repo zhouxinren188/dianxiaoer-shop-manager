@@ -172,8 +172,8 @@ initAdmin()
 // CORS 白名单
 const corsOptions = {
   origin: function (origin, callback) {
-    // Electron 客户端无 origin，允许 null/undefined
-    if (!origin) return callback(null, true)
+    // Electron 客户端从 file:// 协议加载时，origin 为字符串 "null" 或 undefined
+    if (!origin || origin === 'null') return callback(null, true)
     if (ALLOWED_ORIGINS.length === 0) {
       // 未配置白名单时，仅允许服务器自身IP的精确来源
       const allowed = ['http://150.158.54.108:3001', 'http://150.158.54.108:3002', 'http://localhost:3001', 'http://localhost:3002']

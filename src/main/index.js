@@ -797,6 +797,40 @@ ipcMain.handle('set-auth-token', (event, token) => {
   console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')
 })
 
+// ★ 主进程代理 HTTP 请求（绕过 renderer 的 CORS 限制）
+// Electron 从 file:// 协议加载页面时，fetch 请求的 Origin 为 "null"，
+// 部分服务器 CORS 配置会拒绝，导致 TypeError: Failed to fetch
+// 通过主进程 Node.js http 模块代理请求可彻底绕过此问题
+const httpProxy = require('http')
+ipcMain.handle('proxy-fetch', async (event, { url, method, headers, body }) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const urlObj = new URL(url)
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: method || 'GET',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        timeout: 15000
+      }
+      const req = httpProxy.request(options, (res) => {
+        let data = ''
+        res.on('data', chunk => { data += chunk })
+        res.on('end', () => {
+          resolve({ status: res.statusCode, headers: res.headers, data })
+        })
+      })
+      req.on('error', (err) => { reject(new Error(`请求失败: ${err.message}`)) })
+      req.on('timeout', () => { req.destroy(); reject(new Error('请求超时(15s)')) })
+      if (body) req.write(typeof body === 'string' ? body : JSON.stringify(body))
+      req.end()
+    } catch (err) {
+      reject(new Error(`请求构建失败: ${err.message}`))
+    }
+  })
+})
+
 // 注册抓包 IPC（使用 ipcMain.handle，需在 app.whenReady 前注册）
 registerPacketCaptureIpc()
 
