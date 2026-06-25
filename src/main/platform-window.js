@@ -438,6 +438,7 @@ function registerPlatformWindowIpc(mainWindow) {
 
     platformWindows.set(storeId, win)
     storePlatforms.set(storeId, platform)
+    storeKeepCookie.set(storeId, !!keepCookie)  // ★ 记录是否为重新登录，关闭时用于判断是否删除空白店铺
     storeCredentials.delete(storeId)
     storeExtractedInfo.delete(storeId)
 
@@ -486,8 +487,8 @@ function registerPlatformWindowIpc(mainWindow) {
         // 检查是否获取到了关键信息（venderId 或 shopId）
         const hasKeyInfo = extracted.venderId || extracted.shopId
 
-        if (!hasKeyInfo && plat) {
-          // 未获取到关键信息，删除空白店铺卡片
+        if (!hasKeyInfo && plat && !storeKeepCookie.get(storeId)) {
+          // 未获取到关键信息，删除空白店铺卡片（仅新增店铺场景，重新登录不删除）
           console.log('[PlatformWindow] 未获取到店铺信息，删除空白店铺 storeId=', storeId)
           try {
             await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
@@ -516,6 +517,7 @@ function registerPlatformWindowIpc(mainWindow) {
 
         platformWindows.delete(storeId)
         storePlatforms.delete(storeId)
+        storeKeepCookie.delete(storeId)
         storeCredentials.delete(storeId)
         storeExtractedInfo.delete(storeId)
 

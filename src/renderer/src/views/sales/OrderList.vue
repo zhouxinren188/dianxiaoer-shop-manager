@@ -49,10 +49,13 @@
             <el-select v-model="searchForm.purchaseStatus" placeholder="全部状态" clearable @clear="searchForm.purchaseStatus = ''">
               <el-option label="全部状态" value="" />
               <el-option label="未采购" value="未采购" />
+              <el-option label="有货（仓库直发）" value="有货（仓库直发）" />
               <el-option label="已采购（三方代发）" value="已采购（三方代发）" />
               <el-option label="已采购（仓库转发）" value="已采购（仓库转发）" />
+              <el-option label="已采购（仓库进货）" value="已采购（仓库进货）" />
               <el-option label="仓库有货" value="仓库有货" />
               <el-option label="已忽略" value="已忽略" />
+              <el-option label="无效订单" value="无效订单" />
             </el-select>
           </div>
           <div class="filter-item">
@@ -186,8 +189,6 @@
               <span class="order-header-shop">{{ order.shopName }}</span>
               <span v-if="order.warehouseName" class="order-header-warehouse" :style="{color: order.warehouseName === '商家全国仓' ? '#909399' : order.warehouseName === '供应商仓库' ? '#67c23a' : '#409eff'}">[{{ order.warehouseName }}]</span>
               <el-tag :type="orderStatusTagType(order.orderStatus)" size="small">{{ order.orderStatus }}</el-tag>
-              <el-tag v-if="getDisplayPurchaseStatus(order)" :type="purchaseStatusTagType(getDisplayPurchaseStatus(order))" size="small" effect="plain">{{ getDisplayPurchaseStatus(order) }}</el-tag>
-              <el-link v-if="order.purchaseStatus === '未采购'" type="info" :underline="false" style="margin-left:2px;font-size:12px" @click.stop="handleIgnorePurchase(order)">忽略</el-link>
               <span class="order-header-divider">|</span>
               <span class="order-header-time-label">下单时间：</span>
               <span class="order-header-time">{{ order.orderTime }}</span>
@@ -224,8 +225,13 @@
                     <div class="goods-info">
                       <p class="goods-name goods-name-link" @click.stop="handleOpenProduct(order, item)">{{ item.name }}</p>
                       <p class="goods-sku" v-if="item.sku">{{ item.sku }}</p>
+                      <div class="goods-status-row" v-if="getDisplayPurchaseStatus(order) || order.stockStatus">
+                        <el-tag v-if="getDisplayPurchaseStatus(order)" :type="purchaseStatusTagType(getDisplayPurchaseStatus(order))" size="small" effect="plain">{{ getDisplayPurchaseStatus(order) }}</el-tag>
+                        <el-link v-if="order.purchaseStatus === '未采购'" type="info" :underline="false" style="margin-left:2px;font-size:12px" @click.stop="handleIgnorePurchase(order)">忽略</el-link>
+                        <el-tag v-if="order.stockStatus === 2" type="success" size="small">仓库直发</el-tag>
+                        <el-tag v-if="order.stockStatus === 1" type="warning" size="small">延迟发货</el-tag>
+                      </div>
                       <div class="goods-sku-row">
-                        <el-tag v-if="item.purchaseStatus" :type="purchaseStatusTagType(item.purchaseStatus)" size="small" effect="plain">{{ item.purchaseStatus }}</el-tag>
                         <div class="goods-search-links">
                           <el-popover placement="bottom-start" trigger="hover" :width="180">
                             <template #reference>
@@ -252,6 +258,22 @@
                             </div>
                           </el-popover>
                         </div>
+                      </div>
+                      <!-- 库存信息（仅已绑定仓库的商品显示） -->
+                      <div class="goods-inventory-info" v-if="item.inventoryInfo" @click.stop="openEditInventory(order, item)">
+                        <span class="inv-tag inv-tag-stock" :class="{ 'inv-low': item.inventoryInfo.quantity <= 0 }">
+                          库存 {{ item.inventoryInfo.quantity }}<template v-if="item.inventoryInfo.package_num > 1"> (x{{ item.inventoryInfo.package_num }}包装)</template>
+                        </span>
+                        <span class="inv-tag inv-tag-transit" v-if="item.inventoryInfo.in_transit_qty > 0">
+                          在途 {{ item.inventoryInfo.in_transit_qty }}
+                        </span>
+                        <span class="inv-tag inv-tag-unpurchased" v-if="item.inventoryInfo.unpurchased_qty > 0">
+                          待采 {{ item.inventoryInfo.unpurchased_qty }}
+                        </span>
+                        <span class="inv-tag inv-tag-delayed" v-if="item.inventoryInfo.delayed_qty > 0">
+                          延迟 {{ item.inventoryInfo.delayed_qty }}
+                        </span>
+                        <span class="inv-warehouse">{{ item.inventoryInfo.warehouse_name }}</span>
                       </div>
                     </div>
                   </div>
@@ -557,7 +579,7 @@
                 </div>
                 <div class="shipping-banner-right">
                   <el-tag size="default" :type="purchaseInfo.purchaseType === 'dropship' ? 'success' : 'warning'" effect="light" class="address-type-badge">
-                    {{ purchaseInfo.purchaseType === 'dropship' ? '三方代发模式' : '仓库发货模式' }}
+                    {{ {dropship: '三方代发模式', warehouse: '仓库发货模式', warehouse_in: '仓库进货模式'}[purchaseInfo.purchaseType] || '仓库发货模式' }}
                   </el-tag>
                   <el-button
                     v-if="purchaseInfo.purchaseType === 'dropship'"
@@ -666,6 +688,10 @@
                       <el-icon><OfficeBuilding /></el-icon>
                       仓库发货
                     </el-radio-button>
+                    <el-radio-button v-if="purchaseInfo.hasInventoryBinding" value="warehouse_in">
+                      <el-icon><Box /></el-icon>
+                      仓库进货
+                    </el-radio-button>
                   </el-radio-group>
                 </div>
               </div>
@@ -687,7 +713,7 @@
               </div>
 
               <div class="form-group">
-                <label class="form-label" :class="{ required: purchaseInfo.purchaseType === 'warehouse' }">选择仓库</label>
+                <label class="form-label" :class="{ required: purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in' }">选择仓库</label>
                 <el-select v-model="purchaseInfo.warehouseId" :placeholder="purchaseInfo.purchaseType === 'dropship' ? '选填（用于获取收货手机号）' : '请选择发货仓库'" class="full-width-select" clearable @change="onWarehouseChange">
                   <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
                 </el-select>
@@ -861,6 +887,128 @@
         <el-button type="primary" :disabled="!sourceForm.purchase_link.trim()" @click="handleSaveSource">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 绑定仓库商品对话框 -->
+    <el-dialog
+      v-model="bindDialogVisible"
+      title="绑定仓库商品"
+      width="700px"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <div class="bind-sku-info" v-if="currentBindRow">
+        <el-image
+          v-if="currentBindRow.productImage"
+          :src="currentBindRow.productImage"
+          fit="cover"
+          style="width: 60px; height: 60px; border-radius: 6px; flex-shrink: 0"
+        />
+        <div class="bind-sku-detail">
+          <div><strong>SKU:</strong> <span style="font-family: monospace">{{ currentBindRow.skuId }}</span></div>
+          <div><strong>名称:</strong> {{ currentBindRow.productName }}</div>
+        </div>
+      </div>
+
+      <el-divider>搜索已有库存</el-divider>
+
+      <div class="bind-search-section">
+        <div v-if="bindKeywords.length > 0" class="bind-keywords-row">
+          <span class="bind-keywords-label">关键词：</span>
+          <el-tag v-for="kw in bindKeywords" :key="kw" size="small" type="info" effect="plain" class="bind-keyword-tag" @click="applyKeyword(kw)">{{ kw }}</el-tag>
+        </div>
+        <el-input v-model="bindSearchKeyword" placeholder="输入SKU或商品名称搜索" clearable @keyup.enter="searchInventoryForBind" style="width: 300px">
+          <template #append>
+            <el-button @click="searchInventoryForBind" :loading="bindSearchLoading">
+              <el-icon><Search /></el-icon>
+            </el-button>
+          </template>
+        </el-input>
+        <el-table v-if="bindSearchResults.length > 0" :data="bindSearchResults" stripe size="small" style="margin-top: 12px; max-height: 200px; overflow-y: auto">
+          <el-table-column label="图片" width="60" align="center">
+            <template #default="{ row }">
+              <el-image v-if="row.image" :src="row.image" :preview-src-list="[row.image]" preview-teleported hide-on-click-modal fit="cover" style="width: 40px; height: 40px; border-radius: 4px" />
+              <span v-else style="color: #c0c4cc">无</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="productName" label="商品名称" min-width="150" show-overflow-tooltip />
+          <el-table-column prop="warehouseName" label="仓库" width="120" />
+          <el-table-column prop="location" label="货位号" width="90" align="center" />
+          <el-table-column prop="quantity" label="库存" width="80" align="center" />
+          <el-table-column label="操作" width="80" align="center">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="confirmBindExisting(row)">选择</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <el-divider>或新建仓库商品</el-divider>
+
+      <div class="bind-create-section">
+        <el-form :model="bindNewForm" label-width="80px" size="default">
+          <el-form-item label="仓库">
+            <el-select v-model="bindNewForm.warehouseId" placeholder="选择仓库" style="width: 100%">
+              <el-option v-for="wh in warehouseList" :key="wh.id" :label="wh.name" :value="wh.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="包装规格">
+            <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
+          </el-form-item>
+          <el-form-item label="SKU">
+            <el-input :model-value="currentBindRow?.skuId" disabled />
+          </el-form-item>
+          <el-form-item label="商品名称">
+            <el-input :model-value="currentBindRow?.productName" disabled />
+          </el-form-item>
+          <el-form-item label="货位号">
+            <el-input v-model="bindNewForm.location" placeholder="可选" />
+          </el-form-item>
+          <el-form-item label="批次号">
+            <el-input v-model="bindNewForm.batchNo" placeholder="可选" />
+          </el-form-item>
+          <el-form-item label="供应商">
+            <el-input v-model="bindNewForm.supplier" placeholder="可选" />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" @click="confirmCreateAndBind" :loading="bindCreateLoading" style="margin-top: 4px">新建并绑定</el-button>
+      </div>
+    </el-dialog>
+
+    <!-- 编辑商品弹窗 -->
+    <el-dialog v-model="editInvVisible" title="编辑商品" width="520px" align-center destroy-on-close :close-on-click-modal="false">
+      <el-form :model="editInvForm" label-width="90px" v-loading="editInvLoading">
+        <el-form-item label="商品SKU">
+          <el-input :model-value="editInvForm.sku" disabled />
+        </el-form-item>
+        <el-form-item label="商品名称">
+          <el-input :model-value="editInvForm.product_name" disabled />
+        </el-form-item>
+        <el-form-item label="商品售价">
+          <el-input-number v-model="editInvForm.price" :min="0" :precision="2" :step="1" style="width: 180px" />
+        </el-form-item>
+        <el-form-item label="所属仓库">
+          <el-input :model-value="editInvForm.warehouse_name" disabled />
+        </el-form-item>
+        <el-form-item label="货位号">
+          <el-input v-model="editInvForm.location" placeholder="如：A-01-03" style="width: 180px" />
+        </el-form-item>
+        <el-form-item label="包装规格">
+          <el-input-number v-model="editInvForm.package_num" :min="1" :max="999" controls-position="right" style="width: 180px" />
+          <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
+        </el-form-item>
+        <el-form-item label="库存预警值">
+          <el-input-number v-model="editInvForm.warn_quantity" :min="0" :step="1" style="width: 180px" />
+        </el-form-item>
+        <el-form-item label="当前库存">
+          <el-input-number v-model="editInvForm.quantity" :min="0" :step="1" style="width: 180px" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="editInvVisible = false">取消</el-button>
+        <el-button type="primary" :loading="editInvSubmitting" @click="handleEditInvSubmit">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -873,7 +1021,7 @@ import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateB
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
-import { fetchWarehouses } from '@/api/warehouse'
+import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventory, batchQuerySkuBindings, fetchInventoryById, updateInventory, updatePackageNum } from '@/api/warehouse'
 
 // ==================== 筛选项配置 ====================
 
@@ -1008,10 +1156,13 @@ function mapServerOrder(row) {
       items = parsed.map(item => ({
         name: item.name || '',
         sku: item.skuId ? `SKU: ${item.skuId}` : '',
+        skuId: item.skuId || '',
+        storeId: row.store_id,
         price: parseFloat(item.price) || 0,
         quantity: item.quantity || 0,
         image: item.image || '',
-        imageColor: getItemColor(item.name)
+        imageColor: getItemColor(item.name),
+        inventoryInfo: null
       }))
     }
   } catch {}
@@ -1020,10 +1171,13 @@ function mapServerOrder(row) {
     items = [{
       name: row.product_name,
       sku: row.sku_id ? `SKU: ${row.sku_id}` : '',
+      skuId: row.sku_id || '',
+      storeId: row.store_id,
       price: parseFloat(row.unit_price) || 0,
       quantity: row.quantity || 0,
       image: row.product_image || '',
-      imageColor: getItemColor(row.product_name)
+      imageColor: getItemColor(row.product_name),
+      inventoryInfo: null
     }]
   }
 
@@ -1065,7 +1219,8 @@ function mapServerOrder(row) {
     orderRemark: row.order_remark || '',
     timeoutStatus: 'normal',
     purchaseLockedBy: row.purchase_locked_by || null,
-    purchaseLockedName: row.purchase_locked_name || null
+    purchaseLockedName: row.purchase_locked_name || null,
+    stockStatus: row.stock_status || 0
   }
 }
 
@@ -1089,6 +1244,7 @@ async function loadOrdersFromServer() {
     total.value = data.total || 0
     // 加载完成后，批量拉取货源配置，标记哪些 skuId 有货源链接
     loadSkuSourcesMap()
+    loadSkuInventoryMap()
   } catch (err) {
     console.warn('从服务器加载订单失败:', err.message)
   }
@@ -1395,6 +1551,7 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo._buyerRevealed = false
   // 采购类型 & 地址
   purchaseInfo.purchaseType = 'dropship'
+  purchaseInfo.hasInventoryBinding = !!(item.inventoryInfo?.inventory_id || item.inventory_id)
   purchaseInfo.buyerName = order.customerName || ''
   purchaseInfo.buyerPhone = order.customerPhone || ''
   purchaseInfo.buyerAddress = order.address || ''
@@ -1463,7 +1620,7 @@ async function handlePurchase(order, item, itemIdx) {
       applyWarehouseAddress(whMatch)
       if (purchaseInfo.purchaseType === 'dropship') {
         updateDropshipShipping()
-      } else if (purchaseInfo.purchaseType === 'warehouse') {
+      } else if (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') {
         updateWarehouseShipping()
       }
     }
@@ -1471,7 +1628,7 @@ async function handlePurchase(order, item, itemIdx) {
     applyWarehouseAddress(warehouseList.value[0])
     if (purchaseInfo.purchaseType === 'dropship') {
       updateDropshipShipping()
-    } else if (purchaseInfo.purchaseType === 'warehouse') {
+    } else if (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') {
       updateWarehouseShipping()
     }
   }
@@ -1665,7 +1822,8 @@ const purchaseInfo = reactive({
   captureStatus: 'idle', // idle | ordering | captured
   capturedOrderNo: '',
   submitting: false,
-  purchaseType: 'dropship', // dropship(三方代发) | warehouse(仓库发货)
+  purchaseType: 'dropship', // dropship(三方代发) | warehouse(仓库发货) | warehouse_in(仓库进货)
+  hasInventoryBinding: false, // 当前SKU是否已绑定仓库商品
   shippingName: '',
   shippingPhone: '',
   shippingAddress: '',
@@ -1697,6 +1855,310 @@ const sourceForm = reactive({
   purchase_price: 0,
   remark: ''
 })
+
+// ==================== 绑定仓库商品弹窗 ====================
+const bindDialogVisible = ref(false)
+const currentBindRow = ref(null)
+const bindSearchKeyword = ref('')
+const bindSearchResults = ref([])
+const bindSearchLoading = ref(false)
+const bindCreateLoading = ref(false)
+const bindKeywords = ref([])
+const bindNewForm = reactive({
+  warehouseId: '',
+  location: '',
+  batchNo: '',
+  supplier: ''
+})
+const bindPackageNum = ref(1)
+
+// SKU库存信息缓存：key = `${storeId}_${skuId}`
+const skuInventoryCache = reactive({})
+
+// 从商品名称中智能提取关键词
+function extractKeywords(name) {
+  if (!name) return []
+  const categoryWords = [
+    '去油污', '重油污', '油污净', '油烟机', '抽油烟机', '清洁剂', '洗洁精', '洗衣液', '洗衣粉',
+    '洗衣凝珠', '洗洁液', '去污渍', '除菌液', '除螨', '除甲醛', '消毒液', '消毒剂',
+    '玻璃水', '洁厕灵', '洁厕剂', '管道疏通', '疏通剂', '除味剂', '空气清新',
+    '洗碗机', '净水器', '滤水壶', '垃圾袋', '保鲜膜', '保鲜盒', '密封罐', '收纳盒',
+    '洗发水', '护发素', '沐浴露', '洗面奶', '面霜', '精华液', '防晒霜', '身体乳',
+    '牙膏', '牙刷', '漱口水', '纸巾', '湿巾', '卫生纸', '卫生巾', '纸尿裤',
+    '大米', '食用油', '酱油', '醋', '料酒', '调味料', '方便面', '坚果', '牛奶', '酸奶',
+    '充电宝', '充电器', '数据线', '耳机', '蓝牙耳机', '手机壳', '屏幕保护', '钢化膜',
+    '鼠标', '键盘', '显示器', '路由器', '摄像头', '音箱', 'U盘', '存储卡',
+    '垃圾桶', '拖把', '扫把', '抹布', '海绵', '水杯', '保温杯', '水壶', '电水壶',
+    '雨伞', '挂钩', '置物架', '晾衣架', '熨斗', '电风扇', '加湿器', '取暖器',
+    'T恤', '衬衫', '外套', '卫衣', '牛仔裤', '运动鞋', '拖鞋', '袜子',
+    '泡沫', '喷雾', '免洗', '便携', '大容量', '高浓度', '浓缩', '进口', '有机',
+    '植物', '天然', '免搓洗', '一擦净', '一喷净', '免拆洗', '免刷洗'
+  ].sort((a, b) => b.length - a.length)
+
+  const results = []
+  const specRegex = /\d+(\.\d+)?\s*(ml|ML|Ml|L|l|g|G|kg|KG|Kg|oz|cm|mm|m|个|只|瓶|包|盒|罐|袋|支|件|套|箱|张|片|卷|双|条|块|粒|颗|贴)/g
+  let specMatch
+  while ((specMatch = specRegex.exec(name)) !== null) {
+    results.push(specMatch[0].replace(/\s+/g, ''))
+  }
+  const matched = new Set()
+  for (const word of categoryWords) {
+    if (name.includes(word) && !matched.has(word)) {
+      matched.add(word)
+      results.push(word)
+    }
+  }
+  if (results.length < 3) {
+    const segments = name.split(/[\s·•\-—,，、|\/\\()（）\[\]【】0-9a-zA-Z]+/).filter(s => s.length >= 4)
+    for (const seg of segments) {
+      if (results.length >= 5) break
+      for (let len = 4; len >= 2; len--) {
+        for (let i = 0; i <= seg.length - len; i++) {
+          const sub = seg.substring(i, i + len)
+          if (matched.has(sub)) continue
+          if (/^(居家|厨房|家用|商用|强力|高效|超值|新款|同款|专供|正品|包邮|神器|万能)$/.test(sub)) continue
+          if (!results.includes(sub)) {
+            results.push(sub)
+            matched.add(sub)
+            if (results.length >= 5) break
+          }
+        }
+        if (results.length >= 5) break
+      }
+    }
+  }
+  return [...new Set(results)].slice(0, 5)
+}
+
+function applyKeyword(kw) {
+  bindSearchKeyword.value = kw
+  searchInventoryForBind()
+}
+
+async function searchInventoryForBind() {
+  if (!bindSearchKeyword.value.trim()) return
+  bindSearchLoading.value = true
+  try {
+    const res = await searchInventory({ keyword: bindSearchKeyword.value.trim() })
+    bindSearchResults.value = res || []
+  } catch (err) {
+    console.error('[绑定] 搜索库存失败:', err.message)
+  } finally {
+    bindSearchLoading.value = false
+  }
+}
+
+function handleSelectInventory(row) {
+  // 选中行高亮，点击"选择"按钮时触发 confirmBindExisting
+}
+
+async function confirmBindExisting(invRow) {
+  if (!currentBindRow.value) return
+  try {
+    await createSkuBinding({
+      store_id: currentBindRow.value.storeId,
+      sku_id: currentBindRow.value.skuId,
+      inventory_id: invRow.id,
+      warehouse_id: invRow.warehouseId,
+      package_num: bindPackageNum.value
+    })
+    ElMessage.success('绑定成功')
+    bindDialogVisible.value = false
+    await refreshSkuInventory(currentBindRow.value.storeId, currentBindRow.value.skuId, currentBindRow.value.orderItem)
+  } catch (err) {
+    ElMessage.error('绑定失败：' + (err.message || '未知错误'))
+  }
+}
+
+async function confirmCreateAndBind() {
+  if (!currentBindRow.value) return
+  if (!bindNewForm.warehouseId) {
+    ElMessage.warning('请选择仓库')
+    return
+  }
+  bindCreateLoading.value = true
+  try {
+    await quickCreateInventory({
+      warehouse_id: bindNewForm.warehouseId,
+      sku: currentBindRow.value.skuId,
+      product_name: currentBindRow.value.productName,
+      image: currentBindRow.value.productImage,
+      store_id: currentBindRow.value.storeId,
+      location: bindNewForm.location,
+      batch_no: bindNewForm.batchNo,
+      supplier: bindNewForm.supplier,
+      package_num: bindPackageNum.value
+    })
+    ElMessage.success('新建并绑定成功')
+    bindDialogVisible.value = false
+    await refreshSkuInventory(currentBindRow.value.storeId, currentBindRow.value.skuId, currentBindRow.value.orderItem)
+  } catch (err) {
+    ElMessage.error('新建失败：' + (err.message || '未知错误'))
+  } finally {
+    bindCreateLoading.value = false
+  }
+}
+
+// 批量加载当前页所有订单商品的库存绑定信息
+async function loadSkuInventoryMap() {
+  const items = []
+  const seen = new Set()
+  for (const order of tableData.value) {
+    for (const item of (order.items || [])) {
+      const skuId = item.skuId
+      const storeId = order.storeId || item.storeId
+      if (skuId && storeId) {
+        const key = `${storeId}_${skuId}`
+        if (!seen.has(key)) {
+          seen.add(key)
+          items.push({ store_id: storeId, sku_id: skuId })
+        }
+      }
+    }
+  }
+  if (items.length === 0) return
+
+  try {
+    const res = await batchQuerySkuBindings({ items })
+    if (Array.isArray(res)) {
+      for (const row of res) {
+        const key = `${row.store_id}_${row.sku_id}`
+        skuInventoryCache[key] = {
+          inventory_id: row.inventory_id,
+          warehouse_id: row.warehouse_id,
+          warehouse_name: row.warehouse_name,
+          quantity: row.quantity || 0,
+          in_transit_qty: row.in_transit_qty || 0,
+          unpurchased_qty: row.unpurchased_qty || 0,
+          package_num: row.package_num || 1,
+          delayed_qty: row.delayed_qty || 0
+        }
+      }
+      // 回填到 order.items
+      for (const order of tableData.value) {
+        for (const item of (order.items || [])) {
+          const key = `${order.storeId}_${item.skuId}`
+          if (skuInventoryCache[key]) {
+            item.inventoryInfo = skuInventoryCache[key]
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[库存信息] 批量加载失败:', err.message)
+  }
+}
+
+// 刷新单个SKU的库存信息（绑定成功后调用）
+async function refreshSkuInventory(storeId, skuId, orderItem) {
+  if (!storeId || !skuId) return
+  try {
+    const res = await batchQuerySkuBindings({ items: [{ store_id: storeId, sku_id: skuId }] })
+    if (Array.isArray(res) && res.length > 0) {
+      const row = res[0]
+      const key = `${storeId}_${skuId}`
+      skuInventoryCache[key] = {
+        inventory_id: row.inventory_id,
+        warehouse_id: row.warehouse_id,
+        warehouse_name: row.warehouse_name,
+        quantity: row.quantity || 0,
+        in_transit_qty: row.in_transit_qty || 0,
+        unpurchased_qty: row.unpurchased_qty || 0,
+        package_num: row.package_num || 1,
+        delayed_qty: row.delayed_qty || 0
+      }
+      if (orderItem) {
+        orderItem.inventoryInfo = skuInventoryCache[key]
+      }
+    } else {
+      const key = `${storeId}_${skuId}`
+      delete skuInventoryCache[key]
+      if (orderItem) {
+        orderItem.inventoryInfo = null
+      }
+    }
+  } catch (err) {
+    console.warn('[库存信息] 刷新失败:', err.message)
+  }
+}
+
+// ============ 编辑商品弹窗 ============
+const editInvVisible = ref(false)
+const editInvLoading = ref(false)
+const editInvSubmitting = ref(false)
+const editInvForm = reactive({
+  id: '',
+  sku: '',
+  product_name: '',
+  price: 0,
+  warehouse_name: '',
+  location: '',
+  package_num: 1,
+  warn_quantity: 10,
+  quantity: 0
+})
+let editInvContext = null // 保存当前编辑的 order/item 引用
+
+async function openEditInventory(order, item) {
+  if (!item.inventoryInfo?.inventory_id) return
+  editInvContext = { order, item }
+  editInvVisible.value = true
+  editInvLoading.value = true
+  try {
+    const res = await fetchInventoryById(item.inventoryInfo.inventory_id)
+    Object.assign(editInvForm, {
+      id: res.id,
+      sku: res.sku,
+      product_name: res.product_name,
+      price: Number(res.price || 0),
+      warehouse_name: res.warehouse_name,
+      location: res.location || '',
+      package_num: item.inventoryInfo.package_num || 1,
+      warn_quantity: Number(res.warn_quantity || 0),
+      quantity: Number(res.quantity || 0)
+    })
+  } catch (err) {
+    ElMessage.error('获取商品信息失败: ' + err.message)
+    editInvVisible.value = false
+  } finally {
+    editInvLoading.value = false
+  }
+}
+
+async function handleEditInvSubmit() {
+  editInvSubmitting.value = true
+  try {
+    // 更新库存项
+    await updateInventory(editInvForm.id, {
+      price: editInvForm.price,
+      location: editInvForm.location,
+      warn_quantity: editInvForm.warn_quantity,
+      quantity: editInvForm.quantity
+    })
+    // 更新包装规格（如果有上下文）
+    if (editInvContext?.order && editInvContext?.item) {
+      const { order, item } = editInvContext
+      const oldPackageNum = item.inventoryInfo?.package_num || 1
+      if (oldPackageNum !== editInvForm.package_num) {
+        await updatePackageNum({
+          store_id: order.storeId,
+          sku_id: item.skuId,
+          package_num: editInvForm.package_num
+        })
+        // 更新本地缓存
+        if (item.inventoryInfo) {
+          item.inventoryInfo.package_num = editInvForm.package_num
+        }
+      }
+    }
+    ElMessage.success('修改成功')
+    editInvVisible.value = false
+  } catch (err) {
+    ElMessage.error('修改失败: ' + err.message)
+  } finally {
+    editInvSubmitting.value = false
+  }
+}
 
 // 按平台过滤采购账号
 const filteredPurchaseAccounts = computed(() => {
@@ -1754,7 +2216,7 @@ function onWarehouseChange(whId) {
   }
   if (purchaseInfo.purchaseType === 'dropship') {
     updateDropshipShipping()
-  } else if (purchaseInfo.purchaseType === 'warehouse') {
+  } else if (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') {
     updateWarehouseShipping()
   }
 }
@@ -1763,7 +2225,7 @@ function onWarehouseChange(whId) {
 watch(() => purchaseInfo.purchaseType, (type) => {
   if (type === 'dropship') {
     updateDropshipShipping()
-  } else if (type === 'warehouse') {
+  } else if (type === 'warehouse' || type === 'warehouse_in') {
     updateWarehouseShipping()
   }
 })
@@ -1880,8 +2342,8 @@ async function handleGoOrder() {
     ElMessage.warning('请选择采购账号')
     return
   }
-  if (purchaseInfo.purchaseType === 'warehouse' && !purchaseInfo.warehouseId) {
-    ElMessage.warning('请选择发货仓库')
+  if ((purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') && !purchaseInfo.warehouseId) {
+    ElMessage.warning('请选择仓库')
     return
   }
   // 三方代发必须先解密客户信息（卡片内有内联提示，此处仅阻止提交）
@@ -1901,7 +2363,7 @@ async function handleGoOrder() {
       }
       purchaseInfo.purchaseNo = purchaseNo
       // 仓库模式：将编号追加到收货地址
-      if (purchaseInfo.purchaseType === 'warehouse' && !purchaseInfo.shippingAddress.includes('【' + purchaseNo + '】')) {
+      if ((purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') && !purchaseInfo.shippingAddress.includes('【' + purchaseNo + '】')) {
         purchaseInfo.shippingAddress = purchaseInfo.shippingAddress + '【' + purchaseNo + '】'
       }
     } catch (e) {
@@ -2003,7 +2465,7 @@ function setupPurchaseListeners() {
               order.sys_remark = data.sysRemark
             }
             // 根据采购类型更新采购状态
-            order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+            order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : purchaseInfo.purchaseType === 'warehouse_in' ? '已采购（仓库进货）' : '已采购（三方代发）'
             order.hasInventory = false
             // 采购完成，清除锁定状态
             order.purchaseLockedBy = null
@@ -2044,7 +2506,7 @@ function setupPurchaseListeners() {
   })
   unsubAddressFilled = window.electronAPI.onUpdate('purchase-address-filled', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
-      const typeLabel = purchaseInfo.purchaseType === 'dropship' ? '买家收货地址' : '仓库发货地址'
+      const typeLabel = purchaseInfo.purchaseType === 'dropship' ? '买家收货地址' : '仓库地址'
       ElMessage({
         message: `${typeLabel}已自动填充（共${data.filledCount}个字段），请核对后提交订单`,
         type: 'success',
@@ -2151,7 +2613,7 @@ async function handlePurchaseSubmit() {
     // 更新本地订单的采购状态
     const order = tableData.value.find(o => o.id === purchaseInfo.salesOrderId)
     if (order) {
-      order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : '已采购（三方代发）'
+      order.purchaseStatus = purchaseInfo.purchaseType === 'warehouse' ? '已采购（仓库转发）' : purchaseInfo.purchaseType === 'warehouse_in' ? '已采购（仓库进货）' : '已采购（三方代发）'
       order.hasInventory = false
       order.purchaseLockedBy = null
       order.purchaseLockedName = null
@@ -2165,8 +2627,29 @@ async function handlePurchaseSubmit() {
 }
 
 function handleBindWarehouse(order, item, itemIdx) {
-  console.log('[绑定仓库商品] 订单:', order.orderNo, '商品:', item.name, '索引:', itemIdx)
-  ElMessage.info(`绑定仓库商品功能开发中：${item.name}`)
+  // 确保仓库列表已加载
+  if (warehouseList.value.length === 0) {
+    fetchWarehouses().then(res => {
+      warehouseList.value = res?.list || res || []
+    }).catch(() => {})
+  }
+  currentBindRow.value = {
+    skuId: item.skuId || '',
+    productName: item.name || '',
+    productImage: item.image || '',
+    storeId: order.storeId || item.storeId || '',
+    orderItem: item
+  }
+  bindSearchKeyword.value = item.skuId || item.name || ''
+  bindSearchResults.value = []
+  bindKeywords.value = extractKeywords(item.name)
+  bindNewForm.warehouseId = ''
+  bindNewForm.location = ''
+  bindNewForm.batchNo = ''
+  bindNewForm.supplier = ''
+  bindPackageNum.value = 1
+  bindDialogVisible.value = true
+  searchInventoryForBind()
 }
 
 function handleSearchTitle(item, platform) {
@@ -2418,7 +2901,7 @@ function orderStatusTagType(status) {
 }
 
 function purchaseStatusTagType(status) {
-  const map = { '未采购': 'warning', '已采购（三方代发）': 'success', '已采购（仓库转发）': 'success', '仓库有货': '', '已忽略': 'info' }
+  const map = { '未采购': 'warning', '有货（仓库直发）': 'success', '已采购（三方代发）': 'success', '已采购（仓库转发）': 'success', '已采购（仓库进货）': 'success', '仓库有货': '', '已忽略': 'info', '无效订单': 'info' }
   return map[status] || ''
 }
 
@@ -3227,9 +3710,116 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+/* 库存信息展示 */
+.goods-inventory-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+  cursor: pointer;
+}
+
+.goods-inventory-info:hover {
+  opacity: 0.8;
+}
+
+.inv-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.inv-tag-stock {
+  background: #f0f9ff;
+  color: #0958d9;
+  border: 1px solid #bae0ff;
+}
+
+.inv-tag-stock.inv-low {
+  background: #fff2f0;
+  color: #cf1322;
+  border-color: #ffccc7;
+}
+
+.inv-tag-transit {
+  background: #f6ffed;
+  color: #389e0d;
+  border: 1px solid #b7eb8f;
+}
+
+.inv-tag-unpurchased {
+  background: #fffbe6;
+  color: #d48806;
+  border: 1px solid #ffe58f;
+}
+
+.inv-tag-delayed {
+  background: #fff2f0;
+  color: #cf1322;
+  border: 1px solid #ffccc7;
+}
+
+.inv-warehouse {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-left: 2px;
+}
+
+/* 绑定弹窗样式 */
+.bind-sku-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px;
+  background: #f5f7fa;
+  border-radius: 8px;
+}
+
+.bind-sku-detail {
+  flex: 1;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.bind-keywords-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.bind-keywords-label {
+  font-size: 13px;
+  color: #909399;
+  flex-shrink: 0;
+}
+
+.bind-keyword-tag {
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.bind-keyword-tag:hover {
+  color: #409eff;
+  border-color: #409eff;
+  background: #ecf5ff;
+}
+
+.bind-search-section {
+  padding: 0 4px;
+}
+
+.bind-create-section {
+  padding: 0 4px;
+}
+
 .goods-img {
-  width: 70px;
-  height: 70px;
+  width: 90px;
+  height: 90px;
   border-radius: 6px;
   flex-shrink: 0;
   object-fit: cover;
@@ -3291,6 +3881,14 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.goods-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
 }
 
 .goods-sku-row {

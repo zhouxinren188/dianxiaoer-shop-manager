@@ -10,6 +10,11 @@ export function bindPlatformOrderNo(purchaseId, data) {
   return put(`/api/purchase-orders/${purchaseId}/bind`, data)
 }
 
+// 确认采购数量（采购单绑定后，用户确认实际采购数量）
+export function confirmPurchaseQuantity(purchaseNo, quantity) {
+  return put(`/api/purchase-orders/${purchaseNo}/confirm-quantity`, { quantity })
+}
+
 // 查询采购订单列表
 export function fetchPurchaseOrders(params) {
   return get('/api/purchase-orders', params)

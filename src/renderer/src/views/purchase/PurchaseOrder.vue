@@ -539,9 +539,15 @@
           </template>
         </el-input>
         <el-table v-if="bindSearchResults.length > 0" :data="bindSearchResults" stripe size="small" style="margin-top: 12px; max-height: 200px; overflow-y: auto">
-          <el-table-column prop="sku" label="SKU" width="120" />
+          <el-table-column label="图片" width="60" align="center">
+            <template #default="{ row }">
+              <el-image v-if="row.image" :src="row.image" :preview-src-list="[row.image]" preview-teleported hide-on-click-modal fit="cover" style="width: 40px; height: 40px; border-radius: 4px" />
+              <span v-else style="color: #c0c4cc">无</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="productName" label="商品名称" min-width="150" show-overflow-tooltip />
           <el-table-column prop="warehouseName" label="仓库" width="120" />
+          <el-table-column prop="location" label="货位号" width="90" align="center" />
           <el-table-column prop="quantity" label="库存" width="80" align="center" />
           <el-table-column label="操作" width="80" align="center">
             <template #default="{ row }">
@@ -559,6 +565,10 @@
             <el-select v-model="bindNewForm.warehouseId" placeholder="选择仓库" style="width: 100%">
               <el-option v-for="wh in warehouseOptions" :key="wh.id" :label="wh.name" :value="wh.id" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="包装规格">
+            <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
           </el-form-item>
           <el-form-item label="SKU">
             <el-input :model-value="currentBindRow?.skuId" disabled />
@@ -1659,6 +1669,7 @@ const bindNewForm = reactive({
   batchNo: '',
   supplier: ''
 })
+const bindPackageNum = ref(1)
 const warehouseOptions = ref([])
 
 // 加载仓库列表
@@ -1784,6 +1795,7 @@ async function handleStockIn() {
       bindNewForm.location = ''
       bindNewForm.batchNo = ''
       bindNewForm.supplier = ''
+      bindPackageNum.value = 1
       bindDialogVisible.value = true
       // 自动搜索
       searchInventoryForBind()
@@ -1895,7 +1907,8 @@ async function confirmBindExisting(invRow) {
       store_id: currentBindRow.value.storeId,
       sku_id: currentBindRow.value.skuId,
       inventory_id: invRow.id,
-      warehouse_id: invRow.warehouseId
+      warehouse_id: invRow.warehouseId,
+      package_num: bindPackageNum.value
     })
     ElMessage.success('绑定成功')
     bindDialogVisible.value = false
@@ -1929,7 +1942,8 @@ async function confirmCreateAndBind() {
       store_id: currentBindRow.value.storeId,
       location: bindNewForm.location,
       batch_no: bindNewForm.batchNo,
-      supplier: bindNewForm.supplier
+      supplier: bindNewForm.supplier,
+      package_num: bindPackageNum.value
     })
     ElMessage.success('新建并绑定成功')
     bindDialogVisible.value = false

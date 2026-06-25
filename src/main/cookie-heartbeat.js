@@ -14,6 +14,14 @@ const REQUEST_TIMEOUT = 10 * 1000
 // httpFailCount: 记录每个店铺连续HTTP验证失败的次数，连续2次失败才判定离线
 const storeStatusMap = {}
 const httpFailCount = {}
+const lastRestoreTime = {} // storeId -> 上次从服务器恢复Cookie的时间戳
+const RESTORE_RETRY_INTERVAL = 10 * 60 * 1000 // 10分钟内不重复恢复
+
+function canRetryRestore(storeId) {
+  const last = lastRestoreTime[storeId]
+  if (!last) return true
+  return Date.now() - last > RESTORE_RETRY_INTERVAL
+}
 
 // 各平台心跳验证 URL
 const HEARTBEAT_URLS = {
@@ -363,10 +371,69 @@ async function checkSingleStore(storeId, platform, cookieData) {
   }
 }
 
+// ★ 心跳成功时上传本地Cookie到服务器，实现多端Cookie共享
+async function uploadCookiesToServer(storeId, platform, cookies) {
+  try {
+    const cookieData = JSON.stringify(cookies)
+    await httpRequest(`${BUSINESS_SERVER}/api/cookies`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ store_id: storeId, cookie_data: cookieData, domain: platform })
+    })
+    console.log(`[Heartbeat] Cookie已上传到服务器 store_id=${storeId} (${cookies.length}条)`)
+  } catch (e) {
+    console.warn(`[Heartbeat] Cookie上传失败 store_id=${storeId}:`, e.message)
+  }
+}
+
+// ★ 清空本地Cookie并从服务器恢复最新Cookie后重试验证
+async function clearAndRetryWithFreshCookies(storeId, platform) {
+  try {
+    const partitionName = `persist:platform-${storeId}`
+    const ses = session.fromPartition(partitionName)
+
+    // 1. 清空本地分区所有Cookie
+    const existing = await ses.cookies.get({})
+    for (const c of existing) {
+      try {
+        await ses.cookies.remove(buildCookieUrl(c), c.name)
+      } catch (e) { /* ignore */ }
+    }
+    console.log(`[Heartbeat] store_id=${storeId} 已清空本地Cookie (${existing.length}条)`)
+
+    // 2. 从服务器恢复最新Cookie
+    const restored = await restoreCookiesFromDB(storeId)
+    if (!restored) {
+      console.log(`[Heartbeat] store_id=${storeId} 从服务器恢复Cookie失败`)
+      return false
+    }
+
+    // 3. 用恢复的Cookie重试验证
+    const freshCookies = await ses.cookies.get({})
+    if (!freshCookies || freshCookies.length === 0) return false
+
+    // Cookie元数据检查
+    const metaCheck = checkCookieValidity(storeId, freshCookies)
+    if (!metaCheck) return false
+
+    // HTTP验证
+    const httpCheck = await checkSingleStore(storeId, platform, freshCookies)
+    if (httpCheck === true) {
+      // 验证通过，同时上传到服务器（确保最新）
+      await uploadCookiesToServer(storeId, platform, freshCookies)
+      return true
+    }
+    return false
+  } catch (e) {
+    console.error(`[Heartbeat] store_id=${storeId} 恢复重试失败:`, e.message)
+    return false
+  }
+}
+
 async function checkAllStores(mainWindow) {
   try {
-    // 获取所有店铺信息
-    const res = await httpRequest(`${BUSINESS_SERVER}/api/stores`)
+    // 获取所有店铺信息（★ 必须传 pageSize=1000，否则默认只返回10条，导致后面的店铺漏检）
+    const res = await httpRequest(`${BUSINESS_SERVER}/api/stores?pageSize=1000&status=enabled`)
     const json = JSON.parse(res.data)
     if (json.code !== 0 || !json.data || !json.data.list) {
       console.log('[Heartbeat] 获取店铺列表失败:', json.message || '未知错误')
@@ -416,6 +483,9 @@ async function checkAllStores(mainWindow) {
             // HTTP验证通过 → 在线
             online = true
             httpFailCount[storeId] = 0
+            delete lastRestoreTime[storeId]
+            // ★ 心跳成功时上传本地Cookie到服务器，实现多端Cookie共享
+            uploadCookiesToServer(storeId, store.platform, cookies).catch(() => {})
           } else if (httpCheck === false) {
             // HTTP验证明确判定离线 → 累计连续失败次数
             httpFailCount[storeId] = (httpFailCount[storeId] || 0) + 1
@@ -454,6 +524,20 @@ async function checkAllStores(mainWindow) {
             }
           }
         }
+      }
+
+      // ★ 即将标记离线时，尝试从服务器恢复最新Cookie（其他电脑可能已上传新Cookie）
+      if (!online && !isSyncing && canRetryRestore(storeId)) {
+        console.log(`[Heartbeat] store_id=${storeId} 即将标记离线，尝试从服务器恢复最新Cookie...`)
+        const retryResult = await clearAndRetryWithFreshCookies(storeId, store.platform)
+        if (retryResult) {
+          online = true
+          httpFailCount[storeId] = 0
+          console.log(`[Heartbeat] store_id=${storeId} 从服务器恢复Cookie后验证通过 → 在线`)
+        } else {
+          console.log(`[Heartbeat] store_id=${storeId} 恢复Cookie后仍验证失败 → 离线`)
+        }
+        lastRestoreTime[storeId] = Date.now()
       }
 
       // 更新状态追踪（先记录旧值，用于前端判断在线→离线转场）

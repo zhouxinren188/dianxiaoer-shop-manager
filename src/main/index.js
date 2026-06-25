@@ -189,6 +189,42 @@ ipcMain.handle('open-product-url', (event, { storeId, skuId }) => {
   return { success: true }
 })
 
+// 更新店铺在线状态（检测到Cookie失效时调用）
+function updateStoreOnlineStatus(storeId, online) {
+  const http = require('http')
+  const token = getAuthToken()
+  const headers = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const req = http.request({
+    hostname: '150.158.54.108',
+    port: 3002,
+    path: `/api/stores/${storeId}/status`,
+    method: 'PUT',
+    headers,
+    timeout: 5000
+  }, (res) => {
+    let data = ''
+    res.on('data', chunk => data += chunk)
+    res.on('end', () => {
+      console.log(`[StoreBackend] 更新 store_id=${storeId} online=${online} 结果: HTTP ${res.statusCode}`)
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} Cookie失效，已更新 online=${online}`)
+      // 通知所有渲染进程更新状态
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          win.webContents.send('store-status-changed', {
+            storeId, online, wasOnline: true
+          })
+        }
+      })
+    })
+  })
+  req.on('error', e => console.error(`[StoreBackend] 更新状态失败: ${e.message}`))
+  req.on('timeout', () => { req.destroy(); console.error('[StoreBackend] 更新状态超时') })
+  req.write(JSON.stringify({ online }))
+  req.end()
+}
+
 // 用店铺cookie打开京东后台指定页面（售后/纠纷/合规等）
 ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
   if (!url || !storeId) return { success: false, message: '参数不完整' }
@@ -204,8 +240,37 @@ ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
       partition: partitionName
     }
   })
+
+  // ★ 检测登录重定向：Cookie失效时京东会重定向到 passport.jd.com/login
+  const loginKeywords = ['passport', 'login', 'sign']
+  let loginRedirectDetected = false
+
+  urlWin.webContents.on('did-navigate', (e, navUrl) => {
+    if (loginRedirectDetected) return
+    const lowerUrl = navUrl.toLowerCase()
+    if (loginKeywords.some(kw => lowerUrl.includes(kw))) {
+      loginRedirectDetected = true
+      console.log(`[StoreBackend] store_id=${storeId} 检测到登录重定向: ${navUrl}`)
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} 打开后台时重定向到登录页(${navUrl}) → Cookie失效`)
+      // 更新 online=0 并通知前端
+      updateStoreOnlineStatus(storeId, false)
+    }
+  })
+
+  // 也监听 did-navigate-in-page（SPA 单页应用内跳转）
+  urlWin.webContents.on('did-navigate-in-page', (e, navUrl) => {
+    if (loginRedirectDetected) return
+    const lowerUrl = navUrl.toLowerCase()
+    if (loginKeywords.some(kw => lowerUrl.includes(kw))) {
+      loginRedirectDetected = true
+      console.log(`[StoreBackend] store_id=${storeId} 页内导航到登录页: ${navUrl}`)
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} 页内导航到登录页(${navUrl}) → Cookie失效`)
+      updateStoreOnlineStatus(storeId, false)
+    }
+  })
+
   urlWin.loadURL(url).catch(err => {
-    console.error('[OpenStoreBackendURL] loadURL failed:', err.message)
+    console.error('[StoreBackend] loadURL failed:', err.message)
   })
   return { success: true }
 })

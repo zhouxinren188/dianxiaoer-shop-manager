@@ -350,6 +350,27 @@ function handleOpenBackend(row) {
     ElMessage.warning('不支持的平台: ' + (row.platform || '未知'))
     return
   }
+  // ★ 离线状态提醒：Cookie可能已失效
+  if (!row.online) {
+    ElMessageBox.confirm(
+      `店铺「${row.name}」当前状态为离线，Cookie可能已失效。\n点击"继续打开"将尝试访问后台，如无法访问请点击"重新登录"。`,
+      '店铺离线提醒',
+      {
+        confirmButtonText: '继续打开',
+        cancelButtonText: '重新登录',
+        type: 'warning'
+      }
+    ).then(() => {
+      doOpenBackend(row, url)
+    }).catch(() => {
+      handleLogin(row)
+    })
+    return
+  }
+  doOpenBackend(row, url)
+}
+
+function doOpenBackend(row, url) {
   window.electronAPI.invoke('open-store-backend-url', {
     storeId: row.id,
     url,

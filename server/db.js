@@ -265,6 +265,10 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN order_remark TEXT DEFAULT NULL COMMENT '订单备注（商家在平台填写的备注，从平台同步）' AFTER buyer_message`)
     } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 sales_orders 表：添加库存分配状态字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_status TINYINT NOT NULL DEFAULT 0 COMMENT '库存分配: 0=未处理, 1=延迟发货, 2=仓库直发(已扣库存)'`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
@@ -414,6 +418,27 @@ async function initDB() {
         FOREIGN KEY (check_id) REFERENCES inventory_checks(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    // SKU绑定表（关联店铺SKU到仓库库存）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS sku_bindings (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        sku_id VARCHAR(100) NOT NULL,
+        inventory_id INT NOT NULL,
+        warehouse_id INT NOT NULL,
+        package_num INT NOT NULL DEFAULT 1 COMMENT '包装规格：1个店铺SKU对应多少个仓库SKU',
+        owner_id INT DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_store_sku (store_id, sku_id),
+        KEY idx_inventory (inventory_id),
+        KEY idx_owner (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    // 兼容已存在的 sku_bindings 表：添加 package_num 字段
+    try {
+      await connection.execute(`ALTER TABLE sku_bindings ADD COLUMN package_num INT NOT NULL DEFAULT 1 COMMENT '包装规格：1个店铺SKU对应多少个仓库SKU'`)
+    } catch (e) { /* 字段已存在 */ }
 
     // 售后纠纷指标表（按店铺存储各平台运营待办数据）
     await connection.execute(`

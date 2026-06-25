@@ -127,7 +127,11 @@
             <span v-else style="color: #c0c4cc">-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="productName" label="商品名称" min-width="200" show-overflow-tooltip />
+        <el-table-column label="商品名称" min-width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="product-name-link" @click="handleOpenProduct(row)">{{ row.productName }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="单价" width="100" align="right">
           <template #default="{ row }">
             <span style="color: #f56c6c">¥{{ row.avgUnitPrice.toFixed(2) }}</span>
@@ -147,9 +151,7 @@
         </el-table-column>
         <el-table-column label="操作" width="180" align="center" fixed="right">
           <template #default="{ row }">
-            <el-tooltip content="商品链接功能开发中" placement="top">
-              <el-button type="primary" link size="small" disabled>查看商品</el-button>
-            </el-tooltip>
+            <el-button type="primary" link size="small" @click="handleOpenProduct(row)">查看商品</el-button>
             <el-button type="success" link size="small" @click="handleBind(row)">
               {{ row.boundInventoryId ? '重新绑定' : '绑定仓库商品' }}
             </el-button>
@@ -232,9 +234,15 @@
           @current-change="handleSelectInventory"
           style="margin-top: 12px; max-height: 200px; overflow-y: auto"
         >
-          <el-table-column prop="sku" label="SKU" width="120" />
+          <el-table-column label="图片" width="60" align="center">
+            <template #default="{ row }">
+              <el-image v-if="row.image" :src="row.image" :preview-src-list="[row.image]" preview-teleported hide-on-click-modal fit="cover" style="width: 40px; height: 40px; border-radius: 4px" />
+              <span v-else style="color: #c0c4cc">无</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="productName" label="商品名称" min-width="150" show-overflow-tooltip />
           <el-table-column prop="warehouseName" label="仓库" width="120" />
+          <el-table-column prop="location" label="货位号" width="90" align="center" />
           <el-table-column prop="quantity" label="库存" width="80" align="center" />
           <el-table-column label="操作" width="80" align="center">
             <template #default="{ row }">
@@ -258,6 +266,10 @@
                 :value="wh.id"
               />
             </el-select>
+          </el-form-item>
+          <el-form-item label="包装规格">
+            <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
+            <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
           </el-form-item>
           <el-form-item label="SKU">
             <el-input :model-value="currentBindRow?.skuId" disabled />
@@ -410,6 +422,17 @@ function handleReset() {
   loadData()
 }
 
+// 打开商品页面（复用主进程 IPC，与订单列表一致）
+function handleOpenProduct(row) {
+  if (!row.skuId) {
+    ElMessage.warning('该商品无SKU信息，无法访问商品链接')
+    return
+  }
+  if (window.electronAPI) {
+    window.electronAPI.invoke('open-product-url', { storeId: row.storeId, skuId: row.skuId })
+  }
+}
+
 // ============ 绑定功能 ============
 
 const bindDialogVisible = ref(false)
@@ -425,6 +448,7 @@ const bindNewForm = reactive({
   batchNo: '',
   supplier: ''
 })
+const bindPackageNum = ref(1)
 
 /**
  * 从商品名称中智能提取3~5个关键词
@@ -516,6 +540,7 @@ function handleBind(row) {
   bindNewForm.location = ''
   bindNewForm.batchNo = ''
   bindNewForm.supplier = ''
+  bindPackageNum.value = 1
   bindDialogVisible.value = true
   // 自动搜索
   searchInventoryForBind()
@@ -550,7 +575,8 @@ async function confirmBindExisting(invRow) {
       store_id: currentBindRow.value.storeId,
       sku_id: currentBindRow.value.skuId,
       inventory_id: invRow.id,
-      warehouse_id: invRow.warehouseId
+      warehouse_id: invRow.warehouseId,
+      package_num: bindPackageNum.value
     })
     ElMessage.success('绑定成功')
     bindDialogVisible.value = false
@@ -576,7 +602,8 @@ async function confirmCreateAndBind() {
       store_id: currentBindRow.value.storeId,
       location: bindNewForm.location,
       batch_no: bindNewForm.batchNo,
-      supplier: bindNewForm.supplier
+      supplier: bindNewForm.supplier,
+      package_num: bindPackageNum.value
     })
     ElMessage.success('新建并绑定成功')
     bindDialogVisible.value = false
@@ -694,6 +721,17 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   margin-top: 16px;
+}
+
+/* 商品名称可点击链接 */
+.product-name-link {
+  color: #409eff;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.product-name-link:hover {
+  color: #66b1ff;
+  text-decoration: underline;
 }
 
 /* 绑定弹窗样式 */

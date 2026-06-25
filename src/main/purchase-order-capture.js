@@ -4196,7 +4196,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 platform,
                 success: true,
                 sysRemark: `【${purchaseNo}】${platformOrderNo} ${capturedAmount || purchaseInfo.purchasePrice || ''}（${purchaseInfo.accountName || ''}）`,
-                salesOrderId: purchaseInfo.salesOrderId || null
+                salesOrderId: purchaseInfo.salesOrderId || null,
+                inventoryId: purchaseInfo.inventoryId || null
               })
             }
           })
@@ -6127,7 +6128,7 @@ function checkApiResponse(res, label) {
  * 自动调用服务端 API 创建采购单并绑定
  */
 async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount) {
-  const { purchaseNo, salesOrderId, salesOrderNo, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress, accountId, totalAmount, shippingFee } = purchaseInfo
+  const { purchaseNo, salesOrderId, salesOrderNo, inventoryId, goodsName, image, sku, skuId, quantity, purchasePrice, remark, sourceUrl, purchaseType, shippingName, shippingPhone, shippingAddress, accountId, totalAmount, shippingFee } = purchaseInfo
 
   console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
 
@@ -6149,6 +6150,7 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, captur
       shipping_fee: shippingFee || 0,
       remark: remark,
       purchase_type: purchaseType || 'dropship',
+      inventory_id: inventoryId || null,
       shipping_name: shippingName || '',
       shipping_phone: shippingPhone || '',
       shipping_address: shippingAddress || '',

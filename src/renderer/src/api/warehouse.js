@@ -35,6 +35,11 @@ export function updateInventory(id, data) {
   return put(`/api/inventory/${id}`, data)
 }
 
+// 获取单个库存项详情
+export function fetchInventoryById(id) {
+  return get(`/api/inventory/${id}`)
+}
+
 // 获取库存项绑定的销售商品
 export function fetchBoundProducts(inventoryId) {
   return get(`/api/inventory/${inventoryId}/bound-products`)
@@ -63,4 +68,14 @@ export function deleteSkuBinding(params) {
 // 快速新建库存并绑定
 export function quickCreateInventory(data) {
   return post('/api/inventory/quick-create', data)
+}
+
+// 批量查询SKU绑定状态及库存信息
+export function batchQuerySkuBindings(data) {
+  return post('/api/sku-bindings/batch-query', data)
+}
+
+// 更新包装规格
+export function updatePackageNum(data) {
+  return put('/api/sku-bindings/package-num', data)
 }
