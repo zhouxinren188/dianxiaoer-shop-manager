@@ -12,6 +12,11 @@ const multer = require('multer')
 const rateLimit = require('express-rate-limit')
 const mysql = require('mysql2/promise')
 
+// ========== 订阅系统服务 ==========
+const subOrderService = require('./services/sub-order-service')
+const subUserService = require('./services/sub-user-service')
+const wechatPay = require('./services/wechat-pay')
+
 const app = express()
 const PORT = process.env.PORT || 3001
 
@@ -576,6 +581,291 @@ app.get('/api/update/download', (req, res) => {
   }
 })
 
+// ========== 订阅系统路由 ==========
+
+// 版本等级顺序（用于判断升级）
+const TIER_ORDER = { basic: 1, standard: 2, premium: 3 }
+
+// 通过 username 查询 owner_id（主账号为自己 id，子账号取 parent_id）
+async function getOwnerIdFromUsername(username) {
+  const [rows] = await dbPool.execute(
+    'SELECT id, user_type, parent_id FROM users WHERE username = ? AND status = "enabled"',
+    [username]
+  )
+  if (!rows.length) return null
+  const user = rows[0]
+  return user.user_type === 'master' ? user.id : user.parent_id
+}
+
+// 检查订阅状态（需登录）
+app.get('/api/subscription/status', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.sub
+    const ownerId = await getOwnerIdFromUsername(username)
+    if (!ownerId) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
+    const sub = await subUserService.findOrCreateSubscription(ownerId, username)
+    const status = subUserService.getUserStatus(sub)
+    const daysRemaining = subUserService.getDaysRemaining(sub)
+    const tier = subUserService.getUserTier(sub)
+    const isFirst = await subOrderService.isFirstPayment(ownerId)
+
+    res.json({
+      success: true,
+      status,
+      tier,
+      tier_label: subUserService.TIER_LABELS[tier] || tier,
+      days_remaining: daysRemaining,
+      trial_end: sub.trial_end,
+      subscription_end: sub.subscription_end,
+      is_first_payment: isFirst,
+      pricing: subOrderService.TIER_PRICING,
+      server_time: new Date().toISOString()
+    })
+  } catch (err) {
+    console.error('[订阅] 查询状态失败:', err.message)
+    res.status(500).json({ success: false, message: '服务器错误' })
+  }
+})
+
+// 创建支付订单（需登录）
+app.post('/api/subscription/create-order', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.sub
+    const ownerId = await getOwnerIdFromUsername(username)
+    if (!ownerId) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
+    const { tier, plan } = req.body
+    const VALID_TIERS = ['basic', 'standard', 'premium']
+    const VALID_PLANS = ['monthly', 'quarterly', 'yearly']
+    if (!VALID_TIERS.includes(tier) || !VALID_PLANS.includes(plan)) {
+      return res.status(400).json({ success: false, message: '无效的套餐类型' })
+    }
+
+    // 升级抵扣计算
+    let discountAmount = 0
+    const sub = await subUserService.findOrCreateSubscription(ownerId, username)
+    const subStatus = subUserService.getUserStatus(sub)
+    const currentTier = subUserService.getUserTier(sub)
+    if (subStatus === 'active' && TIER_ORDER[currentTier] < TIER_ORDER[tier]) {
+      const { remainingValue } = subUserService.calculateRemainingValue(sub)
+      const originalPrice = subOrderService.TIER_PRICING[tier]?.[plan] || 0
+      discountAmount = Math.min(remainingValue, originalPrice)
+    }
+
+    // 创建内部订单
+    const order = await subOrderService.createOrder(username, ownerId, tier, plan, discountAmount)
+
+    // 调用微信支付创建 Native Pay 订单
+    const wxResult = await wechatPay.createNativeOrder(
+      order.orderNo,
+      order.amount,
+      `店小二 - ${order.label}`
+    )
+
+    // 保存微信支付信息
+    await subOrderService.updateOrderWxInfo(order.orderNo, wxResult.code_url)
+
+    // 记录日志
+    await subOrderService.logPaymentEvent(order.orderNo, 'created', {
+      username, owner_id: ownerId, tier, plan,
+      code_url: wxResult.code_url, discount_amount: discountAmount
+    })
+
+    res.json({
+      success: true,
+      order_no: order.orderNo,
+      code_url: wxResult.code_url,
+      amount: order.amount,
+      original_amount: order.originalAmount,
+      discount_amount: order.discountAmount,
+      plan: order.plan,
+      tier: order.tier,
+      label: order.label
+    })
+  } catch (err) {
+    console.error('[订阅] 创建订单失败:', err.message)
+    res.status(500).json({ success: false, message: err.message || '创建订单失败' })
+  }
+})
+
+// 按店铺创建订阅订单（需登录）
+app.post('/api/subscription/create-store-order', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.sub
+    const ownerId = await getOwnerIdFromUsername(username)
+    if (!ownerId) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+
+    const { store_ids, plan } = req.body
+    const VALID_PLANS = ['monthly', 'quarterly', 'half_yearly']
+    if (!Array.isArray(store_ids) || store_ids.length === 0) {
+      return res.status(400).json({ success: false, message: '请至少选择一个店铺' })
+    }
+    if (!VALID_PLANS.includes(plan)) {
+      return res.status(400).json({ success: false, message: '无效的套餐类型' })
+    }
+
+    // 创建内部订单
+    const order = await subOrderService.createStoreOrder(username, ownerId, store_ids, plan)
+
+    // 调用微信支付创建 Native Pay 订单
+    const wxResult = await wechatPay.createNativeOrder(
+      order.orderNo,
+      order.amount,
+      `店小二 - 店铺订阅${order.label}`
+    )
+
+    // 保存微信支付信息
+    await subOrderService.updateOrderWxInfo(order.orderNo, wxResult.code_url)
+
+    // 记录日志
+    await subOrderService.logPaymentEvent(order.orderNo, 'store_order_created', {
+      username, owner_id: ownerId, store_ids, plan,
+      store_count: store_ids.length, amount: order.amount,
+      code_url: wxResult.code_url
+    })
+
+    res.json({
+      success: true,
+      order_no: order.orderNo,
+      code_url: wxResult.code_url,
+      amount: order.amount,
+      plan: order.plan,
+      tier: order.tier,
+      label: order.label
+    })
+  } catch (err) {
+    console.error('[订阅] 创建店铺订单失败:', err.message)
+    res.status(500).json({ success: false, message: err.message || '创建订单失败' })
+  }
+})
+
+// 查询订单状态（需登录）
+app.get('/api/subscription/query-order', authMiddleware, async (req, res) => {
+  try {
+    const { order_no } = req.query
+    if (!order_no) {
+      return res.status(400).json({ success: false, message: '缺少订单号' })
+    }
+
+    // 过期老订单
+    await subOrderService.expireOldOrders()
+
+    const order = await subOrderService.getOrder(order_no)
+    if (!order) {
+      return res.status(404).json({ success: false, message: '订单不存在' })
+    }
+
+    // 如果订单还是 pending，主动向微信查询真实支付状态
+    if (order.status === 'pending') {
+      try {
+        const wxResult = await wechatPay.queryOrderStatus(order_no)
+        if (wxResult.trade_state === 'SUCCESS') {
+          // 校验金额
+          const wxAmount = wxResult.amount && wxResult.amount.total
+          if (wxAmount !== undefined && wxAmount !== order.amount) {
+            await subOrderService.logPaymentEvent(order_no, 'amount_mismatch', { expected: order.amount, actual: wxAmount })
+            return res.json({ success: true, status: order.status, paid_at: order.paid_at })
+          }
+          // 微信已支付，处理支付成功逻辑
+          const wxTransactionId = wxResult.transaction_id || ''
+          const isNewlyPaid = await subOrderService.markOrderPaid(order_no, wxTransactionId)
+          if (isNewlyPaid) {
+            const isUpgrade = (order.discount_amount || 0) > 0
+            await subUserService.extendSubscription(order.owner_id, order.plan, order.tier, isUpgrade)
+          }
+
+          await subOrderService.logPaymentEvent(order_no, 'payment_completed_via_query', {
+            username: order.username, owner_id: order.owner_id,
+            plan: order.plan, tier: order.tier, wx_transaction_id: wxTransactionId
+          })
+
+          return res.json({ success: true, status: 'paid', paid_at: new Date().toISOString() })
+        }
+      } catch (wxErr) {
+        console.error('[订阅] 微信订单查询失败:', wxErr.message)
+      }
+    }
+
+    res.json({
+      success: true,
+      status: order.status,
+      paid_at: order.paid_at
+    })
+  } catch (err) {
+    console.error('[订阅] 查询订单失败:', err.message)
+    res.status(500).json({ success: false, message: '查询失败' })
+  }
+})
+
+// 微信支付回调通知（公开接口，不需要认证）
+app.post('/api/subscription/notify', async (req, res) => {
+  try {
+    const body = req.body
+
+    await subOrderService.logPaymentEvent(null, 'wx_notify', body)
+
+    if (body.event_type !== 'TRANSACTION.SUCCESS') {
+      return res.json({ code: 'SUCCESS', message: '成功' })
+    }
+
+    // 解密通知内容
+    const transaction = wechatPay.decryptNotification(body.resource)
+    const orderNo = transaction.out_trade_no
+    const wxTransactionId = transaction.transaction_id
+
+    await subOrderService.logPaymentEvent(orderNo, 'wx_notify_decrypted', transaction)
+
+    // 查找订单
+    const order = await subOrderService.getOrder(orderNo)
+    if (!order || order.status !== 'pending') {
+      return res.json({ code: 'SUCCESS', message: '成功' })
+    }
+
+    // 校验金额
+    const wxAmount = transaction.amount && transaction.amount.total
+    if (wxAmount !== undefined && wxAmount !== order.amount) {
+      await subOrderService.logPaymentEvent(orderNo, 'amount_mismatch', { expected: order.amount, actual: wxAmount })
+      return res.json({ code: 'SUCCESS', message: '成功' })
+    }
+
+    // 标记订单为已支付
+    const isNewlyPaid = await subOrderService.markOrderPaid(orderNo, wxTransactionId)
+    if (!isNewlyPaid) {
+      return res.json({ code: 'SUCCESS', message: '成功' })
+    }
+
+    // 延长订阅
+    const isUpgrade = (order.discount_amount || 0) > 0
+
+    if (order.tier === 'store' && order.store_ids) {
+      // 店铺订阅：更新每个店铺的到期时间
+      const storeIds = typeof order.store_ids === 'string' ? JSON.parse(order.store_ids) : order.store_ids
+      await subUserService.extendStoreSubscription(storeIds, order.plan)
+      await subOrderService.logPaymentEvent(orderNo, 'store_subscription_extended', { store_ids: storeIds, plan: order.plan })
+    } else {
+      // 账号订阅：更新用户级订阅
+      await subUserService.extendSubscription(order.owner_id, order.plan, order.tier, isUpgrade)
+    }
+
+    await subOrderService.logPaymentEvent(orderNo, 'payment_completed', {
+      username: order.username, owner_id: order.owner_id,
+      plan: order.plan, tier: order.tier, wx_transaction_id: wxTransactionId
+    })
+
+    res.json({ code: 'SUCCESS', message: '成功' })
+  } catch (err) {
+    console.error('[订阅] 微信回调处理失败:', err.message)
+    res.status(500).json({ code: 'FAIL', message: '处理失败' })
+  }
+})
+
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() })
@@ -588,8 +878,23 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: '服务器内部错误' })
 })
 
+// ========== 数据库迁移：subscription_orders 表添加 store_ids 列 ==========
+async function runMigrations() {
+  try {
+    await dbPool.execute(`ALTER TABLE subscription_orders ADD COLUMN store_ids JSON DEFAULT NULL AFTER tier`)
+    console.log('[迁移] subscription_orders.store_ids 列已添加')
+  } catch (e) {
+    if (e.code === 'ER_DUP_FIELDNAME') {
+      console.log('[迁移] store_ids 列已存在，跳过')
+    } else {
+      console.error('[迁移] 添加 store_ids 列失败:', e.message)
+    }
+  }
+}
+
 // HTTP 服务器（仅 HTTP，新版本客户端正常更新）
 const http = require('http')
-http.createServer(app).listen(PORT, '0.0.0.0', () => {
+http.createServer(app).listen(PORT, '0.0.0.0', async () => {
   console.log(`[API] 店小二后端服务已启动: http://0.0.0.0:${PORT}`)
+  await runMigrations()
 })

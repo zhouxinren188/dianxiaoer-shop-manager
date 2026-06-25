@@ -9,6 +9,12 @@ const routes = [
     meta: { title: '登录' }
   },
   {
+    path: '/subscription',
+    name: 'Subscription',
+    component: () => import('@/views/SubscriptionPage.vue'),
+    meta: { title: '订阅' }
+  },
+  {
     path: '/',
     component: AppLayout,
     redirect: '/home',
@@ -120,6 +126,9 @@ router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('accessToken')
   if (to.path === '/login') {
     token ? next('/') : next()
+  } else if (to.path === '/subscription') {
+    // 订阅页需要登录后才能访问
+    token ? next() : next('/login')
   } else {
     token ? next() : next('/login')
   }

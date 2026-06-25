@@ -1139,6 +1139,21 @@ app.put('/api/stores/:id/toggle', async (req, res) => {
       return res.status(403).json(fail('无权操作此店铺'))
     }
     const status = req.body.status || 'enabled'
+
+    // 启用时检查订阅是否过期
+    if (status === 'enabled') {
+      const [rows] = await pool.execute('SELECT subscription_end FROM stores WHERE id = ?', [id])
+      if (rows.length > 0 && rows[0].subscription_end) {
+        const endDate = new Date(rows[0].subscription_end)
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        endDate.setHours(23, 59, 59, 999)
+        if (endDate < today) {
+          return res.status(403).json(fail('店铺订阅已过期，请充值续费后再启用'))
+        }
+      }
+    }
+
     await pool.execute('UPDATE stores SET status = ? WHERE id = ?', [status, id])
     res.json(ok(true))
   } catch (err) {
@@ -6352,6 +6367,31 @@ app.get('/health', async (req, res) => {
   }
 })
 
+// ============ 自动停用过期店铺 ============
+
+async function autoDisableExpiredStores() {
+  try {
+    const [result] = await pool.execute(
+      `UPDATE stores SET status = 'disabled'
+       WHERE subscription_end IS NOT NULL
+         AND subscription_end < CURDATE()
+         AND status = 'enabled'`
+    )
+    if (result.affectedRows > 0) {
+      console.log(`[AutoDisable] 已自动停用 ${result.affectedRows} 家过期店铺`)
+    }
+  } catch (err) {
+    console.error('[AutoDisable] 自动停用过期店铺失败:', err.message)
+  }
+}
+
+function startExpiredStoreCheck() {
+  // 启动时立即检查一次
+  autoDisableExpiredStores()
+  // 每小时检查一次
+  setInterval(autoDisableExpiredStores, 60 * 60 * 1000)
+}
+
 // ============ 启动 ============
 
 const PORT = process.env.PORT || 3002
@@ -6360,6 +6400,7 @@ initDB().then(() => {
   startKeepAlive()
   startLockCleanup()
   initPurchaseNoCache()
+  startExpiredStoreCheck()
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] 后端服务已启动: http://0.0.0.0:${PORT}`)
   })

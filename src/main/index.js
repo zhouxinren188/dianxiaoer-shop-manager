@@ -3,6 +3,7 @@
 
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
+const QRCode = require('qrcode')
 
 // 防止 EPIPE broken pipe 错误弹窗（stdout/stderr 管道断开时忽略）
 process.stdout?.on?.('error', () => {})
@@ -874,6 +875,11 @@ ipcMain.handle('set-auth-token', (event, token) => {
 // 部分服务器 CORS 配置会拒绝，导致 TypeError: Failed to fetch
 // 通过主进程 Node.js http 模块代理请求可彻底绕过此问题
 const httpProxy = require('http')
+// 生成二维码（用于微信支付扫码）
+ipcMain.handle('generate-qrcode', async (event, text) => {
+  return QRCode.toDataURL(text, { width: 280, margin: 2 })
+})
+
 ipcMain.handle('proxy-fetch', async (event, { url, method, headers, body }) => {
   return new Promise((resolve, reject) => {
     try {

@@ -152,6 +152,14 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN last_sync_device_id VARCHAR(100) DEFAULT NULL AFTER last_sync_at`)
     } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 stores 表：添加 subscription_end 字段（店铺到期时间）
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN subscription_end DATE DEFAULT NULL AFTER status`)
+    } catch (e) { /* 字段已存在 */ }
+    // 初始化所有店铺到期时间为 2026-06-30
+    try {
+      await connection.execute(`UPDATE stores SET subscription_end = '2026-06-30' WHERE subscription_end IS NULL`)
+    } catch (e) { /* 忽略错误 */ }
 
     // 兼容已存在的 warehouses 表：添加 owner_id 字段（归属主账号）
     try {
@@ -506,6 +514,58 @@ async function initDB() {
     } catch(e) {
       console.warn('[DB] 迁移 pending_after_sale 记录失败:', e.message)
     }
+
+    // ======== 订阅系统相关表 ========
+
+    // 订阅表（按 owner_id 唯一，一个主账号一条订阅）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL UNIQUE,
+        username VARCHAR(50) DEFAULT '',
+        trial_end DATETIME DEFAULT NULL,
+        subscription_end DATETIME DEFAULT NULL,
+        subscription_tier VARCHAR(20) DEFAULT NULL,
+        status ENUM('trial', 'active', 'expired') DEFAULT 'trial',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_owner (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 订阅订单表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS subscription_orders (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        order_no VARCHAR(50) NOT NULL UNIQUE,
+        owner_id INT NOT NULL,
+        username VARCHAR(50) DEFAULT '',
+        tier VARCHAR(20) NOT NULL,
+        plan VARCHAR(20) NOT NULL,
+        amount INT NOT NULL,
+        original_amount INT NOT NULL,
+        discount_amount INT DEFAULT 0,
+        status ENUM('pending', 'paid', 'expired') DEFAULT 'pending',
+        wx_transaction_id VARCHAR(100) DEFAULT '',
+        wx_code_url TEXT,
+        paid_at DATETIME DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_owner (owner_id),
+        KEY idx_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 支付日志表
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS subscription_payment_logs (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        order_no VARCHAR(50) DEFAULT '',
+        event_type VARCHAR(50) NOT NULL,
+        raw_data TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_order (order_no)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
 
     console.log('[DB] 数据库初始化完成')
   } finally {

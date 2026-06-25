@@ -148,6 +148,7 @@ import { reactive, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { User, Lock, Phone, TrendCharts, Box, Connection } from '@element-plus/icons-vue'
+import { checkStatus } from '@/api/subscription'
 
 const router = useRouter()
 const loginFormRef = ref(null)
@@ -339,7 +340,22 @@ async function handleLogin() {
         try { await window.electronAPI?.invoke('set-auth-token', token) } catch {}
         try { await window.electronAPI?.invoke('window-set-main-size') } catch {}
         ElMessage.success('登录成功')
-        router.replace('/')
+
+        // 检查订阅状态，过期则跳转订阅页
+        let shouldRedirectToSub = false
+        try {
+          const subRes = await checkStatus()
+          if (subRes.success && subRes.status === 'expired') {
+            shouldRedirectToSub = true
+          }
+        } catch {
+          // 订阅状态查询失败，不阻断登录流程
+        }
+        if (shouldRedirectToSub) {
+          router.replace('/subscription')
+        } else {
+          router.replace('/')
+        }
       } else {
         ElMessage.error(res?.message || '账号或密码错误')
       }

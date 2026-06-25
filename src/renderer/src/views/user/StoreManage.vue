@@ -39,10 +39,16 @@
 
     <div class="list-header">
       <span class="list-title">店铺列表 <span class="list-count">共 {{ pageInfo.total }} 家</span></span>
-      <el-button type="primary" @click="handleAdd">
-        <el-icon><Plus /></el-icon>
-        新增店铺
-      </el-button>
+      <div class="list-actions">
+        <el-button type="danger" @click="handleSubscription">
+          <el-icon><Wallet /></el-icon>
+          店铺充值
+        </el-button>
+        <el-button type="primary" @click="handleAdd">
+          <el-icon><Plus /></el-icon>
+          新增店铺
+        </el-button>
+      </div>
     </div>
 
     <div class="store-list" v-loading="loading">
@@ -68,13 +74,20 @@
                 class="status-tag"
               >已停用</el-tag>
             </div>
-            <el-switch
-              :model-value="row.status === 'enabled'"
-              @change="(val) => handleToggleStatus(row, val)"
-              inline-prompt
-              active-text="启用"
-              inactive-text="停用"
-            />
+           <el-tooltip
+              :content="isExpired(row.subscription_end) && row.status !== 'enabled' ? '店铺订阅已过期，续费后才能启用' : ''"
+              :disabled="!isExpired(row.subscription_end) || row.status === 'enabled'"
+              placement="top"
+            >
+              <el-switch
+                :model-value="row.status === 'enabled'"
+                @change="(val) => handleToggleStatus(row, val)"
+                :disabled="isExpired(row.subscription_end) && row.status !== 'enabled'"
+                inline-prompt
+                active-text="启用"
+                inactive-text="停用"
+              />
+            </el-tooltip>
           </div>
         </div>
 
@@ -95,6 +108,10 @@
             <div class="info-item">
               <span class="info-label">店铺ID</span>
               <span class="info-value">{{ row.shop_id || '-' }}</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">到期时间</span>
+              <span class="info-value expiry-date" :class="{ 'expired': isExpired(row.subscription_end) }">{{ formatDate(row.subscription_end) }}</span>
             </div>
           </div>
           <div class="info-row" v-if="row.tags && row.tags.length">
@@ -119,7 +136,7 @@
             <el-icon><Connection /></el-icon>
             重新登录
           </el-button>
-          <el-button size="small" @click="handleEdit(row)">
+          <el-button size="small" class="action-edit" @click="handleEdit(row)">
             <el-icon><Edit /></el-icon>
             编辑
           </el-button>
@@ -163,15 +180,22 @@
       :tag-options="tagOptions"
       @saved="onStoreSaved"
     />
+
+    <!-- 充值订阅弹窗 -->
+    <SubscriptionDialog
+      v-model:visible="subDialogVisible"
+      @success="onSubSuccess"
+    />
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, Plus, Connection, Edit, Delete, Monitor } from '@element-plus/icons-vue'
+import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchStores, createStore, deleteStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
+import SubscriptionDialog from './components/SubscriptionDialog.vue'
 
 const STORE_TYPE_MAP = {
   pop: 'POP店铺',
@@ -181,6 +205,20 @@ const STORE_TYPE_MAP = {
 
 function storeTypeLabel(type) {
   return STORE_TYPE_MAP[type] || '-'
+}
+
+// 格式化日期
+function formatDate(dateStr) {
+  if (!dateStr) return '-'
+  const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return dateStr
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// 判断是否过期
+function isExpired(dateStr) {
+  if (!dateStr) return false
+  return new Date(dateStr) < new Date()
 }
 
 const searchForm = reactive({
@@ -205,6 +243,21 @@ const loading = ref(false)
 // 编辑弹窗
 const editDialogVisible = ref(false)
 const editStoreData = ref(null)
+
+// 订阅弹窗
+const subDialogVisible = ref(false)
+
+function handleSubscription() {
+  subDialogVisible.value = true
+}
+
+function onSubSuccess() {
+  ElMessage.success('订阅充值成功')
+  // 延迟1秒刷新店铺列表，确保支付回调已处理完成
+  setTimeout(() => {
+    loadStores()
+  }, 1000)
+}
 
 // 登录状态
 const loginPending = reactive({
@@ -521,6 +574,11 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.list-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .list-title {
   font-size: 15px;
   font-weight: 600;
@@ -602,8 +660,8 @@ onUnmounted(() => {
 
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px 24px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px 20px;
 }
 
 .info-item {
@@ -651,6 +709,11 @@ onUnmounted(() => {
   border-top: 1px solid #f5f5f5;
 }
 
+/* 编辑按钮推到最右侧 */
+.action-edit {
+  margin-left: auto;
+}
+
 /* 在线状态点 */
 .online-dot {
   display: inline-block;
@@ -667,6 +730,15 @@ onUnmounted(() => {
 
 .online-dot.offline {
   background-color: #d1d5db;
+}
+
+/* 到期时间样式 */
+.expiry-date {
+  color: #e67e22;
+  font-weight: 600;
+}
+.expiry-date.expired {
+  color: #e74c3c;
 }
 
 /* 分页 */
