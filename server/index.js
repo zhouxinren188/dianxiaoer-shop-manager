@@ -1051,10 +1051,10 @@ app.post('/api/stores', async (req, res) => {
       }
     }
     
-    // 创建新店铺
+    // 创建新店铺（默认7天试用期）
     const [result] = await pool.execute(
-      `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id, subscription_end)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
       [name || '', platform || '', store_type || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled', ownerId]
     )
 
@@ -2221,6 +2221,95 @@ app.get('/api/store-sales-stats', async (req, res) => {
     }))
   } catch (err) {
     console.error('[店铺销售统计] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// ============ 首页 Dashboard 统计 ============
+
+app.get('/api/dashboard-stats', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) {
+      return res.json(ok({
+        today: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
+        yesterday: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
+        thisMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
+        lastMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] }
+      }))
+    }
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const excludeStatuses = ['待付款', '等待付款', '已取消']
+    const excludePh = excludeStatuses.map(() => '?').join(',')
+
+    // 4 个时间段：今日、昨日、本月、上月
+    const queries = [
+      // 今日
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND DATE(order_time) = CURDATE()`,
+      // 昨日
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND DATE(order_time) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`,
+      // 本月
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
+      // 上月
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_FORMAT(CURDATE(),'%Y-%m-01')`
+    ]
+
+    const params = storeIds.concat(excludeStatuses)
+    const [r1] = await pool.execute(queries[0], params)
+    const [r2] = await pool.execute(queries[1], params)
+    const [r3] = await pool.execute(queries[2], params)
+    const [r4] = await pool.execute(queries[3], params)
+
+    // 按仓库分组统计订单数（今日 + 本月）
+    const whQuery = (dateCond) =>
+      `SELECT warehouse_name, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND ${dateCond} AND warehouse_name IS NOT NULL AND warehouse_name != '' GROUP BY warehouse_name ORDER BY cnt DESC`
+    const [whToday] = await pool.execute(whQuery('DATE(order_time) = CURDATE()'), params)
+    const [whMonth] = await pool.execute(whQuery('order_time >= DATE_FORMAT(CURDATE(),\'%Y-%m-01\')'), params)
+
+    const fmtWh = (rows) => rows.map(r => ({ warehouse: r.warehouse_name, count: Number(r.cnt) }))
+    const fmt = (r, wh) => ({ salesAmount: Number(r[0].amt), orderCount: Number(r[0].cnt), warehouseBreakdown: wh })
+
+    res.json(ok({
+      today: fmt(r1, fmtWh(whToday)),
+      yesterday: fmt(r2, []),
+      thisMonth: fmt(r3, fmtWh(whMonth)),
+      lastMonth: fmt(r4, [])
+    }))
+  } catch (err) {
+    console.error('[Dashboard Stats] 错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 销售趋势（近30天每日销售额和订单数）
+app.get('/api/sales-trend', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) {
+      return res.json(ok({ list: [] }))
+    }
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const excludeStatuses = ['待付款', '等待付款', '已取消']
+    const excludePh = excludeStatuses.map(() => '?').join(',')
+
+    const [rows] = await pool.execute(
+      `SELECT DATE_FORMAT(order_time, '%Y-%m-%d') as date,
+              COALESCE(SUM(total_amount),0) as amount,
+              COUNT(*) as count
+       FROM sales_orders
+       WHERE store_id IN (${placeholders})
+         AND status_text NOT IN (${excludePh})
+         AND order_time >= DATE_SUB(CURDATE(), INTERVAL 29 DAY)
+       GROUP BY DATE_FORMAT(order_time, '%Y-%m-%d')
+       ORDER BY date`,
+      storeIds.concat(excludeStatuses)
+    )
+
+    res.json(ok({ list: rows.map(r => ({ date: r.date, amount: Number(r.amount), count: Number(r.count) })) }))
+  } catch (err) {
+    console.error('[Sales Trend] 错误:', err.message)
     res.status(500).json(fail(err.message))
   }
 })
@@ -3574,14 +3663,13 @@ app.get('/api/purchase-orders', async (req, res) => {
 
     if (req.user.user_type === 'sub') {
       // 子账号：用 INNER JOIN 替代 IN (SELECT...) 子查询（避免全表扫描）
+      // ★ 优化：移除 sales_orders LEFT JOIN（OR+CAST导致全表扫描10s+），改为后续批量查询
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
-        LEFT JOIN stores s ON so.store_id = s.id
         LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?
         WHERE po.owner_id=?
           AND (upa.user_id IS NOT NULL
@@ -3598,14 +3686,13 @@ app.get('/api/purchase-orders', async (req, res) => {
       params = [req.user.id, ownerId, req.user.id]
     } else {
       // 主账号：看自己名下所有订单
+      // ★ 优化：移除 sales_orders LEFT JOIN，改为后续批量查询
       sql = `
-        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name, so.warehouse_name as sales_warehouse_name, so.status_text as sales_order_status, so.remark as sales_remark, s.name as store_name
+        SELECT ${listFields}, pa.account as account_name, w.name as warehouse_name
         FROM purchase_orders po
         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
         LEFT JOIN inventory i ON po.inventory_id = i.id
         LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR)) OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND so.order_id = po.sales_order_no)
-        LEFT JOIN stores s ON so.store_id = s.id
         WHERE po.owner_id=?
       `
       countSql = `
@@ -3621,7 +3708,7 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (purchaseNo) { sql += ' AND po.purchase_no LIKE ?'; countSql += ' AND po.purchase_no LIKE ?'; params.push(`%${purchaseNo}%`) }
     if (logisticsNo) { sql += ' AND po.logistics_no LIKE ?'; countSql += ' AND po.logistics_no LIKE ?'; params.push(`%${logisticsNo}%`) }
     if (platformOrderNo) { sql += ' AND po.platform_order_no LIKE ?'; countSql += ' AND po.platform_order_no LIKE ?'; params.push(`%${platformOrderNo}%`) }
-    if (salesOrderNo) { sql += ' AND so.order_id LIKE ?'; countSql += ' AND po.sales_order_no LIKE ?'; params.push(`%${salesOrderNo}%`) }
+    if (salesOrderNo) { sql += ' AND po.sales_order_no LIKE ?'; countSql += ' AND po.sales_order_no LIKE ?'; params.push(`%${salesOrderNo}%`) }
     if (purchaseType) { sql += ' AND po.purchase_type=?'; countSql += ' AND po.purchase_type=?'; params.push(purchaseType) }
     if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
     if (aftersaleStatus) { sql += ' AND po.aftersale_status=?'; countSql += ' AND po.aftersale_status=?'; params.push(aftersaleStatus) }
@@ -3631,6 +3718,65 @@ app.get('/api/purchase-orders', async (req, res) => {
     const offset = Math.max(0, ((parseInt(page,10)||1)-1)*limit)
     sql += ' ORDER BY po.id DESC LIMIT ' + limit + ' OFFSET ' + offset
     const [rows] = await pool.execute(sql, params)
+
+    // ★ 批量查询关联的 sales_orders 数据（替代原 LEFT JOIN，避免全表扫描10s+）
+    if (rows.length > 0) {
+      const salesOrderIds = rows.map(r => r.sales_order_id).filter(v => v != null && v !== '')
+      const salesOrderNos = rows.map(r => r.sales_order_no).filter(v => v != null && v !== '')
+
+      if (salesOrderIds.length > 0 || salesOrderNos.length > 0) {
+        const conditions = []
+        const soParams = []
+        if (salesOrderIds.length > 0) {
+          conditions.push(`CAST(id AS CHAR) IN (${salesOrderIds.map(() => '?').join(',')})`)
+          soParams.push(...salesOrderIds)
+        }
+        if (salesOrderNos.length > 0) {
+          conditions.push(`order_id IN (${salesOrderNos.map(() => '?').join(',')})`)
+          soParams.push(...salesOrderNos)
+        }
+        const soSql = `SELECT id, order_id, warehouse_name, status_text, remark, store_id FROM sales_orders WHERE ${conditions.join(' OR ')}`
+        const [soRows] = await pool.execute(soSql, soParams)
+
+        const soByIdMap = {}
+        const soByOrderNoMap = {}
+        for (const so of soRows) {
+          soByIdMap[String(so.id)] = so
+          if (so.order_id) soByOrderNoMap[so.order_id] = so
+        }
+
+        const storeIds = [...new Set(soRows.map(r => r.store_id).filter(v => v != null))]
+        const storeNameMap = {}
+        if (storeIds.length > 0) {
+          const [storeRows] = await pool.execute(`SELECT id, name FROM stores WHERE id IN (${storeIds.map(() => '?').join(',')})`, storeIds)
+          for (const s of storeRows) { storeNameMap[s.id] = s.name }
+        }
+
+        for (const row of rows) {
+          let so = null
+          if (row.sales_order_id) { so = soByIdMap[String(row.sales_order_id)] }
+          if (!so && row.sales_order_no) { so = soByOrderNoMap[row.sales_order_no] }
+          if (so) {
+            row.sales_order_status = so.status_text
+            row.sales_warehouse_name = so.warehouse_name
+            row.sales_remark = so.remark
+            row.store_name = so.store_id ? (storeNameMap[so.store_id] || null) : null
+          } else {
+            row.sales_order_status = null
+            row.sales_warehouse_name = null
+            row.sales_remark = null
+            row.store_name = null
+          }
+        }
+      } else {
+        for (const row of rows) {
+          row.sales_order_status = null
+          row.sales_warehouse_name = null
+          row.sales_remark = null
+          row.store_name = null
+        }
+      }
+    }
 
     // 同时获取各状态数量（用于 Tab 标签，合并到列表响应避免单独请求失败）
     // ★ statusCounts 需应用与列表相同的筛选条件（除 status 外），这样 tab 数量才与筛选结果对应
@@ -6292,7 +6438,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const [rows] = await pool.execute(
-      'SELECT id, username, real_name, phone, user_type, role, parent_id, status, password_hash FROM users WHERE username = ?',
+      'SELECT id, username, real_name, phone, user_type, role, parent_id, status, password_hash, created_at FROM users WHERE username = ?',
       [username]
     )
 
@@ -6333,7 +6479,8 @@ app.post('/api/auth/login', async (req, res) => {
         username: user.username,
         phone: user.phone,
         userType: user.user_type,
-        role: user.role
+        role: user.role,
+        createdAt: user.created_at
       }
     }))
   } catch (err) {
@@ -6349,6 +6496,29 @@ app.post('/api/auth/logout', async (req, res) => {
     await pool.execute('DELETE FROM user_tokens WHERE token = ?', [token])
   }
   res.json(ok({ message: '已登出' }))
+})
+
+// 获取当前用户信息（含注册时间）
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, username, real_name, phone, user_type, role, status, created_at FROM users WHERE id = ?',
+      [req.user.id]
+    )
+    if (!rows.length) return res.status(404).json(fail('用户不存在'))
+    const u = rows[0]
+    res.json(ok({
+      id: u.id,
+      username: u.username,
+      realName: u.real_name,
+      phone: u.phone,
+      userType: u.user_type,
+      role: u.role,
+      createdAt: u.created_at
+    }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
 })
 
 // ============ 仓库管理路由 ============

@@ -8,3 +8,5 @@ nul
 server-key/nul
 scripts/
 sales-debug.json
+server/.env
+server-api/.env

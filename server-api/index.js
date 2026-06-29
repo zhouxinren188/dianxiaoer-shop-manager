@@ -192,7 +192,7 @@ const corsOptions = {
     callback(new Error('不允许的来源'))
   },
   credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-password']
 }
 app.use(cors(corsOptions))
@@ -863,6 +863,251 @@ app.post('/api/subscription/notify', async (req, res) => {
   } catch (err) {
     console.error('[订阅] 微信回调处理失败:', err.message)
     res.status(500).json({ code: 'FAIL', message: '处理失败' })
+  }
+})
+
+// ========== 管理后台静态页面 ==========
+app.use('/admin', express.static(path.join(__dirname, 'public', 'admin')))
+
+// ========== 管理后台 API ==========
+
+// 管理员密码校验中间件
+function adminAuth(req, res, next) {
+  const password = req.headers['x-admin-password']
+  if (!password || password !== ADMIN_PASSWORD) {
+    return res.status(403).json({ success: false, message: '管理员密码错误' })
+  }
+  next()
+}
+
+// 获取所有店铺（含到期时间、归属用户）
+app.get('/api/admin/stores', adminAuth, async (req, res) => {
+  try {
+    const { page = 1, pageSize = 20, username, storeName, merchantId, status, expired } = req.query
+    const limit = Math.max(1, parseInt(pageSize, 10) || 20)
+    const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
+
+    let where = 'WHERE 1=1'
+    const params = []
+    if (username) { where += ' AND u.username LIKE ?'; params.push(`%${username}%`) }
+    if (storeName) { where += ' AND s.name LIKE ?'; params.push(`%${storeName}%`) }
+    if (merchantId) { where += ' AND s.merchant_id LIKE ?'; params.push(`%${merchantId}%`) }
+    if (status) { where += ' AND s.status = ?'; params.push(status) }
+    if (expired === 'yes') {
+      where += ' AND s.subscription_end IS NOT NULL AND s.subscription_end < CURDATE()'
+    } else if (expired === 'no') {
+      where += ' AND (s.subscription_end IS NULL OR s.subscription_end >= CURDATE())'
+    }
+
+    const [countRows] = await dbPool.execute(
+      `SELECT COUNT(*) as total FROM stores s LEFT JOIN users u ON s.owner_id = u.id ${where}`, params
+    )
+    const total = countRows[0].total
+
+    const [rows] = await dbPool.execute(
+      `SELECT s.id, s.name, s.platform, s.store_type, s.merchant_id, s.shop_id,
+              s.account AS store_username, s.status, s.subscription_end, s.created_at,
+              s.owner_id, u.username AS owner_username, u.phone AS owner_phone
+       FROM stores s
+       LEFT JOIN users u ON s.owner_id = u.id
+       ${where}
+       ORDER BY u.username ASC, s.id ASC
+       LIMIT ${limit} OFFSET ${offset}`,
+      params
+    )
+
+    res.json({
+      success: true,
+      data: {
+        list: rows.map(r => ({
+          id: r.id, name: r.name, platform: r.platform, storeType: r.store_type,
+          merchantId: r.merchant_id, storeId: r.shop_id, storeUsername: r.store_username,
+          status: r.status, subscriptionEnd: r.subscription_end, createdAt: r.created_at,
+          ownerId: r.owner_id, ownerUsername: r.owner_username || '-', ownerPhone: r.owner_phone || ''
+        })),
+        total
+      }
+    })
+  } catch (err) {
+    console.error('[Admin] 获取店铺列表失败:', err.message)
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 批量修改到期时间（必须放在 :id 路由之前，否则 batch 会被当成 id）
+app.put('/api/admin/stores/batch-subscription-end', adminAuth, async (req, res) => {
+  try {
+    const { storeIds, subscriptionEnd } = req.body
+    if (!storeIds?.length) return res.json({ success: false, message: '请选择至少一个店铺' })
+    if (!subscriptionEnd) return res.json({ success: false, message: '到期时间不能为空' })
+    const date = new Date(subscriptionEnd)
+    if (isNaN(date.getTime())) return res.json({ success: false, message: '日期格式无效' })
+    const dateStr = date.toISOString().slice(0, 10)
+
+    // 确保 storeIds 为数字
+    const numericIds = storeIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id))
+    if (!numericIds.length) return res.json({ success: false, message: '店铺ID无效' })
+    const placeholders = numericIds.map(() => '?').join(',')
+
+    console.log('[Admin] 批量修改到期:', { ids: numericIds, dateStr })
+    await dbPool.query(`UPDATE stores SET subscription_end = ? WHERE id IN (${placeholders})`, [dateStr, ...numericIds])
+    if (date < new Date()) {
+      await dbPool.query(`UPDATE stores SET status = 'disabled' WHERE id IN (${placeholders}) AND status = 'enabled'`, numericIds)
+    }
+    res.json({ success: true, data: { updated: numericIds.length, subscriptionEnd: dateStr } })
+  } catch (err) {
+    console.error('[Admin] 批量修改失败:', err)
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 修改单个店铺到期时间
+app.put('/api/admin/stores/:id/subscription-end', adminAuth, async (req, res) => {
+  try {
+    const { subscriptionEnd } = req.body
+    if (!subscriptionEnd) return res.json({ success: false, message: '到期时间不能为空' })
+    const date = new Date(subscriptionEnd)
+    if (isNaN(date.getTime())) return res.json({ success: false, message: '日期格式无效' })
+    const dateStr = date.toISOString().slice(0, 10)
+
+    await dbPool.execute('UPDATE stores SET subscription_end = ? WHERE id = ?', [dateStr, req.params.id])
+    if (date < new Date()) {
+      await dbPool.execute("UPDATE stores SET status = 'disabled' WHERE id = ? AND status = 'enabled'", [req.params.id])
+    }
+    res.json({ success: true, data: { id: req.params.id, subscriptionEnd: dateStr } })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 获取所有主账号用户
+app.get('/api/admin/users', adminAuth, async (req, res) => {
+  try {
+    const [rows] = await dbPool.execute(
+      `SELECT u.id, u.username, u.phone, u.user_type, u.role, u.status, u.created_at,
+              (SELECT COUNT(*) FROM stores s WHERE s.owner_id = u.id) AS store_count
+       FROM users u WHERE u.user_type = 'master' ORDER BY u.username ASC`
+    )
+    res.json({ success: true, data: { list: rows } })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 修改用户状态（启用/停用）
+app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10)
+    if (isNaN(userId)) return res.status(400).json({ success: false, message: '无效的用户ID' })
+    const { status } = req.body
+    if (!['enabled', 'disabled'].includes(status)) {
+      return res.status(400).json({ success: false, message: '状态值无效，应为 enabled 或 disabled' })
+    }
+    const [result] = await dbPool.execute('UPDATE users SET status = ? WHERE id = ?', [status, userId])
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    res.json({ success: true, data: { id: userId, status } })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 删除用户
+app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id, 10)
+    if (isNaN(userId)) return res.status(400).json({ success: false, message: '无效的用户ID' })
+
+    // 检查用户是否存在及是否有关联店铺
+    const [userRows] = await dbPool.execute('SELECT id, username, user_type FROM users WHERE id = ?', [userId])
+    if (userRows.length === 0) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    const [storeRows] = await dbPool.execute('SELECT COUNT(*) as count FROM stores WHERE owner_id = ?', [userId])
+    if (storeRows[0].count > 0) {
+      return res.status(400).json({ success: false, message: `该用户下还有 ${storeRows[0].count} 个店铺，请先处理店铺后再删除` })
+    }
+
+    // 删除关联数据
+    await dbPool.execute('DELETE FROM user_tokens WHERE user_id = ?', [userId])
+    const [result] = await dbPool.execute('DELETE FROM users WHERE id = ?', [userId])
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    res.json({ success: true, data: { id: userId } })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 获取所有订阅订单
+app.get('/api/admin/orders', adminAuth, async (req, res) => {
+  try {
+    const { page = 1, pageSize = 20, startDate, endDate, status } = req.query
+    const limit = Math.max(1, parseInt(pageSize, 10) || 20)
+    const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
+
+    // 构建查询条件
+    let where = ' WHERE 1=1'
+    const params = []
+    if (startDate) { where += ' AND o.created_at >= ?'; params.push(startDate + ' 00:00:00') }
+    if (endDate) { where += ' AND o.created_at <= ?'; params.push(endDate + ' 23:59:59') }
+    if (status) { where += ' AND o.status = ?'; params.push(status) }
+
+    const [countRows] = await dbPool.query('SELECT COUNT(*) as total FROM subscription_orders o' + where, params)
+    const total = countRows[0].total
+
+    // 累计已支付金额
+    let paidWhere = where + " AND o.status = 'paid'"
+    const [sumRows] = await dbPool.query('SELECT COALESCE(SUM(o.amount), 0) as totalAmount, COUNT(*) as paidCount FROM subscription_orders o' + paidWhere, params)
+    const totalAmount = sumRows[0].totalAmount
+    const paidCount = sumRows[0].paidCount
+
+    const [rows] = await dbPool.query(
+      `SELECT o.id, o.order_no, o.owner_id, o.username, o.tier, o.plan, o.amount,
+              o.status, o.store_ids, o.created_at, o.paid_at,
+              u.phone AS owner_phone
+       FROM subscription_orders o
+       LEFT JOIN users u ON o.owner_id = u.id` + where +
+      ` ORDER BY o.id DESC LIMIT ${limit} OFFSET ${offset}`,
+      params
+    )
+
+    // 解析 store_ids，查店铺名称
+    const allStoreIds = new Set()
+    rows.forEach(o => {
+      if (o.store_ids) {
+        try {
+          const ids = typeof o.store_ids === 'string' ? JSON.parse(o.store_ids) : o.store_ids
+          if (Array.isArray(ids)) ids.forEach(id => allStoreIds.add(id))
+        } catch {}
+      }
+    })
+    let storeMap = {}
+    if (allStoreIds.size > 0) {
+      const ids = Array.from(allStoreIds)
+      const placeholders = ids.map(() => '?').join(',')
+      const [storeRows] = await dbPool.execute(
+        `SELECT id, name FROM stores WHERE id IN (${placeholders})`,
+        ids
+      )
+      storeMap = Object.fromEntries(storeRows.map(s => [s.id, s.name]))
+    }
+    rows.forEach(o => {
+      if (o.store_ids) {
+        try {
+          const ids = typeof o.store_ids === 'string' ? JSON.parse(o.store_ids) : o.store_ids
+          o.storeInfo = Array.isArray(ids) ? ids.map(id => `${storeMap[id] || '未知店铺'} [${id}]`).join(', ') : null
+        } catch { o.storeInfo = null }
+      } else {
+        o.storeInfo = null
+      }
+    })
+
+    res.json({ success: true, data: { list: rows, total, totalAmount, paidCount } })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
   }
 })
 

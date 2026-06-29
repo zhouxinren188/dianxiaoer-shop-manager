@@ -60,6 +60,7 @@
             <div class="plan-name">{{ p.name }}</div>
             <div class="plan-price">{{ p.price }}<span class="unit">元/店</span></div>
             <div class="plan-period">{{ p.period }}</div>
+            <div class="plan-daily">≈ {{ (p.price / parseInt(p.period)).toFixed(2) }} 元/天</div>
           </div>
         </div>
       </div>
@@ -469,6 +470,13 @@ onUnmounted(() => {
   font-size: 11px;
   color: #999;
   margin-top: 2px;
+}
+
+.plan-daily {
+  font-size: 11px;
+  color: #27ae60;
+  margin-top: 4px;
+  font-weight: 500;
 }
 
 /* 合计 */
