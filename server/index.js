@@ -2245,14 +2245,14 @@ app.get('/api/dashboard-stats', async (req, res) => {
 
     // 4 个时间段：今日、昨日、本月、上月
     const queries = [
-      // 今日
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND DATE(order_time) = CURDATE()`,
-      // 昨日
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND DATE(order_time) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`,
-      // 本月
+      // 今日（凌晨至今）
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= CURDATE()`,
+      // 昨日同期（昨日凌晨至昨日此时，与今日同时长）
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+      // 本月（1日至今）
       `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
-      // 上月
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_FORMAT(CURDATE(),'%Y-%m-01')`
+      // 上月同期（上月1日至上月同日，与本月天数一致）
+      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
     ]
 
     const params = storeIds.concat(excludeStatuses)
