@@ -66,6 +66,7 @@
               >已停用</el-tag>
             </div>
             <el-switch
+              v-if="isAdmin"
               :model-value="row.status === 'enabled'"
               @change="(val) => handleToggleStatus(row, val)"
               inline-prompt
@@ -138,7 +139,7 @@
             编辑
           </el-button>
           <el-button
-            v-if="row.userType === 'sub'"
+            v-if="row.userType === 'sub' && isAdmin"
             size="small"
             type="success"
             @click="handleAssignStore(row)"
@@ -147,7 +148,7 @@
             分配店铺
           </el-button>
           <el-button
-            v-if="row.userType === 'sub'"
+            v-if="row.userType === 'sub' && isAdmin"
             size="small"
             type="warning"
             @click="handleAssignWarehouse(row)"
@@ -156,14 +157,14 @@
             分配仓库
           </el-button>
           <el-button
-            v-if="row.userType === 'sub'"
+            v-if="row.userType === 'sub' && isAdmin"
             size="small"
             @click="handleAssignPurchaseAccount(row)"
           >
             <el-icon><User /></el-icon>
             分配采购账号
           </el-button>
-          <el-button size="small" type="danger" plain @click="handleDelete(row)">
+          <el-button v-if="isAdmin" size="small" type="danger" plain @click="handleDelete(row)">
             <el-icon><Delete /></el-icon>
             删除
           </el-button>
@@ -215,7 +216,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted } from 'vue'
 import { Search, Plus, Edit, Delete, Shop, House, User } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchUsers, deleteUser, toggleUserStatus } from '@/api/user'
@@ -252,6 +253,9 @@ const currentUser = ref({
   userType: 'master',
   role: 'admin'
 })
+
+// 是否管理员（主账号或子账号管理员均可）
+const isAdmin = computed(() => currentUser.value.role === 'admin')
 
 function roleType(role) {
   const map = { admin: 'warning', staff: '' }

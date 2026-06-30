@@ -80,16 +80,14 @@ function createWindow() {
   //   mainWindow.webContents.openDevTools({ mode: 'right' })
   // }
 
-  // 右键菜单（剪切/复制/粘贴/全选/刷新）
+  // 右键菜单（剪切/复制/粘贴/全选）
   mainWindow.webContents.on('context-menu', (event, params) => {
     const menu = Menu.buildFromTemplate([
       { label: '剪切', role: 'cut', enabled: params.editFlags.canCut },
       { label: '复制', role: 'copy', enabled: params.editFlags.canCopy },
       { label: '粘贴', role: 'paste', enabled: params.editFlags.canPaste },
       { type: 'separator' },
-      { label: '全选', role: 'selectAll' },
-      { type: 'separator' },
-      { label: '刷新页面', role: 'reload' }
+      { label: '全选', role: 'selectAll' }
     ])
     menu.popup()
   })

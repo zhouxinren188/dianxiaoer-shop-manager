@@ -638,8 +638,8 @@ app.put('/api/users/:id', async (req, res) => {
 // 删除用户（只能删除同组的子账号）
 app.delete('/api/users/:id', async (req, res) => {
   try {
-    if (req.user.user_type !== 'master') {
-      return res.status(403).json(fail('只有主账号才能删除用户'))
+    if (req.user.user_type !== 'master' && req.user.role !== 'admin') {
+      return res.status(403).json(fail('只有管理员才能删除用户'))
     }
     const ownerId = getOwnerId(req.user)
     // 不能删除自己，只能删除挂在自己下面的子账号
@@ -658,9 +658,12 @@ app.delete('/api/users/:id', async (req, res) => {
   }
 })
 
-// 切换状态（只能操作同组用户）
+// 切换状态（只有管理员可操作，只能操作同组用户）
 app.put('/api/users/:id/toggle', async (req, res) => {
   try {
+    if (req.user.user_type !== 'master' && req.user.role !== 'admin') {
+      return res.status(403).json(fail('只有管理员才能执行此操作'))
+    }
     const ownerId = getOwnerId(req.user)
     const [check] = await pool.execute(
       'SELECT id FROM users WHERE id = ? AND (id = ? OR parent_id = ?)',
@@ -682,11 +685,11 @@ app.put('/api/users/:id/toggle', async (req, res) => {
   }
 })
 
-// 分配店铺（只有 master 可操作，且只能分配自己名下的店铺给子账号）
+// 分配店铺（管理员可操作，且只能分配自己名下的店铺给子账号）
 app.put('/api/users/:id/stores', async (req, res) => {
   try {
-    if (req.user.user_type !== 'master') {
-      return res.status(403).json(fail('只有主账号才能分配店铺'))
+    if (req.user.user_type !== 'master' && req.user.role !== 'admin') {
+      return res.status(403).json(fail('只有管理员才能分配店铺'))
     }
     const userId = +req.params.id
     const storeIds = req.body.storeIds || []
@@ -734,8 +737,8 @@ app.put('/api/users/:id/stores', async (req, res) => {
 // 分配仓库（只有 master 可操作）
 app.put('/api/users/:id/warehouses', async (req, res) => {
   try {
-    if (req.user.user_type !== 'master') {
-      return res.status(403).json(fail('只有主账号才能分配仓库'))
+    if (req.user.user_type !== 'master' && req.user.role !== 'admin') {
+      return res.status(403).json(fail('只有管理员才能分配仓库'))
     }
     const userId = +req.params.id
     const warehouseIds = req.body.warehouseIds || []
@@ -823,8 +826,8 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
 // 分配采购账号（只有 master 可操作）
 app.put('/api/users/:id/purchase-accounts', async (req, res) => {
   try {
-    if (req.user.user_type !== 'master') {
-      return res.status(403).json(fail('只有主账号才能分配采购账号'))
+    if (req.user.user_type !== 'master' && req.user.role !== 'admin') {
+      return res.status(403).json(fail('只有管理员才能分配采购账号'))
     }
     const userId = +req.params.id
     const accountIds = req.body.accountIds || []
