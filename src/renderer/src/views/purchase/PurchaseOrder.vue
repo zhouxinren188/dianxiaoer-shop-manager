@@ -104,7 +104,7 @@
             <el-option label="售后关闭" value="closed" />
           </el-select>
         </el-form-item>
-        <el-form-item>
+        <el-form-item class="filter-actions">
           <el-button type="primary" @click="handleSearch">
             <el-icon><Search /></el-icon>
             查询
@@ -223,7 +223,10 @@
               <span v-else class="logistics-text">/</span>
             </div>
             <div class="ot-col ot-col-remark">
-              <span class="remark-text">{{ row.sales_remark || '--' }}</span>
+              <div class="remark-cell">
+                <span class="remark-text" @click="openRemarkEditor(row)">{{ row.sales_remark || '--' }}</span>
+                <el-icon class="remark-edit-icon" @click="openRemarkEditor(row)"><Edit /></el-icon>
+              </div>
             </div>
             <div class="ot-col ot-col-action">
               <div class="action-buttons">
@@ -990,11 +993,13 @@ import {
   Plus,
   Upload,
   Download,
-  Location
+  Location,
+  Edit
 } from '@element-plus/icons-vue'
 import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales, deletePurchaseOrder, checkPurchaseBinding } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 import { searchInventory, createSkuBinding, quickCreateInventory, fetchWarehouses } from '@/api/warehouse'
+import { updateRemark } from '@/api/salesOrder'
 
 // ==================== 常量配置 ====================
 
@@ -2007,6 +2012,31 @@ const editPurchaseForm = reactive({
   remark: ''
 })
 
+// 编辑销售备注（有关联销售单时更新销售备注，无关联时保存到采购单本地备注）
+function openRemarkEditor(row) {
+  ElMessageBox.prompt('请输入销售备注', '编辑销售备注', {
+    confirmButtonText: '保存',
+    cancelButtonText: '取消',
+    inputValue: row.sales_remark || '',
+    inputType: 'textarea',
+    inputPlaceholder: '输入备注内容...'
+  }).then(async ({ value }) => {
+    try {
+      if (row.sales_order_id) {
+        // 有关联销售订单 — 更新销售单备注
+        await updateRemark(row.sales_order_id, value)
+      } else {
+        // 无关联销售订单 — 保存到采购单本地备注
+        await updatePurchaseOrder(row.id, { remark: value })
+      }
+      row.sales_remark = value
+      ElMessage.success('备注已保存')
+    } catch (err) {
+      ElMessage.error('保存失败: ' + (err.message || ''))
+    }
+  }).catch(() => {})
+}
+
 function handleEditPurchase(row) {
   editPurchaseForm.id = row.id
   editPurchaseForm.purchaseNo = row.purchase_no || ''
@@ -2708,6 +2738,11 @@ function handleImportDialogClose() {
   margin-bottom: 12px;
 }
 
+.filter-actions {
+  width: 100%;
+  justify-content: center !important;
+}
+
 .status-tabs {
   display: flex;
   gap: 4px;
@@ -2838,7 +2873,7 @@ function handleImportDialogClose() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
+  padding: 12px 16px;
   background: #fafbfc;
   border-bottom: 1px solid #f0f2f5;
   font-size: 13px;
@@ -2892,7 +2927,7 @@ function handleImportDialogClose() {
 .card-body {
   display: flex;
   align-items: center;
-  padding: 14px 16px;
+  padding: 18px 16px;
 }
 
 .card-body .ot-col {
@@ -2909,8 +2944,8 @@ function handleImportDialogClose() {
 }
 
 .product-image {
-  width: 52px;
-  height: 52px;
+  width: 56px;
+  height: 56px;
   border-radius: 6px;
   flex-shrink: 0;
   border: 1px solid #ebeef5;
@@ -2984,6 +3019,13 @@ function handleImportDialogClose() {
 }
 
 /* 备注 */
+.remark-cell {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  cursor: pointer;
+}
+
 .remark-text {
   font-size: 12px;
   color: #f56c6c;
@@ -2993,6 +3035,19 @@ function handleImportDialogClose() {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   word-break: break-all;
+  flex: 1;
+}
+
+.remark-edit-icon {
+  font-size: 14px;
+  color: #c0c4cc;
+  flex-shrink: 0;
+  margin-top: 1px;
+  transition: color 0.2s;
+}
+
+.remark-cell:hover .remark-edit-icon {
+  color: #409eff;
 }
 
 /* 操作按钮 */

@@ -13,6 +13,12 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
+    server: {
+      // localStorage 按 origin（含端口）隔离。开发端口漂移到 5174 会让
+      // 已记住的账号看起来“丢失”，因此端口占用时应直接报错。
+      port: 5173,
+      strictPort: true
+    },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version)
     },

@@ -4,6 +4,15 @@ const http = require('http')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
+const {
+  buildTaobaoAddressManagerScript,
+  TAOBAO_TERMINAL_FAILURE_RESULTS
+} = require('./taobao-address-script')
+const {
+  decodeTaobaoSkuSourceUrl,
+  addTaobaoSkuIdToUrl,
+  buildTaobaoSkuAutoSelectScript
+} = require('./taobao-sku-selection')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -14,6 +23,29 @@ const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 
 // 活跃的采购下单窗口 Map<purchaseNo, { win, pollTimer, resolved }>
 const activePurchaseWindows = new Map()
+
+// 电商平台域名白名单 — 只有这些域名的页面才允许注入脚本
+const ECOMMERCE_DOMAINS = [
+  'taobao.com', 'tmall.com', 'tb.cn',
+  '1688.com',
+  'yangkeduo.com', 'pinduoduo.com',
+  'jd.com', '京东.com',
+  'alipay.com', 'alipaydev.com',  // 支付宝页面需要提取订单号
+  'tenpay.com', 'qpay.com'       // 财付通等支付中间页
+]
+
+// 判断 URL 是否为非电商平台页面（银行支付页、网银页面等）
+// 返回 true 表示该页面不应该注入任何脚本
+function isThirdPartyPage(url) {
+  if (!url) return true
+  const lower = url.toLowerCase()
+  // 电商平台白名单检查
+  for (const domain of ECOMMERCE_DOMAINS) {
+    if (lower.includes(domain)) return false
+  }
+  // 非 whitelist 域名 — 银行/网银/第三方支付页面
+  return true
+}
 
 // 验证商品标题：拒绝明显来自非商品页的标题
 function isValidProductTitle(title) {
@@ -528,13 +560,16 @@ const PRODUCT_INFO_OVERLAY = `
 
   function buildOverlay() {
 
-  // === 淘宝浮窗左侧，PDD浮窗右侧 ===
-  var overlayPos = isPdd ? 'right:20px' : 'left:20px';
+  // === 淘宝浮窗左侧，PDD浮窗右侧；结算页按核对区域避让 ===
+  // 结算页相对原坐标 left:20px/top:80px 右移 90px、下移 205px。
+  var overlayPos = isPdd ? 'right:20px' : (isCheckout ? 'left:110px' : 'left:20px');
+  var overlayTop = isCheckout ? 285 : 190;
+  var overlayWidth = isCheckout ? 330 : 185;
 
   // === 创建浮层容器 ===
   var overlay = document.createElement('div');
   overlay.id = 'jd-product-overlay';
-  overlay.style.cssText = 'position:fixed;top:80px;' + overlayPos + ';width:220px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;line-height:1.5;color:#333;border-radius:8px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.12);user-select:none;background:#fff;border:1px solid #ebeef5;';
+  overlay.style.cssText = 'position:fixed;top:' + overlayTop + 'px;' + overlayPos + ';width:' + overlayWidth + 'px;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:13px;line-height:1.5;color:#333;border-radius:8px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.12);user-select:none;background:#fff;border:1px solid #ebeef5;';
 
   // === 标题栏 ===
   var header = document.createElement('div');
@@ -568,30 +603,36 @@ const PRODUCT_INFO_OVERLAY = `
 
   if (isCheckout) {
     // === 结算页模式：只显示收货地址 ===
-    if (info.shippingName || info.shippingPhone) {
+    if (info.shippingName || info.shippingPhone || info.shippingAddress) {
+      var addressCard = document.createElement('div');
+      addressCard.style.cssText = 'font-size:12px;color:#606266;line-height:1.5;word-break:break-all;padding:10px 12px;background:#f5f7fa;border-radius:6px;border:1px solid #ebeef5;';
+
+      if (info.shippingName || info.shippingPhone) {
       var contactRow = document.createElement('div');
-      contactRow.style.cssText = 'display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;';
+        contactRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;' + (info.shippingAddress ? 'margin-bottom:6px;' : '');
 
-      if (info.shippingName) {
-        var nameSpan = document.createElement('span');
-        nameSpan.style.cssText = 'color:#303133;font-weight:500;';
-        nameSpan.textContent = info.shippingName;
-        contactRow.appendChild(nameSpan);
+        if (info.shippingName) {
+          var nameSpan = document.createElement('span');
+          nameSpan.style.cssText = 'color:#303133;font-weight:500;';
+          nameSpan.textContent = info.shippingName;
+          contactRow.appendChild(nameSpan);
+        }
+        if (info.shippingPhone) {
+          var phoneSpan = document.createElement('span');
+          phoneSpan.style.cssText = 'color:#409eff;font-weight:500;';
+          phoneSpan.textContent = info.shippingPhone;
+          contactRow.appendChild(phoneSpan);
+        }
+        addressCard.appendChild(contactRow);
       }
-      if (info.shippingPhone) {
-        var phoneSpan = document.createElement('span');
-        phoneSpan.style.cssText = 'color:#409eff;font-weight:500;';
-        phoneSpan.textContent = info.shippingPhone;
-        contactRow.appendChild(phoneSpan);
-      }
-      body.appendChild(contactRow);
-    }
 
-    if (info.shippingAddress) {
-      var addrEl = document.createElement('div');
-      addrEl.style.cssText = 'font-size:12px;color:#606266;line-height:1.5;word-break:break-all;padding:8px 10px;background:#f5f7fa;border-radius:6px;border:1px solid #ebeef5;';
-      addrEl.textContent = info.shippingAddress;
-      body.appendChild(addrEl);
+      if (info.shippingAddress) {
+        var addrEl = document.createElement('div');
+        addrEl.textContent = info.shippingAddress;
+        addressCard.appendChild(addrEl);
+      }
+
+      body.appendChild(addressCard);
     }
 
     // 如果没有收货信息，显示提示
@@ -609,7 +650,7 @@ const PRODUCT_INFO_OVERLAY = `
       imgWrap.style.cssText = 'text-align:center;margin-bottom:10px;';
       var img = document.createElement('img');
       img.src = info.image;
-      img.style.cssText = 'width:180px;height:180px;border-radius:6px;object-fit:contain;';
+      img.style.cssText = 'width:100%;aspect-ratio:1/1;border-radius:6px;object-fit:contain;';
       img.onerror = function() { imgWrap.style.display = 'none'; };
       imgWrap.appendChild(img);
       body.appendChild(imgWrap);
@@ -839,7 +880,7 @@ const READ_CAPTURED_PURCHASES = `
 
 // 各平台地址管理页URL
 const ADDRESS_MANAGE_URLS = {
-  taobao: 'https://member1.taobao.com/member/fresh/deliver_address.htm',
+  taobao: 'https://i.taobao.com/my_itaobao/receiver-address-pc',
   '1688': 'https://wuliu.1688.com/foundation/receive_address_manager.htm',
   pinduoduo: 'https://mobile.yangkeduo.com/addresses.html'
 }
@@ -1581,7 +1622,7 @@ function buildPddCheckoutAddressSelectScript(shippingName, shippingPhone) {
  * 参考dl系统：在地址管理页面添加新的收货地址
  * 选择器: #fullName(姓名), #mobile(手机), .cndzk-entrance-division(省市区), .cndzk-entrance-associate-area-textarea(详细地址)
  */
-function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr) {
+function buildTaobaoAddressManagerScriptLegacy(receiverName, receiverPhone, parsedAddr) {
   // 使用 JSON.stringify 安全转义，防止代码注入
   const name = JSON.stringify(receiverName || '')
   const phone = JSON.stringify(receiverPhone || '')
@@ -3507,6 +3548,8 @@ function buildLoginAutoFillScript(accountName, password) {
 function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin }) {
   const addrUrl = ADDRESS_MANAGE_URLS[platform]
   if (!addrUrl) return null
+  // 地址适配已稳定，恢复后台静默执行；仅登录失效或安全验证时再显示窗口。
+  const showAddressDebugWindow = false
 
   // 通知前端：正在自动设置收货地址
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3516,7 +3559,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   const addrWin = new BrowserWindow({
     width: 1280,
     height: 860,
-    show: false,
+    show: showAddressDebugWindow,
     title: `设置收货地址 - ${platform}`,
     webPreferences: {
       partition: partitionName,
@@ -3535,10 +3578,34 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   }, 120000)
 
+  let addrDone = false
+  let lastAddressIssue = ''
+
+  function sendAddressSetupDone(extra = {}) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo, ...extra })
+    }
+  }
+
+  function closeAddressWindowAfterFailure() {
+    if (addrWin.isDestroyed()) return
+    if (showAddressDebugWindow) {
+      addrWin.show()
+      addrWin.focus()
+      runtimeLog.writeLog('AddrSetupWin', '开发调试模式：失败后保留淘宝地址窗口')
+      return
+    }
+    addrWin.destroy()
+  }
+
   // 转发后台窗口的console.log + 检测地址操作成功信号
   addrWin.webContents.on('console-message', (event, level, message) => {
     if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]')) {
       console.log(`[AddrSetupWin] ${message}`)
+    }
+    // 淘宝新版脚本只记录阶段码，不包含姓名、电话或详细地址，可安全写入持久日志。
+    if (message.includes('[AddressAutoFill][TB]')) {
+      runtimeLog.writeLog('AddrSetupWin', message)
     }
     // ★ 检测地址操作成功信号（三种途径，任一触发即可）：
     //   1. "Address added successfully" — DOMNodeInserted检测到新地址行
@@ -3549,9 +3616,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       addrDone = true
       clearTimeout(maxLifetime)
       // 通知前端：地址设置完成
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
-      }
+      sendAddressSetupDone()
       // ★ 在采购小窗中显示绿色居中提示（与result轮询一致）
       if (purchaseWin && !purchaseWin.isDestroyed()) {
         purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
@@ -3576,7 +3641,6 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   })
 
-  let addrDone = false
   let last1688ManagerInjectTime = 0  // ★ 防止页面刷新后立即重复注入1688管理脚本
   let injected1688Count = 0           // ★ 限制1688管理脚本最多注入2次，防止循环
 
@@ -3585,14 +3649,21 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     if (addrDone) return
     const urlLower = url.toLowerCase()
 
-    // 淘宝地址管理页（排除中间跳转页）
-    if (urlLower.includes('member1.taobao.com/member/fresh/deliver_address') && !urlLower.includes('_____tmd_____') && !urlLower.includes('login_jump')) {
+    // 淘宝地址管理页：兼容旧版 member1 页面和新版 i.taobao.com SPA 页面。
+    const isTaobaoAddressPage = platform === 'taobao' &&
+      (urlLower.includes('i.taobao.com/my_itaobao/receiver-address-pc') ||
+       urlLower.includes('member1.taobao.com/member/fresh/deliver_address'))
+    if (isTaobaoAddressPage && !urlLower.includes('_____tmd_____') && !urlLower.includes('login_jump')) {
       console.log('[AddrSetupWin] Taobao address manager page detected')
+      runtimeLog.writeLog('AddrSetupWin', `淘宝地址页命中: ${urlLower.substring(0, 160)}`)
       if (parsedAddr) {
         setTimeout(() => {
           if (addrWin.isDestroyed() || addrDone) return
           const script = buildTaobaoAddressManagerScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
-          addrWin.webContents.executeJavaScript(script).catch(() => {})
+          addrWin.webContents.executeJavaScript(script).catch((err) => {
+            lastAddressIssue = 'script_error'
+            runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行失败: ${err.message}`)
+          })
         }, 500)
       }
       return
@@ -3772,6 +3843,13 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   })
 
+  // 新版 i.taobao.com 地址页使用 SPA 路由，hash/pushState 变化不会触发 did-navigate。
+  addrWin.webContents.on('did-navigate-in-page', (event, url) => {
+    if (addrWin.isDestroyed() || addrDone) return
+    console.log(`[AddrSetupWin] did-navigate-in-page: ${url.substring(0, 120)}`)
+    injectAddressScripts(url)
+  })
+
   // 地址设置结果轮询
   let checkCount = 0
   const checkTimer = setInterval(() => {
@@ -3784,13 +3862,23 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     if (checkCount > 60) {
       clearInterval(checkTimer)
       console.log('[AddrSetupWin] Address setup timeout')
+      const reason = lastAddressIssue || 'timeout'
+      runtimeLog.writeLog('AddrSetupWin', `地址设置超时: platform=${platform}, purchaseNo=${purchaseNo}, reason=${reason}`)
       addrDone = true
       clearTimeout(maxLifetime)
-      // 超时也通知完成，不阻塞主流程
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
-      }
-      if (!addrWin.isDestroyed()) addrWin.destroy()
+      // 超时必须明确标记失败，禁止前端误报“地址已修改成功”。
+      sendAddressSetupDone({ failed: true, reason })
+      closeAddressWindowAfterFailure()
+      return
+    }
+
+    if (TAOBAO_TERMINAL_FAILURE_RESULTS.includes(lastAddressIssue)) {
+      clearInterval(checkTimer)
+      addrDone = true
+      clearTimeout(maxLifetime)
+      runtimeLog.writeLog('AddrSetupWin', `地址脚本失败: platform=${platform}, purchaseNo=${purchaseNo}, reason=${lastAddressIssue}`)
+      sendAddressSetupDone({ failed: true, reason: lastAddressIssue })
+      closeAddressWindowAfterFailure()
       return
     }
 
@@ -3799,15 +3887,14 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       .then(result => {
         if (!result || addrDone) return
         console.log(`[AddrSetupWin] Address setup result: ${result}`)
+        runtimeLog.writeLog('AddrSetupWin', `地址设置结果: platform=${platform}, purchaseNo=${purchaseNo}, result=${result}`)
 
         if (result === 'success' || result === 'submitted') {
           clearInterval(checkTimer)
           addrDone = true
           clearTimeout(maxLifetime)
           // 通知前端：地址设置完成
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
-          }
+          sendAddressSetupDone()
           // 在采购小窗中显示绿色居中提示
           if (purchaseWin && !purchaseWin.isDestroyed()) {
             purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
@@ -3831,16 +3918,16 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
           }, 1500)
         } else if (result === 'need_login' || result === 'need_verify') {
           // 需要登录或验证 — 显示窗口让用户手动操作
+          lastAddressIssue = result
           if (!addrWin.isDestroyed() && !addrWin.isVisible()) addrWin.show()
           console.log(`[AddrSetupWin] Address setup issue: ${result}, showing window`)
-        } else if (result === 'no_button' || result === 'no_form') {
+        } else if (TAOBAO_TERMINAL_FAILURE_RESULTS.includes(result)) {
           clearInterval(checkTimer)
           addrDone = true
           clearTimeout(maxLifetime)
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('purchase-address-setup-done', { purchaseNo })
-          }
-          if (!addrWin.isDestroyed()) addrWin.destroy()
+          lastAddressIssue = result
+          sendAddressSetupDone({ failed: true, reason: result })
+          closeAddressWindowAfterFailure()
         }
       })
       .catch(() => {})
@@ -3848,7 +3935,11 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
   // 加载地址管理页
   console.log(`[AddrSetupWin] Loading address management: ${addrUrl}`)
-  addrWin.loadURL(addrUrl).catch(() => {})
+  runtimeLog.writeLog('AddrSetupWin', `开始地址设置: platform=${platform}, purchaseNo=${purchaseNo}, url=${addrUrl}`)
+  addrWin.loadURL(addrUrl).catch((err) => {
+    lastAddressIssue = 'load_failed'
+    runtimeLog.writeLog('AddrSetupWin', `地址页加载失败: ${err.message}`)
+  })
 
   return addrWin
 }
@@ -3860,6 +3951,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
   ipcMain.handle('open-purchase-order-window', async (event, params) => {
     const { accountId, accountName, password, purchaseUrl, platform, purchaseInfo } = params
     const { purchaseNo } = purchaseInfo
+    const decodedTaobaoSource = (platform === 'taobao' || platform === 'tmall')
+      ? decodeTaobaoSkuSourceUrl(purchaseUrl)
+      : { url: purchaseUrl, selection: null }
+    const savedTaobaoSku = decodedTaobaoSource.selection
+    const effectivePurchaseUrl = savedTaobaoSku
+      ? addTaobaoSkuIdToUrl(decodedTaobaoSource.url, savedTaobaoSku)
+      : decodedTaobaoSource.url
 
     // 将 accountId 和 accountName 注入 purchaseInfo，供 autoCreateAndBind 使用
     purchaseInfo.accountId = accountId
@@ -3876,7 +3974,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     }
     // ========== 所有平台：使用内嵌真实 Chrome（和 dl 内嵌 Chromium 一致） ==========
     const partitionName = `persist:purchase-${accountId}`
-    console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${purchaseUrl}`)
+    console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${effectivePurchaseUrl}`)
+    if (savedTaobaoSku) {
+      runtimeLog.writeLog(
+        'PurchaseSku',
+        `已读取货源SKU: skuId=${savedTaobaoSku.skuId || ''}, options=${savedTaobaoSku.options.length}`
+      )
+    }
     console.log(`[PurchaseCapture] Account info: accountId=${accountId}, accountName="${accountName || ''}", password=${password ? 'YES' : 'NO'}`)
 
     // ========== Cookie 恢复策略 ==========
@@ -4081,6 +4185,21 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         preload: PRELOAD_ENABLED ? preloadPath : undefined
       }
     })
+
+    const taobaoSkuAutoSelectScript = savedTaobaoSku
+      ? buildTaobaoSkuAutoSelectScript(savedTaobaoSku)
+      : ''
+    function scheduleTaobaoSkuAutoSelect(reason, delay = 500) {
+      if (!taobaoSkuAutoSelectScript) return
+      setTimeout(() => {
+        if (win.isDestroyed() || resolved) return
+        win.webContents.executeJavaScript(taobaoSkuAutoSelectScript, true)
+          .then(result => {
+            if (result) runtimeLog.writeLog('PurchaseSku', `${reason}: ${result}`)
+          })
+          .catch(error => runtimeLog.writeLog('PurchaseSku', `${reason}注入失败: ${error.message}`))
+      }, delay)
+    }
 
     // ========== 反爬指纹伪装（复用上方已获取的 ses 对象） ==========
     const chromeVersion = process.versions.chrome || '134.0.0.0'
@@ -4669,6 +4788,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 这比轮询快得多，即使页面马上跳转也能捕获到
     win.webContents.on('console-message', (event, level, message, line, sourceId) => {
       if (!message) return
+      if (message.startsWith('[DXE_SKU_AUTO]')) {
+        runtimeLog.writeLog('PurchaseSku', message)
+        console.log(`[PurchaseCapture] ${message}`)
+        return
+      }
       // ★★★ 捕获 preload 加载确认消息 ★★★
       if (message.startsWith('[PRELOAD_LOADED]')) {
         runtimeLog.writeLog('Preload', `✓ purchase-preload.js 已成功加载并执行: ${message}`)
@@ -4743,23 +4867,27 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
       const currentUrl = win.webContents.getURL()
       console.log(`[PurchaseCapture] dom-ready: ${currentUrl.substring(0, 120)}`)
+      scheduleTaobaoSkuAutoSelect('dom-ready', 450)
 
       // ★ 反检测由 preload 在页面 JS 之前注入（contextIsolation=false 下 preload 直接修改页面 navigator 等）
       // 不再需要 executeJavaScript 注入 ANTI_DETECT_SCRIPT
 
-      // 主窗口始终注入订单拦截器（和 dl 一致）
-      win.webContents.executeJavaScript(PURCHASE_INTERCEPTOR).catch(() => {})
-      console.log('[PurchaseCapture] Interceptor injected (anti-detect handled by preload)')
+      // ★ 非电商平台页面（银行支付页等）跳过所有脚本注入，避免干扰页面交互
+      if (!isThirdPartyPage(currentUrl)) {
+        // 主窗口注入订单拦截器（和 dl 一致）
+        win.webContents.executeJavaScript(PURCHASE_INTERCEPTOR).catch(() => {})
+        console.log('[PurchaseCapture] Interceptor injected (anti-detect handled by preload)')
 
-      // 注入商品信息浮层（采购页面右上角显示销售订单商品信息，方便对比）
-      // ★ PDD 安全策略（参考 dl）：脚本内部通过 URL 正则判断只在商品详情页创建浮层 DOM
-      //   登录页/结算页/支付页等一律跳过，和 dl 的 pddBuyer 行为一致
-      // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
-      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
-        .then(result => {
-          if (result) console.log(`[PurchaseCapture] Overlay result: ${result}`)
-        })
-        .catch(() => {})
+        // 注入商品信息浮层（采购页面右上角显示销售订单商品信息，方便对比）
+        // ★ PDD 安全策略（参考 dl）：脚本内部通过 URL 正则判断只在商品详情页创建浮层 DOM
+        //   登录页/结算页/支付页等一律跳过，和 dl 的 pddBuyer 行为一致
+        // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
+        win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+          .then(result => {
+            if (result) console.log(`[PurchaseCapture] Overlay result: ${result}`)
+          })
+          .catch(() => {})
+      }
 
       // === 登录页自动填充 ===
       const urlLower = currentUrl.toLowerCase()
@@ -5561,17 +5689,23 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }
       }
 
-      // 页面导航后重新注入商品信息浮层（脚本内部按 URL 过滤，PDD 只在商品页创建 DOM）
+      // 页面导航后重新注入商品信息浮层（仅电商平台页面，银行/支付页面跳过）
       // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
-      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
-        .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(nav) result: ${result}`) })
-        .catch(() => {})
+      if (!isThirdPartyPage(url)) {
+        win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+          .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(nav) result: ${result}`) })
+          .catch(() => {})
+      }
+      scheduleTaobaoSkuAutoSelect('did-navigate', 650)
     })
 
     // SPA内的hash/pushState导航
     win.webContents.on('did-navigate-in-page', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate-in-page: ${url.substring(0, 120)}`)
+
+      // ★ 非电商平台页面跳过所有脚本注入（银行支付页等）
+      if (isThirdPartyPage(url)) return
 
       tryExtractOrderFromPage(url)
 
@@ -5652,11 +5786,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }
       }
 
-      // SPA导航后重新注入商品信息浮层（脚本内部按 URL 过滤，PDD 只在商品页创建 DOM）
+      // SPA导航后重新注入商品信息浮层（仅电商平台页面）
       // ★ 合并为单次 executeJavaScript：确保 __jdProductInfo 在 overlay 脚本执行前已设置
-      win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
-        .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(spa) result: ${result}`) })
-        .catch(() => {})
+      if (!isThirdPartyPage(url)) {
+        win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
+          .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(spa) result: ${result}`) })
+          .catch(() => {})
+      }
     })
 
     // 页面即将导航前 — 关键时机！在跳走之前：
@@ -5670,6 +5806,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
         runtimeLog.writeLog('PurchaseNav', `will-navigate: ${url.substring(0, 200)}`)
       }
+
+      // ★ 非电商平台页面（银行支付页等）跳过所有脚本执行，避免干扰页面交互
+      const currentUrl = (win.webContents.getURL() || '').toLowerCase()
+      if (isThirdPartyPage(currentUrl)) return
 
       if (platform === 'taobao' && !resolved) {
         // 1. 尝试从当前页面HTML提取 b2c_orid
@@ -5805,13 +5945,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     })
 
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）
-    console.log(`[PurchaseCapture] Loading product page: ${purchaseUrl.substring(0, 120)}`)
-    runtimeLog.writeLog('PurchaseWin', `加载商品页: ${purchaseUrl.substring(0, 200)}`)
+    console.log(`[PurchaseCapture] Loading product page: ${effectivePurchaseUrl.substring(0, 120)}`)
+    runtimeLog.writeLog('PurchaseWin', `加载商品页: ${effectivePurchaseUrl.substring(0, 200)}`)
 
     // 拼多多：不再需要清除缓存（dl 不做缓存清理，Electron 默认 UA 正常工作）
 
     try {
-      await win.loadURL(purchaseUrl)
+      await win.loadURL(effectivePurchaseUrl)
     } catch (e) {
       console.error('[PurchaseCapture] loadURL failed:', e.message)
     }
@@ -5825,6 +5965,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
         return
       }
+
+      // ★ 非电商平台页面跳过轮询（银行支付页等），避免 executeJavaScript 干扰页面交互
+      const pollUrl = (win.webContents.getURL() || '').toLowerCase()
+      if (isThirdPartyPage(pollUrl)) return
 
       win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
         .then(responses => {

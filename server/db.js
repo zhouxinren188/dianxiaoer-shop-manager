@@ -277,6 +277,24 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_status TINYINT NOT NULL DEFAULT 0 COMMENT '库存分配: 0=未处理, 1=延迟发货, 2=仓库直发(已扣库存)'`)
     } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 sales_orders 表：添加问题事件标记字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN issue_event VARCHAR(50) DEFAULT NULL COMMENT '问题事件标记（如职业打假、超时未发货等）'`)
+    } catch (e) { /* 字段已存在 */ }
+    // 打假人信息库
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS fraudster_buyers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        buyer_account VARCHAR(255) NOT NULL COMMENT '买家账号',
+        buyer_name VARCHAR(255) DEFAULT NULL COMMENT '买家姓名',
+        buyer_phone VARCHAR(50) DEFAULT NULL COMMENT '买家手机号',
+        buyer_address TEXT DEFAULT NULL COMMENT '收货地址',
+        source_order_id VARCHAR(100) DEFAULT NULL COMMENT '来源订单ID',
+        source_order_no VARCHAR(100) DEFAULT NULL COMMENT '来源订单号',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_buyer_account (buyer_account)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='打假人信息库'
+    `)
 
     // 插入默认数据
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")

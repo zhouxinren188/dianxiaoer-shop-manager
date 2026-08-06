@@ -16,11 +16,11 @@
       <el-form-item label="用户名" prop="username">
         <el-input v-model="form.username" placeholder="请输入用户名" :disabled="isEdit" />
       </el-form-item>
+      <el-form-item label="密码" prop="password">
+        <el-input v-model="form.password" type="password" :placeholder="isEdit ? '留空则不修改' : '请输入密码'" show-password />
+      </el-form-item>
       <el-form-item label="手机号" prop="phone">
         <el-input v-model="form.phone" placeholder="请输入手机号" maxlength="11" />
-      </el-form-item>
-      <el-form-item label="密码" prop="password" v-if="!isEdit">
-        <el-input v-model="form.password" type="password" placeholder="请输入密码" show-password />
       </el-form-item>
       <el-form-item label="账号类型" prop="userType">
         <el-radio-group v-model="form.userType" :disabled="isEdit">
@@ -29,7 +29,7 @@
         </el-radio-group>
       </el-form-item>
       <el-form-item label="角色" prop="role">
-        <el-select v-model="form.role" placeholder="请选择角色" style="width: 100%;">
+        <el-select v-model="form.role" placeholder="请选择角色" style="width: 100%;" :disabled="!isAdmin">
           <el-option label="管理员" value="admin" />
           <el-option label="普通员工" value="staff" />
         </el-select>
@@ -66,6 +66,7 @@ const visible = computed({
 })
 
 const isEdit = computed(() => !!props.userData)
+const isAdmin = computed(() => props.currentUser?.role === 'admin')
 
 const formRef = ref()
 const submitting = ref(false)
@@ -79,7 +80,7 @@ const form = ref({
   status: 'enabled'
 })
 
-const rules = {
+const rules = computed(() => ({
   username: [
     { required: true, message: '请输入用户名', trigger: 'blur' }
   ],
@@ -88,7 +89,7 @@ const rules = {
     { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }
   ],
   password: [
-    { required: true, message: '请输入密码', trigger: 'blur' }
+    ...(isEdit.value ? [] : [{ required: true, message: '请输入密码', trigger: 'blur' }])
   ],
   userType: [
     { required: true, message: '请选择账号类型', trigger: 'change' }
@@ -96,7 +97,7 @@ const rules = {
   role: [
     { required: true, message: '请选择角色', trigger: 'change' }
   ]
-}
+}))
 
 watch(() => props.userData, (val) => {
   if (val) {
@@ -136,7 +137,9 @@ async function handleSubmit() {
   submitting.value = true
   try {
     if (isEdit.value) {
-      const { password, ...data } = form.value
+      const data = { ...form.value }
+      // 密码留空则不传
+      if (!data.password) delete data.password
       await updateUser(props.userData.id, data)
       ElMessage.success('修改成功')
     } else {

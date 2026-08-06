@@ -43,6 +43,21 @@ export function updateSalesOrderPurchaseStatus(orderId, purchaseStatus) {
   return put(`/api/sales-orders/${orderId}/purchase-status`, { purchase_status: purchaseStatus })
 }
 
+// 标记/取消标记问题事件
+export function updateIssueEvent(orderId, issueEvent) {
+  return put(`/api/sales-orders/${orderId}/issue-event`, { issueEvent })
+}
+
+// 检查买家是否在打假人库中（解密后二次比对：账号+地址）
+export function checkFraudster(buyerAccount, orderId, buyerAddress) {
+  return post('/api/fraudsters/check', { buyerAccount, orderId, buyerAddress })
+}
+
+// 批量检查买家账号（订单加载后自动比对）
+export function batchCheckFraudsters(orders) {
+  return post('/api/fraudsters/batch-check', { orders })
+}
+
 // 采购锁定：锁定销售订单防止多人同时采购
 export function lockSalesOrderForPurchase(orderId) {
   return post(`/api/sales-orders/${orderId}/purchase-lock`)

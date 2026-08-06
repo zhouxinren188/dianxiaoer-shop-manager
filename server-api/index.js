@@ -425,6 +425,43 @@ app.get('/api/me', authMiddleware, async (req, res) => {
 // 静态文件服务：提供 latest.yml 和 .exe（供 electron-updater 全量更新使用）
 app.use('/updates', express.static(UPDATE_DIR))
 
+// 固定下载地址：自动跳转到最新版安装包（供外部广告/推广使用）
+// 用法：http://150.158.54.108:3001/download/latest
+app.get('/download/latest', (req, res) => {
+  try {
+    // 优先从 latest.yml 读取版本号和文件名
+    const ymlPath = path.join(UPDATE_DIR, 'latest.yml')
+    if (fs.existsSync(ymlPath)) {
+      const yml = fs.readFileSync(ymlPath, 'utf-8')
+      const versionMatch = yml.match(/version:\s*(.+)/)
+      const fileMatch = yml.match(/path:\s*(.+)/)
+      if (versionMatch && fileMatch) {
+        const fileName = fileMatch[1].trim()
+        const filePath = path.join(UPDATE_DIR, fileName)
+        if (fs.existsSync(filePath)) {
+          const version = versionMatch[1].trim()
+          console.log(`[Download] /download/latest → ${fileName} (v${version})`)
+          return res.download(filePath, fileName)
+        }
+      }
+    }
+    // 降级：扫描 updates 目录找最新的 .exe 文件
+    const files = fs.readdirSync(UPDATE_DIR).filter(f => f.endsWith('.exe') && f.startsWith('dianxiaoer-setup-'))
+    if (files.length > 0) {
+      // 按修改时间排序，取最新的
+      files.sort((a, b) => fs.statSync(path.join(UPDATE_DIR, b)).mtimeMs - fs.statSync(path.join(UPDATE_DIR, a)).mtimeMs)
+      const fileName = files[0]
+      const filePath = path.join(UPDATE_DIR, fileName)
+      console.log(`[Download] /download/latest → ${fileName} (降级扫描)`)
+      return res.download(filePath, fileName)
+    }
+    res.status(404).send('暂无可用安装包')
+  } catch (err) {
+    console.error('[Download] 错误:', err.message)
+    res.status(500).send('下载失败: ' + err.message)
+  }
+})
+
 // 读取/写入 update-meta.json
 function readMeta() {
   if (!fs.existsSync(META_FILE)) return { hot: null, full: null }

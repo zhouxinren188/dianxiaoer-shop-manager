@@ -17,6 +17,7 @@ const { getHotUpdateRendererPath, getCurrentVersion, clearHotUpdate } = require(
 const { initUpdateManager } = require('./update-manager')
 const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./platform-window')
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
+const { registerTaobaoSameSearchIpc } = require('./taobao-same-search')
 const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
@@ -26,6 +27,9 @@ const { startHeartbeat } = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
+
+// 退出确认标志 — 防止 close 事件循环
+let isQuitting = false
 
 // 允许自签名证书（仅用于连接内部服务器API）
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -114,6 +118,14 @@ function createWindow() {
     })
   }
 
+  // 拦截窗口关闭 — 通知渲染进程弹出确认对话框（Element Plus 风格）
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault()
+      mainWindow.webContents.send('app-close-requested')
+    }
+  })
+
   return mainWindow
 }
 
@@ -126,6 +138,7 @@ ipcMain.handle('window-maximize', (event) => {
   if (win) win.isMaximized() ? win.unmaximize() : win.maximize()
 })
 ipcMain.handle('window-close', (event) => {
+  isQuitting = true
   BrowserWindow.fromWebContents(event.sender)?.close()
 })
 ipcMain.handle('get-app-version', () => getCurrentVersion())
@@ -992,6 +1005,9 @@ app.whenReady().then(async () => {
 
   // 注册采购下单捕获 IPC
   registerPurchaseOrderCaptureIpc(mainWindow)
+
+  // 注册淘宝按图搜同款 IPC
+  registerTaobaoSameSearchIpc()
 
   // 注册采购订单浏览器同步 IPC
   registerPurchaseOrderSyncIpc(mainWindow)

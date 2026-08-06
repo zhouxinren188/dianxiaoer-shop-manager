@@ -144,11 +144,10 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { User, Lock, Phone, TrendCharts, Box, Connection } from '@element-plus/icons-vue'
-import { checkStatus } from '@/api/subscription'
 
 const router = useRouter()
 const loginFormRef = ref(null)
@@ -194,17 +193,36 @@ const registerRules = {
 function handleMinimize() {
   window.electronAPI?.invoke('window-minimize')
 }
+// 退出确认弹窗
+function showQuitConfirm() {
+  ElMessageBox.confirm('确定要退出店小二网店管家吗？', '退出确认', {
+    confirmButtonText: '退出',
+    cancelButtonText: '取消',
+    type: 'warning'
+  }).then(() => {
+    window.electronAPI?.invoke('window-close')
+  }).catch(() => {})
+}
+
 function handleClose() {
-  window.electronAPI?.invoke('window-close')
+  showQuitConfirm()
 }
 
 // 进入登录页时确保窗口为登录尺寸
+let unsubCloseRequested = null
 onMounted(async () => {
   window.electronAPI?.invoke('window-set-login-size')
+  unsubCloseRequested = window.electronAPI?.onUpdate('app-close-requested', () => {
+    showQuitConfirm()
+  })
   try {
     const ver = await window.electronAPI?.invoke('get-app-version')
     if (ver) appVersion.value = ver
   } catch {}
+})
+
+onUnmounted(() => {
+  unsubCloseRequested?.()
 })
 
 const API_BASE = 'http://150.158.54.108:3001'
@@ -342,21 +360,7 @@ async function handleLogin() {
         try { await window.electronAPI?.invoke('window-set-main-size') } catch {}
         ElMessage.success('登录成功')
 
-        // 检查订阅状态，过期则跳转订阅页
-        let shouldRedirectToSub = false
-        try {
-          const subRes = await checkStatus()
-          if (subRes.success && subRes.status === 'expired') {
-            shouldRedirectToSub = true
-          }
-        } catch {
-          // 订阅状态查询失败，不阻断登录流程
-        }
-        if (shouldRedirectToSub) {
-          router.replace('/subscription')
-        } else {
-          router.replace('/')
-        }
+        router.replace('/')
       } else {
         ElMessage.error(res?.message || '账号或密码错误')
       }

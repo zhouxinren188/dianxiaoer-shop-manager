@@ -181,17 +181,44 @@
       @saved="onStoreSaved"
     />
 
-    <!-- 充值订阅弹窗 -->
+        <!-- 充值订阅弹窗 -->
     <SubscriptionDialog
       v-model:visible="subDialogVisible"
       @success="onSubSuccess"
     />
+
+    <!-- 店铺类型选择弹窗 -->
+    <el-dialog
+      v-model="typeSelectVisible"
+      title="选择店铺类型"
+      width="560px"
+      :close-on-click-modal="false"
+      class="type-select-dialog"
+    >
+      <div class="type-cards">
+        <div
+          v-for="t in storeTypeOptions"
+          :key="t.value"
+          class="type-card"
+          @click="confirmAddStore(t.value)"
+        >
+          <div class="type-card-icon" :style="{ background: t.color }">
+            <el-icon :size="28"><component :is="t.icon" /></el-icon>
+          </div>
+          <div class="type-card-info">
+            <div class="type-card-name">{{ t.label }}</div>
+            <div class="type-card-desc">{{ t.desc }}</div>
+          </div>
+          <el-icon class="type-card-arrow"><ArrowRight /></el-icon>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
-import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet } from '@element-plus/icons-vue'
+import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet, ArrowRight, Shop, Goods, Van } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchStores, createStore, deleteStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
@@ -202,6 +229,16 @@ const STORE_TYPE_MAP = {
   supplier: '供应商店铺',
   consignment: '代销店铺'
 }
+
+// 店铺类型选择卡片
+const storeTypeOptions = [
+  { value: 'pop', label: 'POP店铺', desc: '包含旗舰店、专营店、专卖店、企业店、个人小店', icon: Shop, color: '#409eff' },
+  { value: 'consignment', label: '代销店铺', desc: '代销模式，由供应商发货', icon: Goods, color: '#e6a23c' },
+  { value: 'supplier', label: '供货店铺', desc: '供货模式，为代销商提供货源', icon: Van, color: '#67c23a' }
+]
+
+// 类型选择弹窗
+const typeSelectVisible = ref(false)
 
 function storeTypeLabel(type) {
   return STORE_TYPE_MAP[type] || '-'
@@ -314,11 +351,18 @@ function onStoreSaved() {
   loadAllTagOptions()
 }
 
-async function handleAdd() {
+function handleAdd() {
   if (!window.electronAPI) {
     ElMessage.warning('请在 Electron 环境中使用此功能')
     return
   }
+  // 弹出店铺类型选择
+  typeSelectVisible.value = true
+}
+
+async function confirmAddStore(storeType) {
+  typeSelectVisible.value = false
+  const typeLabel = STORE_TYPE_MAP[storeType] || '店铺'
 
   try {
     const now = new Date()
@@ -329,10 +373,11 @@ async function handleAdd() {
       minute: '2-digit'
     }).replace(/[\/\s:]/g, '')
 
-    // 自动创建店铺（默认京东）
+    // 创建店铺（带店铺类型）
     const result = await createStore({
-      name: `京东店铺${timeStr}`,
-      platform: 'jd'
+      name: `京东${typeLabel}${timeStr}`,
+      platform: 'jd',
+      store_type: storeType
     })
     const newStoreId = result.id
 
@@ -345,7 +390,7 @@ async function handleAdd() {
       throw new Error(openResult?.message || '打开平台窗口失败')
     }
 
-    ElMessage.success('已创建店铺并打开 shop.jd.com，请在弹出的浏览器窗口中登录')
+    ElMessage.success(`已创建${typeLabel}并打开 shop.jd.com，请在弹出的浏览器窗口中登录`)
     loadStores()
   } catch (err) {
     ElMessage.error('操作失败: ' + err.message)
@@ -763,5 +808,66 @@ onUnmounted(() => {
 
 .login-alert .el-button {
   margin-left: 12px;
+}
+
+/* 店铺类型选择弹窗 */
+.type-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.type-card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px;
+  border: 2px solid #f0f0f0;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.25s;
+}
+
+.type-card:hover {
+  border-color: #409eff;
+  background: #f5f9ff;
+  transform: translateX(4px);
+}
+
+.type-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.type-card-info {
+  flex: 1;
+}
+
+.type-card-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 4px;
+}
+
+.type-card-desc {
+  font-size: 13px;
+  color: #9ca3af;
+}
+
+.type-card-arrow {
+  color: #c0c4cc;
+  font-size: 16px;
+  transition: color 0.25s;
+}
+
+.type-card:hover .type-card-arrow {
+  color: #409eff;
 }
 </style>

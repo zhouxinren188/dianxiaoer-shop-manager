@@ -53,6 +53,9 @@
             <el-option label="全部" value="" />
           </el-select>
         </el-form-item>
+        <el-form-item label="SKU/商品">
+          <el-input v-model="filterForm.keyword" placeholder="输入SKU或商品名称" clearable style="width: 200px" @keyup.enter="handleSearch" />
+        </el-form-item>
         <el-form-item label="统计周期">
           <el-select v-model="filterForm.period" placeholder="选择周期" style="width: 140px" @change="handlePeriodChange">
             <el-option label="今日" value="today" />
@@ -324,7 +327,8 @@ const filterForm = reactive({
   storeId: '',
   period: 'week',
   dateRange: [today, today],
-  bindStatus: 'unbind'
+  bindStatus: 'unbind',
+  keyword: ''
 })
 
 const sortBy = ref('count')
@@ -363,6 +367,7 @@ async function loadData() {
     params.page = pagination.page
     params.pageSize = pagination.pageSize
     if (filterForm.bindStatus) params.bind_status = filterForm.bindStatus
+    if (filterForm.keyword) params.keyword = filterForm.keyword
 
     const res = await fetchProductSalesStats(params)
     if (res) {
@@ -418,6 +423,7 @@ function handleReset() {
   filterForm.period = 'week'
   filterForm.dateRange = [today, today]
   filterForm.bindStatus = 'unbind'
+  filterForm.keyword = ''
   pagination.page = 1
   loadData()
 }

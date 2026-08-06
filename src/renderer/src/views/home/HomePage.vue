@@ -69,11 +69,11 @@
             </div>
             <div class="chart-legend">
               <span class="legend-item">
-                <span class="legend-dot" style="background:#fa8c16"></span>
+                <span class="legend-bar" style="background:#2b5aed"></span>
                 销售额（¥）
               </span>
               <span class="legend-item">
-                <span class="legend-dot" style="background:#2b5aed"></span>
+                <span class="legend-line" style="background:#fa8c16"></span>
                 订单笔数
               </span>
             </div>
@@ -91,14 +91,14 @@
               <!-- 右 Y 轴刻度（订单数） -->
               <text v-for="(v, i) in yAxisRight" :key="'yr'+i" :x="chartW - padR + 8" :y="padT + plotH * i / 4 + 4" text-anchor="start" class="axis-label">{{ v }}</text>
 
-              <!-- 柱状图（订单数） -->
+              <!-- 柱状图（销售额） -->
               <rect
                 v-for="(d, i) in trendData"
                 :key="'bar'+i"
                 :x="barX(i)"
-                :y="barY(d.count)"
+                :y="barY(d.amount)"
                 :width="barW"
-                :height="barH(d.count)"
+                :height="barH(d.amount)"
                 fill="#2b5aed"
                 opacity="0.6"
                 rx="2"
@@ -107,21 +107,21 @@
                 @mouseleave="hoverIdx = -1"
               />
 
-              <!-- 折线图（销售额） -->
-              <polyline
-                :points="linePoints"
+              <!-- 曲线图（订单数） -->
+              <path
+                :d="linePath"
                 fill="none"
                 stroke="#fa8c16"
                 stroke-width="2"
                 stroke-linejoin="round"
                 stroke-linecap="round"
               />
-              <!-- 折线圆点 -->
+              <!-- 曲线圆点 -->
               <circle
                 v-for="(d, i) in trendData"
                 :key="'dot'+i"
                 :cx="dotX(i)"
-                :cy="dotY(d.amount)"
+                :cy="dotY(d.count)"
                 r="3"
                 :fill="hoverIdx === i ? '#fa8c16' : '#fff'"
                 stroke="#fa8c16"
@@ -162,8 +162,8 @@
                   fill="rgba(31,41,55,0.95)"
                 />
                 <text :x="tooltipX + 10" :y="tooltipY + 20" fill="#fff" class="tooltip-text">{{ trendData[hoverIdx].date }}</text>
-                <text :x="tooltipX + 10" :y="tooltipY + 36" fill="#ffb066" class="tooltip-text">销售额：¥{{ formatMoney(trendData[hoverIdx].amount) }}</text>
-                <text :x="tooltipX + 10" :y="tooltipY + 50" fill="#7ab8ff" class="tooltip-text">订单数：{{ trendData[hoverIdx].count }} 笔</text>
+                <text :x="tooltipX + 10" :y="tooltipY + 36" fill="#7ab8ff" class="tooltip-text">销售额：¥{{ formatMoney(trendData[hoverIdx].amount) }}</text>
+                <text :x="tooltipX + 10" :y="tooltipY + 50" fill="#ffb066" class="tooltip-text">订单数：{{ trendData[hoverIdx].count }} 笔</text>
               </g>
             </svg>
             <div v-else class="chart-empty">
@@ -188,7 +188,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { UserFilled, ShoppingCart, DataLine, Top, Bottom } from '@element-plus/icons-vue'
 import { get } from '@/api/request'
 
@@ -205,6 +205,7 @@ const greeting = computed(() => {
 
 // 使用天数：从注册日算起（优先从服务器获取）
 const usageDays = ref(1)
+let refreshTimer = null
 
 async function loadUserInfo() {
   try {
@@ -355,23 +356,37 @@ function barX(i) {
 }
 
 // 柱状图 Y 坐标
-function barY(count) {
-  return padT + plotH - (count / maxCount.value) * plotH
-}
-
-// 柱状图高度
-function barH(count) {
-  return (count / maxCount.value) * plotH
-}
-
-// 折线 Y 坐标
-function dotY(amount) {
+function barY(amount) {
   return padT + plotH - (amount / maxAmount.value) * plotH
 }
 
-// 折线路径点
-const linePoints = computed(() => {
-  return trendData.value.map((d, i) => `${dotX(i)},${dotY(d.amount)}`).join(' ')
+// 柱状图高度
+function barH(amount) {
+  return (amount / maxAmount.value) * plotH
+}
+
+// 曲线 Y 坐标
+function dotY(count) {
+  return padT + plotH - (count / maxCount.value) * plotH
+}
+
+// 平滑曲线路径（Catmull-Rom 样条 → 三次贝塞尔）
+const linePath = computed(() => {
+  const pts = trendData.value.map((d, i) => ({ x: dotX(i), y: dotY(d.count) }))
+  if (pts.length < 2) return pts.length === 1 ? `M ${pts[0].x},${pts[0].y}` : ''
+  let path = `M ${pts[0].x},${pts[0].y}`
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i]
+    const p1 = pts[i]
+    const p2 = pts[i + 1]
+    const p3 = pts[i + 2] || p2
+    const cp1x = p1.x + (p2.x - p0.x) / 6
+    const cp1y = p1.y + (p2.y - p0.y) / 6
+    const cp2x = p2.x - (p3.x - p1.x) / 6
+    const cp2y = p2.y - (p3.y - p1.y) / 6
+    path += ` C ${cp1x.toFixed(1)},${cp1y.toFixed(1)} ${cp2x.toFixed(1)},${cp2y.toFixed(1)} ${p2.x.toFixed(1)},${p2.y.toFixed(1)}`
+  }
+  return path
 })
 
 // Tooltip 位置
@@ -383,7 +398,7 @@ const tooltipX = computed(() => {
 const tooltipY = computed(() => {
   if (hoverIdx.value < 0) return 0
   const d = trendData.value[hoverIdx.value]
-  const y = dotY(d.amount)
+  const y = dotY(d.count)
   return y > chartH - 80 ? y - 70 : y + 10
 })
 
@@ -391,6 +406,18 @@ onMounted(() => {
   loadUserInfo()
   loadStats()
   loadTrend()
+  // 每5分钟自动刷新统计数据
+  refreshTimer = setInterval(() => {
+    loadStats()
+    loadTrend()
+  }, 5 * 60 * 1000)
+})
+
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
+  }
 })
 </script>
 
@@ -581,6 +608,19 @@ onMounted(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+}
+
+.legend-bar {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  opacity: 0.6;
+}
+
+.legend-line {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
 }
 
 .chart-body {

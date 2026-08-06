@@ -36,6 +36,8 @@ const validInvokeChannels = [
   'toggle-jd-auto-sync',
   'jd-auto-sync-status',
   'open-pdd-browsing-window',
+  'search-taobao-same-product',
+  'open-taobao-same-product',
   'export-purchase-cookies',
   'import-purchase-cookies',
   'fetch-aftersale-metrics',
@@ -68,7 +70,9 @@ const validOnChannels = [
   'auto-sync-result',
   'auto-sync-progress',
   'batch-sync-progress',
-  'pdd-product-link-update'
+  'pdd-product-link-update',
+  'taobao-same-source-selected',
+  'app-close-requested'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

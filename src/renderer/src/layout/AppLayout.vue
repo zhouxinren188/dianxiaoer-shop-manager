@@ -85,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, watch, computed, onMounted } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Close, Bell, Search, Minus, FullScreen, SwitchButton, User, ArrowDown } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -105,9 +105,29 @@ const userInfo = computed(() => {
   }
 })
 
+// 退出确认弹窗
+function showQuitConfirm() {
+  ElMessageBox.confirm('确定要退出店小二网店管家吗？', '退出确认', {
+    confirmButtonText: '退出',
+    cancelButtonText: '取消',
+    type: 'warning'
+  }).then(() => {
+    window.electronAPI?.invoke('window-close')
+  }).catch(() => {})
+}
+
 // 进入主界面时切换到大窗口尺寸
+let unsubCloseRequested = null
 onMounted(() => {
   window.electronAPI?.invoke('window-set-main-size')
+  // 监听主进程的关闭请求（Alt+F4 等）
+  unsubCloseRequested = window.electronAPI?.onUpdate('app-close-requested', () => {
+    showQuitConfirm()
+  })
+})
+
+onUnmounted(() => {
+  unsubCloseRequested?.()
 })
 
 const visitedTabs = ref([
@@ -152,7 +172,7 @@ function handleMaximize() {
 }
 
 function handleClose() {
-  window.electronAPI?.invoke('window-close')
+  showQuitConfirm()
 }
 
 // 用户菜单命令处理

@@ -611,6 +611,11 @@ app.put('/api/users/:id', async (req, res) => {
     const fields = []
     const values = []
 
+    // 角色修改：只有管理员才能操作
+    if (role !== undefined && req.user.role !== 'admin' && req.user.user_type !== 'master') {
+      return res.status(403).json(fail('只有管理员才能修改角色'))
+    }
+
     if (phone !== undefined) { fields.push('phone = ?'); values.push(phone) }
     if (userType !== undefined) { fields.push('user_type = ?'); values.push(userType) }
     if (role !== undefined) { fields.push('role = ?'); values.push(role) }
@@ -1756,6 +1761,201 @@ app.put('/api/sales-orders/:orderId/order-remark', async (req, res) => {
   }
 })
 
+// 标记/取消标记问题事件
+app.put('/api/sales-orders/:orderId/issue-event', async (req, res) => {
+  try {
+    const { orderId } = req.params
+    const { issueEvent } = req.body
+    if (!orderId) return res.json(fail('orderId 不能为空'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    let result
+    if (storeIds.length > 0) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      ;[result] = await pool.execute(
+        `UPDATE sales_orders SET issue_event=?, updated_at=NOW() WHERE id=? AND store_id IN (${placeholders})`,
+        [issueEvent || null, orderId, ...storeIds]
+      )
+    } else {
+      ;[result] = await pool.execute(
+        'UPDATE sales_orders SET issue_event=?, updated_at=NOW() WHERE id=?',
+        [issueEvent || null, orderId]
+      )
+    }
+
+    // 标记为“职业打假”时，自动将买家信息录入打假人库
+    if (issueEvent === '职业打假' && result.affectedRows > 0) {
+      try {
+        const [rows] = await pool.execute(
+          'SELECT order_id, buyer_name, buyer_phone, buyer_address, raw_data FROM sales_orders WHERE id=?',
+          [orderId]
+        )
+        if (rows.length > 0) {
+          const row = rows[0]
+          let buyerAccount = ''
+          try {
+            const raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data || 'null') : row.raw_data
+            if (raw) buyerAccount = raw.buyerAccount || ''
+          } catch {}
+          if (buyerAccount) {
+            await pool.execute(
+              `INSERT IGNORE INTO fraudster_buyers (buyer_account, buyer_name, buyer_phone, buyer_address, source_order_id, source_order_no)
+               VALUES (?, ?, ?, ?, ?, ?)`,
+              [buyerAccount, row.buyer_name || null, row.buyer_phone || null, row.buyer_address || null, String(orderId), row.order_id || null]
+            )
+            console.log(`[打假人库] 已录入: account=${buyerAccount}, order=${row.order_id}`)
+          }
+        }
+      } catch (e) {
+        console.error('[打假人库] 录入失败:', e.message)
+      }
+    }
+
+    res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 地址相似度计算（Dice系数，基于bigram）
+function addressSimilarity(addr1, addr2) {
+  if (!addr1 || !addr2) return 0
+  // 去除空格和常见行政区划词
+  const normalize = (s) => s.replace(/[\s省市区县乡镇街道村组号幢栋单元楼室#]/g, '')
+  const a = normalize(addr1)
+  const b = normalize(addr2)
+  if (a === b) return 1.0
+  if (a.length < 2 || b.length < 2) return 0
+  // 生成bigram集合
+  const bigramsA = new Set()
+  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.substring(i, i + 2))
+  const bigramsB = new Set()
+  for (let i = 0; i < b.length - 1; i++) bigramsB.add(b.substring(i, i + 2))
+  let intersection = 0
+  for (const bg of bigramsA) {
+    if (bigramsB.has(bg)) intersection++
+  }
+  return (2 * intersection) / (bigramsA.size + bigramsB.size)
+}
+
+// 批量检查买家账号是否在打假人库中（订单加载后自动比对）
+app.post('/api/fraudsters/batch-check', async (req, res) => {
+  try {
+    const { orders } = req.body
+    if (!Array.isArray(orders) || orders.length === 0) return res.json(ok({ matched: [] }))
+
+    // 提取所有非空 buyerAccount
+    const accounts = orders.filter(o => o.buyerAccount).map(o => ({ orderId: o.orderId, buyerAccount: o.buyerAccount }))
+    if (accounts.length === 0) return res.json(ok({ matched: [] }))
+
+    // 查打假人库（一次性查出所有匹配）
+ const accountList = accounts.map(a => a.buyerAccount)
+    const placeholders = accountList.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT buyer_account, buyer_name, buyer_phone, buyer_address, source_order_no FROM fraudster_buyers WHERE buyer_account IN (${placeholders})`,
+      accountList
+    )
+    if (rows.length === 0) return res.json(ok({ matched: [] }))
+
+    // 构建匹配结果
+    const fraudsterMap = new Map()
+    for (const row of rows) fraudsterMap.set(row.buyer_account, row)
+
+    const matched = []
+    for (const acc of accounts) {
+      const fraudster = fraudsterMap.get(acc.buyerAccount)
+      if (fraudster) {
+        // 自动标记订单为疑似打假（如果还不是职业打假）
+        if (acc.orderId) {
+          const [orderRows] = await pool.execute(
+            'SELECT issue_event FROM sales_orders WHERE id=?',
+            [String(acc.orderId)]
+          )
+          if (orderRows.length > 0 && orderRows[0].issue_event !== '职业打假') {
+            await pool.execute(
+              'UPDATE sales_orders SET issue_event=?, updated_at=NOW() WHERE id=?',
+              ['疑似打假', String(acc.orderId)]
+            )
+          }
+        }
+        matched.push({ orderId: acc.orderId, buyerAccount: acc.buyerAccount, matchType: 'account', fraudster })
+      }
+    }
+    console.log(`[打假人批量比对] 检查 ${accounts.length} 个账号，匹配 ${matched.length} 个`)
+    res.json(ok({ matched }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 检查买家是否在打假人库中（解密后二次比对：先查账号，再查地址相似度）
+app.post('/api/fraudsters/check', async (req, res) => {
+  try {
+    const { buyerAccount, buyerAddress, orderId } = req.body
+
+    // 第一步：按账号精确匹配
+    if (buyerAccount) {
+      const [rows] = await pool.execute(
+        'SELECT buyer_account, buyer_name, buyer_phone, buyer_address, source_order_no FROM fraudster_buyers WHERE buyer_account=?',
+        [buyerAccount]
+      )
+      if (rows.length > 0) {
+        const fraudster = rows[0]
+        if (orderId) {
+          const [orderRows] = await pool.execute(
+            'SELECT issue_event FROM sales_orders WHERE id=?',
+            [String(orderId)]
+          )
+          if (orderRows.length > 0 && orderRows[0].issue_event !== '职业打假') {
+            await pool.execute(
+              'UPDATE sales_orders SET issue_event=?, updated_at=NOW() WHERE id=?',
+              ['疑似打假', String(orderId)]
+            )
+          }
+        }
+        console.log(`[打假人比对] 账号匹配: account=${buyerAccount}, order=${orderId}`)
+        return res.json(ok({ matched: true, matchType: 'account', fraudster }))
+      }
+    }
+
+    // 第二步：按地址相似度匹配（>80%）
+    if (buyerAddress) {
+      const [allFraudsters] = await pool.execute(
+        'SELECT buyer_account, buyer_name, buyer_phone, buyer_address, source_order_no FROM fraudster_buyers WHERE buyer_address IS NOT NULL AND buyer_address != ""'
+      )
+      let bestMatch = null
+      let bestScore = 0
+      for (const f of allFraudsters) {
+        const score = addressSimilarity(buyerAddress, f.buyer_address)
+        if (score > bestScore) {
+          bestScore = score
+          bestMatch = f
+        }
+      }
+      if (bestMatch && bestScore >= 0.8) {
+        if (orderId) {
+          const [orderRows] = await pool.execute(
+            'SELECT issue_event FROM sales_orders WHERE id=?',
+            [String(orderId)]
+          )
+          if (orderRows.length > 0 && orderRows[0].issue_event !== '职业打假') {
+            await pool.execute(
+              'UPDATE sales_orders SET issue_event=?, updated_at=NOW() WHERE id=?',
+              ['疑似打假', String(orderId)]
+            )
+          }
+        }
+        console.log(`[打假人比对] 地址匹配: score=${bestScore.toFixed(2)}, order=${orderId}`)
+        return res.json(ok({ matched: true, matchType: 'address', similarity: bestScore, fraudster: bestMatch }))
+      }
+    }
+
+    res.json(ok({ matched: false }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 更新销售订单采购状态（仅允许手动设置为'已忽略'）
 app.put('/api/sales-orders/:orderId/purchase-status', async (req, res) => {
   try {
@@ -1866,7 +2066,7 @@ app.delete('/api/sales-orders/:orderId/purchase-lock', async (req, res) => {
 app.get('/api/sales-orders', async (req, res) => {
   try {
     const { store_id, status, page = 1, pageSize = 20,
-            order_id, goods_name, customer_name, customer_phone, outbound_no, store_tag, purchase_status } = req.query
+            order_id, goods_name, customer_name, customer_phone, outbound_no, store_tag, purchase_status, issue_event } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     const offset = (Math.max(1, parseInt(page, 10)) - 1) * parseInt(pageSize, 10)
@@ -1936,6 +2136,10 @@ app.get('/api/sales-orders', async (req, res) => {
         where += ' AND purchase_status = ?'
         params.push(purchase_status)
       }
+    }
+    if (issue_event) {
+      where += ' AND issue_event = ?'
+      params.push(issue_event)
     }
 
     const [[{ total }]] = await pool.execute(
@@ -2463,7 +2667,7 @@ app.get('/api/store-aftersale-metrics', async (req, res) => {
 
 app.get('/api/product-sales-stats', async (req, res) => {
   try {
-    const { store_id, period, start_date, end_date, page = 1, pageSize = 20, bind_status } = req.query
+    const { store_id, period, start_date, end_date, page = 1, pageSize = 20, bind_status, keyword } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
     const ownerId = getOwnerId(req.user)
 
@@ -2508,6 +2712,15 @@ app.get('/api/product-sales-stats', async (req, res) => {
 
     const storePlaceholders = targetStoreIds.map(() => '?').join(',')
 
+    // 关键词筛选（SKU或商品名称）
+    let keywordClause = ''
+    const keywordParams = []
+    if (keyword && keyword.trim()) {
+      keywordClause = 'AND (so.sku_id LIKE ? OR so.product_name LIKE ?)'
+      const kw = `%${keyword.trim()}%`
+      keywordParams.push(kw, kw)
+    }
+
     // 按SKU+店铺分组统计
     const [skuRows] = await pool.execute(
       `SELECT so.store_id, s.name AS storeName, so.sku_id,
@@ -2523,9 +2736,10 @@ app.get('/api/product-sales-stats', async (req, res) => {
          AND so.sku_id != ''
          AND so.store_id IN (${storePlaceholders})
          ${dateJoin}
+         ${keywordClause}
        GROUP BY so.store_id, so.sku_id, s.name
        ORDER BY salesQuantity DESC`,
-      [...excludeStatuses, ...targetStoreIds, ...dateParams]
+      [...excludeStatuses, ...targetStoreIds, ...dateParams, ...keywordParams]
     )
 
     // 查询绑定信息

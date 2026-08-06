@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>店小二管理后台</title>
+  <link rel="stylesheet" href="https://unpkg.com/element-plus@2.4.4/dist/index.css">
+  <style>
+    [v-cloak] { display: none; }
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: #f5f7fa; }
+    .login-wrapper { display: flex; justify-content: center; align-items: center; min-height: 100vh; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+    .login-card { background: #fff; border-radius: 16px; padding: 40px; width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+    .login-title { text-align: center; font-size: 22px; font-weight: 700; color: #1f2937; margin-bottom: 8px; }
+    .login-subtitle { text-align: center; font-size: 13px; color: #9ca3af; margin-bottom: 28px; }
+    .admin-wrapper { display: flex; min-height: 100vh; }
+    .sidebar { width: 210px; background: #1e293b; flex-shrink: 0; display: flex; flex-direction: column; }
+    .sidebar-logo { height: 56px; display: flex; align-items: center; gap: 10px; padding: 0 18px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .sidebar-logo .logo-icon { width: 32px; height: 32px; border-radius: 8px; background: linear-gradient(135deg, #3b82f6, #1d4ed8); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .sidebar-logo .logo-text { color: #fff; font-size: 15px; font-weight: 700; letter-spacing: 0.5px; }
+    .sidebar-section-label { padding: 16px 18px 6px; font-size: 11px; color: rgba(255,255,255,0.3); text-transform: uppercase; letter-spacing: 1px; }
+    .sidebar-menu { flex: 1; padding: 0 10px; }
+    .menu-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; color: rgba(255,255,255,0.55); cursor: pointer; border-radius: 8px; font-size: 14px; transition: all 0.2s; margin-bottom: 2px; }
+    .menu-item:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.85); }
+    .menu-item.active { background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 500; }
+    .menu-item.active .menu-icon { color: #60a5fa; }
+    .menu-icon { width: 18px; height: 18px; flex-shrink: 0; color: rgba(255,255,255,0.4); transition: color 0.2s; }
+    .menu-item:hover .menu-icon { color: rgba(255,255,255,0.7); }
+    .sidebar-footer { padding: 12px; text-align: center; font-size: 12px; color: rgba(255,255,255,0.25); }
+    .main-content { flex: 1; padding: 20px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+    .page-card { background: #fff; border-radius: 8px; border: 1px solid #f0f0f0; box-shadow: 0 1px 2px rgba(0,0,0,0.03); margin-bottom: 16px; }
+
+    /* ===== 工具栏（云仓助手风格） ===== */
+    .toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 16px; border-bottom: 1px solid #f0f0f0; gap: 12px; flex-wrap: wrap;
+    }
+    .toolbar-left { display: flex; align-items: center; gap: 8px; }
+    .toolbar-title { font-size: 15px; font-weight: 600; color: #333; }
+    .toolbar-count { font-size: 13px; color: #999; }
+    .toolbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .search-input {
+      height: 30px; border: 1px solid #d9d9d9; border-radius: 4px; padding: 0 10px;
+      font-size: 13px; outline: none; min-width: 120px; width: 130px;
+      transition: border-color 0.2s; background: #fff;
+    }
+    .search-input:focus { border-color: #2b5aed; box-shadow: 0 0 0 2px rgba(43,90,237,0.1); }
+    .search-input::placeholder { color: #bbb; }
+    .search-select {
+      height: 30px; border: 1px solid #d9d9d9; border-radius: 4px; padding: 0 24px 0 8px;
+      font-size: 13px; outline: none; min-width: 90px; background: #fff; cursor: pointer;
+      appearance: none; -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpolygon points='0,0 10,0 5,6' fill='%23999'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center;
+    }
+    .search-select:focus { border-color: #2b5aed; }
+    .btn-sm {
+      height: 30px; padding: 0 14px; font-size: 13px; border-radius: 4px; cursor: pointer;
+      border: 1px solid #d9d9d9; background: #fff; color: #555; transition: all 0.2s;
+    }
+    .btn-sm:hover { border-color: #2b5aed; color: #2b5aed; }
+    .btn-primary { background: #2b5aed; border-color: #2b5aed; color: #fff; }
+    .btn-primary:hover { background: #1a40d4; }
+    .btn-warning { background: #e6a23c; border-color: #e6a23c; color: #fff; }
+    .btn-warning:hover { background: #cf8a2e; }
+    .btn-warning:disabled { background: #f5dab1; border-color: #f5dab1; color: #fff; cursor: not-allowed; }
+
+    /* ===== 云仓助手风格表格 ===== */
+    .data-table-wrapper { overflow: auto; position: relative; }
+    .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .data-table thead { background: #fafafa; position: sticky; top: 0; z-index: 10; }
+    .data-table th, .data-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
+    .data-table th { font-weight: 600; color: #333; border-bottom: 1px solid #e0e0e0; user-select: none; }
+    .data-table td { color: #555; }
+    .data-table tbody tr:hover { background: #f0f5ff; }
+    .data-table tbody tr:nth-child(even) { background: #fbfbfb; }
+    .data-table tbody tr:nth-child(even):hover { background: #f0f5ff; }
+    .data-table .col-center { text-align: center; }
+
+    /* 状态标签 */
+    .status-tag { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 10px; white-space: nowrap; font-weight: 500; }
+    .status-enabled { background: #e6f7ee; color: #27ae60; }
+    .status-disabled { background: #f0f0f0; color: #999; }
+    .status-online::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #27ae60; margin-right: 5px; vertical-align: middle; }
+    .status-offline::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #ccc; margin-right: 5px; vertical-align: middle; }
+
+    /* 到期时间颜色 */
+    .expiry-normal { color: #e6a23c; font-weight: 500; }
+    .expiry-expired { color: #f56c6c; font-weight: 500; }
+    .expiry-none { color: #c0c4cc; }
+
+    /* 操作链接按钮 */
+    .action-btn { display: inline-block; padding: 2px 0; font-size: 13px; color: #2b5aed; cursor: pointer; text-decoration: none; background: none; border: none; }
+    .action-btn:hover { text-decoration: underline; }
+
+    /* 平台标签 */
+    .platform-tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 3px; font-weight: 500; }
+    .platform-jd { background: #fef0f0; color: #e1251b; }
+    .platform-taobao { background: #fff3e0; color: #ff6700; }
+    .platform-pdd { background: #fff0f5; color: #e0306f; }
+    .platform-1688 { background: #fff8e1; color: #f57c00; }
+    .platform-default { background: #f0f0f0; color: #666; }
+
+    /* loading 遮罩 */
+    .loading-mask { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,0.7); display: flex; align-items: center; justify-content: center; z-index: 20; font-size: 14px; color: #999; }
+    .loading-mask::after { content: '加载中...'; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
+
+    /* 自定义 checkbox */
+    .dt-checkbox { width: 16px; height: 16px; cursor: pointer; accent-color: #2b5aed; }
+
+    /* 原生弹窗 */
+    .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.45); z-index: 9999; display: flex; align-items: center; justify-content: center; }
+    .modal-box { background: #fff; border-radius: 8px; width: 360px; overflow: hidden; box-shadow: 0 8px 30px rgba(0,0,0,0.2); }
+    .modal-header { padding: 16px 20px; border-bottom: 1px solid #f0f0f0; font-size: 15px; font-weight: 600; color: #333; display: flex; justify-content: space-between; align-items: center; }
+    .modal-close { cursor: pointer; font-size: 18px; color: #999; border: none; background: none; padding: 0; line-height: 1; }
+    .modal-close:hover { color: #333; }
+    .modal-body { padding: 20px; }
+    .modal-body label { display: block; font-size: 13px; color: #666; margin-bottom: 6px; }
+    .modal-body .form-row { margin-bottom: 14px; }
+    .modal-body .form-row:last-child { margin-bottom: 0; }
+    .modal-body .form-val { font-size: 14px; color: #333; font-weight: 500; }
+    .modal-body input[type="date"] { width: 100%; height: 34px; border: 1px solid #d9d9d9; border-radius: 4px; padding: 0 10px; font-size: 14px; outline: none; }
+    .modal-body input[type="date"]:focus { border-color: #2b5aed; }
+        .quick-days { display: flex; gap: 8px; margin-top: 8px; }
+        .quick-days button { flex: 1; height: 30px; border: 1px solid #d9d9d9; border-radius: 4px; background: #f0f5ff; color: #2b5aed; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+        .quick-days button:hover { background: #2b5aed; color: #fff; border-color: #2b5aed; }
+    .modal-footer { padding: 12px 20px; border-top: 1px solid #f0f0f0; display: flex; justify-content: flex-end; gap: 8px; }
+
+    /* 空状态 */
+    .empty-state { text-align: center; padding: 40px 0; color: #ccc; font-size: 14px; }
+
+    /* 分页 */
+    .pagination-wrap { display: flex; justify-content: flex-end; padding: 12px 16px; }
+  </style>
+</head>
+<body>
+<div id="app" v-cloak>
+  <!-- 登录页 -->
+  <div v-if="!loggedIn" class="login-wrapper">
+    <div class="login-card">
+      <div class="login-title">店小二管理后台</div>
+      <div class="login-subtitle">请输入管理员密码</div>
+      <el-input v-model="adminPassword" type="password" placeholder="管理员密码" show-password @keyup.enter="doLogin" />
+      <el-button type="primary" style="width: 100%; margin-top: 16px;" @click="doLogin" :loading="loginLoading">登录</el-button>
+    </div>
+  </div>
+
+  <!-- 管理界面 -->
+  <div v-else class="admin-wrapper">
+    <div class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </div>
+        <span class="logo-text">店小二后台</span>
+      </div>
+      <div class="sidebar-section-label">导航菜单</div>
+      <div class="sidebar-menu">
+        <div class="menu-item" :class="{active: tab==='stores'}" @click="switchTab('stores')">
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          店铺到期管理
+        </div>
+        <div class="menu-item" :class="{active: tab==='users'}" @click="switchTab('users')">
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          用户列表
+        </div>
+        <div class="menu-item" :class="{active: tab==='orders'}" @click="switchTab('orders')">
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+          充值订单
+        </div>
+      </div>
+      <div class="sidebar-footer">v1.1.0</div>
+    </div>
+    <div class="main-content">
+
+      <!-- 店铺到期管理 -->
+      <div v-show="tab==='stores'">
+        <div class="page-card">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <span class="toolbar-title">店铺列表</span>
+              <span class="toolbar-count">共 {{ storeTotal }} 条</span>
+            </div>
+            <div class="toolbar-right">
+              <input class="search-input" v-model="storeSearch.username" placeholder="用户名" @input="debounceSearch" />
+              <input class="search-input" v-model="storeSearch.storeName" placeholder="店铺名称" @input="debounceSearch" />
+              <input class="search-input" v-model="storeSearch.merchantId" placeholder="商家ID" @input="debounceSearch" />
+              <select class="search-select" v-model="storeSearch.status" @change="doSearch">
+                <option value="">全部状态</option>
+                <option value="enabled">启用</option>
+                <option value="disabled">停用</option>
+              </select>
+              <select class="search-select" v-model="storeSearch.expired" @change="doSearch">
+                <option value="">全部到期</option>
+                <option value="yes">已过期</option>
+                <option value="no">未过期</option>
+              </select>
+              <button class="btn-sm btn-warning" :disabled="!selectedStoreIds.length" @click="showBatchDialog = true">
+                批量设置到期 ({{ selectedStoreIds.length }})
+              </button>
+              <button class="btn-sm" @click="loadStores">刷新</button>
+            </div>
+          </div>
+
+          <div class="data-table-wrapper" style="min-height:200px;">
+            <div v-if="storeLoading" class="loading-mask"></div>
+            <table class="data-table" v-if="storeList.length">
+              <thead>
+                <tr>
+                  <th class="col-center" style="width:40px;">
+                    <input type="checkbox" class="dt-checkbox" :checked="isAllSelected" @change="toggleSelectAll($event)" />
+                  </th>
+                  <th style="width:120px;">归属用户</th>
+                  <th style="width:140px;">店铺名称</th>
+                  <th style="width:60px;">平台</th>
+                  <th style="width:60px;">类型</th>
+                  <th style="width:100px;">商家ID</th>
+                  <th style="width:60px;">状态</th>
+                  <th style="width:90px;">创建时间</th>
+                  <th style="width:90px;">到期时间</th>
+                  <th style="width:70px;">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in storeList" :key="row.id">
+                  <td class="col-center">
+                    <input type="checkbox" class="dt-checkbox" :value="row.id" v-model="selectedStoreIdSet" />
+                  </td>
+                  <td>{{ row.ownerUsername || '-' }}</td>
+                  <td>{{ row.name }}</td>
+                  <td><span :class="platformClass(row.platform)">{{ platformLabel(row.platform) }}</span></td>
+                  <td>{{ row.storeType || '-' }}</td>
+                  <td>{{ row.merchantId || '-' }}</td>
+                  <td>
+                    <span :class="['status-tag', row.status === 'enabled' ? 'status-enabled status-online' : 'status-disabled status-offline']">
+                      {{ row.status === 'enabled' ? '启用' : '停用' }}
+                    </span>
+                  </td>
+                  <td>{{ formatDate(row.createdAt) }}</td>
+                  <td>
+                    <span :class="expiryClass(row.subscriptionEnd)">{{ formatDate(row.subscriptionEnd) }}</span>
+                  </td>
+                  <td>
+                    <button class="action-btn" @click="openEditExpiry(row)">修改到期</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!storeLoading" class="empty-state">暂无数据</div>
+          </div>
+
+          <div class="pagination-wrap">
+            <el-pagination
+              v-model:current-page="storePage.page"
+              v-model:page-size="storePage.pageSize"
+              :total="storeTotal"
+              :page-sizes="[20, 50, 100]"
+              layout="total, sizes, prev, pager, next"
+              @size-change="loadStores"
+              @current-change="loadStores"
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- 用户列表 -->
+      <div v-show="tab==='users'">
+        <div class="page-card">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <span class="toolbar-title">主账号用户</span>
+              <span class="toolbar-count">共 {{ userList.length }} 条</span>
+            </div>
+            <div class="toolbar-right">
+              <button class="btn-sm" @click="loadUsers">刷新</button>
+            </div>
+          </div>
+          <div class="data-table-wrapper" style="min-height:200px;">
+            <div v-if="userLoading" class="loading-mask"></div>
+            <table class="data-table" v-if="userList.length">
+              <thead>
+                <tr>
+                  <th style="width:120px;">用户名</th>
+                  <th style="width:120px;">手机号</th>
+                  <th style="width:70px;">角色</th>
+                  <th style="width:70px;">状态</th>
+                  <th style="width:60px;">店铺数</th>
+                  <th style="width:130px;">创建时间</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in userList" :key="i">
+                  <td>{{ row.username }}</td>
+                  <td>{{ row.phone || '-' }}</td>
+                  <td>
+                    <span :class="['status-tag', row.role === 'admin' ? 'status-enabled' : 'status-disabled']">
+                      {{ row.role === 'admin' ? '管理员' : '员工' }}
+                    </span>
+                  </td>
+                  <td>
+                    <span :class="['status-tag', row.status === 'enabled' ? 'status-enabled status-online' : 'status-disabled status-offline']">
+                      {{ row.status === 'enabled' ? '启用' : '停用' }}
+                    </span>
+                  </td>
+                  <td>{{ row.store_count ?? '-' }}</td>
+                  <td>{{ formatDateTime(row.created_at) }}</td>
+                  <td>
+                    <button class="action-btn" @click="toggleUserStatus(row)">{{ row.status === 'enabled' ? '停用' : '启用' }}</button>
+                    <button class="action-btn" style="color:#f56c6c;margin-left:8px;" @click="confirmDeleteUser(row)">删除</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!userLoading" class="empty-state">暂无数据</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 充值订单 -->
+      <div v-show="tab==='orders'">
+        <div class="page-card">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <span class="toolbar-title">充值订单</span>
+              <span class="toolbar-count">共 {{ orderTotal }} 条</span>
+              <span style="font-size:13px;color:#e6a23c;font-weight:600;margin-left:8px;" v-if="orderPaidCount > 0">
+                累计已收: ¥{{ (orderTotalAmount / 100).toFixed(2) }} ({{ orderPaidCount }}笔)
+              </span>
+            </div>
+            <div class="toolbar-right">
+              <select class="search-select" v-model="orderSearch.dateRange" @change="doOrderSearch">
+                <option value="all">全部</option>
+                <option value="today">今日</option>
+                <option value="month">本月</option>
+                <option value="quarter">本季度</option>
+                <option value="year">本年度</option>
+              </select>
+              <select class="search-select" v-model="orderSearch.status" @change="doOrderSearch">
+                <option value="">全部状态</option>
+                <option value="paid">已支付</option>
+                <option value="pending">待支付</option>
+              </select>
+              <button class="btn-sm" @click="loadOrders">刷新</button>
+            </div>
+          </div>
+          <div class="data-table-wrapper" style="min-height:200px;">
+            <div v-if="orderLoading" class="loading-mask"></div>
+            <table class="data-table" v-if="orderList.length">
+              <thead>
+                <tr>
+                  <th style="width:200px;">订单号</th>
+                  <th style="width:120px;">用户</th>
+                  <th style="min-width:160px;">店铺信息</th>
+                  <th style="width:80px;">类型</th>
+                  <th style="width:80px;">套餐</th>
+                  <th style="width:90px;">金额(分)</th>
+                  <th style="width:80px;">状态</th>
+                  <th style="min-width:160px;">创建时间</th>
+                  <th style="min-width:160px;">支付时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in orderList" :key="i">
+                  <td>{{ row.order_no }}</td>
+                  <td>{{ row.username }}</td>
+                  <td>{{ row.storeInfo || '-' }}</td>
+                  <td><span class="status-tag status-enabled">{{ tierText(row.tier) }}</span></td>
+                  <td>{{ planText(row.plan) }}</td>
+                  <td>{{ row.amount }}</td>
+                  <td>
+                    <span :class="['status-tag', row.status === 'paid' ? 'status-enabled status-online' : 'status-disabled status-offline']">
+                      {{ row.status === 'paid' ? '已支付' : '待支付' }}
+                    </span>
+                  </td>
+                  <td>{{ formatDateTime(row.created_at) }}</td>
+                  <td>{{ formatDateTime(row.paid_at) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!orderLoading" class="empty-state">暂无数据</div>
+          </div>
+          <div class="pagination-wrap">
+            <el-pagination
+              v-model:current-page="orderPage.page"
+              v-model:page-size="orderPage.pageSize"
+              :total="orderTotal"
+              :page-sizes="[20, 50, 100]"
+              layout="total, sizes, prev, pager, next"
+              @size-change="loadOrders"
+              @current-change="loadOrders"
+            />
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 修改到期时间弹窗 -->
+  <div v-if="editExpiryDialog" class="modal-overlay" @click.self="editExpiryDialog = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        修改到期时间
+        <button class="modal-close" @click="editExpiryDialog = false">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row"><label>店铺</label><span class="form-val">{{ editTarget?.name }}</span></div>
+        <div class="form-row"><label>用户</label><span class="form-val">{{ editTarget?.ownerUsername || '-' }}</span></div>
+        <div class="form-row"><label>当前到期</label><span class="form-val">{{ formatDate(editTarget?.subscriptionEnd) }}</span></div>
+        <div class="form-row"><label>新到期日期</label><input type="date" v-model="newExpiryDate" /><div class="quick-days"><button @click="quickExpiry(30, 'single')">+30天</button><button @click="quickExpiry(90, 'single')">+90天</button><button @click="quickExpiry(365, 'single')">+365天</button></div></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" @click="editExpiryDialog = false">取消</button>
+        <button class="btn-sm btn-primary" @click="saveExpiry" :disabled="saveLoading">{{ saveLoading ? '保存中...' : '保存' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量修改弹窗 -->
+  <div v-if="showBatchDialog" class="modal-overlay" @click.self="showBatchDialog = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        批量设置到期时间
+        <button class="modal-close" @click="showBatchDialog = false">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom: 16px; color: #606266; font-size: 14px;">已选择 <b>{{ selectedStoreIds.length }}</b> 个店铺</p>
+        <label>到期日期</label>
+        <input type="date" v-model="batchExpiryDate" />
+        <div class="quick-days"><button @click="quickExpiry(30, 'batch')">+30天</button><button @click="quickExpiry(90, 'batch')">+90天</button><button @click="quickExpiry(365, 'batch')">+365天</button></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" @click="showBatchDialog = false">取消</button>
+        <button class="btn-sm btn-primary" @click="saveBatchExpiry" :disabled="saveLoading">{{ saveLoading ? '保存中...' : '批量保存' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除用户确认弹窗 -->
+  <div v-if="showDeleteUserDialog" class="modal-overlay" @click.self="showDeleteUserDialog = false">
+    <div class="modal-box">
+      <div class="modal-header">
+        确认删除用户
+        <button class="modal-close" @click="showDeleteUserDialog = false">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:14px;color:#333;line-height:1.6;">
+          确定要删除用户 <b style="color:#2b5aed;">{{ deleteUserTarget?.username }}</b> 吗？
+        </p>
+        <p style="font-size:13px;color:#999;margin-top:8px;">
+          该用户下无关联店铺时才可删除。此操作不可撤销。
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" @click="showDeleteUserDialog = false">取消</button>
+        <button class="btn-sm btn-primary" style="background:#f56c6c;border-color:#f56c6c;" @click="doDeleteUser" :disabled="saveLoading">{{ saveLoading ? '删除中...' : '确认删除' }}</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3.4.15/dist/vue.global.prod.js"></script>
+<script src="https://unpkg.com/element-plus@2.4.4/dist/index.full.min.js"></script>
+<script>
+const { createApp, ref, reactive, computed, onMounted } = Vue
+
+createApp({
+  setup() {
+    // 从 localStorage 恢复登录状态
+    const savedPw = localStorage.getItem('admin_pw') || ''
+    const loggedIn = ref(!!savedPw)
+    const adminPassword = ref(savedPw)
+    const loginLoading = ref(false)
+    const tab = ref('stores')
+
+    // 切换标签页时懒加载数据
+    function switchTab(t) {
+      tab.value = t
+      if (t === 'orders' && orderList.value.length === 0) loadOrders()
+      if (t === 'users' && userList.value.length === 0) loadUsers()
+    }
+
+    // Store state
+    const storeList = ref([])
+    const storeTotal = ref(0)
+    const storeLoading = ref(false)
+    const storeSearch = reactive({ username: '', storeName: '', merchantId: '', status: '', expired: '' })
+    const storePage = reactive({ page: 1, pageSize: 20 })
+    const selectedStoreIdSet = ref([])
+
+    // User state
+    const userList = ref([])
+    const userLoading = ref(false)
+    const showDeleteUserDialog = ref(false)
+    const deleteUserTarget = ref(null)
+
+    // Order state
+    const orderList = ref([])
+    const orderTotal = ref(0)
+    const orderLoading = ref(false)
+    const orderPage = reactive({ page: 1, pageSize: 20 })
+    const orderSearch = reactive({ dateRange: 'all', status: '' })
+    const orderTotalAmount = ref(0)
+    const orderPaidCount = ref(0)
+
+    // Edit dialog
+    const editExpiryDialog = ref(false)
+    const editTarget = ref(null)
+    const newExpiryDate = ref('')
+    const showBatchDialog = ref(false)
+    const batchExpiryDate = ref('')
+    const saveLoading = ref(false)
+
+    // Debounce
+    let searchTimer = null
+    function debounceSearch() {
+      clearTimeout(searchTimer)
+      searchTimer = setTimeout(() => {
+        storePage.page = 1
+        loadStores()
+      }, 350)
+    }
+    function doSearch() {
+      storePage.page = 1
+      loadStores()
+    }
+
+    // Computed
+    const selectedStoreIds = computed(() => selectedStoreIdSet.value)
+    const isAllSelected = computed(() => {
+      if (!storeList.value.length) return false
+      return storeList.value.every(row => selectedStoreIdSet.value.includes(row.id))
+    })
+
+    // API helper
+    async function api(url, options = {}) {
+      const headers = { 'Content-Type': 'application/json', 'x-admin-password': adminPassword.value }
+      const res = await fetch(url, { ...options, headers })
+      const json = await res.json()
+      if (!json.success) throw new Error(json.message || '请求失败')
+      return json.data
+    }
+
+    function doLogin() {
+      if (!adminPassword.value) {
+        ElementPlus.ElMessage.warning('请输入管理员密码')
+        return
+      }
+      loginLoading.value = true
+      fetch('/api/admin/users', { headers: { 'x-admin-password': adminPassword.value } })
+        .then(r => r.json())
+        .then(json => {
+          if (json.success) {
+            loggedIn.value = true
+            localStorage.setItem('admin_pw', adminPassword.value)
+            ElementPlus.ElMessage.success('登录成功')
+            loadStores()
+            userList.value = json.data.list
+          } else {
+            ElementPlus.ElMessage.error(json.message || '密码错误')
+          }
+        })
+        .catch(() => ElementPlus.ElMessage.error('网络错误'))
+        .finally(() => { loginLoading.value = false })
+    }
+
+    async function loadStores() {
+      storeLoading.value = true
+      try {
+        const params = new URLSearchParams()
+        params.set('page', storePage.page)
+        params.set('pageSize', storePage.pageSize)
+        if (storeSearch.username) params.set('username', storeSearch.username)
+        if (storeSearch.storeName) params.set('storeName', storeSearch.storeName)
+        if (storeSearch.merchantId) params.set('merchantId', storeSearch.merchantId)
+        if (storeSearch.status) params.set('status', storeSearch.status)
+        if (storeSearch.expired) params.set('expired', storeSearch.expired)
+        const data = await api('/api/admin/stores?' + params.toString())
+        storeList.value = data.list
+        storeTotal.value = data.total
+        selectedStoreIdSet.value = []
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        storeLoading.value = false
+      }
+    }
+
+    function toggleSelectAll(event) {
+      if (event.target.checked) {
+        selectedStoreIdSet.value = storeList.value.map(r => r.id)
+      } else {
+        selectedStoreIdSet.value = []
+      }
+    }
+
+    function openEditExpiry(row) {
+      editTarget.value = row
+      newExpiryDate.value = row.subscriptionEnd ? row.subscriptionEnd.slice(0, 10) : ''
+      editExpiryDialog.value = true
+    }
+
+    async function saveExpiry() {
+      if (!newExpiryDate.value) {
+        ElementPlus.ElMessage.warning('请选择日期')
+        return
+      }
+      saveLoading.value = true
+      try {
+        await api(`/api/admin/stores/${editTarget.value.id}/subscription-end`, {
+          method: 'PUT',
+          body: JSON.stringify({ subscriptionEnd: newExpiryDate.value })
+        })
+        ElementPlus.ElMessage.success('修改成功')
+        editExpiryDialog.value = false
+        loadStores()
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        saveLoading.value = false
+      }
+    }
+
+    async function saveBatchExpiry() {
+      if (!batchExpiryDate.value) {
+        ElementPlus.ElMessage.warning('请选择日期')
+        return
+      }
+      saveLoading.value = true
+      try {
+        const ids = selectedStoreIdSet.value
+        await api('/api/admin/stores/batch-subscription-end', {
+          method: 'PUT',
+          body: JSON.stringify({ storeIds: ids, subscriptionEnd: batchExpiryDate.value })
+        })
+        ElementPlus.ElMessage.success(`已批量修改 ${ids.length} 个店铺`)
+        showBatchDialog.value = false
+        batchExpiryDate.value = ''
+        loadStores()
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        saveLoading.value = false
+      }
+    }
+
+    async function loadUsers() {
+      userLoading.value = true
+      try {
+        const data = await api('/api/admin/users')
+        userList.value = data.list
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        userLoading.value = false
+      }
+    }
+
+    async function toggleUserStatus(row) {
+      const newStatus = row.status === 'enabled' ? 'disabled' : 'enabled'
+      try {
+        await api(`/api/admin/users/${row.id}/status`, {
+          method: 'PUT',
+          body: JSON.stringify({ status: newStatus })
+        })
+        row.status = newStatus
+        ElementPlus.ElMessage.success(newStatus === 'enabled' ? '已启用' : '已停用')
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      }
+    }
+
+    function confirmDeleteUser(row) {
+      deleteUserTarget.value = row
+      showDeleteUserDialog.value = true
+    }
+
+    async function doDeleteUser() {
+      if (!deleteUserTarget.value) return
+      saveLoading.value = true
+      try {
+        await api(`/api/admin/users/${deleteUserTarget.value.id}`, { method: 'DELETE' })
+        ElementPlus.ElMessage.success('删除成功')
+        showDeleteUserDialog.value = false
+        deleteUserTarget.value = null
+        loadUsers()
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        saveLoading.value = false
+      }
+    }
+
+    function doOrderSearch() {
+      orderPage.page = 1
+      loadOrders()
+    }
+
+    // 根据日期范围选项计算 startDate / endDate
+    function getDateRange(range) {
+      if (range === 'all') return { startDate: '', endDate: '' }
+      const now = new Date()
+      const y = now.getFullYear()
+      const m = now.getMonth()
+      const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+      const today = fmt(now)
+      if (range === 'today') return { startDate: today, endDate: today }
+      if (range === 'month') return { startDate: fmt(new Date(y, m, 1)), endDate: today }
+      if (range === 'quarter') {
+        const qMonth = Math.floor(m / 3) * 3
+        return { startDate: fmt(new Date(y, qMonth, 1)), endDate: today }
+      }
+      if (range === 'year') return { startDate: fmt(new Date(y, 0, 1)), endDate: today }
+      return { startDate: '', endDate: '' }
+    }
+
+    async function loadOrders() {
+      orderLoading.value = true
+      try {
+        const { startDate, endDate } = getDateRange(orderSearch.dateRange)
+        const params = new URLSearchParams()
+        params.set('page', orderPage.page)
+        params.set('pageSize', orderPage.pageSize)
+        if (startDate) params.set('startDate', startDate)
+        if (endDate) params.set('endDate', endDate)
+        if (orderSearch.status) params.set('status', orderSearch.status)
+        const data = await api('/api/admin/orders?' + params.toString())
+        orderList.value = data.list
+        orderTotal.value = data.total
+        orderTotalAmount.value = data.totalAmount || 0
+        orderPaidCount.value = data.paidCount || 0
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        orderLoading.value = false
+      }
+    }
+
+    // 快捷设置到期时间
+    function quickExpiry(days, type) {
+      const baseDate = type === 'single'
+        ? (editTarget.value?.subscriptionEnd ? new Date(editTarget.value.subscriptionEnd) : new Date())
+        : new Date()
+      baseDate.setDate(baseDate.getDate() + days)
+      const y = baseDate.getFullYear()
+      const m = String(baseDate.getMonth() + 1).padStart(2, '0')
+      const d = String(baseDate.getDate()).padStart(2, '0')
+      const dateStr = `${y}-${m}-${d}`
+      if (type === 'single') {
+        newExpiryDate.value = dateStr
+      } else {
+        batchExpiryDate.value = dateStr
+      }
+    }
+
+    // Utils
+    function formatDate(d) {
+      if (!d) return '-'
+      const date = new Date(d)
+      if (isNaN(date.getTime())) return d
+      return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`
+    }
+    function formatDateTime(d) {
+      if (!d) return '-'
+      const date = new Date(d)
+      if (isNaN(date.getTime())) return d
+      return formatDate(d) + ' ' + String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0')
+    }
+    function expiryClass(d) {
+      if (!d) return 'expiry-none'
+      return new Date(d) < new Date() ? 'expiry-expired' : 'expiry-normal'
+    }
+    function platformLabel(p) {
+      const m = { jd: '京东', taobao: '淘宝', pdd: '拼多多', '1688': '1688' }
+      return m[p] || p || '-'
+    }
+    function platformClass(p) {
+      const m = { jd: 'platform-jd', taobao: 'platform-taobao', pdd: 'platform-pdd', '1688': 'platform-1688' }
+      return ['platform-tag', m[p] || 'platform-default']
+    }
+    function tierText(t) {
+      const m = { basic: '基础版', standard: '标准版', premium: '高级版', store: '按店铺' }
+      return m[t] || t
+    }
+    function planText(p) {
+      const m = { monthly: '月付', quarterly: '季付', half_yearly: '半年付', yearly: '年付' }
+      return m[p] || p
+    }
+
+    // 页面加载时如果已登录，自动拉取数据
+    onMounted(() => {
+      if (loggedIn.value) {
+        loadStores()
+        // 静默加载用户列表
+        fetch('/api/admin/users', { headers: { 'x-admin-password': adminPassword.value } })
+          .then(r => r.json())
+          .then(json => { if (json.success) userList.value = json.data.list })
+          .catch(() => {})
+      }
+    })
+
+    return {
+      loggedIn, adminPassword, loginLoading, tab,
+      storeList, storeTotal, storeLoading, storeSearch, storePage,
+      selectedStoreIdSet, selectedStoreIds, isAllSelected,
+      userList, userLoading, showDeleteUserDialog, deleteUserTarget,
+      orderList, orderTotal, orderLoading, orderPage, orderSearch, orderTotalAmount, orderPaidCount,
+      editExpiryDialog, editTarget, newExpiryDate, showBatchDialog, batchExpiryDate, saveLoading,
+      doLogin, loadStores, switchTab, debounceSearch, doSearch, toggleSelectAll, openEditExpiry, saveExpiry, saveBatchExpiry, loadUsers, loadOrders, quickExpiry,
+      toggleUserStatus, confirmDeleteUser, doDeleteUser, doOrderSearch,
+      formatDate, formatDateTime, expiryClass, platformLabel, platformClass, tierText, planText
+    }
+  }
+}).use(ElementPlus).mount('#app')
+</script>
+</body>
+</html>

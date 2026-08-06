@@ -141,7 +141,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import { checkStatus, createOrder, queryOrder, generateQRCode } from '@/api/subscription'
 
@@ -244,8 +244,19 @@ function selectPlan(plan) {
 function handleMinimize() {
   window.electronAPI?.invoke('window-minimize')
 }
+// 退出确认弹窗
+function showQuitConfirm() {
+  ElMessageBox.confirm('确定要退出店小二网店管家吗？', '退出确认', {
+    confirmButtonText: '退出',
+    cancelButtonText: '取消',
+    type: 'warning'
+  }).then(() => {
+    window.electronAPI?.invoke('window-close')
+  }).catch(() => {})
+}
+
 function handleClose() {
-  window.electronAPI?.invoke('window-close')
+  showQuitConfirm()
 }
 
 async function loadStatus() {
@@ -363,12 +374,17 @@ function enterApp() {
 }
 
 // ========== 生命周期 ==========
+let unsubCloseRequested = null
 onMounted(() => {
   loadStatus()
+  unsubCloseRequested = window.electronAPI?.onUpdate('app-close-requested', () => {
+    showQuitConfirm()
+  })
 })
 
 onUnmounted(() => {
   stopPolling()
+  unsubCloseRequested?.()
 })
 </script>
 

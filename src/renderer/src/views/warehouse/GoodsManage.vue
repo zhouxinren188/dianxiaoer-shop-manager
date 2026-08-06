@@ -1471,8 +1471,22 @@ function setupPurchaseListeners() {
   unsubAddressSetupDone = window.electronAPI.onUpdate('purchase-address-setup-done', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
       if (data.failed) {
+        const reasonText = {
+          no_button: '未找到新增地址按钮',
+          no_form: '未找到地址表单',
+          no_region: '未能选择省市区',
+          no_save_button: '未找到保存按钮',
+          validation_failed: '淘宝未接受填写的地址信息',
+          default_unconfirmed: '未能设置为默认收货地址',
+          save_unconfirmed: '未检测到淘宝保存成功',
+          need_login: '淘宝登录状态已失效',
+          need_verify: '淘宝要求安全验证',
+          script_error: '页面脚本执行异常',
+          load_failed: '地址页面加载失败',
+          timeout: '操作超时'
+        }[data.reason] || '未知原因'
         ElMessage({
-          message: '地址自动设置失败：' + (data.reason === 'no_button' ? '未找到操作按钮' : '未找到表单'),
+          message: '地址自动设置失败：' + reasonText,
           type: 'warning',
           duration: 5000
         })

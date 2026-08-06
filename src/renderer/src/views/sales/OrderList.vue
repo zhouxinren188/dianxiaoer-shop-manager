@@ -173,9 +173,12 @@
       <div class="order-list" v-if="pagedOrders.length">
         <div
           class="order-card"
+          :class="{ 'has-issue-watermark': order.issueEvent === '职业打假' || order.issueEvent === '疑似打假' }"
           v-for="(order, orderIdx) in pagedOrders"
           :key="order.id"
         >
+          <!-- 职业打假/疑似打假水印覆盖层 -->
+          <div v-if="order.issueEvent === '职业打假' || order.issueEvent === '疑似打假'" class="issue-watermark" :style="{ backgroundImage: `url(${getWatermarkUrl(order.issueEvent)})` }"></div>
           <!-- 订单卡片头部条：核心信息区 -->
           <div class="order-card-header"
                :style="{
@@ -194,6 +197,10 @@
               <span class="order-header-time">{{ order.orderTime }}</span>
             </div>
             <div class="order-header-right">
+              <el-button :type="order.issueEvent ? 'danger' : 'info'" link size="small" @click="handleMarkIssue(order)">
+                <el-icon><Warning /></el-icon>
+                <span>{{ order.issueEvent ? order.issueEvent : '标记问题' }}</span>
+              </el-button>
             </div>
           </div>
 
@@ -286,19 +293,31 @@
                 </div>
                 <div class="ot-col ot-col-purchase">
                   <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
-                    <template v-if="order.orderStatus === '待付款' || order.orderStatus === '已取消'">
-                      <el-tooltip :content="order.orderStatus === '待付款' ? '待付款订单无需采购' : '已取消订单无需采购'" placement="top">
+                    <template v-if="order.orderStatus === '待付款'">
+                      <el-tooltip content="待付款订单无需采购" placement="top">
                         <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
                           <el-icon><ShoppingCart /></el-icon>
                           <span>采购下单</span>
                         </el-button>
                       </el-tooltip>
-                      <el-tooltip :content="order.orderStatus === '待付款' ? '待付款订单无需绑定' : '已取消订单无需绑定'" placement="top">
+                      <el-tooltip content="待付款订单无需绑定" placement="top">
                         <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
                           <el-icon><OfficeBuilding /></el-icon>
                           <span>绑定库存</span>
                         </el-button>
                       </el-tooltip>
+                    </template>
+                    <template v-else-if="order.orderStatus === '已取消'">
+                      <el-tooltip content="已取消订单无需采购" placement="top">
+                        <el-button type="info" size="small" plain style="width:90px;margin-left:0" disabled>
+                          <el-icon><ShoppingCart /></el-icon>
+                          <span>采购下单</span>
+                        </el-button>
+                      </el-tooltip>
+                      <el-button type="primary" size="small" plain style="width:90px;margin-left:0" @click.stop="handleBindWarehouse(order, item, itemIdx)">
+                        <el-icon><OfficeBuilding /></el-icon>
+                        <span>绑定库存</span>
+                      </el-button>
                     </template>
                     <template v-else>
                       <el-tooltip v-if="order.purchaseLockedBy" :content="`该订单目前有${order.purchaseLockedName || '其他用户'}在采购`" placement="top">
@@ -376,11 +395,7 @@
             <span class="order-buyer-label">买家:</span>
             <span class="order-buyer-name">{{ order.customerName }}</span>
             <span v-if="order.customerPhone" class="order-buyer-phone">[{{ order.customerPhone }}]</span>
-            <span class="order-header-divider">|</span>
-            <div class="order-contact-btn" @click.stop="handleOpenChat(order)">
-              <el-icon><ChatDotRound /></el-icon>
-              <span>联系买家</span>
-            </div>
+            <span v-if="order.buyerAccount" class="order-buyer-account">账号: {{ order.buyerAccount }}</span>
             <span class="order-header-divider">|</span>
             <span class="order-address-label">收货地址:</span>
             <span class="order-address-text" :title="order.address">{{ order.address }}</span>
@@ -518,7 +533,6 @@
 
         <div class="detail-footer">
           <el-button size="small" @click="onDetailAction('viewOriginal')">查看原单</el-button>
-          <el-button size="small" @click="onDetailAction('contactBuyer')">联系买家</el-button>
           <el-button size="small" @click="onDetailAction('printInvoice')">打印发票</el-button>
           <el-button type="primary" size="small" @click="onDetailAction('confirmShip')">确认发货</el-button>
         </div>
@@ -616,10 +630,17 @@
                 <el-icon><Setting /></el-icon>
                 <span>采购配置</span>
               </div>
-              <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
-                @click="handleOpenPddBrowsing">
-                拼多多选品
-              </el-button>
+              <div class="section-header-actions">
+                <el-button v-if="purchaseInfo.image" type="danger" text size="small"
+                  :loading="taobaoSameSearchLoading" @click="handleSearchTaobaoSame">
+                  <el-icon><Search /></el-icon>
+                  淘宝同款
+                </el-button>
+                <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
+                  @click="handleOpenPddBrowsing">
+                  拼多多选品
+                </el-button>
+              </div>
             </div>
 
             <div class="config-form">
@@ -822,6 +843,62 @@
       </template>
     </el-dialog>
 
+    <!-- 淘宝按图搜同款结果 -->
+    <el-dialog
+      v-model="taobaoSameDialogVisible"
+      title="淘宝同款"
+      width="980px"
+      append-to-body
+      align-center
+      :close-on-click-modal="false"
+      class="taobao-same-dialog"
+    >
+      <div class="taobao-same-source">
+        <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" fit="cover" />
+        <div class="taobao-same-source-info">
+          <strong>{{ purchaseInfo.goodsName }}</strong>
+          <span>根据当前商品主图搜索淘宝同款，最多展示 8 条结果</span>
+        </div>
+      </div>
+
+      <div v-if="taobaoSameSearchLoading" class="taobao-same-loading" v-loading="true">
+        正在调用淘宝图片搜索，请稍候…
+      </div>
+      <el-empty v-else-if="taobaoSameSearchError" :description="taobaoSameSearchError" :image-size="80">
+        <el-button type="danger" plain @click="handleSearchTaobaoSame">重新搜索</el-button>
+      </el-empty>
+      <el-empty v-else-if="taobaoSameResults.length === 0" description="暂无同款商品" :image-size="80" />
+      <div v-else class="taobao-same-grid">
+        <div v-for="product in taobaoSameResults" :key="product.itemId || product.link" class="taobao-same-card">
+          <el-image
+            :src="product.img"
+            fit="cover"
+            class="taobao-same-image"
+            @click="handleOpenTaobaoSameProduct(product)"
+          >
+            <template #error>
+              <div class="taobao-same-image-error"><el-icon><ShoppingBag /></el-icon></div>
+            </template>
+          </el-image>
+          <div class="taobao-same-card-body">
+            <div class="taobao-same-title" :title="product.title">{{ product.title || '淘宝商品' }}</div>
+            <div class="taobao-same-price-row">
+              <span class="taobao-same-price">{{ product.price != null ? '¥' + Number(product.price).toFixed(2) : '价格待查看' }}</span>
+              <del v-if="product.originalPrice != null">¥{{ Number(product.originalPrice).toFixed(2) }}</del>
+            </div>
+            <div class="taobao-same-meta">
+              <span :title="product.shop">{{ product.shop || '淘宝店铺' }}</span>
+              <span>{{ product.sales || '' }}</span>
+            </div>
+            <div class="taobao-same-actions">
+              <el-button size="small" @click="handleOpenTaobaoSameProduct(product)">查看</el-button>
+              <el-button type="danger" size="small" @click="handleSelectTaobaoSameProduct(product)">选为货源</el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </el-dialog>
+
     <!-- 货源管理弹窗 -->
     <el-dialog
       v-model="sourceManageVisible"
@@ -1009,15 +1086,35 @@
         <el-button type="primary" :loading="editInvSubmitting" @click="handleEditInvSubmit">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 标记问题弹窗 -->
+    <el-dialog v-model="issueDialogVisible" title="标记问题订单" width="420px" align-center :close-on-click-modal="false">
+      <div style="margin-bottom: 12px; color: #909399; font-size: 13px;">
+        订单号：{{ issueDialogOrder?.orderNo }}
+      </div>
+      <el-select v-model="issueDialogValue" placeholder="选择问题类型（清空则取消标记）" clearable style="width: 100%">
+        <el-option v-for="e in issueEventOptions" :key="e" :label="e" :value="e" />
+      </el-select>
+      <template #footer>
+        <el-button @click="issueDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="issueSubmitting" @click="submitIssueEvent">确认</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ChatDotRound, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
-import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark } from '@/api/salesOrder'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
+import { FRAUD_WATERMARK_URL, SUSPECT_WATERMARK_URL } from '@/assets/watermark'
+function getWatermarkUrl(issueEvent) {
+  if (issueEvent === '职业打假') return FRAUD_WATERMARK_URL
+  if (issueEvent === '疑似打假') return SUSPECT_WATERMARK_URL
+  return ''
+}
 import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
@@ -1026,7 +1123,7 @@ import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventor
 // ==================== 筛选项配置 ====================
 
 const orderStatusOptions = ['待付款', '待出库', '已出库', '暂停订单', '已完成', '已取消']
-const issueEventOptions = ['超时未发货', '库存不足', '物流异常', '客户拒收']
+const issueEventOptions = ['超时未发货', '库存不足', '物流异常', '客户拒收', '职业打假', '疑似打假']
 
 const AVATAR_COLORS = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
 
@@ -1212,7 +1309,7 @@ function mapServerOrder(row) {
     shopName: row.store_name || getStoreNameById(row.store_id),
     shopTag: '京东',
     items,
-    issueEvent: null,
+    issueEvent: row.issue_event || null,
     remark: row.remark || '',
     sysRemark: row.sys_remark || '',
     buyerMessage: row.buyer_message || '',
@@ -1238,6 +1335,7 @@ async function loadOrdersFromServer() {
     if (searchForm.customerName) params.customer_name = searchForm.customerName
     if (searchForm.purchaseStatus) params.purchase_status = searchForm.purchaseStatus
     if (searchForm.outboundNo) params.outbound_no = searchForm.outboundNo
+    if (searchForm.issueEvent) params.issue_event = searchForm.issueEvent
     const data = await fetchSalesOrders(params)
     const list = (data.list || []).map(mapServerOrder)
     tableData.value = list
@@ -1245,6 +1343,24 @@ async function loadOrdersFromServer() {
     // 加载完成后，批量拉取货源配置，标记哪些 skuId 有货源链接
     loadSkuSourcesMap()
     loadSkuInventoryMap()
+
+    // 批量比对打假人库（按买家账号）
+    const checkOrders = list
+      .filter(o => o.buyerAccount && o.issueEvent !== '职业打假')
+      .map(o => ({ orderId: o.id, buyerAccount: o.buyerAccount }))
+    if (checkOrders.length > 0) {
+      try {
+        const result = await batchCheckFraudsters(checkOrders)
+        if (result.data && result.data.matched && result.data.matched.length > 0) {
+          for (const m of result.data.matched) {
+            const order = list.find(o => o.id === m.orderId)
+            if (order) order.issueEvent = '疑似打假'
+          }
+        }
+      } catch (e) {
+        console.warn('[打假人批量比对] 失败:', e.message)
+      }
+    }
   } catch (err) {
     console.warn('从服务器加载订单失败:', err.message)
   }
@@ -1354,17 +1470,6 @@ async function handleSyncOrders() {
   }
 }
 
-function handleOpenChat(order) {
-  if (!order.buyerAccount) return
-  const pin = encodeURIComponent(order.buyerAccount)
-  const url = `https://im.jd.com/index?customerPin=${pin}`
-  if (window.electronAPI) {
-    window.electronAPI.invoke('open-external-url', { url })
-  } else {
-    window.open(url, '_blank')
-  }
-}
-
 function handleOpenProduct(order, item) {
   const skuId = item.sku ? item.sku.replace('SKU: ', '') : ''
   if (!skuId) {
@@ -1421,6 +1526,26 @@ async function handleRevealBuyerInfo(order) {
         }
       } catch (e) {
         console.warn('[BuyerInfo] 回写服务器失败:', e.message)
+      }
+
+      // 二次比对打假人库（账号精确匹配 + 地址相似度匹配）
+      if (order.issueEvent !== '职业打假') {
+        try {
+          const checkResult = await checkFraudster(order.buyerAccount, order.id, info.buyerAddress || order.address)
+          if (checkResult.data && checkResult.data.matched) {
+            order.issueEvent = '疑似打假'
+            const f = checkResult.data.fraudster
+            const matchType = checkResult.data.matchType === 'address' ? '地址相似' : '账号匹配'
+            let msg = `⚠ 疑似打假预警（${matchType}）\n账号：${order.buyerAccount || '无'}`
+            if (f.buyer_name) msg += `\n姓名：${f.buyer_name}`
+            if (f.buyer_phone) msg += `\n电话：${f.buyer_phone}`
+            if (f.source_order_no) msg += `\n来源订单：${f.source_order_no}`
+            if (checkResult.data.similarity) msg += `\n地址相似度：${(checkResult.data.similarity * 100).toFixed(0)}%`
+            ElMessageBox.alert(msg, '疑似打假预警', { type: 'warning', confirmButtonText: '知道了' })
+          }
+        } catch (e) {
+          console.warn('[打假人比对] 检查失败:', e.message)
+        }
       }
     } else {
       ElMessage.error(result.message || '获取买家信息失败')
@@ -1838,6 +1963,13 @@ const purchaseInfo = reactive({
   _sensitiveLoading: false,
   _buyerRevealed: false
 })
+
+// 淘宝按图搜同款
+const taobaoSameDialogVisible = ref(false)
+const taobaoSameSearchLoading = ref(false)
+const taobaoSameResults = ref([])
+const taobaoSameSearchError = ref('')
+const taobaoSameAccountId = ref(null)
 
 // 货源管理
 const skuSources = ref([])
@@ -2271,6 +2403,31 @@ function platformTagType(val) {
   return map[val] || 'info'
 }
 
+function attachTaobaoSkuMetadata(url, selection) {
+  if (!selection || typeof selection !== 'object') return url
+  const options = (Array.isArray(selection.options) ? selection.options : [])
+    .map(item => ({
+      text: String(item?.text || '').replace(/\s+/g, ' ').trim().slice(0, 100),
+      valueId: String(item?.valueId || '').trim().slice(0, 120),
+      group: String(item?.group || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+    }))
+    .filter(item => item.text || item.valueId)
+    .slice(0, 12)
+  const metadata = {
+    v: 1,
+    skuId: String(selection.skuId || '').trim().slice(0, 120),
+    options
+  }
+  if (!metadata.skuId && options.length === 0) return url
+  try {
+    const parsed = new URL(url)
+    parsed.hash = ''
+    return parsed.toString() + '#dxeSku=' + encodeURIComponent(JSON.stringify(metadata))
+  } catch {
+    return url
+  }
+}
+
 // 精简URL显示：提取核心链接，去除追踪参数
 function shortenUrl(url) {
   if (!url) return ''
@@ -2279,7 +2436,8 @@ function shortenUrl(url) {
     // 淘宝/天猫：只保留 id 参数
     if (u.hostname.includes('taobao.com') || u.hostname.includes('tmall.com')) {
       const id = u.searchParams.get('id')
-      return id ? `${u.origin}${u.pathname}?id=${id}` : url
+      const skuHash = u.hash.startsWith('#dxeSku=') ? u.hash : ''
+      return id ? `${u.origin}${u.pathname}?id=${id}${skuHash}` : url
     }
     // 1688：只保留 offerId
     if (u.hostname.includes('1688.com')) {
@@ -2313,6 +2471,162 @@ function openSourceLink(url) {
     window.electronAPI.invoke('open-external-url', { url })
   } else {
     window.open(url, '_blank')
+  }
+}
+
+function getTaobaoSameSearchAccount() {
+  const accounts = purchaseAccounts.value.filter(account =>
+    account.platform === 'taobao' || account.platform === 'tmall'
+  )
+  if (accounts.length === 0) return null
+  const lastId = localStorage.getItem('lastPurchaseAccount_taobao')
+  const remembered = lastId ? accounts.find(account => String(account.id) === String(lastId)) : null
+  return remembered || accounts.find(account => account.online || account.status === 'online') || accounts[0]
+}
+
+async function handleSearchTaobaoSame() {
+  if (taobaoSameSearchLoading.value) return
+  if (!purchaseInfo.image) {
+    ElMessage.warning('当前商品没有可用于搜索的主图')
+    return
+  }
+  const account = getTaobaoSameSearchAccount()
+  if (!account) {
+    ElMessage.warning('请先在采购账号中添加并登录淘宝账号')
+    return
+  }
+  if (!window.electronAPI) {
+    ElMessage.error('当前环境不支持淘宝搜同款')
+    return
+  }
+
+  taobaoSameAccountId.value = account.id
+  taobaoSameDialogVisible.value = true
+  taobaoSameSearchLoading.value = true
+  taobaoSameSearchError.value = ''
+  taobaoSameResults.value = []
+  try {
+    const result = await window.electronAPI.invoke('search-taobao-same-product', {
+      imgUrl: purchaseInfo.image,
+      accountId: account.id,
+      automatic: false,
+      limit: 8
+    })
+    if (result && result.success) {
+      taobaoSameResults.value = result.products || result.items || []
+      if (taobaoSameResults.value.length === 0) {
+        taobaoSameSearchError.value = '淘宝接口调用成功，但未返回同款商品'
+      }
+      return
+    }
+    const message = result?.message || result?.error || '淘宝同款搜索失败'
+    taobaoSameSearchError.value = message
+    if (result?.needLogin || result?.needVerification) {
+      ElMessage.warning(message)
+    } else {
+      ElMessage.error(message)
+    }
+  } catch (error) {
+    taobaoSameSearchError.value = error.message || '淘宝同款搜索失败'
+    ElMessage.error('淘宝同款搜索失败: ' + taobaoSameSearchError.value)
+  } finally {
+    taobaoSameSearchLoading.value = false
+  }
+}
+
+async function handleOpenTaobaoSameProduct(product) {
+  if (!product?.link || !taobaoSameAccountId.value) return
+  try {
+    // Vue会把列表项包装成响应式Proxy，Electron IPC无法直接结构化克隆。
+    // 只提取允许传入主进程的普通字段，避免 DataCloneError。
+    const sameItem = {
+      itemId: String(product.itemId || ''),
+      link: String(product.link || ''),
+      title: String(product.title || ''),
+      img: String(product.img || ''),
+      price: product.price == null ? null : Number(product.price),
+      originalPrice: product.originalPrice == null ? null : Number(product.originalPrice),
+      sales: String(product.sales || ''),
+      shop: String(product.shop || '')
+    }
+    const result = await window.electronAPI.invoke('open-taobao-same-product', {
+      accountId: taobaoSameAccountId.value,
+      url: sameItem.link,
+      sameItem,
+      sourceProduct: {
+        goodsName: purchaseInfo.goodsName,
+        image: purchaseInfo.image,
+        sku: purchaseInfo.sku,
+        quantity: purchaseInfo.quantity,
+        price: purchaseInfo.price,
+        purchasePrice: purchaseInfo.purchasePrice,
+        shippingName: purchaseInfo.shippingName,
+        shippingPhone: purchaseInfo.shippingPhone,
+        shippingAddress: purchaseInfo.shippingAddress
+      }
+    })
+    if (!result?.success) throw new Error(result?.message || '打开淘宝商品失败')
+  } catch (error) {
+    ElMessage.error('打开淘宝商品失败: ' + error.message)
+  }
+}
+
+async function applyTaobaoSameProduct(product, accountId) {
+  if (!product?.link) {
+    ElMessage.warning('该搜索结果没有可用商品链接')
+    return
+  }
+  if (!purchaseInfo.skuId) {
+    throw new Error('当前销售商品缺少SKU标识，无法添加货源')
+  }
+
+  const sourceLink = shortenUrl(attachTaobaoSkuMetadata(String(product.link).trim(), product.skuSelection))
+  const sourceBaseLink = sourceLink.split('#dxeSku=')[0]
+  const existingSource = skuSources.value.find(source =>
+    shortenUrl(source.purchase_link || '') === sourceLink
+  ) || skuSources.value.find(source => {
+    const existingLink = shortenUrl(source.purchase_link || '')
+    return !existingLink.includes('#dxeSku=') && existingLink === sourceBaseLink
+  })
+  const purchasePrice = product.price != null && Number.isFinite(Number(product.price))
+    ? Number(product.price)
+    : Number(existingSource?.purchase_price || 0)
+
+  // “选为货源”需要真正保存SKU货源配置，而不只是回填当前采购表单。
+  await saveSkuPurchaseConfig({
+    id: existingSource?.id || undefined,
+    sku_id: purchaseInfo.skuId,
+    platform: 'taobao',
+    purchase_link: sourceLink,
+    purchase_price: purchasePrice,
+    remark: existingSource?.remark || '淘宝同款'
+  })
+
+  await loadSkuSources(purchaseInfo.skuId)
+  const savedIndex = skuSources.value.findIndex(source =>
+    shortenUrl(source.purchase_link || '') === sourceLink
+  )
+  if (savedIndex >= 0) applySourceToPurchase(savedIndex)
+  else {
+    purchaseInfo.sourceUrl = sourceLink
+    purchaseInfo.platform = 'taobao'
+    purchaseInfo.purchasePrice = purchasePrice
+  }
+  await nextTick()
+  const selectedAccountId = accountId || taobaoSameAccountId.value
+  if (selectedAccountId) {
+    purchaseInfo.selectedAccountId = selectedAccountId
+    localStorage.setItem('lastPurchaseAccount_taobao', String(selectedAccountId))
+  }
+  taobaoSameDialogVisible.value = false
+  ElMessage.success(existingSource ? '淘宝货源已更新并回填' : '淘宝货源已添加并回填')
+}
+
+async function handleSelectTaobaoSameProduct(product) {
+  try {
+    await applyTaobaoSameProduct(product, taobaoSameAccountId.value)
+  } catch (error) {
+    ElMessage.error('添加淘宝货源失败: ' + (error.message || '未知错误'))
   }
 }
 
@@ -2438,6 +2752,7 @@ let unsubAddressSetupDone = null
 let unsubAddressSetupStart = null
 let unsubAutoSyncStart = null
 let unsubPddProductLink = null
+let unsubTaobaoSameSource = null
 let unsubAutoSyncResult = null
 let unsubSyncProgress = null
 let unsubStoreStatusChanged = null
@@ -2517,8 +2832,22 @@ function setupPurchaseListeners() {
   unsubAddressSetupDone = window.electronAPI.onUpdate('purchase-address-setup-done', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
       if (data.failed) {
+        const reasonText = {
+          no_button: '未找到新增地址按钮',
+          no_form: '未找到地址表单',
+          no_region: '未能选择省市区',
+          no_save_button: '未找到保存按钮',
+          validation_failed: '淘宝未接受填写的地址信息',
+          default_unconfirmed: '未能设置为默认收货地址',
+          save_unconfirmed: '未检测到淘宝保存成功',
+          need_login: '淘宝登录状态已失效',
+          need_verify: '淘宝要求安全验证',
+          script_error: '页面脚本执行异常',
+          load_failed: '地址页面加载失败',
+          timeout: '操作超时'
+        }[data.reason] || '未知原因'
         ElMessage({
-          message: '地址自动设置失败：' + (data.reason === 'no_button' ? '未找到操作按钮' : '未找到表单'),
+          message: '地址自动设置失败：' + reasonText,
           type: 'warning',
           duration: 5000
         })
@@ -2548,6 +2877,13 @@ function setupPurchaseListeners() {
       ElMessage.success('已提取商品链接到货源链接')
     }
   })
+  // 淘宝同款商品页中的“选为货源”按钮回传
+  unsubTaobaoSameSource = window.electronAPI.onUpdate('taobao-same-source-selected', (data) => {
+    if (!data?.product) return
+    applyTaobaoSameProduct(data.product, data.accountId).catch(error => {
+      ElMessage.error('选择淘宝货源失败: ' + error.message)
+    })
+  })
 }
 
 function cleanupPurchaseListeners() {
@@ -2557,9 +2893,14 @@ function cleanupPurchaseListeners() {
   if (unsubAddressSetupDone) { unsubAddressSetupDone(); unsubAddressSetupDone = null }
   if (unsubAddressSetupStart) { unsubAddressSetupStart(); unsubAddressSetupStart = null }
   if (unsubPddProductLink) { unsubPddProductLink(); unsubPddProductLink = null }
+  if (unsubTaobaoSameSource) { unsubTaobaoSameSource(); unsubTaobaoSameSource = null }
 }
 
 function onPurchaseDialogClosed() {
+  taobaoSameDialogVisible.value = false
+  taobaoSameResults.value = []
+  taobaoSameSearchError.value = ''
+  taobaoSameAccountId.value = null
   // 对话框关闭时，如果采购未完成（非captured状态），需要解锁订单
   // captured状态时后端创建采购单已自动解锁
   if (purchaseInfo.captureStatus !== 'captured' && purchaseInfo.salesOrderId) {
@@ -2796,6 +3137,34 @@ async function handleGongxiaoDetail(order) {
 function handleSmsNotify(order) {
   console.log('[短信通知] 订单:', order.orderNo, '客户电话:', order.customerPhone)
   ElMessage.info(`短信通知功能开发中：${order.customerPhone || '无手机号'}`)
+}
+
+// ==================== 标记问题 ====================
+const issueDialogVisible = ref(false)
+const issueDialogOrder = ref(null)
+const issueDialogValue = ref('')
+const issueSubmitting = ref(false)
+
+function handleMarkIssue(order) {
+  issueDialogOrder.value = order
+  issueDialogValue.value = order.issueEvent || ''
+  issueDialogVisible.value = true
+}
+
+async function submitIssueEvent() {
+  if (!issueDialogOrder.value) return
+  issueSubmitting.value = true
+  try {
+    await updateIssueEvent(issueDialogOrder.value.id, issueDialogValue.value)
+    issueDialogOrder.value.issueEvent = issueDialogValue.value || null
+    ElMessage.success(issueDialogValue.value ? '已标记为：' + issueDialogValue.value : '已取消标记')
+    issueDialogVisible.value = false
+  } catch (err) {
+    console.error('[标记问题] 失败:', err.message)
+    ElMessage.error('标记失败：' + (err.message || '未知错误'))
+  } finally {
+    issueSubmitting.value = false
+  }
 }
 
 function handleEditRemark(order) {
@@ -3492,11 +3861,28 @@ onUnmounted(() => {
 
 /* 订单卡片 */
 .order-card {
+  position: relative;
   border: 1px solid #e8e8e8;
   border-radius: 10px;
   overflow: hidden;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
   background: #fff;
+}
+
+/* 职业打假水印覆盖层 */
+.issue-watermark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-size: 160px 160px;
+  background-repeat: no-repeat;
+  background-position: center;
+  transform: rotate(-10deg);
+  opacity: 0.35;
+  pointer-events: none;
+  z-index: 10;
 }
 
 .order-card:hover {
@@ -5202,6 +5588,22 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.section-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.section-header-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.section-header-actions :deep(.el-button span) {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .section-header .el-icon {
   font-size: 18px;
   color: #2b5aed;
@@ -5522,5 +5924,146 @@ onUnmounted(() => {
 
 .remark-input {
   width: 100%;
+}
+
+.taobao-same-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: #fff7f0;
+  border: 1px solid #ffe2cc;
+  border-radius: 8px;
+}
+
+.taobao-same-source :deep(.el-image) {
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+.taobao-same-source-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.taobao-same-source-info strong {
+  overflow: hidden;
+  color: #303133;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taobao-same-source-info span {
+  color: #909399;
+  font-size: 12px;
+}
+
+.taobao-same-loading {
+  display: flex;
+  min-height: 320px;
+  align-items: center;
+  justify-content: center;
+  color: #909399;
+}
+
+.taobao-same-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  max-height: 570px;
+  padding: 2px;
+  overflow-y: auto;
+}
+
+.taobao-same-card {
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.taobao-same-card:hover {
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+  transform: translateY(-2px);
+}
+
+.taobao-same-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  cursor: pointer;
+}
+
+.taobao-same-image-error {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
+  color: #c0c4cc;
+  font-size: 34px;
+}
+
+.taobao-same-card-body {
+  padding: 10px;
+}
+
+.taobao-same-title {
+  display: -webkit-box;
+  min-height: 40px;
+  overflow: hidden;
+  color: #303133;
+  font-size: 13px;
+  line-height: 20px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.taobao-same-price-row {
+  display: flex;
+  min-height: 28px;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 6px;
+}
+
+.taobao-same-price {
+  color: #ff5000;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.taobao-same-price-row del {
+  color: #b1b3b8;
+  font-size: 11px;
+}
+
+.taobao-same-meta {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 8px;
+  color: #909399;
+  font-size: 11px;
+}
+
+.taobao-same-meta span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taobao-same-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 </style>
