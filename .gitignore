@@ -9,4 +9,5 @@ server-key/nul
 scripts/
 sales-debug.json
 server/.env
+server/.env.sms
 server-api/.env

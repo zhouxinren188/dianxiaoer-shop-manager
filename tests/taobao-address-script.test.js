@@ -72,6 +72,9 @@ describe('淘宝地址管理脚本 v2', () => {
     })
 
     expect(script).toContain('collectAddressRows')
+    expect(script).toContain('#addressCard [class*="listItem"]')
+    expect(script).toContain("visibleAll('button, a, [role=\"button\"]', document)")
+    expect(script).not.toContain("visibleAll('button, a, span, [role=\"button\"]', document)")
     expect(script).toContain('EXISTING_ROW_SCOPE_INVALID')
     expect(script).toContain('getRowAction(row, /^取消默认$/)')
     expect(script).not.toContain('[class*="address"], [class*="Address"]')

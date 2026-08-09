@@ -257,6 +257,9 @@ async function initDB() {
         raw_data LONGTEXT,
         buyer_message TEXT DEFAULT NULL COMMENT '买家留言（从平台同步）',
         order_remark TEXT DEFAULT NULL COMMENT '订单备注（商家在平台填写的备注，从平台同步）',
+        sms_content TEXT DEFAULT NULL COMMENT '最近一次成功发送的短信内容',
+        sms_sent_at DATETIME DEFAULT NULL COMMENT '最近一次短信发送时间',
+        sms_send_count INT NOT NULL DEFAULT 0 COMMENT '短信发送次数',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_store_order (store_id, order_id),
@@ -281,6 +284,41 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN issue_event VARCHAR(50) DEFAULT NULL COMMENT '问题事件标记（如职业打假、超时未发货等）'`)
     } catch (e) { /* 字段已存在 */ }
+    // 兼容已存在的 sales_orders 表：添加短信通知摘要字段
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN sms_content TEXT DEFAULT NULL COMMENT '最近一次成功发送的短信内容'`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN sms_sent_at DATETIME DEFAULT NULL COMMENT '最近一次短信发送时间'`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN sms_send_count INT NOT NULL DEFAULT 0 COMMENT '短信发送次数'`)
+    } catch (e) { /* 字段已存在 */ }
+
+    // 短信发送记录：第三方密钥只保存在服务端环境变量，本表不保存任何密钥
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS sms_send_records (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        request_id VARCHAR(64) NOT NULL,
+        owner_id INT NOT NULL,
+        sender_user_id INT NOT NULL,
+        sales_order_id INT NOT NULL,
+        store_id INT NOT NULL,
+        order_no VARCHAR(50) NOT NULL,
+        phone VARCHAR(30) NOT NULL,
+        sign_name VARCHAR(100) NOT NULL,
+        content TEXT NOT NULL,
+        sms_count INT NOT NULL DEFAULT 1,
+        status ENUM('sending', 'success', 'failed') NOT NULL DEFAULT 'sending',
+        provider_response TEXT DEFAULT NULL,
+        error_message VARCHAR(500) DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        sent_at DATETIME DEFAULT NULL,
+        UNIQUE KEY uk_sms_request (owner_id, request_id),
+        KEY idx_sms_order (sales_order_id, created_at),
+        KEY idx_sms_owner (owner_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
     // 打假人信息库
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS fraudster_buyers (

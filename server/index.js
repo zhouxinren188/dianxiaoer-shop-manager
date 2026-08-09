@@ -3,9 +3,18 @@ const cors = require('cors')
 const path = require('path')
 const fs = require('fs')
 require('dotenv').config({ path: path.join(__dirname, '.env') })
+require('dotenv').config({ path: path.join(__dirname, '.env.sms') })
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const { pool, initDB, startKeepAlive } = require('./db')
+const {
+  getSmsConfig,
+  assertSmsConfigured,
+  normalizeReceiverPhone,
+  buildSmsMessage,
+  calculateSmsCount,
+  sendSms
+} = require('./services/sms-service')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.33-purchase-perf'
@@ -1814,6 +1823,151 @@ app.put('/api/sales-orders/:orderId/issue-event', async (req, res) => {
     res.json(ok({ updated: result.affectedRows }))
   } catch (err) {
     res.status(500).json(fail(err.message))
+  }
+})
+
+// 获取订单短信发送上下文及最近记录
+app.get('/api/sales-orders/:orderId/sms-context', async (req, res) => {
+  try {
+    const orderId = Number.parseInt(req.params.orderId, 10)
+    if (!Number.isInteger(orderId) || orderId <= 0) return res.json(fail('订单ID无效'))
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (storeIds.length === 0) return res.status(403).json(fail('无权查看此订单'))
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [orders] = await pool.execute(
+      `SELECT id, store_id, order_id, buyer_name, buyer_phone, sms_content, sms_sent_at, sms_send_count
+       FROM sales_orders WHERE id=? AND store_id IN (${placeholders}) LIMIT 1`,
+      [orderId, ...storeIds]
+    )
+    if (orders.length === 0) return res.status(404).json(fail('订单不存在'))
+
+    const ownerId = getOwnerId(req.user)
+    const [history] = await pool.execute(
+      `SELECT id, phone, sign_name, content, sms_count, status, error_message, created_at, sent_at
+       FROM sms_send_records
+       WHERE owner_id=? AND sales_order_id=?
+       ORDER BY id DESC LIMIT 20`,
+      [ownerId, orderId]
+    )
+    const config = getSmsConfig()
+    res.json(ok({
+      order: orders[0],
+      signName: config.signName,
+      configured: Boolean(config.appId && config.mchId && config.key),
+      history
+    }))
+  } catch (err) {
+    console.error('[SMS] 获取发送上下文失败:', err.message)
+    res.status(500).json(fail('获取短信信息失败'))
+  }
+})
+
+// 从订单列表发送短信。第三方商户号和密钥只从业务服务器环境变量读取。
+app.post('/api/sales-orders/:orderId/sms', async (req, res) => {
+  const orderId = Number.parseInt(req.params.orderId, 10)
+  if (!Number.isInteger(orderId) || orderId <= 0) return res.json(fail('订单ID无效'))
+
+  const rawRequestId = String(req.body?.requestId || '').trim()
+  const requestId = /^[A-Za-z0-9_-]{8,64}$/.test(rawRequestId)
+    ? rawRequestId
+    : `sms_${Date.now()}_${req.user.id}_${Math.random().toString(36).slice(2, 10)}`
+
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (storeIds.length === 0) return res.status(403).json(fail('无权操作此订单'))
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [orders] = await pool.execute(
+      `SELECT id, store_id, order_id, buyer_name, buyer_phone
+       FROM sales_orders WHERE id=? AND store_id IN (${placeholders}) LIMIT 1`,
+      [orderId, ...storeIds]
+    )
+    if (orders.length === 0) return res.status(404).json(fail('订单不存在'))
+
+    const order = orders[0]
+    const ownerId = getOwnerId(req.user)
+    const config = getSmsConfig()
+    assertSmsConfigured(config)
+
+    const receiver = normalizeReceiverPhone(req.body?.phone || order.buyer_phone)
+    const finalMessage = buildSmsMessage(req.body?.message, receiver.extension)
+    const smsCount = calculateSmsCount(config.signName, finalMessage)
+
+    const [existing] = await pool.execute(
+      `SELECT id, status, phone, sign_name, content, sms_count, sent_at, error_message
+       FROM sms_send_records WHERE owner_id=? AND request_id=? LIMIT 1`,
+      [ownerId, requestId]
+    )
+    if (existing.length > 0) {
+      const record = existing[0]
+      if (record.status === 'success') {
+        return res.json(ok({ ...record, requestId, duplicate: true }))
+      }
+      if (record.status === 'sending') return res.json(fail('短信正在发送，请勿重复提交'))
+      return res.json(fail(record.error_message || '上次发送失败，请重新点击发送'))
+    }
+
+    const [insertResult] = await pool.execute(
+      `INSERT INTO sms_send_records
+       (request_id, owner_id, sender_user_id, sales_order_id, store_id, order_no,
+        phone, sign_name, content, sms_count, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sending')`,
+      [requestId, ownerId, req.user.id, order.id, order.store_id, order.order_id,
+       receiver.phone, config.signName, finalMessage, smsCount]
+    )
+
+    let result
+    try {
+      result = await sendSms({
+        config,
+        phone: req.body?.phone || order.buyer_phone,
+        message: req.body?.message
+      })
+    } catch (sendErr) {
+      const errorMessage = String(sendErr.message || '短信发送失败').slice(0, 500)
+      await pool.execute(
+        `UPDATE sms_send_records SET status='failed', error_message=? WHERE id=?`,
+        [errorMessage, insertResult.insertId]
+      )
+      console.warn(`[SMS] 发送失败: order=${order.order_id}, reason=${errorMessage}`)
+      return res.json(fail(errorMessage))
+    }
+
+    const providerResponse = JSON.stringify(result.providerResponse || {}).slice(0, 10000)
+    const displayContent = `${config.signName}${result.message}`
+    try {
+      await pool.execute(
+        `UPDATE sms_send_records
+         SET status='success', provider_response=?, sent_at=NOW()
+         WHERE id=?`,
+        [providerResponse, insertResult.insertId]
+      )
+      await pool.execute(
+        `UPDATE sales_orders
+         SET sms_content=?, sms_sent_at=NOW(), sms_send_count=sms_send_count+1, updated_at=NOW()
+         WHERE id=?`,
+        [displayContent, order.id]
+      )
+    } catch (logErr) {
+      // 运营商已经确认发送成功时不能向客户端返回失败，否则用户重试会造成重复短信。
+      console.error(`[SMS] 短信已送达但记录回写失败: order=${order.order_id}, reason=${logErr.message}`)
+    }
+
+    console.log(`[SMS] 发送成功: order=${order.order_id}, phone=***${result.phone.slice(-4)}, units=${result.smsCount}`)
+    return res.json(ok({
+      id: insertResult.insertId,
+      requestId,
+      phone: result.phone,
+      signName: config.signName,
+      content: result.message,
+      smsCount: result.smsCount,
+      status: 'success',
+      sentAt: new Date().toISOString()
+    }))
+  } catch (err) {
+    console.error('[SMS] 发送接口异常:', err.message)
+    const safeMessage = /短信|手机号|订单/.test(String(err.message || '')) ? err.message : '短信发送服务异常'
+    return res.status(500).json(fail(safeMessage))
   }
 })
 

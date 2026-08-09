@@ -48,6 +48,14 @@ export function updateIssueEvent(orderId, issueEvent) {
   return put(`/api/sales-orders/${orderId}/issue-event`, { issueEvent })
 }
 
+export function fetchSalesOrderSmsContext(orderId) {
+  return get(`/api/sales-orders/${orderId}/sms-context`)
+}
+
+export function sendSalesOrderSms(orderId, data) {
+  return post(`/api/sales-orders/${orderId}/sms`, data, 20000)
+}
+
 // 检查买家是否在打假人库中（解密后二次比对：账号+地址）
 export function checkFraudster(buyerAccount, orderId, buyerAddress) {
   return post('/api/fraudsters/check', { buyerAccount, orderId, buyerAddress })

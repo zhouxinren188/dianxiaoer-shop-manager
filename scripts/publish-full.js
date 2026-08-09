@@ -25,6 +25,7 @@ const USERNAME = 'administrator'
 const PASSWORD = 'K9#m2$vL5@zQ'
 const REMOTE_DIR = 'C:/dianxiaoer-api'
 const REMOTE_UPDATE_DIR = `${REMOTE_DIR}/updates`
+const BUSINESS_REMOTE_DIR = 'C:/dianxiaoer-server'
 const NSSM = 'C:/nssm/nssm.exe'
 const UPDATE_SERVER = 'https://150.158.54.108:3001'
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Dxe@2026!Admin'
@@ -79,8 +80,11 @@ async function uploadFiles(files) {
   const conn = await createConnection()
   console.log('[Deploy] 已连接服务器')
   try {
-    // 确保远程 updates 目录存在
-    await execCmd(conn, `powershell -Command "New-Item -ItemType Directory -Force -Path '${REMOTE_UPDATE_DIR}'"`)
+    // 确保所有上传目标的父目录存在（包括 updates、业务服务 services 等）。
+    const remoteDirs = [...new Set(files.map(file => path.posix.dirname(file.remote)))]
+    for (const remoteDir of remoteDirs) {
+      await execCmd(conn, `powershell -Command "New-Item -ItemType Directory -Force -Path '${remoteDir}'"`)
+    }
 
     // 获取 SFTP 通道
     const sftp = await new Promise((resolve, reject) => {
@@ -194,6 +198,17 @@ async function main() {
   smallFiles.push({ local: localPkgFile, remote: `${REMOTE_DIR}/package.json` })
   smallFiles.push({ local: localAdminFile, remote: `${REMOTE_DIR}/public/admin/index.html` })
 
+  // 业务服务与客户端功能必须同步发布，避免客户端已出现入口而 3002 API 仍为旧版。
+  smallFiles.push({ local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` })
+  smallFiles.push({ local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` })
+  smallFiles.push({ local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` })
+  const localSmsEnvFile = path.join(ROOT, 'server', '.env.sms')
+  if (fs.existsSync(localSmsEnvFile)) {
+    smallFiles.push({ local: localSmsEnvFile, remote: `${BUSINESS_REMOTE_DIR}/.env.sms` })
+  } else {
+    console.warn('  警告：未找到 server/.env.sms，业务服务器将保留现有短信配置')
+  }
+
   await uploadFiles(smallFiles)
 
   // 4. 远程安装依赖 + 重启服务（新连接）
@@ -209,6 +224,14 @@ async function main() {
     await new Promise(r => setTimeout(r, 5000))
     const health = await execCmd(conn3, 'curl -sk https://localhost:3001/api/health')
     console.log('  Health:', health.stdout.trim())
+
+    console.log('  重启业务服务...')
+    await execCmd(conn3, `${NSSM} stop dianxiaoer-server`)
+    await new Promise(r => setTimeout(r, 3000))
+    await execCmd(conn3, `${NSSM} start dianxiaoer-server`)
+    await new Promise(r => setTimeout(r, 5000))
+    const businessHealth = await execCmd(conn3, 'curl -s http://localhost:3002/health')
+    console.log('  Business health:', businessHealth.stdout.trim())
   } finally {
     conn3.end()
   }

@@ -588,7 +588,40 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   function collectAddressRows() {
     var rows = [];
-    var actionNodes = visibleAll('button, a, span, [role="button"]', document);
+
+    function collectFromCandidate(candidate) {
+      if (!candidate || candidate === document.body || !matchesTargetAddressRow(candidate)) return;
+      var current = candidate;
+      for (var depth = 0; depth < 5 && current && current !== document.body; depth++) {
+        var actions = getRowActions(current);
+        if (actions.length >= 2 && actions.length <= 6 && matchesTargetAddressRow(current)) {
+          if (rows.indexOf(current) < 0) rows.push(current);
+          return;
+        }
+        current = current.parentElement;
+      }
+    }
+
+    // 地址较多时，全页遍历每一个 span 并逐层回溯会反复触发布局计算，
+    // 实测可把一次匹配拖到近一分钟。优先从表格行和新版地址卡片的
+    // 结构节点开始，只对包含目标姓名/电话/地址的少量候选做动作核验。
+    var structuralSelector = [
+      '#addressCard tr', '#addressCard [role="row"]',
+      '#addressCard [class*="listItem"]', '#addressCard [class*="addressContent"]',
+      '[class*="addressList"] tr', '[class*="addressList"] [role="row"]',
+      '[class*="address-list"] tr', '[class*="address-list"] [role="row"]',
+      'table tr', '[role="row"]'
+    ].join(',');
+    var structuralRows = [];
+    try { structuralRows = Array.prototype.slice.call(document.querySelectorAll(structuralSelector)); } catch (e) {}
+    for (var structuralIndex = 0; structuralIndex < structuralRows.length; structuralIndex++) {
+      collectFromCandidate(structuralRows[structuralIndex]);
+      if (rows.length) return rows;
+    }
+
+    // 灰度页面结构不匹配时再走语义兜底。动作通常是 button/a/role=button，
+    // 不扫描全页 span，避免地址数量增加后出现平方级耗时。
+    var actionNodes = visibleAll('button, a, [role="button"]', document);
     for (var i = 0; i < actionNodes.length; i++) {
       if (!rowActionPattern.test(nodeText(actionNodes[i]))) continue;
       var current = actionOwner(actionNodes[i]);
@@ -602,15 +635,6 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       }
     }
 
-    if (!rows.length) {
-      var semanticRows = visibleAll('tr, [role="row"]', document);
-      for (var j = 0; j < semanticRows.length; j++) {
-        var semanticActions = getRowActions(semanticRows[j]);
-        if (semanticActions.length >= 2 && semanticActions.length <= 6 && matchesTargetAddressRow(semanticRows[j])) {
-          rows.push(semanticRows[j]);
-        }
-      }
-    }
     return rows;
   }
 

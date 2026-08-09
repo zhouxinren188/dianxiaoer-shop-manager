@@ -381,9 +381,9 @@
                 <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;width:100%;">
                   <el-button type="primary" link size="small" @click="handleView(order)">查看详情</el-button>
                   <el-button v-if="isConsignmentOrder(order)" type="warning" link size="small" @click="handleGongxiaoDetail(order)">采购单详情</el-button>
-                  <el-button type="success" link size="small" @click="handleSmsNotify(order)">
+                  <el-button type="success" link size="small" @click.stop="handleSmsNotify(order)">
                     <el-icon><Message /></el-icon>
-                    <span>短信</span>
+                    <span>{{ order.smsSendCount > 0 ? '再次短信' : '短信' }}</span>
                   </el-button>
                 </div>
               </div>
@@ -667,7 +667,7 @@
                       </div>
                       <div class="source-option-link-row">
                         <span class="source-option-link">{{ displaySourceUrl(src.purchase_link) }}</span>
-                        <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src.purchase_link)"><el-icon><Link /></el-icon></el-button>
+                        <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src)">查看商品</el-button>
                       </div>
                     </div>
                   </div>
@@ -1094,6 +1094,99 @@
       </template>
     </el-dialog>
 
+    <!-- 订单短信通知弹窗 -->
+    <el-dialog
+      v-model="smsDialogVisible"
+      title="发送短信"
+      width="560px"
+      align-center
+      destroy-on-close
+      :close-on-click-modal="false"
+    >
+      <div class="sms-order-summary">
+        <div>
+          <span class="sms-summary-label">订单号</span>
+          <strong>{{ smsDialogOrder?.orderNo || '--' }}</strong>
+        </div>
+        <div>
+          <span class="sms-summary-label">收件人</span>
+          <strong>{{ smsDialogOrder?.customerName || '--' }}</strong>
+        </div>
+      </div>
+
+      <el-alert
+        v-if="!smsConfigured"
+        type="warning"
+        :closable="false"
+        title="短信服务尚未配置，请联系管理员"
+        style="margin-bottom: 16px"
+      />
+
+      <el-form v-loading="smsContextLoading" label-width="86px" class="sms-form">
+        <el-form-item label="接收电话" required>
+          <el-input v-model="smsForm.phone" placeholder="请输入11位手机号，支持手机号-分机号" maxlength="30" />
+          <div class="sms-field-tip">隐私号可填写为“手机号-分机号”，分机号会自动加入短信正文。</div>
+        </el-form-item>
+        <el-form-item label="短信类型" required>
+          <el-select v-model="smsForm.template" style="width: 100%" @change="applySmsTemplate">
+            <el-option v-for="item in SMS_TEMPLATE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
+        <template v-if="smsForm.template === 'pickup'">
+          <el-form-item label="取件地址" required>
+            <el-input v-model="smsForm.pickupAddress" placeholder="请输入包裹实际取件地址" @input="applySmsTemplate" />
+          </el-form-item>
+          <el-form-item label="取件码" required>
+            <el-input v-model="smsForm.pickupCode" placeholder="请输入取件码" @input="applySmsTemplate" />
+          </el-form-item>
+        </template>
+        <el-form-item label="短信签名">
+          <el-input :model-value="smsSignName" readonly />
+        </el-form-item>
+        <el-form-item label="短信内容" required>
+          <el-input
+            v-model="smsForm.message"
+            type="textarea"
+            :rows="6"
+            maxlength="500"
+            show-word-limit
+            resize="vertical"
+            placeholder="请输入短信内容"
+          />
+          <div class="sms-count-tip">预计计费 <strong>{{ smsEstimatedCount }}</strong> 条（70字以内1条，长短信按67字/条）</div>
+        </el-form-item>
+      </el-form>
+
+      <template v-if="smsHistory.length">
+        <el-divider content-position="left">最近发送记录</el-divider>
+        <div class="sms-history-list">
+          <div v-for="item in smsHistory" :key="item.id" class="sms-history-item">
+            <div class="sms-history-meta">
+              <span>{{ formatSmsTime(item.sent_at || item.sentAt || item.created_at) }}</span>
+              <span>{{ item.phone }}</span>
+              <el-tag :type="item.status === 'success' ? 'success' : item.status === 'failed' ? 'danger' : 'warning'" size="small">
+                {{ item.status === 'success' ? '发送成功' : item.status === 'failed' ? '发送失败' : '发送中' }}
+              </el-tag>
+            </div>
+            <div class="sms-history-content">{{ item.sign_name || item.signName || smsSignName }}{{ item.content }}</div>
+            <div v-if="item.error_message" class="sms-history-error">{{ item.error_message }}</div>
+          </div>
+        </div>
+      </template>
+
+      <template #footer>
+        <el-button @click="smsDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="smsSending"
+          :disabled="smsContextLoading || !smsConfigured"
+          @click="submitSms"
+        >
+          立即发送
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 标记问题弹窗 -->
     <el-dialog v-model="issueDialogVisible" title="标记问题订单" width="420px" align-center :close-on-click-modal="false">
       <div style="margin-bottom: 12px; color: #909399; font-size: 13px;">
@@ -1113,9 +1206,9 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Link, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
-import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
+import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, fetchSalesOrderSmsContext, sendSalesOrderSms, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
 import { FRAUD_WATERMARK_URL, SUSPECT_WATERMARK_URL } from '@/assets/watermark'
 function getWatermarkUrl(issueEvent) {
   if (issueEvent === '职业打假') return FRAUD_WATERMARK_URL
@@ -1131,6 +1224,13 @@ import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventor
 
 const orderStatusOptions = ['待付款', '待出库', '已出库', '暂停订单', '已完成', '已取消']
 const issueEventOptions = ['超时未发货', '库存不足', '物流异常', '客户拒收', '职业打假', '疑似打假']
+const DEFAULT_SMS_SIGN_NAME = '【宿迁小灰狼电子商务】'
+const SMS_TEMPLATE_OPTIONS = [
+  { value: 'pickup', label: '取件通知' },
+  { value: 'reship', label: '补发通知' },
+  { value: 'refund', label: '退款通知' },
+  { value: 'custom', label: '自定义内容' }
+]
 
 const AVATAR_COLORS = ['#4fc3f7', '#81c784', '#ffb74d', '#e57373', '#ba68c8', '#4db6ac', '#7986cb', '#f06292', '#aed581', '#ff8a65']
 
@@ -1163,6 +1263,30 @@ const manualSyncStatus = ref('')       // 手动同步状态
 const autoSyncStatus = ref('')         // 渲染进程自动同步状态
 const mainProcessSyncStatus = ref('')  // 主进程自动同步状态
 const syncSkipStatus = ref('')         // 跳过的店铺信息
+
+// 短信通知
+const smsDialogVisible = ref(false)
+const smsDialogOrder = ref(null)
+const smsContextLoading = ref(false)
+const smsSending = ref(false)
+const smsConfigured = ref(true)
+const smsSignName = ref(DEFAULT_SMS_SIGN_NAME)
+const smsHistory = ref([])
+const smsForm = reactive({
+  phone: '',
+  template: 'reship',
+  pickupAddress: '',
+  pickupCode: '',
+  message: ''
+})
+
+const smsEstimatedCount = computed(() => {
+  const extensionMatch = String(smsForm.phone || '').trim().match(/^1\d{10}-([0-9]{1,12})$/)
+  const extensionLength = extensionMatch ? extensionMatch[1].length + 2 : 0
+  const length = smsSignName.value.length + smsForm.message.trim().length + extensionLength
+  if (length <= 0) return 0
+  return length <= 70 ? 1 : Math.ceil(length / 67)
+})
 
 // 同步状态文本（用于显示在小字区域）
 const syncStatusText = computed(() => {
@@ -1323,6 +1447,9 @@ function mapServerOrder(row) {
     sysRemark: row.sys_remark || '',
     buyerMessage: row.buyer_message || '',
     orderRemark: row.order_remark || '',
+    smsContent: row.sms_content || '',
+    smsSentAt: row.sms_sent_at || null,
+    smsSendCount: Number(row.sms_send_count) || 0,
     timeoutStatus: 'normal',
     purchaseLockedBy: row.purchase_locked_by || null,
     purchaseLockedName: row.purchase_locked_name || null,
@@ -2532,12 +2659,56 @@ function displaySourceUrl(url) {
   return shortenUrl(url).split('#dxeSku=')[0]
 }
 
-// 打开货源链接
-function openSourceLink(url) {
-  if (window.electronAPI) {
-    window.electronAPI.invoke('open-external-url', { url })
-  } else {
+function getSourcePurchaseAccount(platform) {
+  const accounts = purchaseAccounts.value.filter(account => account.platform === platform)
+  if (accounts.length === 0) return null
+
+  const selected = accounts.find(account =>
+    String(account.id) === String(purchaseInfo.selectedAccountId || '')
+  )
+  if (selected) return selected
+
+  const lastId = localStorage.getItem('lastPurchaseAccount_' + platform)
+  const remembered = lastId
+    ? accounts.find(account => String(account.id) === String(lastId))
+    : null
+  return remembered || accounts.find(account => account.online || account.status === 'online') || accounts[0]
+}
+
+// 使用对应采购账号的持久化登录会话打开货源商品，避免进入未登录页面。
+async function openSourceLink(source) {
+  const url = typeof source === 'string' ? source : source?.purchase_link
+  if (!url) {
+    ElMessage.warning('货源链接为空')
+    return
+  }
+
+  const platform = (typeof source === 'object' && source?.platform)
+    || detectPlatformFromUrl(url)
+    || purchaseInfo.platform
+  const account = getSourcePurchaseAccount(platform)
+  if (!account) {
+    ElMessage.warning(`请先添加并登录${platformLabel(platform)}采购账号`)
+    return
+  }
+
+  if (!window.electronAPI) {
     window.open(url, '_blank')
+    return
+  }
+
+  try {
+    const result = await window.electronAPI.invoke('open-purchase-url', {
+      accountId: account.id,
+      url,
+      title: '查看货源商品',
+      platform
+    })
+    if (!result?.success) {
+      ElMessage.error(result?.message || '打开商品失败')
+    }
+  } catch (err) {
+    ElMessage.error('打开商品失败: ' + (err?.message || '未知错误'))
   }
 }
 
@@ -3203,9 +3374,122 @@ async function handleGongxiaoDetail(order) {
   }
 }
 
-function handleSmsNotify(order) {
-  console.log('[短信通知] 订单:', order.orderNo, '客户电话:', order.customerPhone)
-  ElMessage.info(`短信通知功能开发中：${order.customerPhone || '无手机号'}`)
+function applySmsTemplate() {
+  if (smsForm.template === 'custom') return
+  if (smsForm.template === 'pickup') {
+    const address = smsForm.pickupAddress.trim() || '{取件地址}'
+    const code = smsForm.pickupCode.trim() || '{取件码}'
+    smsForm.message = `您购买的“商品”已放置${address}，取件码：${code}，请及时取件。`
+    return
+  }
+  if (smsForm.template === 'refund') {
+    smsForm.message = '您在京东购买的“商品”，仓库检查出存在质量问题，无法为您发货，请您及时上线申请退款。'
+    return
+  }
+  smsForm.message = '您在京东购买的“商品”，被仓库发错了，已重新补发，您会收到两个包裹，您都签收一下，有问题联系在线客服。'
+}
+
+function resetSmsForm(order) {
+  smsForm.phone = order?.customerPhone || ''
+  smsForm.template = 'reship'
+  smsForm.pickupAddress = ''
+  smsForm.pickupCode = ''
+  smsForm.message = ''
+  smsSignName.value = DEFAULT_SMS_SIGN_NAME
+  smsHistory.value = []
+  smsConfigured.value = true
+  applySmsTemplate()
+}
+
+function formatSmsTime(value) {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function createSmsRequestId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID()
+  return `sms_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`
+}
+
+function isUsableSmsPhone(value) {
+  const phone = String(value || '').trim().replace(/[\s()]/g, '').replace(/^\+86-?/, '')
+  return /^(?:86-?)?1\d{10}(?:-[0-9]{1,12})?$/.test(phone)
+}
+
+async function handleSmsNotify(order) {
+  smsDialogOrder.value = order
+  resetSmsForm(order)
+  smsDialogVisible.value = true
+  smsContextLoading.value = true
+  try {
+    const context = await fetchSalesOrderSmsContext(order.id)
+    smsConfigured.value = context.configured !== false
+    smsSignName.value = context.signName || DEFAULT_SMS_SIGN_NAME
+    smsHistory.value = Array.isArray(context.history) ? context.history : []
+
+    const contextOrder = context.order || {}
+    if (contextOrder.buyer_phone) smsForm.phone = contextOrder.buyer_phone
+    order.smsContent = contextOrder.sms_content || order.smsContent || ''
+    order.smsSentAt = contextOrder.sms_sent_at || order.smsSentAt || null
+    order.smsSendCount = Number(contextOrder.sms_send_count) || order.smsSendCount || 0
+
+    // 同步列表里经常只有掩码手机号；点击短信时自动获取一次真实信息。
+    if (!isUsableSmsPhone(smsForm.phone) && window.electronAPI) {
+      await handleRevealBuyerInfo(order)
+      if (isUsableSmsPhone(order.customerPhone)) smsForm.phone = order.customerPhone
+    }
+  } catch (err) {
+    console.error('[短信通知] 获取发送信息失败:', err.message)
+    ElMessage.error('获取短信信息失败：' + (err.message || '未知错误'))
+  } finally {
+    smsContextLoading.value = false
+  }
+}
+
+async function submitSms() {
+  if (!smsDialogOrder.value || smsSending.value) return
+  if (!smsForm.phone.trim()) {
+    ElMessage.warning('请输入接收手机号')
+    return
+  }
+  if (!smsForm.message.trim()) {
+    ElMessage.warning('请输入短信内容')
+    return
+  }
+  if (smsForm.template === 'pickup' && (!smsForm.pickupAddress.trim() || !smsForm.pickupCode.trim())) {
+    ElMessage.warning('请填写取件地址和取件码')
+    return
+  }
+
+  smsSending.value = true
+  try {
+    const result = await sendSalesOrderSms(smsDialogOrder.value.id, {
+      requestId: createSmsRequestId(),
+      phone: smsForm.phone.trim(),
+      message: smsForm.message.trim()
+    })
+    const order = smsDialogOrder.value
+    order.smsContent = `${result.signName || smsSignName.value}${result.content || smsForm.message.trim()}`
+    order.smsSentAt = result.sentAt || new Date().toISOString()
+    order.smsSendCount = (Number(order.smsSendCount) || 0) + (result.duplicate ? 0 : 1)
+    smsHistory.value.unshift({
+      id: result.id || result.requestId,
+      phone: result.phone || smsForm.phone.trim(),
+      sign_name: result.signName || smsSignName.value,
+      content: result.content || smsForm.message.trim(),
+      sms_count: result.smsCount || smsEstimatedCount.value,
+      status: 'success',
+      sent_at: result.sentAt || new Date().toISOString()
+    })
+    ElMessage.success(`短信发送成功，计费 ${result.smsCount || smsEstimatedCount.value} 条`)
+  } catch (err) {
+    console.error('[短信通知] 发送失败:', err.message)
+    ElMessage.error('短信发送失败：' + (err.message || '未知错误'))
+  } finally {
+    smsSending.value = false
+  }
 }
 
 // ==================== 标记问题 ====================
@@ -6203,6 +6487,90 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sms-order-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+}
+
+.sms-order-summary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sms-order-summary strong {
+  overflow: hidden;
+  color: #303133;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sms-summary-label {
+  color: #909399;
+  font-size: 12px;
+}
+
+.sms-form :deep(.el-form-item) {
+  margin-bottom: 18px;
+}
+
+.sms-field-tip,
+.sms-count-tip {
+  width: 100%;
+  margin-top: 5px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sms-count-tip strong {
+  color: #e6a23c;
+  font-size: 14px;
+}
+
+.sms-history-list {
+  max-height: 210px;
+  overflow-y: auto;
+}
+
+.sms-history-item {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #fafafa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+
+.sms-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.sms-history-content {
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.sms-history-error {
+  margin-top: 5px;
+  color: #f56c6c;
+  font-size: 12px;
 }
 
 </style>

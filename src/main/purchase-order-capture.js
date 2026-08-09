@@ -4039,8 +4039,9 @@ async function fillPaymentPasswordFromServerVault(win, accountId) {
 function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin }) {
   const addrUrl = ADDRESS_MANAGE_URLS[platform]
   if (!addrUrl) return null
-  // 地址适配已稳定，恢复后台静默执行；仅登录失效或安全验证时再显示窗口。
-  const showAddressDebugWindow = false
+  // 淘宝地址较多的账号仍存在明显延迟，暂时显示窗口便于现场观察页面状态；
+  // 其他平台继续后台静默执行，避免扩大对正常采购流程的影响。
+  const showAddressDebugWindow = platform === 'taobao'
 
   // 通知前端：正在自动设置收货地址
   if (mainWindow && !mainWindow.isDestroyed()) {

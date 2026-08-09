@@ -301,6 +301,33 @@ async function recreateTaobaoSearchWindow(accountId, oldState, clearCache = fals
   return getOrCreateTaobaoSearchWindow(accountId)
 }
 
+async function resetTaobaoSearchWindow(accountId, oldState, reason) {
+  if (!oldState) return getOrCreateTaobaoSearchWindow(accountId)
+  const partition = oldState.partition
+  const ses = oldState.ses
+  if (searchWindowStates.get(partition) === oldState) searchWindowStates.delete(partition)
+  if (oldState.win && !oldState.win.isDestroyed()) {
+    try {
+      if (oldState.win.webContents.debugger.isAttached()) oldState.win.webContents.debugger.detach()
+    } catch (_) {}
+    oldState.win.destroy()
+  }
+
+  // RGV587/USER_VALIDATE 会把搜同款专用页面会话标记为需验证。
+  // 只重建 BrowserWindow 仍会复用被标记的 LocalStorage/MTOP Token，后续查询
+  // 会持续失败；清理该专用分区后再从采购账号恢复 Cookie，不影响正式采购窗口。
+  try { await ses.clearCache() } catch (_) {}
+  try {
+    await ses.clearStorageData({
+      storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage']
+    })
+  } catch (_) {}
+  await injectTaobaoCookiesFromAccount(ses, accountId)
+  const freshState = await getOrCreateTaobaoSearchWindow(accountId)
+  runtimeLog.writeLog('TaobaoSame', '安全验证后已重置搜索专用会话: accountId=' + accountId + ', reason=' + reason)
+  return freshState
+}
+
 async function restoreTaobaoSearchSession(accountId, oldState, reason) {
   const restoredCount = await injectTaobaoCookiesFromAccount(oldState.ses, accountId)
   const restoredCookies = await oldState.ses.cookies.get({})
@@ -1014,7 +1041,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   function createSelectRow() {
     var row = document.createElement('div');
     row.id = '__dxe_same_source_row__';
-    row.style.cssText = 'position:relative;z-index:2;display:flex;align-items:center;flex:0 0 100%;width:100%;min-height:30px;margin:4px 0 0;padding:0;box-sizing:border-box;clear:both;';
+    row.style.cssText = 'position:fixed;left:20px;top:146px;z-index:2147483001;display:flex;align-items:center;width:auto;height:34px;margin:0;padding:0;box-sizing:border-box;';
     var button = document.createElement('button');
     button.id = '__dxe_same_source_control__';
     button.type = 'button';
@@ -1045,24 +1072,12 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
 
   function placeSelectRow() {
     var existing = document.getElementById('__dxe_same_source_row__');
-    var title = findProductTitle();
-    if (!title) return Boolean(existing && existing.isConnected);
-    // 按标题元素完成位置校验，但将控件插在完整标题块之后，避免窗口较窄、
-    // 标题换行时被标题容器的固定高度或 overflow:hidden 裁掉。
-    var titleBlock = title.closest('[class*="ItemTitle--"],[class*="titleWrap--"]') || title.parentElement || title;
-    if (existing && existing.isConnected && existing.previousElementSibling === titleBlock) return true;
-    if (existing) existing.remove();
+    if (existing && existing.isConnected) return true;
+    if (!document.body) return false;
+    // 独立悬浮在销售商品信息窗上方，不再插入淘宝标题容器，也不修改淘宝
+    // flex/grid 布局；部分活动价组件会因父级结构变化而只保留“￥”占位。
     var row = createSelectRow();
-    titleBlock.insertAdjacentElement('afterend', row);
-    var parent = row.parentElement;
-    if (parent) {
-      var parentDisplay = getComputedStyle(parent).display || '';
-      if (parentDisplay.indexOf('flex') >= 0) parent.style.flexWrap = 'wrap';
-      if (parentDisplay.indexOf('grid') >= 0) {
-        row.style.gridColumn = '1 / -1';
-        row.style.justifySelf = 'start';
-      }
-    }
+    document.body.appendChild(row);
     return true;
   }
 
@@ -1407,6 +1422,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     )
 
     let lastMessage = ''
+    let validationResetAttempted = false
     for (let attempt = 0; attempt < 3; attempt++) {
       const token = await waitForTaobaoMtopToken(ses, attempt === 0 ? 1200 : 3500)
       const bixiTokens = state.bixiTokens || await waitForTaobaoPageBixiTokens(win, attempt === 0 ? 2500 : 4500)
@@ -1418,8 +1434,17 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       lastMessage = retText || '淘宝图片搜索失败'
 
       if (/RGV587|FAIL_SYS_USER_VALIDATE/i.test(retText)) {
+        if (!validationResetAttempted) {
+          validationResetAttempted = true
+          runtimeLog.writeLog('TaobaoSame', '淘宝安全验证命中，重置搜索专用会话后重试')
+          state = await resetTaobaoSearchWindow(accountId, state, retText.substring(0, 80))
+          win = state.win
+          ses = state.ses
+          await sleep(800)
+          continue
+        }
         showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
-        runtimeLog.writeLog('TaobaoSame', '淘宝要求安全验证')
+        runtimeLog.writeLog('TaobaoSame', '淘宝要求安全验证，自动重置后仍未恢复')
         return {
           success: false,
           needVerification: true,
