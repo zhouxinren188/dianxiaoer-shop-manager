@@ -1,9 +1,23 @@
 'use strict'
 
+function normalizeTaobaoAddressForMatch(value) {
+  return String(value || '')
+    .replace(/[【】\[\]［］()（）]/g, '')
+    .replace(/[\s·•・,，。;；:：\-—_]/g, '')
+}
+
+function taobaoAddressDetailMatches(rowText, targetDetail) {
+  const normalizedTarget = normalizeTaobaoAddressForMatch(targetDetail)
+  return !!normalizedTarget && normalizeTaobaoAddressForMatch(rowText).includes(normalizedTarget)
+}
+
+const TAOBAO_ADDRESS_ROLLING_LIMIT = 10
+const TAOBAO_ADDRESS_CLEANUP_BATCH = 5
+
 // 淘宝地址页会灰度发布不同版本，不能依赖单一 className。
 // 这个脚本以“可见表单 + 中文语义 + 旧版选择器”组合定位，并且只在
 // 检测到成功提示或地址列表中确实出现目标地址后才返回 success。
-function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr) {
+function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr, options = {}) {
   const originalDetail = parsedAddr && parsedAddr.other ? parsedAddr.other : ''
   const streetMatch = originalDetail.match(/^(.{1,20}?(?:街道办事处|街道|镇|乡|苏木))(.*)$/)
   const street = streetMatch ? streetMatch[1] : ''
@@ -21,6 +35,15 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     detail,
     fullAddress: province + (city === province ? '' : city) + area + originalDetail
   })
+  const protectedTargets = JSON.stringify(
+    (Array.isArray(options.protectedAddresses) ? options.protectedAddresses : [])
+      .map(item => ({
+        name: String(item && item.name ? item.name : ''),
+        phone: String(item && item.phone ? item.phone : ''),
+        detail: String(item && item.detail ? item.detail : '')
+      }))
+      .filter(item => item.name && item.phone && item.detail)
+  )
 
   return `
 (async function() {
@@ -30,6 +53,9 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   window.__tbAddrResultDetail = '';
 
   var target = ${target};
+  var protectedTargets = ${protectedTargets};
+  var addressRollingLimit = ${TAOBAO_ADDRESS_ROLLING_LIMIT};
+  var addressCleanupBatch = ${TAOBAO_ADDRESS_CLEANUP_BATCH};
   var formRoot = null;
   var saveClicked = false;
   var finished = false;
@@ -520,11 +546,9 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   var rowActionPattern = /^(修改|删除|设为默认|设置默认|设为默认地址|设为默认收货地址|取消默认|置顶|取消置顶)$/;
 
-  function normalizedMatchText(value) {
-    return String(value || '')
-      .replace(/【[^】]*】/g, '')
-      .replace(/[\\s·•・,，。;；:：\\-—_]/g, '');
-  }
+  var normalizeAddressForMatch = ${normalizeTaobaoAddressForMatch.toString()};
+  var addressDetailMatches = ${taobaoAddressDetailMatches.toString()
+    .replaceAll('normalizeTaobaoAddressForMatch', 'normalizeAddressForMatch')};
 
   function actionOwner(el) {
     if (!el) return null;
@@ -566,35 +590,43 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     return null;
   }
 
-  function matchesTargetAddressRow(row) {
+  function matchesAddressTarget(row, addressTarget) {
     if (!row || row === document.body || (formRoot && (row === formRoot || formRoot.contains(row) || row.contains(formRoot)))) return false;
     var text = nodeText(row);
     if (!text || text.length > 700) return false;
 
-    var compactText = normalizedMatchText(text);
-    var phoneDigits = String(target.phone || '').replace(/\\D/g, '').slice(-11);
+    var phoneDigits = String(addressTarget.phone || '').replace(/\\D/g, '').slice(-11);
     var rowDigits = text.replace(/\\D/g, '');
-    var detailKey = normalizedMatchText(target.detail).slice(0, 12);
-    var markerMatch = String(target.detail || target.fullAddress || '').match(/【[^】]+】/);
-    var purchaseMarker = markerMatch ? markerMatch[0] : '';
-    var nameOk = !!target.name && text.indexOf(target.name) >= 0;
+    var detailOk = addressDetailMatches(text, addressTarget.detail);
+    var nameOk = !!addressTarget.name && text.indexOf(addressTarget.name) >= 0;
     var phoneOk = !!phoneDigits && rowDigits.indexOf(phoneDigits) >= 0;
-    var detailOk = !!detailKey && compactText.indexOf(detailKey) >= 0;
-    var regionOk = !!target.area && text.indexOf(target.area) >= 0;
-    var markerOk = !purchaseMarker || text.indexOf(purchaseMarker) >= 0;
-    var locationOk = detailKey ? detailOk : regionOk;
-    return nameOk && phoneOk && markerOk && locationOk;
+    var regionOk = !!addressTarget.area && text.indexOf(addressTarget.area) >= 0;
+    var locationOk = addressTarget.detail ? detailOk : regionOk;
+    return nameOk && phoneOk && locationOk;
   }
 
-  function collectAddressRows() {
+  function matchesTargetAddressRow(row) {
+    return matchesAddressTarget(row, target);
+  }
+
+  function matchesProtectedAddressRow(row) {
+    for (var i = 0; i < protectedTargets.length; i++) {
+      if (matchesAddressTarget(row, protectedTargets[i])) return true;
+    }
+    return false;
+  }
+
+  function collectManageableAddressRows() {
     var rows = [];
 
-    function collectFromCandidate(candidate) {
-      if (!candidate || candidate === document.body || !matchesTargetAddressRow(candidate)) return;
+    function collectFromCandidate(candidate, maxDepth) {
+      if (!candidate || candidate === document.body) return;
       var current = candidate;
-      for (var depth = 0; depth < 5 && current && current !== document.body; depth++) {
+      for (var depth = 0; depth < maxDepth && current && current !== document.body; depth++) {
         var actions = getRowActions(current);
-        if (actions.length >= 2 && actions.length <= 6 && matchesTargetAddressRow(current)) {
+        var text = nodeText(current);
+        var hasDelete = actions.some(function(action) { return /^删除$/.test(nodeText(action)); });
+        if (text && text.length <= 700 && actions.length >= 2 && actions.length <= 6 && hasDelete) {
           if (rows.indexOf(current) < 0) rows.push(current);
           return;
         }
@@ -602,9 +634,8 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       }
     }
 
-    // 地址较多时，全页遍历每一个 span 并逐层回溯会反复触发布局计算，
-    // 实测可把一次匹配拖到近一分钟。优先从表格行和新版地址卡片的
-    // 结构节点开始，只对包含目标姓名/电话/地址的少量候选做动作核验。
+    // 地址较多时，全页遍历每一个 span 并逐层回溯会反复触发布局计算。
+    // 优先从表格行和新版地址卡片的结构节点开始，只收集可管理的地址行。
     var structuralSelector = [
       '#addressCard tr', '#addressCard [role="row"]',
       '#addressCard [class*="listItem"]', '#addressCard [class*="addressContent"]',
@@ -615,26 +646,27 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     var structuralRows = [];
     try { structuralRows = Array.prototype.slice.call(document.querySelectorAll(structuralSelector)); } catch (e) {}
     for (var structuralIndex = 0; structuralIndex < structuralRows.length; structuralIndex++) {
-      collectFromCandidate(structuralRows[structuralIndex]);
-      if (rows.length) return rows;
+      collectFromCandidate(structuralRows[structuralIndex], 5);
     }
+    if (rows.length) return rows;
 
-    // 灰度页面结构不匹配时再走语义兜底。动作通常是 button/a/role=button，
-    // 不扫描全页 span，避免地址数量增加后出现平方级耗时。
-    var actionNodes = visibleAll('button, a, [role="button"]', document);
+    // 灰度页面结构不匹配时再走语义兜底。只扫描交互元素和明确的删除控件，
+    // 不扫描全页普通 span，避免地址数量增加后出现平方级耗时。
+    var actionNodes = visibleAll('button, a, [role="button"], .delete, [class*="delete"]', document);
     for (var i = 0; i < actionNodes.length; i++) {
       if (!rowActionPattern.test(nodeText(actionNodes[i]))) continue;
-      var current = actionOwner(actionNodes[i]);
-      for (var depth = 0; depth < 8 && current && current !== document.body; depth++) {
-        var actions = getRowActions(current);
-        if (actions.length >= 2 && actions.length <= 6 && matchesTargetAddressRow(current)) {
-          if (rows.indexOf(current) < 0) rows.push(current);
-          break;
-        }
-        current = current.parentElement;
-      }
+      collectFromCandidate(actionOwner(actionNodes[i]), 8);
     }
 
+    return rows;
+  }
+
+  function collectAddressRows() {
+    var manageableRows = collectManageableAddressRows();
+    var rows = [];
+    for (var i = 0; i < manageableRows.length; i++) {
+      if (matchesTargetAddressRow(manageableRows[i])) rows.push(manageableRows[i]);
+    }
     return rows;
   }
 
@@ -647,6 +679,96 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   function targetAddressVisibleOutsideForm() {
     return !!findTargetAddressOutsideForm();
+  }
+
+  function cleanupRowIsProtected(row) {
+    return matchesTargetAddressRow(row) ||
+      matchesProtectedAddressRow(row) ||
+      !!getRowAction(row, /^取消默认$/) ||
+      !!getRowAction(row, /^取消置顶$/);
+  }
+
+  function findDeleteConfirmButton() {
+    var dialogs = visibleAll('[role="dialog"], .next-dialog, [class*="Dialog"], [class*="dialog"], [class*="Modal"], [class*="modal"]', document);
+    for (var i = 0; i < dialogs.length; i++) {
+      var dialogText = nodeText(dialogs[i]);
+      if (!/删除|移除/.test(dialogText)) continue;
+      var button = findButtonByText(/^(确定|确认|删除|确认删除)$/, dialogs[i]);
+      if (button) return button;
+    }
+    return null;
+  }
+
+  async function cleanupHistoricalAddresses(reservedSlots) {
+    var desiredMax = Math.max(0, addressRollingLimit - Math.max(0, Number(reservedSlots) || 0));
+    var rows = collectManageableAddressRows();
+    if (rows.length <= desiredMax) {
+      log('CLEANUP_SKIPPED', 'count=' + rows.length + ',limit=' + desiredMax);
+      return 0;
+    }
+
+    var deleteGoal = Math.min(addressCleanupBatch, rows.length - desiredMax);
+    var deleted = 0;
+    log('CLEANUP_START', 'count=' + rows.length + ',goal=' + deleteGoal + ',limit=' + desiredMax);
+
+    while (deleted < deleteGoal) {
+      rows = collectManageableAddressRows();
+      if (rows.length <= desiredMax) break;
+
+      var candidate = null;
+      var deleteButton = null;
+      for (var rowIndex = rows.length - 1; rowIndex >= 0; rowIndex--) {
+        var row = rows[rowIndex];
+        if (cleanupRowIsProtected(row)) continue;
+        var rowDeleteButton = getRowAction(row, /^删除$/);
+        if (!rowDeleteButton) continue;
+        candidate = row;
+        deleteButton = rowDeleteButton;
+        break;
+      }
+
+      if (!candidate || !deleteButton) {
+        log('CLEANUP_NO_CANDIDATE', 'count=' + rows.length + ',deleted=' + deleted);
+        break;
+      }
+
+      var beforeCount = rows.length;
+      deleteButton.click();
+      log('CLEANUP_DELETE_CLICKED', 'attempt=' + (deleted + 1) + ',count=' + beforeCount);
+
+      var confirmClicked = false;
+      var deleteConfirmed = false;
+      for (var waitTry = 0; waitTry < 40; waitTry++) {
+        await sleep(150);
+        if (!confirmClicked) {
+          var confirmButton = findDeleteConfirmButton();
+          if (confirmButton) {
+            confirmButton.click();
+            confirmClicked = true;
+            log('CLEANUP_CONFIRM_CLICKED', 'attempt=' + (deleted + 1));
+          }
+        }
+        var currentRows = collectManageableAddressRows();
+        if (currentRows.length < beforeCount) {
+          deleteConfirmed = true;
+          break;
+        }
+        var issue = detectBlockingIssue();
+        if (issue) break;
+      }
+
+      if (!deleteConfirmed) {
+        log('CLEANUP_DELETE_UNCONFIRMED', 'attempt=' + (deleted + 1));
+        break;
+      }
+
+      deleted++;
+      log('CLEANUP_DELETE_CONFIRMED', 'deleted=' + deleted);
+      await sleep(350);
+    }
+
+    log('CLEANUP_DONE', 'deleted=' + deleted + ',remaining=' + collectManageableAddressRows().length);
+    return deleted;
   }
 
   async function ensureExistingAddressDefault(candidate) {
@@ -704,9 +826,13 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   if (initialIssue) return finish(initialIssue, 'page_blocked');
   var existingAddress = findTargetAddressOutsideForm();
   if (existingAddress) {
+    try { await cleanupHistoricalAddresses(0); } catch (cleanupError) { log('CLEANUP_ERROR', cleanupError && cleanupError.message ? cleanupError.message : 'unknown'); }
+    existingAddress = findTargetAddressOutsideForm();
     var existingDefaultOk = await ensureExistingAddressDefault(existingAddress);
     return finish(existingDefaultOk ? 'success' : 'default_unconfirmed', existingDefaultOk ? 'existing_address_default' : 'existing_address_not_default');
   }
+
+  try { await cleanupHistoricalAddresses(1); } catch (cleanupError) { log('CLEANUP_ERROR', cleanupError && cleanupError.message ? cleanupError.message : 'unknown'); }
 
   var addButton = await waitForDom(findAddButton, 30000);
   if (!addButton) {
@@ -794,5 +920,7 @@ const TAOBAO_TERMINAL_FAILURE_RESULTS = [
 
 module.exports = {
   buildTaobaoAddressManagerScript,
+  normalizeTaobaoAddressForMatch,
+  taobaoAddressDetailMatches,
   TAOBAO_TERMINAL_FAILURE_RESULTS
 }

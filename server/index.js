@@ -1843,6 +1843,22 @@ app.get('/api/sales-orders/:orderId/sms-context', async (req, res) => {
     if (orders.length === 0) return res.status(404).json(fail('订单不存在'))
 
     const ownerId = getOwnerId(req.user)
+    const salesOrder = orders[0]
+    const [pickupRows] = await pool.execute(
+      `SELECT pickup_code, pickup_address, logistics_no, logistics_company
+       FROM purchase_orders
+       WHERE owner_id=?
+         AND ((sales_order_id IS NOT NULL AND sales_order_id != '' AND CAST(sales_order_id AS CHAR)=?)
+           OR (sales_order_no IS NOT NULL AND sales_order_no != '' AND sales_order_no=?))
+         AND ((pickup_code IS NOT NULL AND pickup_code != '')
+           OR (pickup_address IS NOT NULL AND pickup_address != ''))
+       ORDER BY ((pickup_code IS NOT NULL AND pickup_code != '') AND
+                 (pickup_address IS NOT NULL AND pickup_address != '')) DESC,
+                updated_at DESC, id DESC
+       LIMIT 1`,
+      [ownerId, String(salesOrder.id), String(salesOrder.order_id || '')]
+    )
+    const pickupInfo = pickupRows[0] || {}
     const [history] = await pool.execute(
       `SELECT id, phone, sign_name, content, sms_count, status, error_message, created_at, sent_at
        FROM sms_send_records
@@ -1852,7 +1868,13 @@ app.get('/api/sales-orders/:orderId/sms-context', async (req, res) => {
     )
     const config = getSmsConfig()
     res.json(ok({
-      order: orders[0],
+      order: {
+        ...salesOrder,
+        pickup_code: pickupInfo.pickup_code || '',
+        pickup_address: pickupInfo.pickup_address || '',
+        purchase_logistics_no: pickupInfo.logistics_no || '',
+        purchase_logistics_company: pickupInfo.logistics_company || ''
+      },
       signName: config.signName,
       configured: Boolean(config.appId && config.mchId && config.key),
       history
@@ -4773,7 +4795,7 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no, logistics_company, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, purchase_no, status, logistics_no, logistics_company, pickup_code, pickup_address, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -4808,6 +4830,16 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       updateValues.push(orderInfo.logistics_company)
       console.log(`[Sync-Single] Updated logistics_company: ${orderInfo.logistics_company}`)
     }
+    if (orderInfo.pickup_code) {
+      updateFields.push('pickup_code=?')
+      updateValues.push(orderInfo.pickup_code)
+      console.log(`[Sync-Single] Updated pickup_code for order ${platform_order_no}`)
+    }
+    if (orderInfo.pickup_address) {
+      updateFields.push('pickup_address=?')
+      updateValues.push(orderInfo.pickup_address)
+      console.log(`[Sync-Single] Updated pickup_address for order ${platform_order_no}`)
+    }
 
     // 淘宝价格回填：仅当本地价格为0或NULL且同步获取到价格时更新
     if (platform === 'taobao') {
@@ -4833,6 +4865,8 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       logistics_no: orderInfo.logistics_no || localOrder.logistics_no,
       logistics_company: orderInfo.logistics_company || localOrder.logistics_company,
       logistics_status: orderInfo.logistics_status || '',
+      pickup_code: orderInfo.pickup_code || localOrder.pickup_code || '',
+      pickup_address: orderInfo.pickup_address || localOrder.pickup_address || '',
       purchase_price: orderInfo.purchase_price || ''
     }))
   } catch (err) {
@@ -4905,7 +4939,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no, logistics_company, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, purchase_no, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -4939,6 +4973,16 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       updateFields.push('logistics_company=?')
       updateValues.push(order_info.logistics_company)
       console.log(`[Browser-Sync-Update] 物流公司: ${order_info.logistics_company}`)
+    }
+    if (order_info.pickup_code) {
+      updateFields.push('pickup_code=?')
+      updateValues.push(order_info.pickup_code)
+      console.log(`[Browser-Sync-Update] 已保存取件码`)
+    }
+    if (order_info.pickup_address) {
+      updateFields.push('pickup_address=?')
+      updateValues.push(order_info.pickup_address)
+      console.log(`[Browser-Sync-Update] 已保存取件地址`)
     }
 
     // 物流轨迹数据
@@ -4984,6 +5028,8 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       logistics_no: order_info.logistics_no || localOrder.logistics_no,
       logistics_company: order_info.logistics_company || localOrder.logistics_company,
       logistics_status: order_info.logistics_status || '',
+      pickup_code: order_info.pickup_code || localOrder.pickup_code || '',
+      pickup_address: order_info.pickup_address || localOrder.pickup_address || '',
       goods_name: order_info.goods_name || localOrder.goods_name,
       goods_image: order_info.goods_image || localOrder.goods_image
     }))
@@ -5008,7 +5054,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
 
     // 获取本地已绑定的采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
       [ownerId, '']
     )
 
@@ -5089,6 +5135,14 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
       if (platformOrder.logistics_tracking && Array.isArray(platformOrder.logistics_tracking) && platformOrder.logistics_tracking.length > 0) {
         updateFields.push('logistics_tracking=?')
         updateValues.push(JSON.stringify(platformOrder.logistics_tracking))
+      }
+      if (platformOrder.pickup_code) {
+        updateFields.push('pickup_code=?')
+        updateValues.push(platformOrder.pickup_code)
+      }
+      if (platformOrder.pickup_address) {
+        updateFields.push('pickup_address=?')
+        updateValues.push(platformOrder.pickup_address)
       }
 
       // PDD 搜索 API 返回的商品信息（仅当原数据为空/弱时才更新）

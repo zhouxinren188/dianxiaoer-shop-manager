@@ -4036,12 +4036,33 @@ async function fillPaymentPasswordFromServerVault(win, accountId) {
  * - 仅在需要登录/验证时才显示窗口
  * - 最长 120 秒自动关闭，防止泄漏
  */
+function getActiveTaobaoProtectedAddresses(accountId) {
+  const protectedAddresses = []
+  const seen = new Set()
+
+  for (const state of activePurchaseWindows.values()) {
+    if (!state || String(state.accountId || '') !== String(accountId || '')) continue
+    if (state.platform !== 'taobao' && state.platform !== 'tmall') continue
+
+    const info = state.purchaseInfo || {}
+    const parsed = parseAddress(info.shippingAddress || '')
+    const detail = parsed?.other || String(info.shippingAddress || '')
+    const name = String(info.shippingName || '').trim()
+    const phone = String(info.shippingPhone || '').trim()
+    if (!name || !phone || !detail) continue
+
+    const dedupeKey = `${name}|${phone.replace(/\D/g, '')}|${detail.replace(/\s/g, '')}`
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    protectedAddresses.push({ name, phone, detail })
+  }
+
+  return protectedAddresses
+}
+
 function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainWindow, purchaseNo, partitionName, purchaseWin }) {
   const addrUrl = ADDRESS_MANAGE_URLS[platform]
   if (!addrUrl) return null
-  // 淘宝地址较多的账号仍存在明显延迟，暂时显示窗口便于现场观察页面状态；
-  // 其他平台继续后台静默执行，避免扩大对正常采购流程的影响。
-  const showAddressDebugWindow = platform === 'taobao'
 
   // 通知前端：正在自动设置收货地址
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4057,7 +4078,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   const addrWin = new BrowserWindow({
     width: 1280,
     height: 860,
-    show: showAddressDebugWindow,
+    show: false,
     title: `设置收货地址 - ${platform}`,
     webPreferences: {
       partition: partitionName,
@@ -4089,12 +4110,6 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
   function closeAddressWindowAfterFailure() {
     if (addrWin.isDestroyed()) return
-    if (showAddressDebugWindow) {
-      addrWin.show()
-      addrWin.focus()
-      runtimeLog.writeLog('AddrSetupWin', '开发调试模式：失败后保留淘宝地址窗口')
-      return
-    }
     addrWin.destroy()
   }
 
@@ -4165,7 +4180,14 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       if (parsedAddr) {
         setTimeout(() => {
           if (addrWin.isDestroyed() || addrDone) return
-          const script = buildTaobaoAddressManagerScript(purchaseInfo.shippingName, purchaseInfo.shippingPhone, parsedAddr)
+          const protectedAddresses = getActiveTaobaoProtectedAddresses(purchaseInfo.accountId)
+          const script = buildTaobaoAddressManagerScript(
+            purchaseInfo.shippingName,
+            purchaseInfo.shippingPhone,
+            parsedAddr,
+            { protectedAddresses }
+          )
+          runtimeLog.writeLog('AddrSetupWin', `淘宝地址清理保护队列: count=${protectedAddresses.length}`)
           addrWin.webContents.executeJavaScript(script).catch((err) => {
             lastAddressIssue = 'script_error'
             runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行失败: ${err.message}`)
@@ -4752,7 +4774,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     let pddPayClicked = false     // PDD结算页是否已选择支付宝支付（防止dom-ready和did-navigate重复触发）
     let pddAddrAreaClicked = false // PDD结算页是否已点击地址区域（防止dom-ready和did-navigate重复触发）
     let pddCookieSaveTimer = null // PDD cookie 定期保存定时器
-    const windowState = { win, pollTimer, resolved }
+    const windowState = {
+      win,
+      pollTimer,
+      resolved,
+      accountId,
+      platform,
+      purchaseInfo
+    }
     activePurchaseWindows.set(purchaseNo, windowState)
 
     function cleanup() {

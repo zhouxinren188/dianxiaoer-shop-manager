@@ -11,6 +11,7 @@ const {
   resolveLogisticsCompany, extractTrackingFromData, normalizeTrackingItems,
   looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
+const { extractTaobaoPickupInfo } = require('./taobao-logistics')
 
 // ============ 平台配置 ============
 
@@ -496,11 +497,12 @@ function syncSingle(accountId, platformOrderNo) {
         if (found) {
           // 首页找到订单，检查是否需要物流轨迹
           const mappedStatus = mapOrderStatus(found.status)
-          const needTracking = (mappedStatus === 'shipped' || mappedStatus === 'in_transit') && !found.logistics_tracking
-          if (needTracking) {
-            // 已发货/运输中但缺少轨迹，需要访问物流页
+          const needLogisticsDetails = (mappedStatus === 'shipped' || mappedStatus === 'in_transit') &&
+            (!found.logistics_tracking || !found.pickup_code || !found.pickup_address)
+          if (needLogisticsDetails) {
+            // 已发货/运输中需要访问物流页，补齐轨迹及取件信息
             detailResult = found
-            console.log(`[PurchaseSync-Taobao] 首页找到订单但缺少轨迹(状态=${found.status}), 导航到物流页面`)
+            console.log(`[PurchaseSync-Taobao] 首页订单需要补齐物流详情(状态=${found.status}), 导航到物流页面`)
             navigateToLogisticsPage()
             return true
           }
@@ -530,7 +532,15 @@ function syncSingle(accountId, platformOrderNo) {
         console.log(`[PurchaseSync-Taobao] findAllOrders解析到 ${orders.length} 条订单`)
         const found = orders.find(o => o.order_no === platformOrderNo)
         if (found) {
-          // 列表页格式有完整数据，直接完成
+          const mappedStatus = mapOrderStatus(found.status)
+          const needLogisticsDetails = mappedStatus === 'shipped' || mappedStatus === 'in_transit'
+          // 已发货订单必须进入物流详情页，才能读取取件码和取件地址。
+          if (needLogisticsDetails) {
+            detailResult = found
+            console.log(`[PurchaseSync-Taobao] 详情页订单需要补齐物流详情(状态=${found.status}), 导航到物流页面`)
+            navigateToLogisticsPage()
+            return true
+          }
           if (found.logistics_company || found.status) {
             clearTimeout(overallTimer)
             console.log('[PurchaseSync-Taobao] 详情页找到完整订单:', JSON.stringify(found))
@@ -699,6 +709,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company_code: '',
           logistics_status: '',
           logistics_tracking: null,
+          pickup_code: '',
+          pickup_address: '',
           purchase_price: ''
         }
 
@@ -709,6 +721,8 @@ function syncSingle(accountId, platformOrderNo) {
           if (!merged.logistics_company_code && logisticsInfo.logistics_company_code) merged.logistics_company_code = logisticsInfo.logistics_company_code
           if (!merged.status && logisticsInfo.status) merged.status = logisticsInfo.status
           if (!merged.logistics_status && logisticsInfo.logistics_status) merged.logistics_status = logisticsInfo.logistics_status
+          if (!merged.pickup_code && logisticsInfo.pickup_code) merged.pickup_code = logisticsInfo.pickup_code
+          if (!merged.pickup_address && logisticsInfo.pickup_address) merged.pickup_address = logisticsInfo.pickup_address
           if (!merged.purchase_price && logisticsInfo.purchase_price) merged.purchase_price = logisticsInfo.purchase_price
           // 物流页的轨迹数据优先（更详细）
           if (logisticsInfo.logistics_tracking && logisticsInfo.logistics_tracking.length > 0) {
@@ -720,7 +734,7 @@ function syncSingle(accountId, platformOrderNo) {
         merged.logistics_company = resolveLogisticsCompany(merged.logistics_company, merged.logistics_company_code)
 
         clearTimeout(overallTimer)
-        if (merged.logistics_no || merged.status || merged.logistics_company) {
+        if (merged.logistics_no || merged.status || merged.logistics_company || merged.pickup_code || merged.pickup_address) {
           console.log('[PurchaseSync-Taobao] 最终合并结果:', JSON.stringify(merged))
           finish({ success: true, orderInfo: merged })
         } else {
@@ -780,6 +794,8 @@ function syncSingle(accountId, platformOrderNo) {
           logistics_company_code: '',
           logistics_status: '',
           logistics_tracking: null,
+          pickup_code: '',
+          pickup_address: '',
           purchase_price: ''
         }
         let hasAnyInfo = false
@@ -787,6 +803,16 @@ function syncSingle(accountId, platformOrderNo) {
         // 物流页数据可能在 data.data 中
         const components = (data && data.data) || data
         if (!components || typeof components !== 'object') return null
+
+        const pickupInfo = extractTaobaoPickupInfo(components, richTextToPlain)
+        if (pickupInfo.pickup_code) {
+          result.pickup_code = pickupInfo.pickup_code
+          hasAnyInfo = true
+        }
+        if (pickupInfo.pickup_address) {
+          result.pickup_address = pickupInfo.pickup_address
+          hasAnyInfo = true
+        }
 
         // 收集 logisticsDetailLine 组件（每个轨迹点是一个独立组件）
         const trackingComponents = []

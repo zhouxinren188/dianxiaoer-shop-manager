@@ -552,6 +552,14 @@ async function initDB() {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN shipping_fee DECIMAL(12,2) DEFAULT 0 COMMENT '运费'")
     } catch(e) { /* 列已存在 */ }
 
+    // ======== 淘宝物流取件信息 ========
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN pickup_code VARCHAR(100) DEFAULT '' COMMENT '物流取件码'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN pickup_address VARCHAR(500) DEFAULT '' COMMENT '物流取件地址'")
+    } catch(e) { /* 列已存在 */ }
+
     // ======== 采购单售后状态字段 ========
     try {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN aftersale_status VARCHAR(30) DEFAULT 'none' COMMENT '售后状态: none/pending_refund/pending_merchant_handle/pending_return_refund/pending_return_tracking/closed'")

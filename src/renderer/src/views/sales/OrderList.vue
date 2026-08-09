@@ -3431,6 +3431,12 @@ async function handleSmsNotify(order) {
 
     const contextOrder = context.order || {}
     if (contextOrder.buyer_phone) smsForm.phone = contextOrder.buyer_phone
+    smsForm.pickupAddress = contextOrder.pickup_address || ''
+    smsForm.pickupCode = contextOrder.pickup_code || ''
+    if (smsForm.pickupAddress || smsForm.pickupCode) {
+      smsForm.template = 'pickup'
+      applySmsTemplate()
+    }
     order.smsContent = contextOrder.sms_content || order.smsContent || ''
     order.smsSentAt = contextOrder.sms_sent_at || order.smsSentAt || null
     order.smsSendCount = Number(contextOrder.sms_send_count) || order.smsSendCount || 0

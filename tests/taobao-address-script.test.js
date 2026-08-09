@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 import vm from 'node:vm'
 import taobaoAddressScript from '../src/main/taobao-address-script.js'
 
-const { buildTaobaoAddressManagerScript, TAOBAO_TERMINAL_FAILURE_RESULTS } = taobaoAddressScript
+const {
+  buildTaobaoAddressManagerScript,
+  normalizeTaobaoAddressForMatch,
+  taobaoAddressDetailMatches,
+  TAOBAO_TERMINAL_FAILURE_RESULTS
+} = taobaoAddressScript
 
 describe('淘宝地址管理脚本 v2', () => {
   it('生成的注入脚本语法有效', () => {
@@ -73,10 +78,51 @@ describe('淘宝地址管理脚本 v2', () => {
 
     expect(script).toContain('collectAddressRows')
     expect(script).toContain('#addressCard [class*="listItem"]')
-    expect(script).toContain("visibleAll('button, a, [role=\"button\"]', document)")
+    expect(script).toContain("visibleAll('button, a, [role=\"button\"], .delete, [class*=\"delete\"]', document)")
     expect(script).not.toContain("visibleAll('button, a, span, [role=\"button\"]', document)")
     expect(script).toContain('EXISTING_ROW_SCOPE_INVALID')
     expect(script).toContain('getRowAction(row, /^取消默认$/)')
     expect(script).not.toContain('[class*="address"], [class*="Address"]')
+  })
+
+  it('已有地址必须匹配完整详细地址和仓库编号', () => {
+    const row = '王宝苏 86-17305271170 江苏省 宿迁市 沭阳县 沭城街道 石化装饰城1幢112室【A7928】 修改 删除 设为默认 置顶'
+
+    expect(taobaoAddressDetailMatches(row, '石化装饰城1幢112室【A7928】')).toBe(true)
+    expect(taobaoAddressDetailMatches(row, '石化装饰城1幢112室【A7851】')).toBe(false)
+    expect(taobaoAddressDetailMatches(row, '石化装饰城1幢112室[A7928]')).toBe(true)
+    expect(normalizeTaobaoAddressForMatch('石化装饰城 1幢-112室【A7928】'))
+      .toBe('石化装饰城1幢112室A7928')
+
+    const script = buildTaobaoAddressManagerScript('王宝苏', '17305271170', {
+      province: '江苏省',
+      city: '宿迁市',
+      area: '沭阳县',
+      other: '沭城街道石化装饰城1幢112室【A7928】'
+    })
+    expect(script).toContain('addressDetailMatches(text, addressTarget.detail)')
+    expect(script).not.toContain('.slice(0, 12)')
+  })
+
+  it('地址超过上限时分批清理，并保护默认、置顶和活跃采购地址', () => {
+    const script = buildTaobaoAddressManagerScript('新收件人', '13800138000', {
+      province: '江苏省',
+      city: '宿迁市',
+      area: '沭阳县',
+      other: '沭城街道仓库路1号【A9001】'
+    }, {
+      protectedAddresses: [{
+        name: '排队订单',
+        phone: '13900139000',
+        detail: '仓库路1号【A9002】'
+      }]
+    })
+
+    expect(script).toContain('var addressRollingLimit = 10')
+    expect(script).toContain('var addressCleanupBatch = 5')
+    expect(script).toContain('cleanupHistoricalAddresses(1)')
+    expect(script).toContain('getRowAction(row, /^取消默认$/)')
+    expect(script).toContain('getRowAction(row, /^取消置顶$/)')
+    expect(script).toContain('"detail":"仓库路1号【A9002】"')
   })
 })
