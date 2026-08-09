@@ -2579,13 +2579,18 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
     return rect.width > 0 && rect.height > 0;
   }
 
+  function isOwnedNode(el) {
+    return !!(el && el.closest && el.closest(
+      '#jd-product-overlay,#dxe-address-code-status,#dxe-address-code-blocked-notice'
+    ));
+  }
+
   function isAddressLike(el) {
-    if (!el) return false;
+    if (!el || isOwnedNode(el)) return false;
     var marker = ((el.className || '') + ' ' + (el.id || '') + ' ' +
       (el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-spm') || ''))).toLowerCase();
     var text = normalize(el.innerText || el.textContent || '');
     if (/address|addr|receiver|consignee|delivery/.test(marker)) return true;
-    if (text.indexOf(expectedToken) >= 0) return true;
     return /1\\d{2}\\*{0,4}\\d{2,8}/.test(text) && /省|市|区|县|街道|镇|乡/.test(text);
   }
 
@@ -2599,6 +2604,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
 
   function selectedAddressTexts() {
     var selectors = [
+      '[class*="listItemSelect"]',
       '[class*="address"][class*="selected"]',
       '[class*="address"][class*="active"]',
       '[class*="address"][class*="checked"]',
@@ -2619,7 +2625,8 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
       var nodes = [];
       try { nodes = document.querySelectorAll(selector); } catch (e) { return; }
       Array.prototype.forEach.call(nodes, function(node) {
-        var root = addressRoot(node);
+        if (isOwnedNode(node)) return;
+        var root = node.matches && node.matches('[class*="listItemSelect"]') ? node : addressRoot(node);
         if (!root || !isVisible(root) || seen.indexOf(root) >= 0) return;
         seen.push(root);
         var text = normalize(root.innerText || root.textContent || '');
@@ -2627,16 +2634,6 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
       });
     });
     return texts;
-  }
-
-  function hasVisibleExpectedToken() {
-    var nodes = document.querySelectorAll('body *');
-    for (var i = 0; i < nodes.length; i++) {
-      var node = nodes[i];
-      if (!isVisible(node) || node.children.length > 0) continue;
-      if (normalize(node.textContent).indexOf(expectedToken) >= 0) return true;
-    }
-    return false;
   }
 
   function validateSelectedAddress() {
@@ -2650,10 +2647,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
       return { ok: false, method: 'selected-address-mismatch', selectedText: selectedTexts[0] };
     }
 
-    if (hasVisibleExpectedToken()) {
-      return { ok: true, method: 'visible-token', selectedText: '' };
-    }
-    return { ok: false, method: 'token-not-found', selectedText: '' };
+    return { ok: false, method: 'selected-address-unresolved', selectedText: '' };
   }
 
   function ensureStatus(result) {
@@ -4053,6 +4047,12 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     mainWindow.webContents.send('purchase-address-setup-start', { purchaseNo })
   }
 
+  const addressStartedAt = Date.now()
+  const addressAbsoluteTimeoutMs = 150000
+  const addressProgressGraceMs = 60000
+  let addressProgressDeadline = addressStartedAt + 90000
+  let addressLastStage = 'window-created'
+
   const addrWin = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -4069,13 +4069,13 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   })
   // 注意：dl 不做 UA 伪装，Electron 默认 UA 对各平台正常工作
 
-  // 120秒最大生存期，防止窗口泄漏
+  // 绝对生存期比阶段超时多留10秒，仅用于防止异常窗口泄漏。
   const maxLifetime = setTimeout(() => {
     if (!addrWin.isDestroyed()) {
       console.log('[AddrSetupWin] Max lifetime reached, closing')
       addrWin.destroy()
     }
-  }, 120000)
+  }, addressAbsoluteTimeoutMs + 10000)
 
   let addrDone = false
   let lastAddressIssue = ''
@@ -4104,6 +4104,12 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
     // 淘宝新版脚本只记录阶段码，不包含姓名、电话或详细地址，可安全写入持久日志。
     if (message.includes('[AddressAutoFill][TB]')) {
+      const stageMatch = message.match(/\[AddressAutoFill\]\[TB\]\s+([A-Z_]+)/)
+      addressLastStage = stageMatch?.[1] || addressLastStage
+      addressProgressDeadline = Math.min(
+        addressStartedAt + addressAbsoluteTimeoutMs,
+        Math.max(addressProgressDeadline, Date.now() + addressProgressGraceMs)
+      )
       runtimeLog.writeLog('AddrSetupWin', message)
     }
     // ★ 检测地址操作成功信号（三种途径，任一触发即可）：
@@ -4350,19 +4356,20 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   })
 
   // 地址设置结果轮询
-  let checkCount = 0
   const checkTimer = setInterval(() => {
-    checkCount++
     if (addrWin.isDestroyed() || addrDone) {
       clearInterval(checkTimer)
       return
     }
-    // 最多等60秒
-    if (checkCount > 60) {
+    const now = Date.now()
+    const absoluteTimedOut = now - addressStartedAt > addressAbsoluteTimeoutMs
+    const stageTimedOut = now > addressProgressDeadline
+    if (absoluteTimedOut || stageTimedOut) {
       clearInterval(checkTimer)
-      console.log('[AddrSetupWin] Address setup timeout')
+      const elapsedMs = now - addressStartedAt
+      console.log(`[AddrSetupWin] Address setup timeout: stage=${addressLastStage}, elapsedMs=${elapsedMs}`)
       const reason = lastAddressIssue || 'timeout'
-      runtimeLog.writeLog('AddrSetupWin', `地址设置超时: platform=${platform}, purchaseNo=${purchaseNo}, reason=${reason}`)
+      runtimeLog.writeLog('AddrSetupWin', `地址设置超时: platform=${platform}, purchaseNo=${purchaseNo}, reason=${reason}, stage=${addressLastStage}, elapsedMs=${elapsedMs}`)
       addrDone = true
       clearTimeout(maxLifetime)
       // 超时必须明确标记失败，禁止前端误报“地址已修改成功”。

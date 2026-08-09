@@ -33,9 +33,10 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   var formRoot = null;
   var saveClicked = false;
   var finished = false;
+  var startedAt = Date.now();
 
   function log(code, detail) {
-    console.log('[AddressAutoFill][TB] ' + code + (detail ? ' ' + detail : ''));
+    console.log('[AddressAutoFill][TB] ' + code + ' elapsedMs=' + (Date.now() - startedAt) + (detail ? ' ' + detail : ''));
   }
 
   function finish(result, detail) {
@@ -50,6 +51,48 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   function sleep(ms) {
     return new Promise(function(resolve) { setTimeout(resolve, ms); });
+  }
+
+  // 淘宝地址页是异步渲染的 SPA。隐藏窗口中的短间隔定时器即使关闭后台节流，
+  // 在部分 Windows/Chromium 环境仍可能被延后；DOM 变化监听可以在按钮或表单
+  // 真正出现时立即继续，定时轮询仅作为没有 DOM 变化时的后备手段。
+  function waitForDom(readValue, timeoutMs) {
+    return new Promise(function(resolve) {
+      var settled = false;
+      var observer = null;
+      var intervalId = null;
+      var timeoutId = null;
+
+      function finishWait(value) {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (intervalId) clearInterval(intervalId);
+        if (timeoutId) clearTimeout(timeoutId);
+        resolve(value || null);
+      }
+
+      function check() {
+        if (settled) return;
+        try {
+          var value = readValue();
+          if (value) finishWait(value);
+        } catch (e) {}
+      }
+
+      try {
+        observer = new MutationObserver(check);
+        observer.observe(document.documentElement || document.body, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['class', 'style', 'aria-hidden', 'aria-expanded']
+        });
+      } catch (e) {}
+      intervalId = setInterval(check, 250);
+      timeoutId = setTimeout(function() { finishWait(null); }, timeoutMs);
+      check();
+    });
   }
 
   function nodeText(el) {
@@ -641,27 +684,24 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     return finish(existingDefaultOk ? 'success' : 'default_unconfirmed', existingDefaultOk ? 'existing_address_default' : 'existing_address_not_default');
   }
 
-  var addButton = null;
-  for (var addTry = 0; addTry < 50; addTry++) {
-    var issue = detectBlockingIssue();
-    if (issue) return finish(issue, 'waiting_add_button');
-    addButton = findAddButton();
-    if (addButton) break;
-    await sleep(300);
+  var addButton = await waitForDom(findAddButton, 30000);
+  if (!addButton) {
+    var addIssue = detectBlockingIssue();
+    return addIssue
+      ? finish(addIssue, 'waiting_add_button')
+      : finish('no_button', 'add_button_not_found');
   }
-  if (!addButton) return finish('no_button', 'add_button_not_found');
 
   addButton.click();
   log('ADD_BUTTON_CLICKED');
 
-  for (var formTry = 0; formTry < 60; formTry++) {
+  formRoot = await waitForDom(getFormRoot, 30000);
+  if (!formRoot) {
     var formIssue = detectBlockingIssue();
-    if (formIssue) return finish(formIssue, 'waiting_form');
-    formRoot = getFormRoot();
-    if (formRoot) break;
-    await sleep(250);
+    return formIssue
+      ? finish(formIssue, 'waiting_form')
+      : finish('no_form', 'address_form_not_found');
   }
-  if (!formRoot) return finish('no_form', 'address_form_not_found');
   log('FORM_READY');
 
   // 新版页面优先使用淘宝自带的智能地址识别，识别失败再回退到级联选择。

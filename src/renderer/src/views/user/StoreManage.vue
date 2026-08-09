@@ -10,6 +10,14 @@
         <el-form-item label="店铺名称">
           <el-input v-model="searchForm.name" placeholder="请输入店铺名称" clearable />
         </el-form-item>
+        <el-form-item label="商家ID">
+          <el-input
+            v-model.trim="searchForm.merchant_id"
+            placeholder="请输入商家ID"
+            clearable
+            style="width: 180px"
+          />
+        </el-form-item>
         <el-form-item label="标签">
           <el-select v-model="searchForm.tag" placeholder="全部标签" clearable filterable style="width: 160px">
             <el-option v-for="tag in tagOptions" :key="tag" :label="tag" :value="tag" />
@@ -260,6 +268,7 @@ function isExpired(dateStr) {
 
 const searchForm = reactive({
   name: '',
+  merchant_id: '',
   tag: '',
   status: '',
   online: ''
@@ -340,6 +349,7 @@ function handleSearch() {
 
 function handleReset() {
   searchForm.name = ''
+  searchForm.merchant_id = ''
   searchForm.tag = ''
   searchForm.status = ''
   searchForm.online = ''
