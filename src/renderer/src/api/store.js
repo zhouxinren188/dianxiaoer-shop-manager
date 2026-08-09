@@ -20,6 +20,10 @@ export function deleteStore(id) {
   return del(`/api/stores/${id}`)
 }
 
+export function deletePendingStore(id) {
+  return del(`/api/stores/${id}/pending`)
+}
+
 export function updateStoreOnline(id, online) {
   return put(`/api/stores/${id}/status`, { online })
 }

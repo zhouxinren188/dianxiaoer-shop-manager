@@ -2,6 +2,8 @@ const { BrowserWindow, ipcMain, session, app } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { getAuthToken } = require('./auth-store')
+const { getDeviceId, getShortDeviceId } = require('./device-identity')
+const runtimeLog = require('./runtime-logger')
 
 const DEBUG_LOG_PATH = path.join(
   app.isPackaged ? path.dirname(process.execPath) : process.cwd(),
@@ -306,7 +308,7 @@ try {
 } catch(e) {}
 `
 
-function fetchSalesOrders(storeId, options = {}) {
+function fetchSalesOrdersAttempt(storeId, options = {}) {
   return new Promise(async (resolve) => {
     if (activeFetches.has(storeId)) {
       return resolve({ success: false, message: '该店铺正在获取数据，请等待完成' })
@@ -320,11 +322,11 @@ function fetchSalesOrders(storeId, options = {}) {
     console.log('[SalesFetch] storeId:', storeId, 'partition:', partitionName)
     console.log('[SalesFetch] Cookies:', cookies.length, 'JD:', jdCookies.length)
 
-    // 详细Cookie诊断
+    // 详细Cookie诊断：只记录名称、域名和有效期，禁止输出 Cookie 值。
     if (cookies.length > 0) {
-      console.log('[SalesFetch] Cookie详情:')
+      console.log('[SalesFetch] Cookie详情(无值):')
       cookies.forEach((c, i) => {
-        console.log(`  ${i+1}. ${c.name}=${c.value?.substring(0, 15)}... domain:${c.domain} expires:${c.expirationDate ? new Date(c.expirationDate * 1000).toISOString() : 'session'}`)
+        console.log(`  ${i+1}. ${c.name} domain:${c.domain} expires:${c.expirationDate ? new Date(c.expirationDate * 1000).toISOString() : 'session'}`)
       })
     }
 
@@ -950,6 +952,89 @@ function fetchSalesOrders(storeId, options = {}) {
       finish({ success: false, message: '获取订单失败: ' + err.message })
     }
   })
+}
+
+function isCookieLoginFailure(result) {
+  if (!result || result.success) return false
+  const message = String(result.message || '')
+  return message.includes('登录已过期') || message.includes('重新登录京东') || message.includes('京东Cookie')
+}
+
+// 统一入口：同步前对比服务器版本；遇到登录页时从服务器恢复并且只重试一次。
+async function fetchSalesOrders(storeId, options = {}) {
+  const {
+    refreshCookiesFromServerIfNewer,
+    recoverStoreSessionFromServer,
+    reportStoreDeviceStatus
+  } = require('./cookie-heartbeat')
+  const device = getShortDeviceId()
+
+  const precheck = await refreshCookiesFromServerIfNewer(storeId, {
+    skipFlush: true,
+    context: 'sales_sync_precheck'
+  })
+  runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=precheck action=${precheck.action || 'unknown'} server_rev=${Number(precheck.serverRevision || 0)}`)
+
+  let result = await fetchSalesOrdersAttempt(storeId, options)
+  if (!isCookieLoginFailure(result)) {
+    if (result?.success) {
+      await reportStoreDeviceStatus(storeId, {
+        online: true,
+        verified: true,
+        reason: 'sales_sync_success',
+        context: 'sales_sync_status'
+      })
+      runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=sync result=success recovery_attempted=false`)
+    } else {
+      runtimeLog.writeLog(
+        'JD_COOKIE_FLOW',
+        `store_id=${storeId} device=${device} phase=sync result=other_failure recovery_attempted=false message=${String(result?.message || 'unknown').replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`
+      )
+    }
+    return result
+  }
+
+  runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=sync result=login_redirect action=restore_server_cookie`)
+  const recovered = await recoverStoreSessionFromServer(storeId, 'jd')
+  if (recovered === false) {
+    await reportStoreDeviceStatus(storeId, {
+      online: false,
+      verified: false,
+      reason: 'sales_sync_cookie_recovery_failed',
+      context: 'sales_sync_status'
+    })
+    runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=recovery result=failed final=cookie_expired`)
+    return result
+  }
+
+  runtimeLog.writeLog(
+    'JD_COOKIE_FLOW',
+    `store_id=${storeId} device=${device} phase=recovery result=${recovered === true ? 'verified' : 'check_uncertain'} action=retry_sync_once`
+  )
+  result = await fetchSalesOrdersAttempt(storeId, { ...options, cookieRecoveryRetry: true })
+  if (result?.success) {
+    await reportStoreDeviceStatus(storeId, {
+      online: true,
+      verified: true,
+      reason: 'sales_sync_recovered',
+      context: 'sales_sync_status'
+    })
+    runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=retry result=success final=online`)
+    return result
+  }
+
+  if (isCookieLoginFailure(result)) {
+    await reportStoreDeviceStatus(storeId, {
+      online: false,
+      verified: false,
+      reason: 'sales_sync_retry_login_failure',
+      context: 'sales_sync_status'
+    })
+    runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=retry result=login_redirect final=cookie_expired`)
+  } else {
+    runtimeLog.writeLog('JD_COOKIE_FLOW', `store_id=${storeId} device=${device} phase=retry result=other_failure message=${String(result?.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`)
+  }
+  return result
 }
 
 function registerSalesOrderIpc(mainWindow) {
@@ -3321,7 +3406,7 @@ const LOCAL_SERVER = 'http://localhost:3002'
 let autoSyncTimer = null
 let autoSyncRunning = false
 let _mainWindow = null  // 存储 mainWindow 引用，供 IPC handler 使用
-const DEVICE_ID = `device_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+const DEVICE_ID = getDeviceId()
 
 function httpGetJson(url) {
   const http = require('http')

@@ -1387,32 +1387,37 @@ async function handleGoOrder() {
 
   // 调用主进程打开采购窗口
   if (window.electronAPI) {
-    window.electronAPI.invoke('open-purchase-order-window', {
-      accountId: purchaseInfo.selectedAccountId,
-      accountName: accountName,
-      password: accountPassword,
-      purchaseUrl: finalUrl,
-      platform: purchaseInfo.platform,
-      purchaseInfo: {
-        purchaseNo: purchaseInfo.purchaseNo,
-        salesOrderId: null,
-        salesOrderNo: '',
-        inventoryId: purchaseInfo.inventoryId,
-        goodsName: purchaseInfo.goodsName,
-        image: purchaseInfo.image,
-        sku: purchaseInfo.sku,
-        skuId: purchaseInfo.skuId,
-        quantity: purchaseInfo.quantity,
-        price: purchaseInfo.price,
-        purchasePrice: purchaseInfo.purchasePrice,
-        remark: purchaseInfo.remark,
-        sourceUrl: finalUrl,
-        purchaseType: purchaseInfo.purchaseType,
-        shippingName: purchaseInfo.shippingName,
-        shippingPhone: purchaseInfo.shippingPhone,
-        shippingAddress: purchaseInfo.shippingAddress
-      }
-    })
+    try {
+      await window.electronAPI.invoke('open-purchase-order-window', {
+        accountId: purchaseInfo.selectedAccountId,
+        accountName: accountName,
+        password: accountPassword,
+        purchaseUrl: finalUrl,
+        platform: purchaseInfo.platform,
+        purchaseInfo: {
+          purchaseNo: purchaseInfo.purchaseNo,
+          salesOrderId: null,
+          salesOrderNo: '',
+          inventoryId: purchaseInfo.inventoryId,
+          goodsName: purchaseInfo.goodsName,
+          image: purchaseInfo.image,
+          sku: purchaseInfo.sku,
+          skuId: purchaseInfo.skuId,
+          quantity: purchaseInfo.quantity,
+          price: purchaseInfo.price,
+          purchasePrice: purchaseInfo.purchasePrice,
+          remark: purchaseInfo.remark,
+          sourceUrl: finalUrl,
+          purchaseType: purchaseInfo.purchaseType,
+          shippingName: purchaseInfo.shippingName,
+          shippingPhone: purchaseInfo.shippingPhone,
+          shippingAddress: purchaseInfo.shippingAddress
+        }
+      })
+    } catch (error) {
+      ElMessage.error('打开采购页面失败: ' + error.message)
+      return
+    }
   }
 
   purchaseInfo.captureStatus = 'ordering'

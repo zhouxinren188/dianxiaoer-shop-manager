@@ -6,7 +6,7 @@
  *
  * 日志文件位置: app.getPath('userData') / 店小二运行日志.txt
  * 每次启动自动追加，不清空旧日志（保留历史上下文）
- * 日志超过 2MB 自动截断保留尾部
+ * 日志超过 8MB 自动截断保留尾部，便于回溯最近数天的跨设备 Cookie 流程
  */
 
 const fs = require('fs')
@@ -14,7 +14,8 @@ const path = require('path')
 const { app } = require('electron')
 
 const LOG_FILE_NAME = '店小二运行日志.txt'
-const MAX_LOG_SIZE = 2 * 1024 * 1024 // 2MB
+const MAX_LOG_SIZE = 8 * 1024 * 1024 // 约保留数天诊断信息
+const RETAIN_LOG_SIZE = 6 * 1024 * 1024
 
 let logFilePath = null
 
@@ -29,10 +30,9 @@ function truncateLogIfNeeded() {
   try {
     const stats = fs.statSync(getLogFilePath())
     if (stats.size > MAX_LOG_SIZE) {
-      // 截断：保留最后 1MB 的内容
+      // 截断：保留最后 6MB 的内容
       const content = fs.readFileSync(getLogFilePath(), 'utf-8')
-      const keepSize = 1024 * 1024
-      const truncated = content.slice(content.length - keepSize)
+      const truncated = content.slice(content.length - RETAIN_LOG_SIZE)
       fs.writeFileSync(getLogFilePath(), truncated, 'utf-8')
     }
   } catch (e) {

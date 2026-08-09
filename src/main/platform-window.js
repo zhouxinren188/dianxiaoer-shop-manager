@@ -4,6 +4,12 @@ const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
+const { getDeviceId } = require('./device-identity')
+const runtimeLog = require('./runtime-logger')
+const {
+  reportStoreDeviceStatus,
+  uploadCookiesToServer
+} = require('./cookie-heartbeat')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -40,6 +46,65 @@ const storeCredentials = new Map()
 const storeExtractedInfo = new Map()
 // 暂存是否为重新登录（keepCookie） Map<storeId, boolean>
 const storeKeepCookie = new Map()
+// 同一店铺一次只允许一个保存任务，避免页面重复加载/手动确认造成并发写入。
+const storeSaveTasks = new Map()
+const storeOriginalCookies = new Map()
+
+function cleanupPlatformWindowState(storeId) {
+  platformWindows.delete(storeId)
+  storePlatforms.delete(storeId)
+  storeKeepCookie.delete(storeId)
+  storeCredentials.delete(storeId)
+  storeExtractedInfo.delete(storeId)
+  storeSaveTasks.delete(storeId)
+  storeOriginalCookies.delete(storeId)
+}
+
+function cookieUrl(cookie) {
+  const domain = String(cookie?.domain || '').replace(/^\./, '')
+  return `${cookie?.secure === false ? 'http' : 'https'}://${domain}${cookie?.path || '/'}`
+}
+
+async function restoreOriginalCookies(storeId) {
+  const originalCookies = storeOriginalCookies.get(storeId)
+  if (!Array.isArray(originalCookies)) return
+  const ses = session.fromPartition(`persist:platform-${storeId}`)
+  await ses.clearStorageData({ storages: ['cookies'] })
+  let restored = 0
+  for (const cookie of originalCookies) {
+    try {
+      const details = {
+        url: cookieUrl(cookie),
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path || '/',
+        secure: cookie.secure !== false,
+        httpOnly: !!cookie.httpOnly
+      }
+      if (cookie.expirationDate) details.expirationDate = cookie.expirationDate
+      if (cookie.sameSite && ['no_restriction', 'lax', 'strict', 'unspecified'].includes(cookie.sameSite)) {
+        details.sameSite = cookie.sameSite
+      }
+      await ses.cookies.set(details)
+      restored++
+    } catch { /* 单条Cookie恢复失败不阻断其余条目 */ }
+  }
+  runtimeLog.writeLog('STORE_LOGIN', `store_id=${storeId} phase=cancel_restore restored=${restored}/${originalCookies.length}`)
+}
+
+function parseBusinessResponse(response, fallbackMessage) {
+  let body = null
+  try { body = JSON.parse(response?.data || '{}') } catch { /* ignore */ }
+  if (!response || response.statusCode < 200 || response.statusCode >= 300 || body?.code !== 0) {
+    return {
+      success: false,
+      statusCode: Number(response?.statusCode || 0),
+      message: body?.message || fallbackMessage
+    }
+  }
+  return { success: true, statusCode: response.statusCode, data: body.data }
+}
 
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -75,6 +140,70 @@ function httpRequest(url, options = {}) {
     if (options.body) req.write(options.body)
     req.end()
   })
+}
+
+async function cleanupPendingStoreOnServer(storeId, context = 'cancel') {
+  const pendingResponse = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/pending`, {
+    method: 'DELETE'
+  })
+  let result = parseBusinessResponse(pendingResponse, '清理临时店铺失败')
+
+  // 兼容尚未部署新接口的开发环境；新服务端不会进入此分支。
+  if (!result.success && result.statusCode === 404) {
+    const legacyResponse = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
+      method: 'DELETE'
+    })
+    result = parseBusinessResponse(legacyResponse, '清理临时店铺失败')
+  }
+
+  runtimeLog.writeLog(
+    'STORE_LOGIN',
+    `store_id=${storeId} phase=pending_cleanup context=${context} result=${result.success ? 'success' : 'failed'} http=${result.statusCode} message=${result.success ? 'none' : String(result.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 160)}`
+  )
+  return result
+}
+
+async function finalizeStoreLoginOnServer(storeId, updateBody) {
+  const response = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}/finalize-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updateBody)
+  })
+  const result = parseBusinessResponse(response, '保存店铺资料失败')
+  if (result.success || result.statusCode !== 404) return result
+
+  // 兼容新服务端部署前的开发版：保留精确商家ID查询，但严格检查业务响应。
+  let targetStoreId = storeId
+  let merged = false
+  if (updateBody.merchant_id) {
+    const checkResponse = await httpRequest(
+      `${BUSINESS_SERVER}/api/stores?merchant_id=${encodeURIComponent(updateBody.merchant_id)}`,
+      { method: 'GET' }
+    )
+    const checkResult = parseBusinessResponse(checkResponse, '检查商家ID失败')
+    if (!checkResult.success) return checkResult
+    const existingStore = Array.isArray(checkResult.data?.list)
+      ? checkResult.data.list.find(store => String(store.id) !== String(storeId))
+      : null
+    if (existingStore) {
+      targetStoreId = Number(existingStore.id)
+      merged = true
+    }
+  }
+
+  const updateResponse = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updateBody)
+  })
+  const updateResult = parseBusinessResponse(updateResponse, '保存店铺资料失败')
+  if (!updateResult.success) return updateResult
+
+  if (merged) {
+    const cleanupResult = await cleanupPendingStoreOnServer(storeId, 'legacy_merge')
+    if (!cleanupResult.success) return cleanupResult
+  }
+  return { success: true, data: { store_id: targetStoreId, merged, legacy: true } }
 }
 
 // 生成登录表单自动填充脚本（注入到采购登录窗口）
@@ -196,10 +325,23 @@ function registerPlatformWindowIpc(mainWindow) {
   const preloadPath = resolveAppPath('resources/platform-login-preload.js')
 
   // 判断是否为后台 URL（排除登录页）
-  function isBackendUrl(url) {
-    return (url.includes('shop.jd.com') || url.includes('sz.jd.com') ||
-      url.includes('jd.com/index')) &&
-      !url.includes('passport') && !url.includes('login')
+  function isBackendUrl(url, platform = 'jd') {
+    try {
+      const parsed = new URL(url)
+      const host = parsed.hostname.toLowerCase()
+      const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase()
+      if (/(passport|login)/.test(host) || /(^|[/?&_-])login([/?&_.=-]|$)/.test(pathAndQuery)) return false
+      const platformHosts = {
+        jd: ['shop.jd.com', 'sz.jd.com'],
+        taobao: ['myseller.taobao.com', 'seller.taobao.com'],
+        tmall: ['myseller.taobao.com', 'seller.taobao.com'],
+        pdd: ['mms.pinduoduo.com'],
+        douyin: ['fxg.jinritemai.com']
+      }
+      return (platformHosts[platform] || []).some(domain => host === domain || host.endsWith(`.${domain}`))
+    } catch {
+      return false
+    }
   }
 
   // 页面商家信息提取脚本
@@ -357,21 +499,31 @@ function registerPlatformWindowIpc(mainWindow) {
           // 如果已经拿到 venderId 或 shopId，立即执行保存
           const extracted = storeExtractedInfo.get(sid) || {}
           if (extracted.venderId || extracted.shopId) {
+            if (win._saveStarted || win._saveDone) return
+            win._saveStarted = true
             console.log('[PlatformWindow] 提取成功，执行保存')
             const cred = storeCredentials.get(sid) || {}
-            
-            // 保存店铺信息
-            saveStoreInfo(mw, sid, plat, cred.account, cred.password).then(() => {
-              // 3秒后自动关闭平台窗口
+            saveStoreInfo(mw, sid, plat, cred.account, cred.password, { verifiedLogin: true }).then(result => {
+              if (!result.success) {
+                win._saveStarted = false
+                if (mw && !mw.isDestroyed()) {
+                  mw.webContents.send('platform-login-failed', {
+                    requestedStoreId: sid,
+                    message: result.message || '店铺登录信息保存失败，请重试'
+                  })
+                }
+                return
+              }
               setTimeout(() => {
                 if (!win.isDestroyed()) {
-                  console.log('[PlatformWindow] 3秒后自动关闭平台窗口')
+                  console.log('[PlatformWindow] 登录保存成功，3秒后自动关闭平台窗口')
                   win._saveDone = true
                   win.close()
                 }
               }, 3000)
-            }).catch(err => {
-              console.error('[PlatformWindow] 保存失败:', err.message)
+            }).catch(error => {
+              win._saveStarted = false
+              console.error('[PlatformWindow] 保存异常:', error.message)
             })
           } else if (retryCount < maxRetries) {
             // 还没拿到关键数据，继续重试
@@ -405,11 +557,14 @@ function registerPlatformWindowIpc(mainWindow) {
     }
 
     const partitionName = `persist:platform-${storeId}`
+    const platformSession = session.fromPartition(partitionName)
 
     // keepCookie=true（登录按钮）保留已有 cookie；否则（新增店铺）清除
-    if (!keepCookie) {
-      const ses = session.fromPartition(partitionName)
-      await ses.clearStorageData({ storages: ['cookies'] })
+    if (keepCookie) {
+      storeOriginalCookies.set(storeId, await platformSession.cookies.get({}))
+    } else {
+      storeOriginalCookies.delete(storeId)
+      await platformSession.clearStorageData({ storages: ['cookies'] })
     }
 
     const win = new BrowserWindow({
@@ -425,7 +580,7 @@ function registerPlatformWindowIpc(mainWindow) {
       }
     })
 
-    win.loadURL(targetUrl)
+    const loadPromise = win.loadURL(targetUrl)
 
     // 确保平台窗口在最前面，防止被主窗口遮挡
     win.once('ready-to-show', () => {
@@ -459,7 +614,7 @@ function registerPlatformWindowIpc(mainWindow) {
       }
 
       // 2. 在后台页面提取商家信息（排除登录页）
-      const isBackend = isBackendUrl(currentUrl)
+      const isBackend = isBackendUrl(currentUrl, platform)
 
       if (isBackend) {
         console.log('[PlatformWindow] 检测到后台页面:', currentUrl)
@@ -468,81 +623,80 @@ function registerPlatformWindowIpc(mainWindow) {
       }
     })
 
-    // 窗口关闭前保存 Cookie 和店铺信息
-    // 使用 e.preventDefault() 阻止窗口在异步保存完成前被销毁
+    // 关闭/X/取消都不再隐式保存；只有已验证的自动保存或“确认已登录”可以写入。
     win.on('close', (e) => {
-      // 只执行一次
       if (win._saveDone) return
-      win._saveDone = true
+      e.preventDefault()
+      if (win._closing) return
+      win._closing = true
 
-      e.preventDefault() // 阻止窗口立即关闭
+      const closeWithoutSaving = async () => {
+        let saveSucceeded = false
+        const activeSave = storeSaveTasks.get(storeId)
+        if (activeSave) {
+          const result = await activeSave
+          saveSucceeded = result.success === true
+        }
 
-      const plat = storePlatforms.get(storeId)
-      const cred = storeCredentials.get(storeId) || {}
-      const extracted = storeExtractedInfo.get(storeId) || {}
-
-      console.log('[PlatformWindow] 窗口关闭，检查店铺信息 storeId=', storeId)
-
-      const doSaveAndDestroy = async () => {
-        // 检查是否获取到了关键信息（venderId 或 shopId）
-        const hasKeyInfo = extracted.venderId || extracted.shopId
-
-        if (!hasKeyInfo && plat && !storeKeepCookie.get(storeId)) {
-          // 未获取到关键信息，删除空白店铺卡片（仅新增店铺场景，重新登录不删除）
-          console.log('[PlatformWindow] 未获取到店铺信息，删除空白店铺 storeId=', storeId)
-          try {
-            await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
-              method: 'DELETE'
-            })
-            console.log('[PlatformWindow] 空白店铺已删除 storeId=', storeId)
-          } catch (err) {
-            console.error('[PlatformWindow] 删除空白店铺失败:', err.message)
-          }
-          // 通知前端刷新列表（storeId=null 表示删除而非更新）
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('platform-login-success', { storeId: null })
-          }
-        } else if (plat) {
-          // 有关键信息，正常保存
-          try {
-            await saveStoreInfo(mainWindow, storeId, plat, cred.account, cred.password)
-          } catch (err) {
-            console.error('[PlatformWindow] 保存失败:', err.message)
-            // 即使保存失败也通知界面刷新
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('platform-login-success', { storeId, account: cred.account })
+        if (!saveSucceeded) {
+          if (storeKeepCookie.get(storeId)) {
+            await restoreOriginalCookies(storeId)
+          } else {
+            const cleanupResult = await cleanupPendingStoreOnServer(
+              storeId,
+              activeSave ? 'close_after_save_failure' : 'window_cancel'
+            )
+            if (!cleanupResult.success && mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('platform-login-failed', {
+                requestedStoreId: storeId,
+                message: cleanupResult.message || '取消登录后清理临时店铺失败'
+              })
             }
+            const pendingSession = session.fromPartition(`persist:platform-${storeId}`)
+            await pendingSession.clearStorageData()
           }
         }
 
-        platformWindows.delete(storeId)
-        storePlatforms.delete(storeId)
-        storeKeepCookie.delete(storeId)
-        storeCredentials.delete(storeId)
-        storeExtractedInfo.delete(storeId)
-
-        // 销毁窗口前先刷盘，确保 session 数据（Cookie等）持久化到磁盘
-        // 避免 win.destroy() 后内存中 session 数据丢失导致心跳检测不到 Cookie
         try {
           const ses = session.fromPartition(`persist:platform-${storeId}`)
-          // 刷盘持久化（5秒超时防止卡死）
           await Promise.race([
             new Promise(resolve => ses.flushStorageData(resolve)),
             new Promise(resolve => setTimeout(resolve, 5000))
           ])
-          console.log('[PlatformWindow] Session数据已刷盘 storeId=', storeId)
-        } catch (e) {
-          console.error('[PlatformWindow] Session刷盘失败:', e.message)
+        } catch (error) {
+          console.error('[PlatformWindow] Session刷盘失败:', error.message)
         }
 
-        // 保存/删除完成后真正销毁窗口
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('platform-login-closed', { requestedStoreId: storeId })
+        }
+        win._saveDone = true
         win.destroy()
       }
-
-      doSaveAndDestroy()
+      closeWithoutSaving().catch(error => {
+        console.error('[PlatformWindow] 关闭登录窗口失败:', error.message)
+        win._saveDone = true
+        win.destroy()
+      })
     })
 
-    return { success: true }
+    win.on('closed', () => cleanupPlatformWindowState(storeId))
+
+    try {
+      await loadPromise
+      return { success: true }
+    } catch (error) {
+      if (keepCookie) {
+        await restoreOriginalCookies(storeId)
+      } else {
+        await cleanupPendingStoreOnServer(storeId, 'load_failed')
+        await platformSession.clearStorageData()
+      }
+      win._saveDone = true
+      if (!win.isDestroyed()) win.destroy()
+      cleanupPlatformWindowState(storeId)
+      return { success: false, message: `平台登录页面加载失败: ${error.message}` }
+    }
   })
 
   // 监听账号密码输入（平台窗口 preload 发送）
@@ -579,194 +733,151 @@ function registerPlatformWindowIpc(mainWindow) {
       return { success: false, message: '平台窗口未打开或已关闭' }
     }
 
-    const cred = storeCredentials.get(storeId) || {}
-    await saveStoreInfo(mainWindow, storeId, platform, cred.account, cred.password)
+    const actualPlatform = storePlatforms.get(storeId) || platform
+    if (!isBackendUrl(win.webContents.getURL(), actualPlatform)) {
+      return { success: false, message: '尚未进入店铺后台，请先完成登录' }
+    }
 
+    const cred = storeCredentials.get(storeId) || {}
+    const result = await saveStoreInfo(mainWindow, storeId, actualPlatform, cred.account, cred.password, {
+      verifiedLogin: true
+    })
+    if (!result.success) return result
+
+    win._saveDone = true
     win.close()
-    return { success: true }
+    return result
   })
 
   // 关闭平台窗口
   ipcMain.handle('close-platform-window', async (event, { storeId }) => {
     const win = platformWindows.get(storeId)
     if (win && !win.isDestroyed()) {
-      win.close() // close 触发 closed 事件，会自动保存
+      win.close()
     }
     return { success: true }
   })
 }
 
-// 保存店铺信息：Cookie + 账号密码 + 商家信息 + 在线状态
-async function saveStoreInfo(mainWindow, storeId, platform, account, password) {
+// 保存店铺信息：只有确认进入后台后，才事务化提交店铺资料和 Cookie。
+async function saveStoreInfo(mainWindow, storeId, platform, account, password, { verifiedLogin = false } = {}) {
+  if (storeSaveTasks.has(storeId)) return storeSaveTasks.get(storeId)
 
-  try {
-    // 1. 提取 Cookie（获取 session 中所有 cookie，不限定域名）
-    let cookies = []
-    try {
-      const partitionName = `persist:platform-${storeId}`
-      const ses = session.fromPartition(partitionName)
-      cookies = await ses.cookies.get({})
-      console.log('[PlatformWindow] 获取到 cookie 数量:', cookies ? cookies.length : 0)
-    } catch (e) {
-      console.error('[PlatformWindow] 获取 Cookie 失败:', e.message)
+  const saveTask = (async () => {
+    const failSave = (phase, message) => {
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} phase=${phase} result=failed reason=${String(message || 'unknown').replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`
+      )
+      return { success: false, message }
+    }
+    if (!verifiedLogin) {
+      return failSave('verify_backend', '尚未进入店铺后台，请先完成登录')
     }
 
-    if (cookies && cookies.length > 0) {
-      try {
-        const cookieData = JSON.stringify(cookies)
-        const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/cookies`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ store_id: storeId, cookie_data: cookieData, domain: platform })
-        })
-        if (cookieRes.statusCode >= 400) {
-          console.error('[PlatformWindow] 保存 Cookie 服务端拒绝:', cookieRes.statusCode, cookieRes.data)
-        } else {
-          console.log('[PlatformWindow] Cookie 已保存，共', cookies.length, '条')
-        }
-      } catch (e) {
-        console.error('[PlatformWindow] 保存 Cookie 失败:', e.message)
-      }
+    const partitionName = `persist:platform-${storeId}`
+    const ses = session.fromPartition(partitionName)
+    const cookies = await ses.cookies.get({})
+    if (!Array.isArray(cookies) || cookies.length === 0) {
+      return failSave('read_cookie', '未获取到登录Cookie，请重新登录后再确认')
     }
 
-    // 2. 从 Cookie 中提取商家信息（仅精确匹配 cookie 名称）
     let cookieMerchantId = ''
     let cookieShopId = ''
     let pinName = ''
-    if (cookies && cookies.length > 0) {
-      // 打印所有 cookie 名称用于调试
-      const cookieNames = cookies.map(c => `${c.name}=${c.value}`).filter(s => s.length < 80).join('; ')
-      console.log('[PlatformWindow] Cookie 列表(部分):', cookieNames.substring(0, 1000))
-
-      for (const cookie of cookies) {
-        const name = cookie.name
-        const nameLow = name.toLowerCase()
-        const val = cookie.value || ''
-        if (!val) continue
-
-        // 商家ID：只精确匹配已知的 cookie 名
-        if (!cookieMerchantId && (name === 'venderId' || nameLow === 'venderid' || nameLow === 'merchant_id')) {
-          cookieMerchantId = val
-          console.log('[PlatformWindow] Cookie 精确匹配 merchantId:', name, '=', val)
-        }
-        // 店铺ID：只精确匹配已知的 cookie 名
-        if (!cookieShopId && (name === 'shopId' || nameLow === 'shopid' || nameLow === 'shop_id')) {
-          cookieShopId = val
-          console.log('[PlatformWindow] Cookie 精确匹配 shopId:', name, '=', val)
-        }
-        // 用户 pin
-        if (!pinName && nameLow === 'pin') {
-          try { pinName = decodeURIComponent(val) } catch (e) { pinName = val }
-        }
+    for (const cookie of cookies) {
+      const name = String(cookie?.name || '')
+      const nameLow = name.toLowerCase()
+      const value = String(cookie?.value || '')
+      if (!value) continue
+      if (!cookieMerchantId && (name === 'venderId' || nameLow === 'venderid' || nameLow === 'merchant_id')) {
+        cookieMerchantId = value
       }
-
-      console.log('[PlatformWindow] Cookie 提取结果: merchantId=', cookieMerchantId, 'shopId=', cookieShopId, 'pin=', pinName)
+      if (!cookieShopId && (name === 'shopId' || nameLow === 'shopid' || nameLow === 'shop_id')) {
+        cookieShopId = value
+      }
+      if (!pinName && nameLow === 'pin') {
+        try { pinName = decodeURIComponent(value) } catch { pinName = value }
+      }
     }
 
-    // 3. 合并页面提取的信息（页面提取优先，cookie 提取作为补充）
     const extracted = storeExtractedInfo.get(storeId) || {}
-    console.log('[PlatformWindow] 页面提取结果:', extracted)
-
-    // 页面提取优先级高于 cookie（页面脚本中的 venderId/shopId 更准确）
-    const merchantId = extracted.venderId || cookieMerchantId
-    const shopId = extracted.shopId || cookieShopId
-
-    // 4. 更新店铺信息（账号、密码、商家ID、店铺ID、店铺名）
-    const updateBody = {}
+    const merchantId = String(extracted.venderId || cookieMerchantId || '').trim()
+    const shopId = String(extracted.shopId || cookieShopId || '').trim()
+    const updateBody = {
+      cookie_data: cookies,
+      domain: platform,
+      device_id: getDeviceId()
+    }
     if (account) updateBody.account = account
     if (password) updateBody.password = password
     if (merchantId) updateBody.merchant_id = merchantId
     if (shopId) updateBody.shop_id = shopId
     if (extracted.storeName) updateBody.name = extracted.storeName
-    // 如果没有从输入框捕获到账号但 cookie 有 pin，用 pin 作为账号
     if (!account && pinName) updateBody.account = pinName
 
-    // 提升到外层作用域，以便 catch 块也能访问
-    let targetStoreId = storeId
+    const finalized = await finalizeStoreLoginOnServer(storeId, updateBody)
+    if (!finalized.success) {
+      return failSave('finalize', finalized.message || '保存店铺资料失败')
+    }
 
-    if (Object.keys(updateBody).length > 0) {
-      try {
-        // 检查是否有 merchant_id 重复，如果有则更新已有店铺并删除新店铺
-        let shouldDeleteNewStore = false
-
-        if (merchantId) {
-          try {
-            const checkRes = await httpRequest(`${BUSINESS_SERVER}/api/stores?merchant_id=${encodeURIComponent(merchantId)}`, {
-              method: 'GET'
-            })
-            if (checkRes.statusCode === 200) {
-              const checkResult = JSON.parse(checkRes.data)
-              if (checkResult.code === 0 && checkResult.data && checkResult.data.list && checkResult.data.list.length > 0) {
-                const existingStore = checkResult.data.list[0]
-                if (String(existingStore.id) !== String(storeId)) {
-                  // 发现重复的 merchant_id，使用已存在的店铺
-                  console.log(`[PlatformWindow] 发现重复 merchant_id=${merchantId}，已存在店铺 id=${existingStore.id}，将更新该店铺并删除新店铺 id=${storeId}`)
-                  targetStoreId = existingStore.id
-                  shouldDeleteNewStore = true
-                }
-              }
-            }
-          } catch (checkErr) {
-            console.error('[PlatformWindow] 检查 merchant_id 重复失败:', checkErr.message)
-          }
-        }
-
-        // 更新目标店铺（可能是已存在的，也可能是当前的）
-        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updateBody)
-        })
-        if (updateRes.statusCode >= 400) {
-          console.error('[PlatformWindow] 更新店铺信息服务端拒绝:', updateRes.statusCode, updateRes.data)
-        } else {
-          console.log(`[PlatformWindow] 已更新店铺信息 (storeId=${targetStoreId}):`, updateBody)
-        }
-
-        // 如果是重复店铺，删除新创建的空白店铺
-        if (shouldDeleteNewStore) {
-          try {
-            const deleteRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${storeId}`, {
-              method: 'DELETE'
-            })
-            if (deleteRes.statusCode === 200) {
-              console.log(`[PlatformWindow] 已删除重复的新店铺 id=${storeId}`)
-            }
-          } catch (deleteErr) {
-            console.error('[PlatformWindow] 删除重复店铺失败:', deleteErr.message)
-          }
-        }
-
-        // 5. 更新在线状态
-        try {
-          const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/stores/${targetStoreId}/status`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ online: true })
-          })
-          if (statusRes.statusCode >= 400) {
-            console.error('[PlatformWindow] 更新在线状态服务端拒绝:', statusRes.statusCode, statusRes.data)
-          }
-        } catch (e) {
-          console.error('[PlatformWindow] 更新在线状态失败:', e.message)
-        }
-
-        // 6. 通知前端刷新列表
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('platform-login-success', { storeId: targetStoreId, account })
-        }
-      } catch (e) {
-        console.error('[PlatformWindow] 更新店铺信息失败:', e.message)
+    const targetStoreId = Number(finalized.data?.store_id || storeId)
+    let cookieRevision = Number(finalized.data?.cookie_revision || 0)
+    // 兼容旧服务端：旧接口只完成资料归并，Cookie 仍走原版本化接口。
+    if (finalized.data?.cookie_saved !== true) {
+      const cookieResult = await uploadCookiesToServer(targetStoreId, platform, cookies, {
+        sourceType: 'login_capture',
+        verified: true,
+        context: 'platform_login_capture'
+      })
+      if (!cookieResult.success) {
+        return failSave('legacy_cookie_upload', cookieResult.reason || '保存Cookie失败')
       }
-    } else {
-      console.log('[PlatformWindow] 无可更新的店铺信息字段 (updateBody 为空)')
+      cookieRevision = Number(cookieResult.revision || 0)
     }
-  } catch (err) {
-    console.error('[PlatformWindow] 保存失败:', err.message)
-    // 即使保存失败，也通知界面刷新
+
+    const statusResult = await reportStoreDeviceStatus(targetStoreId, {
+      online: true,
+      verified: true,
+      reason: 'platform_login_capture',
+      context: 'platform_login_status'
+    })
+    await Promise.race([
+      new Promise(resolve => ses.flushStorageData(resolve)),
+      new Promise(resolve => setTimeout(resolve, 5000))
+    ])
+
+    runtimeLog.writeLog(
+      'STORE_LOGIN',
+      `store_id=${storeId} target_store_id=${targetStoreId} phase=save result=success merged=${finalized.data?.merged === true} cookies=${cookies.length} revision=${cookieRevision} status_reported=${statusResult.success === true}`
+    )
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('platform-login-success', { storeId: targetStoreId, account })
+      mainWindow.webContents.send('platform-login-success', {
+        requestedStoreId: storeId,
+        storeId: targetStoreId,
+        account: updateBody.account || ''
+      })
     }
+    return {
+      success: true,
+      storeId: targetStoreId,
+      merged: finalized.data?.merged === true,
+      cookieRevision,
+      statusReported: statusResult.success === true
+    }
+  })().catch(error => {
+    runtimeLog.writeLog(
+      'STORE_LOGIN',
+      `store_id=${storeId} phase=save result=failed reason=${String(error.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`
+    )
+    return { success: false, message: error.message || '店铺登录信息保存失败' }
+  })
+
+  storeSaveTasks.set(storeId, saveTask)
+  try {
+    return await saveTask
+  } finally {
+    if (storeSaveTasks.get(storeId) === saveTask) storeSaveTasks.delete(storeId)
   }
 }
 

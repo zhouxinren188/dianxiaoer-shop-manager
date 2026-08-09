@@ -4,6 +4,7 @@ const path = require('path')
 const fs = require('fs')
 require('dotenv').config({ path: path.join(__dirname, '.env') })
 require('dotenv').config({ path: path.join(__dirname, '.env.sms') })
+require('dotenv').config({ path: path.join(__dirname, '.env.rebate') })
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const { pool, initDB, startKeepAlive } = require('./db')
@@ -15,6 +16,16 @@ const {
   calculateSmsCount,
   sendSms
 } = require('./services/sms-service')
+const {
+  getTaobaoRebateConfig,
+  convertTaobaoRebateUrl
+} = require('./services/taobao-rebate-service')
+const {
+  decideCookieUpdate,
+  fingerprintCookieData,
+  normalizeSourceType,
+  parseCookieData
+} = require('./services/store-cookie-policy')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.33-purchase-perf'
@@ -166,6 +177,25 @@ app.use(async (req, res, next) => {
   } catch (err) {
     console.error('[Auth] 认证失败:', err.message)
     return res.status(500).json({ code: 1, message: '认证服务异常' })
+  }
+})
+
+// 淘宝联盟返利转链。该路由位于全局认证中间件之后，API Key 仅存在业务服务器环境变量中。
+app.post('/api/taobao/rebate/convert', async (req, res) => {
+  try {
+    const result = await convertTaobaoRebateUrl({
+      url: req.body?.url,
+      config: getTaobaoRebateConfig()
+    })
+    res.json(ok({
+      url: result.convertedUrl,
+      converted: result.converted,
+      reasonCode: result.reasonCode || '',
+      reason: result.reason || ''
+    }))
+  } catch (error) {
+    console.warn('[TaobaoRebate] 转链失败:', error.message)
+    res.status(502).json(fail('淘宝返利转链失败'))
   }
 })
 
@@ -910,7 +940,10 @@ app.get('/api/users/:id/purchase-accounts', async (req, res) => {
 // 查询店铺列表（按权限过滤）
 app.get('/api/stores', async (req, res) => {
   try {
-    const { page = 1, pageSize = 10, name, platform, store_type, status, online, merchant_id, tag } = req.query
+    const {
+      page = 1, pageSize = 10, name, platform, store_type, status, online,
+      merchant_id, merchant_id_keyword, tag
+    } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
@@ -935,6 +968,11 @@ app.get('/api/stores', async (req, res) => {
     }
     if (status) { sql += ' AND status = ?'; params.push(status) }
     if (online !== undefined && online !== '') { sql += ' AND online = ?'; params.push(+online) }
+    // 店铺管理筛选专用：按连续字符包含匹配。保留 merchant_id 精确匹配供登录去重流程使用。
+    if (merchant_id_keyword) {
+      sql += ' AND INSTR(merchant_id, ?) > 0'
+      params.push(String(merchant_id_keyword).trim())
+    }
     if (merchant_id) { sql += ' AND merchant_id = ?'; params.push(merchant_id) }
     if (tag) { sql += ' AND JSON_CONTAINS(tags, ?)'; params.push(JSON.stringify(tag)) }
 
@@ -1032,7 +1070,19 @@ app.put('/api/stores/:id/sync-time', async (req, res) => {
 app.post('/api/stores', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { name, platform, store_type, account, password, merchant_id, shop_id, tags, status } = req.body
+    const {
+      name, platform, store_type, account, password, merchant_id, shop_id,
+      tags, status, setup_pending
+    } = req.body
+
+    const supportedPlatforms = new Set(['jd', 'taobao', 'tmall', 'pdd', 'douyin'])
+    const supportedStoreTypes = new Set(['pop', 'supplier', 'consignment'])
+    if (!supportedPlatforms.has(String(platform || ''))) {
+      return res.status(400).json(fail('不支持的店铺平台'))
+    }
+    if (store_type && !supportedStoreTypes.has(String(store_type))) {
+      return res.status(400).json(fail('不支持的店铺类型'))
+    }
     
     // 如果提供了 merchant_id，检查是否已存在
     if (merchant_id) {
@@ -1047,8 +1097,21 @@ app.post('/api/stores', async (req, res) => {
         console.log(`[Store] 发现重复店铺 merchant_id=${merchant_id}，更新店铺 ${existingId} 而不是创建新店铺`)
         
         // ★ 只更新有值的字段，避免 store_type/tags 被空值覆盖（历史bug修复）
-        const updateFields = ['name = ?', 'platform = ?', 'account = ?', 'password = ?', 'merchant_id = ?', 'shop_id = ?', 'status = ?']
-        const updateValues = [name || '', platform || '', account || '', password || '', merchant_id, shop_id || '', status || 'enabled']
+        const updateFields = ['merchant_id = ?']
+        const updateValues = [merchant_id]
+        for (const [column, value] of [
+          ['name', name], ['platform', platform], ['account', account],
+          ['password', password], ['shop_id', shop_id]
+        ]) {
+          if (value !== undefined && value !== null && String(value).trim() !== '') {
+            updateFields.push(`${column} = ?`)
+            updateValues.push(value)
+          }
+        }
+        if (status === 'enabled' || status === 'disabled') {
+          updateFields.push('status = ?')
+          updateValues.push(status)
+        }
         if (store_type) {
           updateFields.push('store_type = ?')
           updateValues.push(store_type)
@@ -1070,9 +1133,13 @@ app.post('/api/stores', async (req, res) => {
     
     // 创建新店铺（默认7天试用期）
     const [result] = await pool.execute(
-      `INSERT INTO stores (name, platform, store_type, account, password, merchant_id, shop_id, tags, status, owner_id, subscription_end)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
-      [name || '', platform || '', store_type || '', account || '', password || '', merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled', ownerId]
+      `INSERT INTO stores
+         (name, platform, store_type, account, password, merchant_id, shop_id, tags,
+          status, setup_status, owner_id, subscription_end)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
+      [name || '', platform || '', store_type || '', account || '', password || '',
+        merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled',
+        setup_pending === true ? 'pending' : 'active', ownerId]
     )
 
     // 如果是子账号创建的店铺，自动关联到子账号（写入 user_stores 表）
@@ -1194,6 +1261,257 @@ app.put('/api/stores/:id/status', async (req, res) => {
   }
 })
 
+// 登录成功后原子完成店铺资料更新和商家ID归并。
+// pending 临时店铺允许由创建它的子账号完成归并，不依赖主账号删除权限。
+app.post('/api/stores/:id/finalize-login', async (req, res) => {
+  let connection
+  try {
+    const sourceStoreId = +req.params.id
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(sourceStoreId)) {
+      return res.status(403).json(fail('无权完成此店铺登录'))
+    }
+
+    const ownerId = getOwnerId(req.user)
+    const merchantId = String(req.body?.merchant_id || '').trim().slice(0, 50)
+    const shopId = String(req.body?.shop_id || '').trim().slice(0, 50)
+    const cookieDomain = String(req.body?.domain || '').trim().slice(0, 50)
+    const sourceDeviceId = String(req.body?.device_id || '').trim().slice(0, 100)
+    const parsedCookies = parseCookieData(req.body?.cookie_data)
+    if (!parsedCookies.length) {
+      return res.status(400).json(fail('未获取到有效Cookie，请确认登录完成后重试'))
+    }
+    if (sourceDeviceId && !/^device_[a-zA-Z0-9-]{16,80}$/.test(sourceDeviceId)) {
+      return res.status(400).json(fail('device_id 无效'))
+    }
+    if (cookieDomain === 'jd') {
+      const criticalNames = new Set(['pt_key', 'pt_pin', 'thor', 'pinId', 'pin', 'CookieJD'])
+      if (!parsedCookies.some(cookie => criticalNames.has(cookie.name))) {
+        return res.status(400).json(fail('未检测到京东关键登录Cookie'))
+      }
+    }
+    const serializedCookieData = JSON.stringify(parsedCookies)
+    const incomingFingerprint = fingerprintCookieData(parsedCookies)
+
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+
+    // 先锁商家ID，再锁临时店铺；统一锁顺序避免两个并发登录互相等待。
+    if (merchantId) {
+      await connection.execute(
+        `INSERT INTO store_merchant_locks (owner_id, merchant_id)
+         VALUES (?, ?) ON DUPLICATE KEY UPDATE updated_at = updated_at`,
+        [ownerId, merchantId]
+      )
+      await connection.execute(
+        'SELECT owner_id FROM store_merchant_locks WHERE owner_id = ? AND merchant_id = ? FOR UPDATE',
+        [ownerId, merchantId]
+      )
+    }
+
+    const [sourceRows] = await connection.execute(
+      'SELECT id, owner_id, setup_status FROM stores WHERE id = ? AND owner_id = ? FOR UPDATE',
+      [sourceStoreId, ownerId]
+    )
+    if (!sourceRows.length) {
+      await connection.rollback()
+      return res.status(404).json(fail('待登录店铺不存在'))
+    }
+    const sourceStore = sourceRows[0]
+    if (sourceStore.setup_status === 'pending' && !merchantId && !shopId) {
+      await connection.rollback()
+      return res.status(422).json(fail('尚未提取到商家ID或店铺ID，请确认已进入店铺后台'))
+    }
+
+    let targetStoreId = sourceStoreId
+    let merged = false
+    if (merchantId) {
+      const [duplicateRows] = await connection.execute(
+        `SELECT id, setup_status FROM stores
+         WHERE owner_id = ? AND merchant_id = ? AND id != ?
+         ORDER BY (setup_status = 'active') DESC, id ASC LIMIT 1 FOR UPDATE`,
+        [ownerId, merchantId, sourceStoreId]
+      )
+      if (duplicateRows.length) {
+        if (sourceStore.setup_status !== 'pending') {
+          await connection.rollback()
+          return res.status(409).json(fail('该商家ID已绑定其他店铺，请刷新店铺列表后重试'))
+        }
+        targetStoreId = Number(duplicateRows[0].id)
+        merged = true
+      }
+    }
+
+    const updateFields = ["setup_status = 'active'"]
+    const updateValues = []
+    for (const [column, rawValue, maxLength] of [
+      ['name', req.body?.name, 100],
+      ['account', req.body?.account, 100],
+      ['password', req.body?.password, 200],
+      ['merchant_id', merchantId, 50],
+      ['shop_id', shopId, 50]
+    ]) {
+      const rawText = String(rawValue || '')
+      const value = (column === 'password' ? rawText : rawText.trim()).slice(0, maxLength)
+      if (value) {
+        updateFields.push(`${column} = ?`)
+        updateValues.push(value)
+      }
+    }
+    updateValues.push(targetStoreId, ownerId)
+    await connection.execute(
+      `UPDATE stores SET ${updateFields.join(', ')} WHERE id = ? AND owner_id = ?`,
+      updateValues
+    )
+
+    const [cookieRows] = await connection.execute(
+      'SELECT * FROM cookies WHERE store_id = ? FOR UPDATE',
+      [targetStoreId]
+    )
+    const currentCookie = cookieRows[0] || null
+    const currentFingerprint = currentCookie
+      ? (currentCookie.fingerprint || fingerprintCookieData(currentCookie.cookie_data))
+      : ''
+    const cookieDecision = decideCookieUpdate({
+      currentRevision: currentCookie?.revision || 0,
+      currentFingerprint,
+      incomingFingerprint,
+      sourceType: 'login_capture',
+      baseRevision: currentCookie?.revision || 0
+    })
+    const cookieRevision = cookieDecision.nextRevision
+
+    await connection.execute(
+      `INSERT INTO cookies
+         (store_id, cookie_data, domain, revision, source_device_id, source_type,
+          fingerprint, last_verified_at, saved_at)
+       VALUES (?, ?, ?, ?, ?, 'login_capture', ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE
+         cookie_data = VALUES(cookie_data), domain = VALUES(domain), revision = VALUES(revision),
+         source_device_id = VALUES(source_device_id), source_type = VALUES(source_type),
+         fingerprint = VALUES(fingerprint), last_verified_at = NOW(), saved_at = NOW()`,
+      [targetStoreId, serializedCookieData, cookieDomain, cookieRevision,
+        sourceDeviceId, incomingFingerprint]
+    )
+
+    if (merged) {
+      await connection.execute('DELETE FROM cookies WHERE store_id = ?', [sourceStoreId])
+      await connection.execute('DELETE FROM store_device_status WHERE store_id = ?', [sourceStoreId])
+      await connection.execute('DELETE FROM stores WHERE id = ? AND owner_id = ?', [sourceStoreId, ownerId])
+    }
+
+    await connection.commit()
+    res.json(ok({
+      store_id: targetStoreId,
+      merged,
+      cookie_saved: true,
+      cookie_revision: cookieRevision,
+      cookie_updated: cookieDecision.contentChanged
+    }))
+  } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore */ }
+    }
+    res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
+  }
+})
+
+// 仅清理尚未完成登录的临时店铺；子账号只能清理自己有权限访问的 pending 记录。
+app.delete('/api/stores/:id/pending', async (req, res) => {
+  let connection
+  try {
+    const storeId = +req.params.id
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(storeId)) {
+      return res.status(403).json(fail('无权清理此临时店铺'))
+    }
+    const ownerId = getOwnerId(req.user)
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const [rows] = await connection.execute(
+      'SELECT setup_status FROM stores WHERE id = ? AND owner_id = ? FOR UPDATE',
+      [storeId, ownerId]
+    )
+    if (!rows.length) {
+      await connection.rollback()
+      return res.json(ok({ deleted: false, missing: true }))
+    }
+    if (rows[0].setup_status !== 'pending') {
+      await connection.rollback()
+      return res.status(409).json(fail('只能清理尚未完成登录的临时店铺'))
+    }
+    await connection.execute('DELETE FROM cookies WHERE store_id = ?', [storeId])
+    await connection.execute('DELETE FROM store_device_status WHERE store_id = ?', [storeId])
+    await connection.execute('DELETE FROM stores WHERE id = ? AND owner_id = ?', [storeId, ownerId])
+    await connection.commit()
+    res.json(ok({ deleted: true }))
+  } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore */ }
+    }
+    res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
+  }
+})
+
+// 设备级店铺健康状态。单台设备失败不会覆盖其他设备最近验证成功的结果。
+app.put('/api/stores/:id/device-status', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    const storeId = +req.params.id
+    if (!storeIds.includes(storeId)) {
+      return res.status(403).json(fail('无权操作此店铺'))
+    }
+
+    const deviceId = String(req.body?.device_id || '').trim().slice(0, 100)
+    if (!/^device_[a-zA-Z0-9-]{16,80}$/.test(deviceId)) {
+      return res.status(400).json(fail('device_id 无效'))
+    }
+
+    const online = req.body?.online ? 1 : 0
+    const verified = req.body?.verified === true
+    const reason = String(req.body?.reason || '').replace(/[\r\n\t]+/g, ' ').slice(0, 255)
+    const requestedRevision = Number(req.body?.cookie_revision || 0)
+    const cookieRevision = Number.isSafeInteger(requestedRevision) && requestedRevision > 0
+      ? requestedRevision
+      : 0
+
+    await pool.execute(
+      `INSERT INTO store_device_status
+         (store_id, device_id, online, last_verified_at, last_failure_at, failure_reason, cookie_revision)
+       VALUES (?, ?, ?, IF(? = 1, NOW(), NULL), IF(? = 0, NOW(), NULL), ?, ?)
+       ON DUPLICATE KEY UPDATE
+         online = VALUES(online),
+         last_verified_at = IF(? = 1, NOW(), last_verified_at),
+         last_failure_at = IF(? = 0, NOW(), last_failure_at),
+         failure_reason = IF(VALUES(online) = 0, VALUES(failure_reason), ''),
+         cookie_revision = VALUES(cookie_revision),
+         updated_at = NOW()`,
+      [storeId, deviceId, online, verified ? 1 : 0, online, reason, cookieRevision,
+        verified ? 1 : 0, online]
+    )
+
+    const [activeRows] = await pool.execute(
+      `SELECT COUNT(*) AS active_count
+       FROM store_device_status
+       WHERE store_id = ? AND online = 1
+         AND updated_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)`,
+      [storeId]
+    )
+    const activeDeviceCount = Number(activeRows[0]?.active_count || 0)
+    const overallOnline = activeDeviceCount > 0 ? 1 : 0
+    await pool.execute('UPDATE stores SET online = ? WHERE id = ?', [overallOnline, storeId])
+
+    console.log(`[StoreDeviceStatus] store_id=${storeId} device=${deviceId.slice(0, 18)} online=${online} verified=${verified} overall=${overallOnline} activeDevices=${activeDeviceCount} revision=${cookieRevision} reason=${reason || 'none'}`)
+    res.json(ok({ overall_online: !!overallOnline, active_device_count: activeDeviceCount }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // ============ 仓库接口 ============
 
 // 查询仓库列表（按权限过滤）
@@ -1305,7 +1623,8 @@ app.get('/api/cookies', async (req, res) => {
 
     const placeholders = storeIds.map(() => '?').join(',')
     const [rows] = await pool.execute(
-      `SELECT c.id, c.store_id, c.cookie_data, c.domain, c.saved_at,
+      `SELECT c.id, c.store_id, c.cookie_data, c.domain, c.revision,
+              c.source_device_id, c.source_type, c.fingerprint, c.last_verified_at, c.saved_at,
               s.name AS store_name, s.platform, s.account
        FROM cookies c
        LEFT JOIN stores s ON c.store_id = s.id
@@ -1340,8 +1659,12 @@ app.get('/api/cookies/:storeId', async (req, res) => {
 
 // 保存/更新店铺 Cookie（权限校验）
 app.post('/api/cookies', async (req, res) => {
+  let connection
   try {
-    const { store_id, cookie_data, domain } = req.body
+    const {
+      store_id, cookie_data, domain, device_id,
+      source_type, base_revision, verified
+    } = req.body
     if (!store_id) return res.json(fail('store_id 不能为空'))
 
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -1349,15 +1672,103 @@ app.post('/api/cookies', async (req, res) => {
       return res.status(403).json(fail('无权操作此店铺 Cookie'))
     }
 
-    await pool.execute(
-      `INSERT INTO cookies (store_id, cookie_data, domain, saved_at)
-       VALUES (?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE cookie_data = VALUES(cookie_data), domain = VALUES(domain), saved_at = NOW()`,
-      [store_id, typeof cookie_data === 'string' ? cookie_data : JSON.stringify(cookie_data || []), domain || '']
+    const parsedCookies = parseCookieData(cookie_data)
+    if (parsedCookies.length === 0) {
+      return res.status(400).json(fail('cookie_data 不是有效的 Cookie 数组'))
+    }
+
+    const normalizedSource = normalizeSourceType(source_type)
+    const normalizedDomain = String(domain || '').trim().slice(0, 50)
+    const normalizedDeviceId = String(device_id || '').trim().slice(0, 100)
+    if (normalizedDeviceId && !/^device_[a-zA-Z0-9-]{16,80}$/.test(normalizedDeviceId)) {
+      return res.status(400).json(fail('device_id 无效'))
+    }
+
+    // 显式登录捕获必须包含关键登录 Cookie，避免关闭未登录窗口时提升跟踪 Cookie。
+    if (normalizedDomain === 'jd' && normalizedSource === 'login_capture') {
+      const criticalNames = new Set(['pt_key', 'pt_pin', 'thor', 'pinId', 'pin', 'CookieJD'])
+      if (!parsedCookies.some(cookie => criticalNames.has(cookie.name))) {
+        return res.status(400).json(fail('未检测到京东关键登录 Cookie'))
+      }
+    }
+
+    const serializedCookieData = JSON.stringify(parsedCookies)
+    const incomingFingerprint = fingerprintCookieData(parsedCookies)
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+
+    const [rows] = await connection.execute(
+      'SELECT * FROM cookies WHERE store_id = ? FOR UPDATE',
+      [+store_id]
     )
-    res.json(ok(true))
+    const current = rows[0] || null
+    const currentFingerprint = current
+      ? (current.fingerprint || fingerprintCookieData(current.cookie_data))
+      : ''
+    const decision = decideCookieUpdate({
+      currentRevision: current?.revision || 0,
+      currentFingerprint,
+      incomingFingerprint,
+      sourceType: normalizedSource,
+      baseRevision: base_revision
+    })
+
+    if (!decision.accepted) {
+      await connection.rollback()
+      console.warn(`[CookieVersion] 拒绝旧版本覆盖 store_id=${store_id} source=${normalizedSource} base=${Number(base_revision || 0)} current=${Number(current?.revision || 0)} reason=${decision.reason}`)
+      return res.status(409).json({
+        code: 1,
+        message: '服务器已有更新的 Cookie，本次旧版本未覆盖',
+        data: {
+          reason: decision.reason,
+          current_revision: Number(current?.revision || 0),
+          current_fingerprint: currentFingerprint
+        }
+      })
+    }
+
+    if (!current) {
+      await connection.execute(
+        `INSERT INTO cookies
+           (store_id, cookie_data, domain, revision, source_device_id, source_type, fingerprint, last_verified_at, saved_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, IF(? = 1, NOW(), NULL), NOW())`,
+        [+store_id, serializedCookieData, normalizedDomain, decision.nextRevision,
+          normalizedDeviceId, normalizedSource, incomingFingerprint, verified === true ? 1 : 0]
+      )
+    } else if (decision.contentChanged) {
+      await connection.execute(
+        `UPDATE cookies
+         SET cookie_data = ?, domain = ?, revision = ?, source_device_id = ?, source_type = ?,
+             fingerprint = ?, last_verified_at = IF(? = 1, NOW(), last_verified_at), saved_at = NOW()
+         WHERE store_id = ?`,
+        [serializedCookieData, normalizedDomain, decision.nextRevision, normalizedDeviceId,
+          normalizedSource, incomingFingerprint, verified === true ? 1 : 0, +store_id]
+      )
+    } else {
+      await connection.execute(
+        `UPDATE cookies
+         SET fingerprint = IF(fingerprint = '' OR fingerprint IS NULL, ?, fingerprint),
+             last_verified_at = IF(? = 1, NOW(), last_verified_at)
+         WHERE store_id = ?`,
+        [incomingFingerprint, verified === true ? 1 : 0, +store_id]
+      )
+    }
+
+    await connection.commit()
+    console.log(`[CookieVersion] 接受 store_id=${store_id} source=${normalizedSource} revision=${decision.nextRevision} changed=${decision.contentChanged} fp=${incomingFingerprint.slice(0, 12)} reason=${decision.reason}`)
+    res.json(ok({
+      updated: decision.contentChanged,
+      revision: decision.nextRevision,
+      fingerprint: incomingFingerprint,
+      reason: decision.reason
+    }))
   } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore */ }
+    }
     res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
   }
 })
 

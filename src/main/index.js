@@ -23,7 +23,12 @@ const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
 const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
-const { startHeartbeat } = require('./cookie-heartbeat')
+const {
+  startHeartbeat,
+  recoverStoreSessionFromServer,
+  refreshCookiesFromServerIfNewer,
+  reportStoreDeviceStatus
+} = require('./cookie-heartbeat')
 const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
@@ -201,46 +206,36 @@ ipcMain.handle('open-product-url', (event, { storeId, skuId }) => {
   return { success: true }
 })
 
-// 更新店铺在线状态（检测到Cookie失效时调用）
-function updateStoreOnlineStatus(storeId, online) {
-  const http = require('http')
-  const token = getAuthToken()
-  const headers = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
-
-  const req = http.request({
-    hostname: '150.158.54.108',
-    port: 3002,
-    path: `/api/stores/${storeId}/status`,
-    method: 'PUT',
-    headers,
-    timeout: 5000
-  }, (res) => {
-    let data = ''
-    res.on('data', chunk => data += chunk)
-    res.on('end', () => {
-      console.log(`[StoreBackend] 更新 store_id=${storeId} online=${online} 结果: HTTP ${res.statusCode}`)
-      runtimeLog.writeLog('BACKEND', `store_id=${storeId} Cookie失效，已更新 online=${online}`)
-      // 通知所有渲染进程更新状态
-      BrowserWindow.getAllWindows().forEach(win => {
-        if (!win.isDestroyed()) {
-          win.webContents.send('store-status-changed', {
-            storeId, online, wasOnline: true
-          })
-        }
-      })
-    })
+// 上报当前设备状态，并把服务端汇总后的总体状态通知给界面。
+async function updateStoreOnlineStatus(storeId, online, reason, verified = false) {
+  const result = await reportStoreDeviceStatus(storeId, {
+    online,
+    verified,
+    reason,
+    context: 'backend_window_status'
   })
-  req.on('error', e => console.error(`[StoreBackend] 更新状态失败: ${e.message}`))
-  req.on('timeout', () => { req.destroy(); console.error('[StoreBackend] 更新状态超时') })
-  req.write(JSON.stringify({ online }))
-  req.end()
+  const overallOnline = result.overallOnline
+  runtimeLog.writeLog('BACKEND', `store_id=${storeId} local_online=${!!online} overall_online=${overallOnline} verified=${verified} reason=${reason}`)
+  BrowserWindow.getAllWindows().forEach(win => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('store-status-changed', {
+        storeId,
+        online: overallOnline,
+        wasOnline: true
+      })
+    }
+  })
+  return result
 }
 
 // 用店铺cookie打开京东后台指定页面（售后/纠纷/合规等）
-ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
+ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title }) => {
   if (!url || !storeId) return { success: false, message: '参数不完整' }
   const partitionName = `persist:platform-${storeId}`
+  await refreshCookiesFromServerIfNewer(storeId, {
+    skipFlush: true,
+    context: 'backend_window_precheck'
+  })
   const urlWin = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -254,31 +249,58 @@ ipcMain.handle('open-store-backend-url', (event, { storeId, url, title }) => {
   })
 
   // ★ 检测登录重定向：Cookie失效时京东会重定向到 passport.jd.com/login
-  const loginKeywords = ['passport', 'login', 'sign']
-  let loginRedirectDetected = false
+  let recoveryAttempted = false
+  let recoveryInProgress = false
+  let finalFailureReported = false
 
-  urlWin.webContents.on('did-navigate', (e, navUrl) => {
-    if (loginRedirectDetected) return
-    const lowerUrl = navUrl.toLowerCase()
-    if (loginKeywords.some(kw => lowerUrl.includes(kw))) {
-      loginRedirectDetected = true
-      console.log(`[StoreBackend] store_id=${storeId} 检测到登录重定向: ${navUrl}`)
-      runtimeLog.writeLog('BACKEND', `store_id=${storeId} 打开后台时重定向到登录页(${navUrl}) → Cookie失效`)
-      // 更新 online=0 并通知前端
-      updateStoreOnlineStatus(storeId, false)
+  function isJdLoginUrl(navUrl) {
+    try {
+      const parsed = new URL(navUrl)
+      const host = parsed.hostname.toLowerCase()
+      const pathAndQuery = `${parsed.pathname}${parsed.search}`.toLowerCase()
+      return host.includes('passport.jd.com') || host === 'login.jd.com' ||
+        (host.endsWith('.jd.com') && pathAndQuery.includes('login'))
+    } catch {
+      return false
     }
+  }
+
+  async function handleLoginRedirect(navUrl, navigationType) {
+    if (!isJdLoginUrl(navUrl) || recoveryInProgress || finalFailureReported) return
+    runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=login_redirect type=${navigationType} recovery_attempted=${recoveryAttempted} url_host=${new URL(navUrl).hostname}`)
+
+    if (!recoveryAttempted) {
+      recoveryAttempted = true
+      recoveryInProgress = true
+      const recovered = await recoverStoreSessionFromServer(storeId, 'jd')
+      recoveryInProgress = false
+      if (recovered !== false && !urlWin.isDestroyed()) {
+        runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=${recovered === true ? 'verified' : 'check_uncertain'} action=reload_original_url`)
+        if (recovered === true) {
+          await updateStoreOnlineStatus(storeId, true, 'backend_cookie_recovered', true)
+        }
+        urlWin.loadURL(url).catch(error => {
+          runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=reload result=failed reason=${error.message}`)
+        })
+        return
+      }
+    }
+
+    finalFailureReported = true
+    runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=failed final=device_offline`)
+    await updateStoreOnlineStatus(storeId, false, 'backend_login_redirect_after_recovery', false)
+  }
+
+  urlWin.webContents.on('did-navigate', (event, navUrl) => {
+    handleLoginRedirect(navUrl, 'did-navigate').catch(error => {
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+    })
   })
 
-  // 也监听 did-navigate-in-page（SPA 单页应用内跳转）
-  urlWin.webContents.on('did-navigate-in-page', (e, navUrl) => {
-    if (loginRedirectDetected) return
-    const lowerUrl = navUrl.toLowerCase()
-    if (loginKeywords.some(kw => lowerUrl.includes(kw))) {
-      loginRedirectDetected = true
-      console.log(`[StoreBackend] store_id=${storeId} 页内导航到登录页: ${navUrl}`)
-      runtimeLog.writeLog('BACKEND', `store_id=${storeId} 页内导航到登录页(${navUrl}) → Cookie失效`)
-      updateStoreOnlineStatus(storeId, false)
-    }
+  urlWin.webContents.on('did-navigate-in-page', (event, navUrl) => {
+    handleLoginRedirect(navUrl, 'did-navigate-in-page').catch(error => {
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+    })
   })
 
   urlWin.loadURL(url).catch(err => {

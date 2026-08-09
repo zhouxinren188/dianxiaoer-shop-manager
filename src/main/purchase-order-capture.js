@@ -14,6 +14,11 @@ const {
   addTaobaoSkuIdToUrl,
   buildTaobaoSkuAutoSelectScript
 } = require('./taobao-sku-selection')
+const {
+  isTaobaoUrl,
+  loadDevelopmentRebateConfig,
+  convertTaobaoRebateUrlDirect
+} = require('./taobao-rebate')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -2472,6 +2477,54 @@ function isCheckoutPage(url, platform) {
   return patterns.some(p => lower.includes(p.toLowerCase()))
 }
 
+async function resolveTaobaoRebatePurchaseUrl(originalUrl) {
+  if (!isTaobaoUrl(originalUrl)) {
+    return { url: originalUrl, converted: false, reason: 'not_taobao_url' }
+  }
+
+  // 开发版优先使用工作区的忽略配置直连，避免未部署服务端路由时先等待一次 404/超时。
+  // 打包版不包含 server/.env.rebate，也绝不会走客户端密钥回退。
+  const developmentConfig = loadDevelopmentRebateConfig(app)
+  if (developmentConfig) {
+    try {
+      const result = await convertTaobaoRebateUrlDirect(originalUrl, developmentConfig)
+      if (result.reasonCode === 'no_commission') {
+        runtimeLog.writeLog('TaobaoRebate', `商品无佣金，使用原链接: ${result.reason}`)
+      } else {
+        runtimeLog.writeLog('TaobaoRebate', `开发版直连转链成功: converted=${result.converted}`)
+      }
+      return { ...result, source: 'development-direct' }
+    } catch (error) {
+      runtimeLog.writeLog('TaobaoRebate', `开发版直连转链失败，继续尝试服务端: ${error.message}`)
+    }
+  }
+
+  let serverFailure = ''
+  try {
+    const response = await httpRequest(`${BUSINESS_SERVER}/api/taobao/rebate/convert`, {
+      method: 'POST',
+      body: JSON.stringify({ url: originalUrl })
+    })
+    const body = response.data ? JSON.parse(response.data) : null
+    if (response.statusCode === 200 && body?.code === 0 && isTaobaoUrl(body.data?.url)) {
+      runtimeLog.writeLog('TaobaoRebate', `服务端转链成功: converted=${body.data.converted !== false}`)
+      return {
+        url: body.data.url,
+        converted: body.data.converted !== false,
+        source: 'server',
+        reasonCode: body.data.reasonCode || '',
+        reason: body.data.reason || ''
+      }
+    }
+    serverFailure = body?.message || `HTTP ${response.statusCode}`
+  } catch (error) {
+    serverFailure = error.message
+  }
+
+  runtimeLog.writeLog('TaobaoRebate', `服务端转链不可用，使用原链接: ${serverFailure || 'unknown'}`)
+  return { url: originalUrl, converted: false, reason: serverFailure || 'service_unavailable' }
+}
+
 // 支付密码只通过独立 HTTPS 入口读取，并固定校验服务端证书指纹。
 // 返回值只在当前调用栈内短暂存在，不写文件、不写日志、不放入 renderer/localStorage。
 function paymentVaultRequest(pathname, body) {
@@ -4480,20 +4533,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
   ipcMain.handle('open-purchase-order-window', async (event, params) => {
     const { accountId, accountName, password, purchaseUrl, platform, purchaseInfo } = params
     const { purchaseNo } = purchaseInfo
-    const decodedTaobaoSource = (platform === 'taobao' || platform === 'tmall')
-      ? decodeTaobaoSkuSourceUrl(purchaseUrl)
-      : { url: purchaseUrl, selection: null }
-    const savedTaobaoSku = decodedTaobaoSource.selection
-    const effectivePurchaseUrl = savedTaobaoSku
-      ? addTaobaoSkuIdToUrl(decodedTaobaoSource.url, savedTaobaoSku)
-      : decodedTaobaoSource.url
 
-    // 将 accountId 和 accountName 注入 purchaseInfo，供 autoCreateAndBind 使用
-    purchaseInfo.accountId = accountId
-    purchaseInfo.accountName = accountName || ''
-    purchaseInfo.accountPassword = password || ''
-
-    // 防重复
+    // 已打开的采购窗口直接聚焦，避免重复请求返利转链。
     if (activePurchaseWindows.has(purchaseNo)) {
       const existing = activePurchaseWindows.get(purchaseNo)
       if (existing.win && !existing.win.isDestroyed()) {
@@ -4501,6 +4542,27 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         return { success: true, message: '窗口已打开' }
       }
     }
+
+    const decodedTaobaoSource = (platform === 'taobao' || platform === 'tmall')
+      ? decodeTaobaoSkuSourceUrl(purchaseUrl)
+      : { url: purchaseUrl, selection: null }
+    const savedTaobaoSku = decodedTaobaoSource.selection
+    const rebateResult = (platform === 'taobao' || platform === 'tmall')
+      ? await resolveTaobaoRebatePurchaseUrl(decodedTaobaoSource.url)
+      : { url: decodedTaobaoSource.url, converted: false, reason: 'not_taobao_platform' }
+    // 返利短链需要先完成淘宝落地跳转，不能向短链强行追加 skuId。
+    // SKU 仍由商品页加载后的自动选中脚本恢复；仅原链接回退时才追加 skuId。
+    const effectivePurchaseUrl = rebateResult.converted
+      ? rebateResult.url
+      : savedTaobaoSku
+        ? addTaobaoSkuIdToUrl(decodedTaobaoSource.url, savedTaobaoSku)
+        : decodedTaobaoSource.url
+
+    // 将 accountId 和 accountName 注入 purchaseInfo，供 autoCreateAndBind 使用
+    purchaseInfo.accountId = accountId
+    purchaseInfo.accountName = accountName || ''
+    purchaseInfo.accountPassword = password || ''
+
     // ========== 所有平台：使用内嵌真实 Chrome（和 dl 内嵌 Chromium 一致） ==========
     const partitionName = `persist:purchase-${accountId}`
     console.log(`[PurchaseCapture] Opening window: partition=${partitionName}, url=${effectivePurchaseUrl}`)
@@ -6579,7 +6641,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     windowState.pollTimer = pollTimer
 
-    return { success: true }
+    return {
+      success: true,
+      rebateApplied: rebateResult.converted,
+      rebateSource: rebateResult.source || '',
+      rebateReason: rebateResult.reason || ''
+    }
   })
 
   // 关闭采购下单窗口

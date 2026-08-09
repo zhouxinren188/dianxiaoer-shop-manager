@@ -13,7 +13,7 @@
         <el-form-item label="商家ID">
           <el-input
             v-model.trim="searchForm.merchant_id"
-            placeholder="请输入商家ID"
+            placeholder="输入连续几位即可搜索"
             clearable
             style="width: 180px"
           />
@@ -228,7 +228,7 @@
 import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet, ArrowRight, Shop, Goods, Van } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchStores, createStore, deleteStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
+import { fetchStores, createStore, deleteStore, deletePendingStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
 import StoreEditDialog from './components/StoreEditDialog.vue'
 import SubscriptionDialog from './components/SubscriptionDialog.vue'
 
@@ -318,10 +318,12 @@ const removeListeners = []
 async function loadStores() {
   loading.value = true
   try {
+    const { merchant_id, ...otherFilters } = searchForm
     const params = {
       page: pageInfo.page,
       pageSize: pageInfo.pageSize,
-      ...searchForm
+      ...otherFilters,
+      merchant_id_keyword: merchant_id
     }
     const data = await fetchStores(params)
     tableData.value = data.list || []
@@ -373,6 +375,7 @@ function handleAdd() {
 async function confirmAddStore(storeType) {
   typeSelectVisible.value = false
   const typeLabel = STORE_TYPE_MAP[storeType] || '店铺'
+  let newStoreId = null
 
   try {
     const now = new Date()
@@ -387,9 +390,10 @@ async function confirmAddStore(storeType) {
     const result = await createStore({
       name: `京东${typeLabel}${timeStr}`,
       platform: 'jd',
-      store_type: storeType
+      store_type: storeType,
+      setup_pending: true
     })
-    const newStoreId = result.id
+    newStoreId = result.id
 
     // 直接打开 shop.jd.com
     const openResult = await window.electronAPI.invoke('open-platform-window', {
@@ -403,6 +407,13 @@ async function confirmAddStore(storeType) {
     ElMessage.success(`已创建${typeLabel}并打开 shop.jd.com，请在弹出的浏览器窗口中登录`)
     loadStores()
   } catch (err) {
+    if (newStoreId) {
+      try {
+        await deletePendingStore(newStoreId)
+      } catch (cleanupError) {
+        console.error('[StoreManage] 清理登录窗口打开失败的临时店铺失败:', cleanupError)
+      }
+    }
     ElMessage.error('操作失败: ' + err.message)
   }
 }
@@ -488,52 +499,66 @@ function doOpenBackend(row, url) {
   })
 }
 
-function handleLogin(row) {
+function clearLoginPending(expectedStoreId = null) {
+  if (expectedStoreId && loginPending.storeId !== expectedStoreId) return
+  loginPending.storeId = null
+  loginPending.storeName = ''
+  loginPending.platform = ''
+}
+
+async function handleLogin(row) {
   if (!window.electronAPI) {
     ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  if (loginPending.storeId && loginPending.storeId !== row.id) {
+    ElMessage.warning(`请先完成或取消「${loginPending.storeName}」的登录`)
     return
   }
   loginPending.storeId = row.id
   loginPending.storeName = row.name
   loginPending.platform = row.platform
   // 登录按钮保留已有 cookie，并传递账号密码供自动填充
-  window.electronAPI.invoke('open-platform-window', {
-    storeId: row.id,
-    platform: row.platform,
-    keepCookie: true,
-    account: row.account || '',
-    password: row.password || ''
-  }).catch(err => {
+  try {
+    const result = await window.electronAPI.invoke('open-platform-window', {
+      storeId: row.id,
+      platform: row.platform,
+      keepCookie: true,
+      account: row.account || '',
+      password: row.password || ''
+    })
+    if (!result?.success) throw new Error(result?.message || '打开平台窗口失败')
+  } catch (err) {
     ElMessage.error('打开平台窗口失败: ' + err.message)
-    loginPending.storeId = null
-  })
-}
-
-function handleConfirmLogin() {
-  if (!loginPending.storeId) return
-  window.electronAPI.invoke('confirm-platform-login', {
-    storeId: loginPending.storeId,
-    platform: loginPending.platform
-  }).then(() => {
-    ElMessage.success('登录成功，Cookie 已保存')
-    loginPending.storeId = null
-    loginPending.storeName = ''
-    loginPending.platform = ''
-    loadStores()
-  }).catch(err => {
-    ElMessage.error('确认登录失败: ' + err.message)
-  })
-}
-
-function handleCancelLogin() {
-  if (loginPending.storeId) {
-    window.electronAPI.invoke('close-platform-window', {
-      storeId: loginPending.storeId
-    }).catch(() => {})
+    clearLoginPending(row.id)
   }
-  loginPending.storeId = null
-  loginPending.storeName = ''
-  loginPending.platform = ''
+}
+
+async function handleConfirmLogin() {
+  if (!loginPending.storeId) return
+  const storeId = loginPending.storeId
+  try {
+    const result = await window.electronAPI.invoke('confirm-platform-login', {
+      storeId,
+      platform: loginPending.platform
+    })
+    if (!result?.success) throw new Error(result?.message || '登录信息保存失败')
+    ElMessage.success('登录成功，Cookie 已保存')
+    clearLoginPending(storeId)
+    loadStores()
+  } catch (err) {
+    ElMessage.error('确认登录失败: ' + err.message)
+  }
+}
+
+async function handleCancelLogin() {
+  const storeId = loginPending.storeId
+  if (storeId) {
+    try {
+      await window.electronAPI.invoke('close-platform-window', { storeId, cancel: true })
+    } catch { /* 窗口可能已自动关闭 */ }
+  }
+  clearLoginPending(storeId)
 }
 
 function handleSizeChange() {
@@ -553,10 +578,21 @@ onMounted(() => {
   // 监听平台登录成功事件
   if (window.electronAPI?.onUpdate) {
     removeListeners.push(
-      window.electronAPI.onUpdate('platform-login-success', ({ storeId }) => {
-        loginPending.storeId = null
-        loginPending.storeName = ''
-        loginPending.platform = ''
+      window.electronAPI.onUpdate('platform-login-success', ({ storeId, requestedStoreId }) => {
+        clearLoginPending(requestedStoreId || storeId)
+        loadStores()
+      })
+    )
+    removeListeners.push(
+      window.electronAPI.onUpdate('platform-login-failed', ({ requestedStoreId, message }) => {
+        clearLoginPending(requestedStoreId)
+        ElMessage.error(message || '店铺登录信息保存失败，请重试')
+        loadStores()
+      })
+    )
+    removeListeners.push(
+      window.electronAPI.onUpdate('platform-login-closed', ({ requestedStoreId }) => {
+        clearLoginPending(requestedStoreId)
         loadStores()
       })
     )

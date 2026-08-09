@@ -10,4 +10,5 @@ scripts/
 sales-debug.json
 server/.env
 server/.env.sms
+server/.env.rebate
 server-api/.env

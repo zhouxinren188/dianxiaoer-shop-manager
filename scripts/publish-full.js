@@ -202,11 +202,18 @@ async function main() {
   smallFiles.push({ local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` })
   smallFiles.push({ local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` })
   smallFiles.push({ local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` })
+  smallFiles.push({ local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` })
   const localSmsEnvFile = path.join(ROOT, 'server', '.env.sms')
   if (fs.existsSync(localSmsEnvFile)) {
     smallFiles.push({ local: localSmsEnvFile, remote: `${BUSINESS_REMOTE_DIR}/.env.sms` })
   } else {
     console.warn('  警告：未找到 server/.env.sms，业务服务器将保留现有短信配置')
+  }
+  const localRebateEnvFile = path.join(ROOT, 'server', '.env.rebate')
+  if (fs.existsSync(localRebateEnvFile)) {
+    smallFiles.push({ local: localRebateEnvFile, remote: `${BUSINESS_REMOTE_DIR}/.env.rebate` })
+  } else {
+    console.warn('  警告：未找到 server/.env.rebate，业务服务器将保留现有淘宝返利配置')
   }
 
   await uploadFiles(smallFiles)

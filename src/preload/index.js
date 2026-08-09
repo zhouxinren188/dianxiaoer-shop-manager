@@ -58,6 +58,8 @@ const validOnChannels = [
   'um-update-ready',
   'um-update-error',
   'platform-login-success',
+  'platform-login-failed',
+  'platform-login-closed',
   'purchase-account-login-success',
   'store-status-changed',
   'purchase-order-captured',

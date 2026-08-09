@@ -66,6 +66,7 @@ async function initDB() {
         tags JSON,
         online TINYINT DEFAULT 0,
         status ENUM('enabled', 'disabled') DEFAULT 'enabled',
+        setup_status ENUM('pending', 'active') DEFAULT 'active',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
@@ -76,6 +77,9 @@ async function initDB() {
     // 兼容已存在的 stores 表：添加 store_type 字段
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN store_type VARCHAR(20) DEFAULT '' AFTER platform`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN setup_status ENUM('pending', 'active') DEFAULT 'active' AFTER status`)
     } catch (e) { /* 字段已存在 */ }
 
     // 仓库表
@@ -173,8 +177,47 @@ async function initDB() {
         store_id INT NOT NULL,
         cookie_data LONGTEXT,
         domain VARCHAR(50) DEFAULT '',
+        revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
+        source_device_id VARCHAR(100) DEFAULT '',
+        source_type VARCHAR(30) DEFAULT 'legacy',
+        fingerprint CHAR(64) DEFAULT '',
+        last_verified_at DATETIME DEFAULT NULL,
         saved_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_store_id (store_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // Cookie 版本字段：服务端版本用于阻止旧设备把新 Cookie 反向覆盖。
+    try { await connection.execute(`ALTER TABLE cookies ADD COLUMN revision BIGINT UNSIGNED NOT NULL DEFAULT 1 AFTER domain`) } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute(`ALTER TABLE cookies ADD COLUMN source_device_id VARCHAR(100) DEFAULT '' AFTER revision`) } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute(`ALTER TABLE cookies ADD COLUMN source_type VARCHAR(30) DEFAULT 'legacy' AFTER source_device_id`) } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute(`ALTER TABLE cookies ADD COLUMN fingerprint CHAR(64) DEFAULT '' AFTER source_type`) } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute(`ALTER TABLE cookies ADD COLUMN last_verified_at DATETIME DEFAULT NULL AFTER fingerprint`) } catch (e) { /* 字段已存在 */ }
+
+    // 每台设备分别上报店铺健康状态；店铺总体在线状态由最近验证成功的设备汇总得出。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS store_device_status (
+        store_id INT NOT NULL,
+        device_id VARCHAR(100) NOT NULL,
+        online TINYINT NOT NULL DEFAULT 0,
+        last_verified_at DATETIME DEFAULT NULL,
+        last_failure_at DATETIME DEFAULT NULL,
+        failure_reason VARCHAR(255) DEFAULT '',
+        cookie_revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (store_id, device_id),
+        KEY idx_store_recent_online (store_id, online, last_verified_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    try { await connection.execute(`ALTER TABLE store_device_status ADD KEY idx_store_recent_report (store_id, online, updated_at)`) } catch (e) { /* 索引已存在 */ }
+
+    // 商家ID归并锁：按主账号+商家ID串行完成“查询并归并”，避免并发登录产生重复店铺。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS store_merchant_locks (
+        owner_id INT NOT NULL,
+        merchant_id VARCHAR(50) NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (owner_id, merchant_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
