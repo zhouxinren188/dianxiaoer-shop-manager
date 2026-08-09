@@ -26,16 +26,19 @@ function normalizeTaobaoSkuSelection(value) {
     if (options.length >= 12) break
   }
 
-  return {
+  const normalized = {
     v: 1,
     skuId: cleanString(source.skuId, 120),
     options
   }
+  const shipFrom = cleanString(source.shipFrom, 80)
+  if (shipFrom) normalized.shipFrom = shipFrom
+  return normalized
 }
 
 function encodeTaobaoSkuSourceUrl(rawUrl, selection) {
   const normalized = normalizeTaobaoSkuSelection(selection)
-  if (!normalized.skuId && normalized.options.length === 0) return String(rawUrl || '')
+  if (!normalized.skuId && normalized.options.length === 0 && !normalized.shipFrom) return String(rawUrl || '')
   try {
     const parsed = new URL(String(rawUrl || ''))
     parsed.hash = ''
@@ -57,7 +60,7 @@ function decodeTaobaoSkuSourceUrl(rawUrl) {
     const selection = normalizeTaobaoSkuSelection(JSON.parse(decodeURIComponent(encoded)))
     return {
       url: parsed.toString(),
-      selection: selection.skuId || selection.options.length > 0 ? selection : null
+      selection: selection.skuId || selection.options.length > 0 || selection.shipFrom ? selection : null
     }
   } catch (_) {
     return { url: originalUrl, selection: null }
@@ -180,6 +183,39 @@ function buildTaobaoSelectedSkuExtractionScript() {
     }
   }
 
+  function parseShipFrom(text) {
+    var normalized = clean(text, 160);
+    if (normalized.indexOf('至') < 0) return '';
+    var left = normalized.split('至')[0].trim();
+    var provinceMatch = left.match(/(内蒙古|黑龙江|北京|天津|上海|重庆|河北|山西|辽宁|吉林|江苏|浙江|安徽|福建|江西|山东|河南|湖北|湖南|广东|广西|海南|四川|贵州|云南|西藏|陕西|甘肃|青海|宁夏|新疆|台湾|香港|澳门)(?:省|市|自治区|壮族自治区|回族自治区|维吾尔自治区)?\\s*([\\u4e00-\\u9fff]{1,8})?$/);
+    if (!provinceMatch) return '';
+    return clean((provinceMatch[1] || '') + (provinceMatch[2] || ''), 80).replace(/\\s+/g, '');
+  }
+  var shippingCandidates = [];
+  var shippingNodes = document.querySelectorAll('span,div,p,li');
+  for (var shippingIndex = 0; shippingIndex < shippingNodes.length && shippingIndex < 7000; shippingIndex++) {
+    var shippingElement = shippingNodes[shippingIndex];
+    if (!visible(shippingElement)) continue;
+    var shippingText = clean(shippingElement.textContent, 160);
+    if (!shippingText || shippingText.indexOf('至') < 0 || shippingText.length > 150) continue;
+    var origin = parseShipFrom(shippingText);
+    if (!origin) continue;
+    var shippingRect = shippingElement.getBoundingClientRect();
+    var shippingScore = 220 - shippingText.length;
+    if (/快递|发货|运费|包邮/.test(shippingText)) shippingScore += 35;
+    if (shippingRect.left > window.innerWidth * 0.35) shippingScore += 20;
+    if (shippingRect.top > 80 && shippingRect.top < 850) shippingScore += 15;
+    shippingCandidates.push({
+      shipFrom: origin,
+      text: shippingText.slice(0, 100),
+      score: shippingScore,
+      top: Math.round(shippingRect.top),
+      left: Math.round(shippingRect.left)
+    });
+  }
+  shippingCandidates.sort(function(a, b) { return b.score - a.score; });
+  var shipFrom = shippingCandidates.length > 0 ? shippingCandidates[0].shipFrom : '';
+
   function parsePrice(text) {
     var normalized = clean(text, 120).replace(/,/g, '');
     var matches = normalized.match(/\\d+(?:\\.\\d{1,2})?/g) || [];
@@ -189,35 +225,138 @@ function buildTaobaoSelectedSkuExtractionScript() {
     }
     return null;
   }
+  // 淘宝新版详情数据通常在 skuCore.sku2info[skuId] 中，优先使用SKU专属价格。
+  function priceFromSkuInfo(value, depth) {
+    if (value == null || depth > 5) return null;
+    if (typeof value === 'string' || typeof value === 'number') return parsePrice(value);
+    if (typeof value !== 'object') return null;
+    var keys = ['finalPrice','promotionPrice','activityPrice','couponPrice','salePrice','discountPrice','priceText','price'];
+    for (var i = 0; i < keys.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(value, keys[i])) continue;
+      var found = priceFromSkuInfo(value[keys[i]], depth + 1);
+      if (found != null) return found;
+    }
+    return null;
+  }
+  function findSkuPrice(root, depth, visited) {
+    if (!root || typeof root !== 'object' || depth > 9 || visited.has(root)) return null;
+    visited.add(root);
+    var maps = [root.sku2info, root.sku2Info, root.skuMap, root.skuPriceMap];
+    for (var i = 0; i < maps.length; i++) {
+      var map = maps[i];
+      if (!map || typeof map !== 'object') continue;
+      var skuInfo = map[skuId];
+      if (skuInfo) {
+        var directPrice = priceFromSkuInfo(skuInfo, 0);
+        if (directPrice != null) return directPrice;
+      }
+    }
+    var containerKeys = ['data','props','pageProps','pageData','detail','item','global','componentsVO','skuCore','skuBase','model'];
+    for (var k = 0; k < containerKeys.length; k++) {
+      var nestedPrice = findSkuPrice(root[containerKeys[k]], depth + 1, visited);
+      if (nestedPrice != null) return nestedPrice;
+    }
+    return null;
+  }
+  var skuDataPrice = null;
+  if (skuId) {
+    var stateRoots = [
+      window.__INITIAL_STATE__, window.__INIT_DATA__, window.__INITIAL_DATA__,
+      window.__GLOBAL_DATA__, window.__NEXT_DATA__, window.__ICE_DATA__, window.g_config
+    ];
+    for (var stateIndex = 0; stateIndex < stateRoots.length && skuDataPrice == null; stateIndex++) {
+      try { skuDataPrice = findSkuPrice(stateRoots[stateIndex], 0, new WeakSet()); } catch (_) {}
+    }
+    if (skuDataPrice == null) {
+      var scripts = Array.from(document.querySelectorAll('script[type="application/json"],script#__NEXT_DATA__')).slice(0, 80);
+      for (var scriptIndex = 0; scriptIndex < scripts.length && skuDataPrice == null; scriptIndex++) {
+        var scriptText = String(scripts[scriptIndex].textContent || '').trim();
+        if (!scriptText || scriptText.indexOf(skuId) < 0 || !/sku2info|sku2Info|skuCore/.test(scriptText)) continue;
+        try { skuDataPrice = findSkuPrice(JSON.parse(scriptText), 0, new WeakSet()); } catch (_) {}
+      }
+    }
+  }
+  var promotionPriceMasked = false;
+  var promotionNodes = document.querySelectorAll('[class*="Price"],[class*="price"],[class*="Belt"],[class*="belt"]');
+  for (var promotionIndex = 0; promotionIndex < promotionNodes.length && promotionIndex < 800; promotionIndex++) {
+    var promotionElement = promotionNodes[promotionIndex];
+    if (!visible(promotionElement)) continue;
+    var promotionText = clean(promotionElement.textContent, 180);
+    if (!/(?:秒杀价|活动价|券后价|到手价|店铺优惠后|平台优惠后|平台加补后|会员价|促销价|特惠价|折后价|优惠价)/.test(promotionText) || !/(?:优惠前|原价|市场价|日常价)/.test(promotionText)) continue;
+    var promotionBeforeOriginal = promotionText.split(/优惠前|原价|市场价|日常价/)[0];
+    if (parsePrice(promotionBeforeOriginal) == null) {
+      promotionPriceMasked = true;
+      break;
+    }
+  }
   var priceSelectors = [
     '[class*="Price--"] [class*="priceText--"]',
     '[class*="priceWrap--"] [class*="priceText--"]',
     '[class*="priceText--"]', '[class*="PriceText--"]',
     '[class*="priceText"]', '[class*="PriceText"]',
+    '[class*="highlightPrice"]', '[class*="HighlightPrice"]',
+    '[class*="promotionPrice"]', '[class*="PromotionPrice"]',
+    '[class*="salePrice"]', '[class*="SalePrice"]',
     '#J_PromoPrice .tm-price', '.tm-promo-price .tm-price',
-    '.tm-price', '.tb-rmb-num'
+    '.tm-price', '.tb-rmb-num', '[itemprop="price"]', '[data-price]',
+    '[class*="price"]', '[class*="Price"]'
   ];
   var bestPrice = null;
   var bestScore = -Infinity;
+  var priceCandidates = [];
+  var visitedPriceElements = new Set();
+  var skuRect = roots.length > 0 ? roots[0].getBoundingClientRect() : null;
   priceSelectors.forEach(function(selector, selectorIndex) {
     Array.from(document.querySelectorAll(selector)).forEach(function(element) {
+      if (visitedPriceElements.has(element)) return;
+      visitedPriceElements.add(element);
       if (!visible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
       var cls = String(element.className || '') + ' ' + String(element.parentElement && element.parentElement.className || '');
       var style = getComputedStyle(element);
       if (/line-through/.test(style.textDecorationLine || '') || /(?:origin|original|market|delete|delPrice|linePrice)/i.test(cls)) return;
       var text = clean(element.textContent, 120);
-      var value = parsePrice(text);
+      var attributePrice = element.getAttribute('data-price') || element.getAttribute('content') || '';
+      var originalMarkerIndex = text.search(/优惠前|原价|市场价|日常价/);
+      var currentPriceText = originalMarkerIndex >= 0 ? text.slice(0, originalMarkerIndex) : text;
+      var textPrice = parsePrice(currentPriceText);
+      // 活动区域只剩“优惠前/原价”数字时，不能把划线价当成当前SKU成交价。
+      if (originalMarkerIndex >= 0 && textPrice == null) return;
+      var value = textPrice || parsePrice(attributePrice);
       if (value == null) return;
       var rect = element.getBoundingClientRect();
-      var score = (priceSelectors.length - selectorIndex) * 20 + Math.min(parseFloat(style.fontSize || '0'), 40);
+      var isGeneric = selectorIndex >= priceSelectors.length - 2;
+      var numericParts = text.replace(/,/g, '').match(/\\d+(?:\\.\\d{1,2})?/g) || [];
+      if (isGeneric && (text.length > 45 || numericParts.length > 2 || rect.height > 100)) return;
+      var score = (priceSelectors.length - selectorIndex) * 18 + Math.min(parseFloat(style.fontSize || '0'), 42) * 2;
+      if (/priceText|highlightPrice|promotionPrice|salePrice/i.test(cls)) score += 45;
       if (/[¥￥]/.test(text)) score += 20;
       if (rect.top > 50 && rect.top < 800) score += 15;
       if (rect.left > window.innerWidth * 0.25) score += 10;
+      if (rect.width < 320 && rect.height < 80) score += 15;
+      if (skuRect && rect.bottom <= skuRect.top + 100 && rect.top >= skuRect.top - 650) {
+        score += Math.max(20, 90 - Math.abs(skuRect.top - rect.bottom) / 8);
+        if (Math.abs(rect.left - skuRect.left) < 420) score += 25;
+      }
+      priceCandidates.push({
+        value: value, text: text.slice(0, 45), className: cls.slice(0, 90),
+        selector: selector, score: Math.round(score),
+        top: Math.round(rect.top), left: Math.round(rect.left)
+      });
       if (score > bestScore) { bestScore = score; bestPrice = value; }
     });
   });
+  priceCandidates.sort(function(a, b) { return b.score - a.score; });
 
-  return { skuId: skuId, options: options.slice(0, 12), price: bestPrice };
+  return {
+    skuId: skuId,
+    options: options.slice(0, 12),
+    shipFrom: shipFrom,
+    shippingCandidates: shippingCandidates.slice(0, 4),
+    price: promotionPriceMasked ? null : (skuDataPrice != null ? skuDataPrice : bestPrice),
+    priceSource: promotionPriceMasked ? 'promotion-masked' : (skuDataPrice != null ? 'sku-data' : (bestPrice != null ? 'visible-dom' : '')),
+    promotionPriceMasked: promotionPriceMasked,
+    priceCandidates: priceCandidates.slice(0, 6)
+  };
 })()
 `
 }

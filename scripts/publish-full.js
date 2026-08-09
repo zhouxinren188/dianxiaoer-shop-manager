@@ -188,9 +188,11 @@ async function main() {
   }
   const localServerFile = path.join(ROOT, 'server-api', 'index.js')
   const localPkgFile = path.join(ROOT, 'server-api', 'package.json')
+  const localAdminFile = path.join(ROOT, 'server-api', 'public', 'admin', 'index.html')
   smallFiles.push({ local: localServerFile, remote: `${REMOTE_DIR}/index.js` })
   smallFiles.push({ local: localServerFile, remote: `${REMOTE_DIR}/update-server.js` })
   smallFiles.push({ local: localPkgFile, remote: `${REMOTE_DIR}/package.json` })
+  smallFiles.push({ local: localAdminFile, remote: `${REMOTE_DIR}/public/admin/index.html` })
 
   await uploadFiles(smallFiles)
 

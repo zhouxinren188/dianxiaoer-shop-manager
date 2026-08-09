@@ -13,6 +13,7 @@ const {
 describe('淘宝货源SKU记录与回选', () => {
   const selection = {
     skuId: '589999001',
+    shipFrom: '河北邯郸',
     options: [
       { group: '颜色分类', text: '象牙白', valueId: '1627207:28320' },
       { group: '容量', text: '1300ml', valueId: '122216547:10122' }
@@ -59,6 +60,15 @@ describe('淘宝货源SKU记录与回选', () => {
     expect(() => new Function(extractionScript)).not.toThrow()
     expect(() => new Function(autoSelectScript)).not.toThrow()
     expect(extractionScript).toContain('priceText--')
+    expect(extractionScript).toContain('sku2info')
+    expect(extractionScript).toContain('priceCandidates')
+    expect(extractionScript).toContain('shippingCandidates')
+    expect(extractionScript).toContain('parseShipFrom')
+    expect(extractionScript).toContain("split('至')[0].trim()")
+    expect(extractionScript).toContain('promotionPriceMasked')
+    expect(extractionScript).toContain('优惠前')
+    expect(extractionScript).toContain('店铺优惠后')
+    expect(extractionScript).toContain('平台加补后')
     expect(extractionScript).toContain('aria-checked="true"')
     expect(autoSelectScript).toContain('[DXE_SKU_AUTO] success')
     expect(autoSelectScript).toContain("element.click()")

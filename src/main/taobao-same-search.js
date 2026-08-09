@@ -25,9 +25,27 @@ const SEARCH_REQUEST_TIMEOUT = 25000
 const searchWindowStates = new Map()
 const searchQueues = new Map()
 const productWindows = new Set()
+const preparedImageCache = new Map()
+const PREPARED_IMAGE_CACHE_TTL = 20 * 60 * 1000
+const MAX_PREPARED_IMAGE_CACHE = 20
+let productWindowSequence = 0
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function attachTaobaoProductPriceDiagnostics(productWindow, diagnosticId) {
+  const webContents = productWindow.webContents
+  const onConsoleMessage = (_event, _level, message) => {
+    const text = String(message || '')
+    if (!text.startsWith('[DXE_PRICE_DIAG]')) return
+    runtimeLog.writeLog('TaobaoPriceDiag', `window=${diagnosticId}, dom=${text.slice('[DXE_PRICE_DIAG]'.length, 1800)}`)
+  }
+  webContents.on('console-message', onConsoleMessage)
+  runtimeLog.writeLog('TaobaoPriceDiag', `window=${diagnosticId}, dom-listener=ready`)
+  productWindow.once('closed', () => {
+    try { webContents.removeListener('console-message', onConsoleMessage) } catch (_) {}
+  })
 }
 
 function httpRequest(url, options = {}) {
@@ -77,6 +95,10 @@ function hasTaobaoLoginCookie(cookies) {
 
 function getTaobaoSamePartition(accountId) {
   return 'persist:dianxiaoer-tb-account-' + accountId
+}
+
+function getTaobaoPurchasePartition(accountId) {
+  return 'persist:purchase-' + accountId
 }
 
 function normalizeSameSite(value) {
@@ -241,7 +263,8 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
     win,
     initializing: null,
     bootstrapComplete: false,
-    firstSearchPrepared: false
+    firstSearchPrepared: false,
+    bixiTokens: null
   }
   searchWindowStates.set(partition, state)
   win.on('closed', () => {
@@ -374,6 +397,26 @@ function convertTaobaoSearchImage(buffer, mimeType) {
   const jpeg = whiteBackgroundImage.toJPEG(80)
   if (!jpeg.length) throw new Error('商品主图转换失败')
   return jpeg.toString('base64')
+}
+
+async function prepareTaobaoSearchImage(ses, imageUrl) {
+  const cacheKey = crypto.createHash('sha1').update(String(imageUrl || '')).digest('hex')
+  const cached = preparedImageCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return { ...cached, cacheHit: true }
+  if (cached) preparedImageCache.delete(cacheKey)
+
+  const downloaded = await downloadTaobaoSearchImage(ses, imageUrl)
+  const prepared = {
+    imageBase64: convertTaobaoSearchImage(downloaded.buffer, downloaded.mimeType),
+    byteLength: downloaded.buffer.length,
+    mimeType: downloaded.mimeType,
+    expiresAt: Date.now() + PREPARED_IMAGE_CACHE_TTL
+  }
+  preparedImageCache.set(cacheKey, prepared)
+  while (preparedImageCache.size > MAX_PREPARED_IMAGE_CACHE) {
+    preparedImageCache.delete(preparedImageCache.keys().next().value)
+  }
+  return { ...prepared, cacheHit: false }
 }
 
 async function getTaobaoMtopToken(ses) {
@@ -665,10 +708,24 @@ function buildTaobaoSameSelection(context = {}, currentPageUrl = '', skuSnapshot
   } catch (_) {}
   const product = { ...sameItem, itemId, link }
   if (skuSnapshot && typeof skuSnapshot === 'object') {
+    product.skuCaptureAttempted = true
     const skuSelection = normalizeTaobaoSkuSelection(skuSnapshot)
-    if (skuSelection.skuId || skuSelection.options.length > 0) product.skuSelection = skuSelection
+    if (skuSelection.skuId || skuSelection.options.length > 0 || skuSelection.shipFrom) product.skuSelection = skuSelection
+    product.shipFrom = String(skuSelection.shipFrom || '')
+    product.shippingCandidates = Array.isArray(skuSnapshot.shippingCandidates)
+      ? skuSnapshot.shippingCandidates.slice(0, 4)
+      : []
     const currentSkuPrice = Number(skuSnapshot.price)
-    if (Number.isFinite(currentSkuPrice) && currentSkuPrice > 0) product.price = currentSkuPrice
+    product.skuPriceCaptured = Number.isFinite(currentSkuPrice) && currentSkuPrice > 0
+    product.skuPriceSource = String(skuSnapshot.priceSource || '')
+    product.promotionPriceMasked = !!skuSnapshot.promotionPriceMasked
+    product.skuPriceCandidates = Array.isArray(skuSnapshot.priceCandidates)
+      ? skuSnapshot.priceCandidates.slice(0, 6)
+      : []
+    if (product.skuPriceCaptured) {
+      product.currentSkuPrice = currentSkuPrice
+      product.price = currentSkuPrice
+    }
   }
   return { accountId: context.accountId, product }
 }
@@ -688,11 +745,12 @@ function getTaobaoSameLogoDataUrl() {
   return ''
 }
 
-function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
+function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', diagnosticId = '') {
   const safeSource = {
     goodsName: String(sourceProduct.goodsName || ''),
     image: String(sourceProduct.image || ''),
     sku: String(sourceProduct.sku || ''),
+    skuSpec: String(sourceProduct.skuSpec || ''),
     quantity: Number(sourceProduct.quantity || 0),
     price: Number(sourceProduct.price || 0),
     purchasePrice: Number(sourceProduct.purchasePrice || 0),
@@ -704,6 +762,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
 (function() {
   var info = ${JSON.stringify(safeSource)};
   var logoDataUrl = ${JSON.stringify(logoDataUrl)};
+  var diagnosticId = ${JSON.stringify(String(diagnosticId || ''))};
 
   function appendText(parent, tag, text, css) {
     var element = document.createElement(tag);
@@ -711,6 +770,122 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
     if (css) element.style.cssText = css;
     parent.appendChild(element);
     return element;
+  }
+
+  function diagnosticLog(type, payload) {
+    try {
+      var data = payload && typeof payload === 'object' ? payload : {};
+      data.type = type;
+      data.window = diagnosticId;
+      data.at = Date.now();
+      console.info('[DXE_PRICE_DIAG]' + JSON.stringify(data));
+    } catch (_) {}
+  }
+
+  function diagnosticVisible(element) {
+    if (!element || !element.isConnected) return false;
+    var rect = element.getBoundingClientRect();
+    var style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  }
+
+  function selectedSkuOptions() {
+    var selectors = [
+      '[aria-checked="true"]', '[aria-selected="true"]', '.tb-selected',
+      '[class*="valueItem"][class*="selected"]', '[class*="valueItem"][class*="Selected"]',
+      '[class*="skuItem"][class*="selected"]', '[class*="skuItem"][class*="Selected"]'
+    ];
+    var values = [];
+    var seen = {};
+    Array.from(document.querySelectorAll(selectors.join(','))).slice(0, 80).forEach(function(element) {
+      if (!diagnosticVisible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
+      var text = String(element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 100);
+      if (!text || seen[text]) return;
+      seen[text] = true;
+      values.push(text);
+    });
+    return values.slice(0, 8);
+  }
+
+  var lastPriceDiagnosticSignature = '';
+  var priceDiagnosticTimer = null;
+  function emitPriceState(reason, force) {
+    try {
+      var selectors = [
+        '[class*="highlightPrice"]', '[class*="priceText"]', '[class*="PriceText"]',
+        '[class*="promotionPrice"]', '[class*="salePrice"]',
+        '[class*="beltPrice"]', '[class*="BeltPrice"]',
+        '[class*="priceWrap"]', '[class*="PriceWrap"]'
+      ];
+      var nodes = [];
+      var seenNodes = new Set();
+      selectors.forEach(function(selector) {
+        Array.from(document.querySelectorAll(selector)).slice(0, 120).forEach(function(element) {
+          if (nodes.length >= 12 || seenNodes.has(element)) return;
+          seenNodes.add(element);
+          if (!diagnosticVisible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
+          var text = String(element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+          if (!text || !/(?:[¥￥]|价格|优惠|加补|到手|秒杀|活动|会员|\\d|[•·]{2,}|\\.{3,})/.test(text)) return;
+          var rect = element.getBoundingClientRect();
+          nodes.push({
+            text: text,
+            cls: String(element.className || '').slice(0, 100),
+            top: Math.round(rect.top),
+            left: Math.round(rect.left)
+          });
+        });
+      });
+      var itemId = '', skuId = '';
+      try {
+        var pageUrl = new URL(location.href);
+        itemId = pageUrl.searchParams.get('id') || '';
+        skuId = pageUrl.searchParams.get('skuId') || pageUrl.searchParams.get('sku_id') || '';
+      } catch (_) {}
+      var options = selectedSkuOptions();
+      var signature = JSON.stringify({ itemId: itemId, skuId: skuId, options: options, nodes: nodes });
+      if (!force && signature === lastPriceDiagnosticSignature) return;
+      lastPriceDiagnosticSignature = signature;
+      diagnosticLog('price-state', {
+        reason: reason,
+        itemId: itemId,
+        skuId: skuId,
+        selectedOptions: options,
+        masked: nodes.some(function(node) { return /[•·]{2,}|\\.{3,}/.test(node.text); }),
+        nodes: nodes
+      });
+    } catch (error) {
+      diagnosticLog('price-state-error', { reason: reason, message: String(error && error.message || error).slice(0, 200) });
+    }
+  }
+
+  function schedulePriceState(reason, delay, force) {
+    setTimeout(function() { emitPriceState(reason, force); }, delay || 0);
+  }
+
+  function installPriceDiagnostics() {
+    if (window.__dxePriceDiagnosticsInstalled === diagnosticId) return;
+    window.__dxePriceDiagnosticsInstalled = diagnosticId;
+    document.addEventListener('click', function(event) {
+      var target = event.target && event.target.closest ? event.target.closest([
+        '[class*="valueItem--"]', '[class*="ValueItem--"]',
+        '[class*="skuValue--"]', '[class*="SkuValue--"]',
+        '[class*="skuItemValue"]', '[class*="SkuItemValue"]',
+        '.J_TSaleProp li', '.tb-sku li', '.tm-sale-prop li',
+        '[role="radio"]', '[role="option"]', '[data-prop-value]', '[data-property-value]'
+      ].join(',')) : null;
+      if (!target || target.closest('#__dxe_sales_product_overlay__')) return;
+      diagnosticLog('sku-click', {
+        text: String(target.getAttribute('aria-label') || target.getAttribute('title') || target.textContent || '')
+          .replace(/\s+/g, ' ').trim().slice(0, 120)
+      });
+      emitPriceState('sku-click-before', true);
+      schedulePriceState('sku-click-200ms', 200, true);
+      schedulePriceState('sku-click-800ms', 800, true);
+      schedulePriceState('sku-click-2000ms', 2000, true);
+      schedulePriceState('sku-click-5000ms', 5000, true);
+    }, true);
+    emitPriceState('diagnostic-installed', true);
   }
 
   function buildSourceOverlay() {
@@ -740,7 +915,8 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
       image.onerror = function() { image.style.display = 'none'; };
       body.appendChild(image);
     }
-    appendText(body, 'div', info.goodsName || '\u672a\u83b7\u53d6\u5230\u8ba2\u5355\u5546\u54c1\u6807\u9898', 'margin-top:10px;color:#303133;font-size:13px;font-weight:600;line-height:1.5;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;word-break:break-all;');
+    appendText(body, 'div', info.goodsName || '\u672a\u83b7\u53d6\u5230\u8ba2\u5355\u5546\u54c1\u6807\u9898', 'margin-top:10px;color:#303133;font-size:13px;font-weight:600;line-height:1.5;white-space:normal;word-break:break-all;');
+    if (info.skuSpec) appendText(body, 'div', '\u9500\u552e\u89c4\u683c\uff1a' + info.skuSpec, 'margin-top:7px;padding:6px 8px;border:1px solid #ffd7ba;border-radius:5px;background:#fff7e8;color:#fa541c;font-size:12px;font-weight:700;line-height:1.5;word-break:break-all;');
     if (info.sku) appendText(body, 'div', 'SKU: ' + info.sku, 'margin-top:5px;color:#909399;word-break:break-all;');
 
     var priceRow = document.createElement('div');
@@ -860,6 +1036,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
       button.disabled = true;
       button.style.cursor = 'default';
       label.textContent = '\u6b63\u5728\u9009\u62e9...';
+      emitPriceState('select-source-click', true);
       window.open('dianxiaoer://select-taobao-same-source', '_blank');
     });
     row.appendChild(button);
@@ -892,19 +1069,26 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '') {
   function initialize() {
     buildSourceOverlay();
     placeSelectRow();
+    installPriceDiagnostics();
+    requestAnimationFrame(function() { placeSelectRow(); });
     if (window.__dxeSameSourceObserver) window.__dxeSameSourceObserver.disconnect();
     var scheduled = false;
     window.__dxeSameSourceObserver = new MutationObserver(function() {
       if (scheduled) return;
       scheduled = true;
-      requestAnimationFrame(function() { scheduled = false; placeSelectRow(); });
+      requestAnimationFrame(function() {
+        scheduled = false;
+        placeSelectRow();
+        if (priceDiagnosticTimer) clearTimeout(priceDiagnosticTimer);
+        priceDiagnosticTimer = setTimeout(function() { emitPriceState('dom-mutation', false); }, 120);
+      });
     });
     window.__dxeSameSourceObserver.observe(document.documentElement, { childList: true, characterData: true, subtree: true });
     var attempts = 0;
     var timer = setInterval(function() {
       attempts++;
-      if (placeSelectRow() || attempts >= 40) clearInterval(timer);
-    }, 500);
+      if (placeSelectRow() || attempts >= 100) clearInterval(timer);
+    }, 100);
   }
 
   if (document.body) initialize();
@@ -921,16 +1105,22 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
     return { success: false, message: '淘宝商品链接或采购账号无效' }
   }
 
-  const state = await getOrCreateTaobaoSearchWindow(accountId)
-  // 商品页与搜索承载页共享账号Cookie；商品页可能刷新MTOP Token，因此下次
-  // 搜索前强制重建隐藏页的Token/Bixi上下文，但不清空或重灌Cookie。
-  state.bootstrapComplete = false
-  state.firstSearchPrepared = false
+  await getOrCreateTaobaoSearchWindow(accountId)
+  // 隐藏搜索页继续使用独立分区，商品详情页改用与正式采购下单完全相同的
+  // purchase分区。活动价会依赖该分区内的登录上下文与站点存储。
+  const productPartition = getTaobaoPurchasePartition(accountId)
+  const productSession = session.fromPartition(productPartition)
+  let productCookies = await productSession.cookies.get({})
+  if (!hasTaobaoLoginCookie(productCookies)) {
+    await injectTaobaoCookiesFromAccount(productSession, accountId)
+    productCookies = await productSession.cookies.get({})
+  }
   const context = {
     accountId,
     sourceProduct: params.sourceProduct || {},
     sameItem: { ...(params.sameItem || {}), link: url }
   }
+  const diagnosticId = `${accountId}-${++productWindowSequence}-${Date.now().toString(36)}`
   const productWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -939,10 +1129,11 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      partition: state.partition
+      partition: productPartition
     }
   })
   productWindows.add(productWindow)
+  attachTaobaoProductPriceDiagnostics(productWindow, diagnosticId)
   const chromeVersion = process.versions.chrome || '134.0.6998.205'
   productWindow.webContents.setUserAgent(
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
@@ -953,10 +1144,16 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
     if (selecting || productWindow.isDestroyed()) return
     selecting = true
     let skuSnapshot = null
-    try {
-      skuSnapshot = await productWindow.webContents.executeJavaScript(buildTaobaoSelectedSkuExtractionScript(), true)
-    } catch (error) {
-      runtimeLog.writeLog('TaobaoSame', '读取当前SKU失败: ' + error.message)
+    for (let captureAttempt = 0; captureAttempt < 6; captureAttempt++) {
+      try {
+        skuSnapshot = await productWindow.webContents.executeJavaScript(buildTaobaoSelectedSkuExtractionScript(), true)
+      } catch (error) {
+        runtimeLog.writeLog('TaobaoSame', '读取当前SKU失败: ' + error.message)
+        break
+      }
+      const capturedPrice = Number(skuSnapshot && skuSnapshot.price)
+      if (Number.isFinite(capturedPrice) && capturedPrice > 0) break
+      if (captureAttempt < 5) await sleep(650)
     }
     if (productWindow.isDestroyed()) return
     const selected = buildTaobaoSameSelection(context, productWindow.webContents.getURL(), skuSnapshot)
@@ -972,14 +1169,30 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
     runtimeLog.writeLog(
       'TaobaoSame',
       '商品页选为货源: accountId=' + accountId +
+      ', window=' + diagnosticId +
       ', itemId=' + (selected.product.itemId || '') +
       ', skuId=' + (selectedSku?.skuId || '') +
       ', options=' + (selectedSku?.options?.length || 0) +
-      ', price=' + (selected.product.price || '')
+      ', price=' + (selected.product.currentSkuPrice || '') +
+      ', priceCaptured=' + !!selected.product.skuPriceCaptured +
+      ', priceSource=' + (selected.product.skuPriceSource || '') +
+      ', shipFrom=' + (selected.product.shipFrom || '') +
+      ', candidates=' + JSON.stringify(selected.product.skuPriceCandidates || []) +
+      ', shippingCandidates=' + JSON.stringify(selected.product.shippingCandidates || [])
     )
-    setTimeout(() => {
-      if (!productWindow.isDestroyed()) productWindow.close()
-    }, 120)
+    if (selected.product.skuPriceCaptured) {
+      setTimeout(() => {
+        if (!productWindow.isDestroyed()) productWindow.close()
+      }, 120)
+    } else {
+      selecting = false
+      productWindow.webContents.executeJavaScript(
+        "(function(){var button=document.getElementById('__dxe_same_source_control__');" +
+        "if(!button)return;button.disabled=false;button.style.cursor='pointer';" +
+        "var label=button.querySelector('span');if(label)label.textContent=" +
+        JSON.stringify(selected.product.promotionPriceMasked ? '优惠价未显示，重试' : '重新选为货源') + ";})()"
+      ).catch(() => {})
+    }
   }
   productWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
     if (targetUrl.startsWith('dianxiaoer://select-taobao-same-source')) selectCurrentProduct().catch(() => {})
@@ -994,21 +1207,31 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   const logoDataUrl = getTaobaoSameLogoDataUrl()
   const inject = () => {
     if (productWindow.isDestroyed()) return
-    const script = buildTaobaoSameProductInjection(context.sourceProduct, logoDataUrl)
+    const script = buildTaobaoSameProductInjection(context.sourceProduct, logoDataUrl, diagnosticId)
     productWindow.webContents.executeJavaScript(script, true).catch(error => {
       runtimeLog.writeLog('TaobaoSame', '商品页控件注入失败: ' + error.message)
     })
   }
-  productWindow.webContents.on('did-finish-load', () => setTimeout(inject, 300))
-  productWindow.webContents.on('did-navigate-in-page', () => setTimeout(inject, 300))
-  productWindow.on('closed', () => productWindows.delete(productWindow))
+  // DOM就绪立即注入；脚本内的MutationObserver负责淘宝SPA后续异步重绘，
+  // 无需在did-finish-load时再次重建浮窗和按钮。
+  productWindow.webContents.on('dom-ready', inject)
+  productWindow.on('closed', () => {
+    productWindows.delete(productWindow)
+    runtimeLog.writeLog('TaobaoPriceDiag', `window=${diagnosticId}, closed`)
+  })
 
   await productWindow.loadURL(url)
-  runtimeLog.writeLog('TaobaoSame', '打开同款商品页: accountId=' + accountId)
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '打开同款商品页: accountId=' + accountId +
+    ', window=' + diagnosticId +
+    ', partition=' + productPartition +
+    ', loginCookie=' + (hasTaobaoLoginCookie(productCookies) ? 'YES' : 'NO')
+  )
   return { success: true }
 }
 
-function normalizeTaobaoSearchItems(items, limit = 8) {
+function normalizeTaobaoSearchItems(items, limit = 20) {
   const source = Array.isArray(items) ? items : []
   const products = []
   for (const item of source) {
@@ -1106,7 +1329,7 @@ function enqueueSearch(partition, task) {
   return current
 }
 
-async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 8, automatic = false }) {
+async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automatic = false }) {
   let state = await getOrCreateTaobaoSearchWindow(accountId)
   const partition = state.partition
   return enqueueSearch(partition, async () => {
@@ -1172,14 +1395,22 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 8, automat
     }
 
     const normalizedImageUrl = normalizeRemoteImageUrl(imageUrl)
-    const downloaded = await downloadTaobaoSearchImage(ses, normalizedImageUrl)
-    const imageBase64 = convertTaobaoSearchImage(downloaded.buffer, downloaded.mimeType)
-    runtimeLog.writeLog('TaobaoSame', '图片准备完成: bytes=' + downloaded.buffer.length + ', mime=' + downloaded.mimeType)
+    const imagePreparedAt = Date.now()
+    const preparedImage = await prepareTaobaoSearchImage(ses, normalizedImageUrl)
+    const imageBase64 = preparedImage.imageBase64
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '图片准备完成: bytes=' + preparedImage.byteLength +
+      ', mime=' + preparedImage.mimeType +
+      ', cache=' + (preparedImage.cacheHit ? 'HIT' : 'MISS') +
+      ', ms=' + (Date.now() - imagePreparedAt)
+    )
 
     let lastMessage = ''
     for (let attempt = 0; attempt < 3; attempt++) {
       const token = await waitForTaobaoMtopToken(ses, attempt === 0 ? 1200 : 3500)
-      const bixiTokens = await waitForTaobaoPageBixiTokens(win, attempt === 0 ? 2500 : 4500)
+      const bixiTokens = state.bixiTokens || await waitForTaobaoPageBixiTokens(win, attempt === 0 ? 2500 : 4500)
+      if (bixiTokens) state.bixiTokens = bixiTokens
       const request = buildTaobaoImageSearchRequest({ token, imageBase64, bixiTokens })
       const responseBody = await pageXhrPostAndCapture(win, request.url, request.body)
       const resultJson = parseMtopJson(responseBody)
@@ -1267,7 +1498,7 @@ function registerTaobaoSameSearchIpc() {
       return await searchTaobaoImageDirect({
         accountId,
         imageUrl: params.imgUrl || params.imageUrl,
-        limit: Math.min(Math.max(Number(params.limit) || 8, 1), 20),
+        limit: Math.min(Math.max(Number(params.limit) || 20, 1), 20),
         automatic: !!params.automatic
       })
     } catch (error) {
@@ -1296,6 +1527,7 @@ module.exports = {
   buildTaobaoSameSelection,
   buildTaobaoSameProductInjection,
   getTaobaoSamePartition,
+  getTaobaoPurchasePartition,
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,

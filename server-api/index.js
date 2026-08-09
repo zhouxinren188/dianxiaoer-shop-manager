@@ -32,6 +32,16 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .map(s => s.trim())
   .filter(Boolean)
 
+// 管理后台由认证服务自身提供。即使部署环境配置了外部 CORS 白名单，
+// 服务自身的 HTTPS Origin 也必须放行，否则同源页面的 POST/PUT/DELETE
+// 会在进入路由前被 CORS 中间件拒绝。
+const SERVER_SELF_ORIGINS = new Set([
+  'https://150.158.54.108',
+  'https://150.158.54.108:443',
+  'https://localhost',
+  'https://localhost:443'
+])
+
 // ========== MySQL 数据库连接 ==========
 const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
@@ -84,9 +94,87 @@ const UPDATE_DIR = path.join(__dirname, 'updates')
 const HOT_DIR = path.join(UPDATE_DIR, 'hot')
 const META_FILE = path.join(UPDATE_DIR, 'update-meta.json')
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
+const PAYMENT_VAULT_HTTPS_PORT = Math.max(1, parseInt(process.env.PAYMENT_VAULT_HTTPS_PORT || '443', 10) || 443)
+const PAYMENT_VAULT_KEY_SECRET = process.env.PAYMENT_VAULT_KEY || ''
 if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 8) {
   console.error('[FATAL] 环境变量 ADMIN_PASSWORD 未设置或长度不足8字符')
   process.exit(1)
+}
+
+function getPaymentVaultKey() {
+  if (PAYMENT_VAULT_KEY_SECRET.length < 32) {
+    throw new Error('PAYMENT_VAULT_KEY 未配置或长度不足32字符')
+  }
+  return crypto.createHash('sha256').update(PAYMENT_VAULT_KEY_SECRET, 'utf8').digest()
+}
+
+function normalizePayerAccount(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^(支付宝账号|付款账号|支付账号|账号)\s*[：:]?\s*/i, '')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function maskPayerAccount(value) {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  const at = text.indexOf('@')
+  if (at > 1) return text.slice(0, 2) + '***' + text.slice(at)
+  if (text.length <= 4) return '*'.repeat(text.length)
+  return text.slice(0, 3) + '*'.repeat(Math.min(6, text.length - 5)) + text.slice(-2)
+}
+
+function payerAccountMatches(observedValue, storedValue) {
+  const observed = normalizePayerAccount(observedValue)
+  const stored = normalizePayerAccount(storedValue)
+  if (!observed || !stored) return false
+  if (observed === stored) return true
+  if (!observed.includes('*')) return false
+  const pattern = observed
+    .split(/\*+/)
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*')
+  try {
+    return new RegExp('^' + pattern + '$', 'i').test(stored)
+  } catch (_) {
+    return false
+  }
+}
+
+function encryptPaymentPassword(password, ownerId, payerAccount) {
+  const normalizedAccount = normalizePayerAccount(payerAccount)
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', getPaymentVaultKey(), iv)
+  cipher.setAAD(Buffer.from(`${ownerId}:${normalizedAccount}`, 'utf8'))
+  const encrypted = Buffer.concat([cipher.update(String(password), 'utf8'), cipher.final()])
+  return {
+    passwordCiphertext: encrypted.toString('base64'),
+    passwordIv: iv.toString('base64'),
+    passwordTag: cipher.getAuthTag().toString('base64')
+  }
+}
+
+function decryptPaymentPassword(row) {
+  const decipher = crypto.createDecipheriv(
+    'aes-256-gcm',
+    getPaymentVaultKey(),
+    Buffer.from(row.password_iv, 'base64')
+  )
+  decipher.setAAD(Buffer.from(`${row.owner_id}:${normalizePayerAccount(row.payer_account)}`, 'utf8'))
+  decipher.setAuthTag(Buffer.from(row.password_tag, 'base64'))
+  return Buffer.concat([
+    decipher.update(Buffer.from(row.password_ciphertext, 'base64')),
+    decipher.final()
+  ]).toString('utf8')
+}
+
+function requireSecureVaultTransport(req, res, next) {
+  if (req.secure || req.socket?.encrypted) return next()
+  return res.status(426).json({
+    success: false,
+    message: `密码本仅允许通过 HTTPS 访问，请打开 https://${req.hostname}:${PAYMENT_VAULT_HTTPS_PORT}/admin/`
+  })
 }
 
 if (!fs.existsSync(UPDATE_DIR)) fs.mkdirSync(UPDATE_DIR, { recursive: true })
@@ -179,6 +267,7 @@ const corsOptions = {
   origin: function (origin, callback) {
     // Electron 客户端从 file:// 协议加载时，origin 为字符串 "null" 或 undefined
     if (!origin || origin === 'null') return callback(null, true)
+    if (SERVER_SELF_ORIGINS.has(origin)) return callback(null, true)
     if (ALLOWED_ORIGINS.length === 0) {
       // 未配置白名单时，仅允许服务器自身IP的精确来源
       const allowed = ['http://150.158.54.108:3001', 'http://150.158.54.108:3002', 'http://localhost:3001', 'http://localhost:3002']
@@ -216,6 +305,15 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: '登录尝试过于频繁，请15分钟后再试' },
   skipSuccessfulRequests: false
+})
+
+// 支付密码读取限流：只允许付款页按需读取，防止账号枚举和高频尝试
+const paymentVaultResolveLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: '密码本读取过于频繁，请稍后重试' }
 })
 
 // JWT 认证中间件
@@ -417,6 +515,93 @@ app.get('/api/me', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('[API] 获取用户信息错误:', err.message)
     res.status(500).json({ success: false, message: '服务器错误' })
+  }
+})
+
+// 付款页按当前登录用户、采购账号和支付宝付款账号读取密码。
+// 仅 HTTPS 可用，返回禁止缓存；密码只在本次响应中短暂出现。
+app.post('/api/payment-vault/resolve', requireSecureVaultTransport, paymentVaultResolveLimiter, authMiddleware, async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+  res.set('Pragma', 'no-cache')
+  try {
+    const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
+    const username = req.user.sub || req.user.username
+    const accountId = parseInt(req.body?.accountId, 10)
+    const observedPayerAccount = String(req.body?.payerAccount || '').trim()
+
+    if (!username || !accountId || !observedPayerAccount) {
+      return res.status(400).json({ success: false, message: '付款账号或采购账号参数不完整' })
+    }
+    if (observedPayerAccount.length > 190) {
+      return res.status(400).json({ success: false, message: '付款账号格式无效' })
+    }
+
+    // 单点登录校验：仅验证 JWT 签名还不够，token 必须仍在 user_tokens 中。
+    const [userRows] = await dbPool.execute(
+      `SELECT u.id, u.username, u.user_type, u.parent_id, u.status
+       FROM users u
+       INNER JOIN user_tokens ut ON ut.user_id = u.id
+       WHERE u.username = ? AND ut.token = ? AND u.status = 'enabled'
+       LIMIT 1`,
+      [username, token]
+    )
+    if (!userRows.length) {
+      return res.status(401).json({ success: false, message: '登录已失效，请重新登录' })
+    }
+
+    const user = userRows[0]
+    const ownerId = user.user_type === 'master' ? user.id : user.parent_id
+    if (!ownerId) {
+      return res.status(403).json({ success: false, message: '当前账号未归属主账号，无法读取密码本' })
+    }
+
+    let purchaseAccountRows
+    if (user.user_type === 'master') {
+      ;[purchaseAccountRows] = await dbPool.execute(
+        'SELECT id FROM purchase_accounts WHERE id = ? AND owner_id = ? LIMIT 1',
+        [accountId, ownerId]
+      )
+    } else {
+      ;[purchaseAccountRows] = await dbPool.execute(
+        `SELECT pa.id FROM purchase_accounts pa
+         INNER JOIN user_purchase_accounts upa ON upa.account_id = pa.id
+         WHERE pa.id = ? AND pa.owner_id = ? AND upa.user_id = ? LIMIT 1`,
+        [accountId, ownerId, user.id]
+      )
+    }
+    if (!purchaseAccountRows.length) {
+      return res.status(403).json({ success: false, message: '无权使用该采购账号读取密码本' })
+    }
+
+    const [vaultRows] = await dbPool.execute(
+      `SELECT id, owner_id, payer_account, password_ciphertext, password_iv, password_tag
+       FROM payment_vault
+       WHERE owner_id = ? AND status = 'enabled'`,
+      [ownerId]
+    )
+    const matches = vaultRows.filter(row => payerAccountMatches(observedPayerAccount, row.payer_account))
+    if (matches.length === 0) {
+      return res.status(404).json({ success: false, message: `密码本中未找到付款账号 ${maskPayerAccount(observedPayerAccount)}` })
+    }
+    if (matches.length > 1) {
+      return res.status(409).json({ success: false, message: '付款账号匹配到多条密码记录，请在管理后台清理重复项' })
+    }
+
+    const password = decryptPaymentPassword(matches[0])
+    res.json({
+      success: true,
+      data: {
+        password,
+        payerAccount: maskPayerAccount(matches[0].payer_account)
+      }
+    })
+  } catch (err) {
+    console.error('[PaymentVault] 读取失败:', err.message)
+    const configError = err.message.includes('PAYMENT_VAULT_KEY')
+    res.status(configError ? 503 : 500).json({
+      success: false,
+      message: configError ? '服务器密码本尚未配置加密密钥' : '密码本读取失败'
+    })
   }
 })
 
@@ -1031,6 +1216,165 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
   }
 })
 
+// 密码本列表：不返回密文、IV、认证标签或明文密码。
+app.get('/api/admin/payment-vault', requireSecureVaultTransport, adminAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const [rows] = await dbPool.execute(
+      `SELECT pv.id, pv.owner_id, u.username AS owner_username,
+              pv.label, pv.payer_account, pv.status, pv.created_at, pv.updated_at
+       FROM payment_vault pv
+       INNER JOIN users u ON u.id = pv.owner_id
+       ORDER BY u.username ASC, pv.id DESC`
+    )
+    res.json({
+      success: true,
+      data: {
+        list: rows.map(row => ({
+          id: row.id,
+          ownerId: row.owner_id,
+          ownerUsername: row.owner_username,
+          label: row.label || '',
+          payerAccount: row.payer_account,
+          maskedPayerAccount: maskPayerAccount(row.payer_account),
+          status: row.status,
+          hasPassword: true,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        }))
+      }
+    })
+  } catch (err) {
+    console.error('[PaymentVault] 获取列表失败:', err.message)
+    res.status(500).json({ success: false, message: '获取密码本失败' })
+  }
+})
+
+app.post('/api/admin/payment-vault', requireSecureVaultTransport, adminAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const ownerId = parseInt(req.body?.ownerId, 10)
+    const label = String(req.body?.label || '').trim()
+    const payerAccount = String(req.body?.payerAccount || '').trim()
+    const password = String(req.body?.password || '')
+    const status = req.body?.status === 'disabled' ? 'disabled' : 'enabled'
+
+    if (!ownerId || !payerAccount || !password) {
+      return res.status(400).json({ success: false, message: '归属主账号、付款账号和支付密码不能为空' })
+    }
+    if (label.length > 100 || payerAccount.length > 190 || password.length > 128) {
+      return res.status(400).json({ success: false, message: '输入内容长度超出限制' })
+    }
+    const [ownerRows] = await dbPool.execute(
+      "SELECT id FROM users WHERE id = ? AND user_type = 'master' LIMIT 1",
+      [ownerId]
+    )
+    if (!ownerRows.length) {
+      return res.status(400).json({ success: false, message: '归属主账号不存在' })
+    }
+
+    const encrypted = encryptPaymentPassword(password, ownerId, payerAccount)
+    const [result] = await dbPool.execute(
+      `INSERT INTO payment_vault
+        (owner_id, label, payer_account, password_ciphertext, password_iv, password_tag, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [ownerId, label, payerAccount, encrypted.passwordCiphertext, encrypted.passwordIv, encrypted.passwordTag, status]
+    )
+    console.log(`[PaymentVault] 已创建: id=${result.insertId}, ownerId=${ownerId}, payer=${maskPayerAccount(payerAccount)}`)
+    res.json({ success: true, data: { id: result.insertId } })
+  } catch (err) {
+    console.error('[PaymentVault] 创建失败:', err.message)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: '该主账号下已存在相同付款账号' })
+    }
+    const configError = err.message.includes('PAYMENT_VAULT_KEY')
+    res.status(configError ? 503 : 500).json({
+      success: false,
+      message: configError ? '服务器密码本尚未配置加密密钥' : '创建密码记录失败'
+    })
+  }
+})
+
+app.put('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const id = parseInt(req.params.id, 10)
+    const ownerId = parseInt(req.body?.ownerId, 10)
+    const label = String(req.body?.label || '').trim()
+    const payerAccount = String(req.body?.payerAccount || '').trim()
+    const password = String(req.body?.password || '')
+    const status = req.body?.status === 'disabled' ? 'disabled' : 'enabled'
+    if (!id || !ownerId || !payerAccount) {
+      return res.status(400).json({ success: false, message: '参数不完整' })
+    }
+    if (label.length > 100 || payerAccount.length > 190 || password.length > 128) {
+      return res.status(400).json({ success: false, message: '输入内容长度超出限制' })
+    }
+    const [ownerRows] = await dbPool.execute(
+      "SELECT id FROM users WHERE id = ? AND user_type = 'master' LIMIT 1",
+      [ownerId]
+    )
+    if (!ownerRows.length) {
+      return res.status(400).json({ success: false, message: '归属主账号不存在' })
+    }
+    const [existingRows] = await dbPool.execute('SELECT id FROM payment_vault WHERE id = ? LIMIT 1', [id])
+    if (!existingRows.length) {
+      return res.status(404).json({ success: false, message: '密码记录不存在' })
+    }
+
+    if (password) {
+      const encrypted = encryptPaymentPassword(password, ownerId, payerAccount)
+      await dbPool.execute(
+        `UPDATE payment_vault
+         SET owner_id = ?, label = ?, payer_account = ?, password_ciphertext = ?,
+             password_iv = ?, password_tag = ?, status = ?, updated_at = NOW()
+         WHERE id = ?`,
+        [ownerId, label, payerAccount, encrypted.passwordCiphertext, encrypted.passwordIv, encrypted.passwordTag, status, id]
+      )
+    } else {
+      // AAD 与 owner/account 绑定；未输入新密码时不允许改变这两个绑定字段。
+      const [bindingRows] = await dbPool.execute(
+        'SELECT owner_id, payer_account FROM payment_vault WHERE id = ? LIMIT 1',
+        [id]
+      )
+      const binding = bindingRows[0]
+      if (Number(binding.owner_id) !== ownerId || normalizePayerAccount(binding.payer_account) !== normalizePayerAccount(payerAccount)) {
+        return res.status(400).json({ success: false, message: '修改归属或付款账号时必须重新输入支付密码' })
+      }
+      await dbPool.execute(
+        'UPDATE payment_vault SET label = ?, status = ?, updated_at = NOW() WHERE id = ?',
+        [label, status, id]
+      )
+    }
+    console.log(`[PaymentVault] 已更新: id=${id}, ownerId=${ownerId}, payer=${maskPayerAccount(payerAccount)}`)
+    res.json({ success: true, data: { id } })
+  } catch (err) {
+    console.error('[PaymentVault] 更新失败:', err.message)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: '该主账号下已存在相同付款账号' })
+    }
+    const configError = err.message.includes('PAYMENT_VAULT_KEY')
+    res.status(configError ? 503 : 500).json({
+      success: false,
+      message: configError ? '服务器密码本尚未配置加密密钥' : '更新密码记录失败'
+    })
+  }
+})
+
+app.delete('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAuth, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10)
+    if (!id) return res.status(400).json({ success: false, message: '密码记录ID无效' })
+    const [result] = await dbPool.execute('DELETE FROM payment_vault WHERE id = ?', [id])
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: '密码记录不存在' })
+    console.log(`[PaymentVault] 已删除: id=${id}`)
+    res.json({ success: true, data: { id } })
+  } catch (err) {
+    console.error('[PaymentVault] 删除失败:', err.message)
+    res.status(500).json({ success: false, message: '删除密码记录失败' })
+  }
+})
+
 // 修改用户状态（启用/停用）
 app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
   try {
@@ -1163,6 +1507,28 @@ app.use((err, req, res, next) => {
 // ========== 数据库迁移：subscription_orders 表添加 store_ids 列 ==========
 async function runMigrations() {
   try {
+    await dbPool.execute(`
+      CREATE TABLE IF NOT EXISTS payment_vault (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        label VARCHAR(100) DEFAULT '',
+        payer_account VARCHAR(190) NOT NULL,
+        password_ciphertext TEXT NOT NULL,
+        password_iv VARCHAR(64) NOT NULL,
+        password_tag VARCHAR(64) NOT NULL,
+        status ENUM('enabled', 'disabled') NOT NULL DEFAULT 'enabled',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_payment_vault_owner_payer (owner_id, payer_account),
+        KEY idx_payment_vault_owner_status (owner_id, status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    console.log('[迁移] payment_vault 表已就绪')
+  } catch (e) {
+    console.error('[迁移] 创建 payment_vault 表失败:', e.message)
+  }
+
+  try {
     await dbPool.execute(`ALTER TABLE subscription_orders ADD COLUMN store_ids JSON DEFAULT NULL AFTER tier`)
     console.log('[迁移] subscription_orders.store_ids 列已添加')
   } catch (e) {
@@ -1180,3 +1546,10 @@ http.createServer(app).listen(PORT, '0.0.0.0', async () => {
   console.log(`[API] 店小二后端服务已启动: http://0.0.0.0:${PORT}`)
   await runMigrations()
 })
+
+// 密码本和管理后台同时提供独立 HTTPS 入口；原 HTTP 端口继续服务旧客户端更新/登录。
+if (PAYMENT_VAULT_HTTPS_PORT !== Number(PORT)) {
+  https.createServer(sslOptions, app).listen(PAYMENT_VAULT_HTTPS_PORT, '0.0.0.0', () => {
+    console.log(`[API] 密码本安全入口已启动: https://0.0.0.0:${PAYMENT_VAULT_HTTPS_PORT}`)
+  })
+}

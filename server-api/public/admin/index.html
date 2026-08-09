@@ -121,6 +121,9 @@
     .modal-body .form-val { font-size: 14px; color: #333; font-weight: 500; }
     .modal-body input[type="date"] { width: 100%; height: 34px; border: 1px solid #d9d9d9; border-radius: 4px; padding: 0 10px; font-size: 14px; outline: none; }
     .modal-body input[type="date"]:focus { border-color: #2b5aed; }
+    .modal-body .text-input, .modal-body .form-select { width: 100%; height: 36px; box-sizing: border-box; border: 1px solid #d9d9d9; border-radius: 4px; padding: 0 10px; font-size: 14px; outline: none; background: #fff; }
+    .modal-body .text-input:focus, .modal-body .form-select:focus { border-color: #2b5aed; box-shadow: 0 0 0 2px rgba(43,90,237,0.08); }
+    .field-hint { margin-top: 5px; color: #9ca3af; font-size: 12px; line-height: 1.5; }
         .quick-days { display: flex; gap: 8px; margin-top: 8px; }
         .quick-days button { flex: 1; height: 30px; border: 1px solid #d9d9d9; border-radius: 4px; background: #f0f5ff; color: #2b5aed; font-size: 13px; cursor: pointer; transition: all 0.15s; }
         .quick-days button:hover { background: #2b5aed; color: #fff; border-color: #2b5aed; }
@@ -163,6 +166,10 @@
         <div class="menu-item" :class="{active: tab==='users'}" @click="switchTab('users')">
           <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           用户列表
+        </div>
+        <div class="menu-item" :class="{active: tab==='vault'}" @click="switchTab('vault')">
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>
+          支付密码本
         </div>
         <div class="menu-item" :class="{active: tab==='orders'}" @click="switchTab('orders')">
           <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -317,6 +324,58 @@
         </div>
       </div>
 
+      <!-- 支付密码本 -->
+      <div v-show="tab==='vault'">
+        <div class="page-card">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <span class="toolbar-title">支付密码本</span>
+              <span class="toolbar-count">共 {{ vaultList.length }} 条</span>
+            </div>
+            <div class="toolbar-right">
+              <span style="font-size:12px;color:#909399;">密码经服务端加密保存，列表不会回显明文</span>
+              <button class="btn-sm" @click="loadVault">刷新</button>
+              <button class="btn-sm btn-primary" @click="openVaultDialog()">新增密码</button>
+            </div>
+          </div>
+          <div class="data-table-wrapper" style="min-height:200px;">
+            <div v-if="vaultLoading" class="loading-mask"></div>
+            <table class="data-table" v-if="vaultList.length">
+              <thead>
+                <tr>
+                  <th style="width:130px;">归属主账号</th>
+                  <th style="width:120px;">名称</th>
+                  <th style="min-width:180px;">支付宝付款账号</th>
+                  <th style="width:90px;">支付密码</th>
+                  <th style="width:70px;">状态</th>
+                  <th style="width:150px;">更新时间</th>
+                  <th style="width:120px;">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in vaultList" :key="row.id">
+                  <td>{{ row.ownerUsername }}</td>
+                  <td>{{ row.label || '-' }}</td>
+                  <td>{{ row.maskedPayerAccount || row.payerAccount }}</td>
+                  <td><span style="letter-spacing:2px;color:#909399;">••••••</span></td>
+                  <td>
+                    <span :class="['status-tag', row.status === 'enabled' ? 'status-enabled status-online' : 'status-disabled status-offline']">
+                      {{ row.status === 'enabled' ? '启用' : '停用' }}
+                    </span>
+                  </td>
+                  <td>{{ formatDateTime(row.updatedAt) }}</td>
+                  <td>
+                    <button class="action-btn" @click="openVaultDialog(row)">编辑</button>
+                    <button class="action-btn" style="color:#f56c6c;margin-left:8px;" @click="deleteVault(row)">删除</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!vaultLoading" class="empty-state">暂无密码记录</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 充值订单 -->
       <div v-show="tab==='orders'">
         <div class="page-card">
@@ -458,6 +517,50 @@
       </div>
     </div>
   </div>
+
+  <!-- 新增/编辑支付密码 -->
+  <div v-if="vaultDialog" class="modal-overlay" @click.self="vaultDialog = false">
+    <div class="modal-box" style="width:440px;">
+      <div class="modal-header">
+        {{ vaultForm.id ? '编辑密码记录' : '新增密码记录' }}
+        <button class="modal-close" @click="vaultDialog = false">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label>归属主账号</label>
+          <select class="form-select" v-model="vaultForm.ownerId">
+            <option value="" disabled>请选择主账号</option>
+            <option v-for="user in userList" :key="user.id" :value="user.id">{{ user.username }}</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>名称（可选）</label>
+          <input class="text-input" v-model.trim="vaultForm.label" maxlength="100" placeholder="例如：采购支付宝1" />
+        </div>
+        <div class="form-row">
+          <label>支付宝付款账号</label>
+          <input class="text-input" v-model.trim="vaultForm.payerAccount" maxlength="190" autocomplete="off" placeholder="请输入付款页显示的支付宝账号" />
+          <div class="field-hint">请填写完整账号；付款页显示脱敏账号时系统会按前后缀匹配。</div>
+        </div>
+        <div class="form-row">
+          <label>支付密码</label>
+          <input class="text-input" type="password" v-model="vaultForm.password" maxlength="128" autocomplete="new-password" :placeholder="vaultForm.id ? '留空表示不修改' : '请输入支付密码'" />
+          <div class="field-hint">密码只会提交到服务器加密保存，保存后无法在后台查看。</div>
+        </div>
+        <div class="form-row">
+          <label>状态</label>
+          <select class="form-select" v-model="vaultForm.status">
+            <option value="enabled">启用</option>
+            <option value="disabled">停用</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" @click="vaultDialog = false">取消</button>
+        <button class="btn-sm btn-primary" @click="saveVault" :disabled="saveLoading">{{ saveLoading ? '保存中...' : '保存' }}</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/vue@3.4.15/dist/vue.global.prod.js"></script>
@@ -476,9 +579,17 @@ createApp({
 
     // 切换标签页时懒加载数据
     function switchTab(t) {
+      if (t === 'vault' && window.location.protocol !== 'https:') {
+        window.location.href = `https://${window.location.hostname}/admin/`
+        return
+      }
       tab.value = t
       if (t === 'orders' && orderList.value.length === 0) loadOrders()
       if (t === 'users' && userList.value.length === 0) loadUsers()
+      if (t === 'vault' && vaultList.value.length === 0) {
+        if (userList.value.length === 0) loadUsers()
+        loadVault()
+      }
     }
 
     // Store state
@@ -494,6 +605,12 @@ createApp({
     const userLoading = ref(false)
     const showDeleteUserDialog = ref(false)
     const deleteUserTarget = ref(null)
+
+    // Payment vault state
+    const vaultList = ref([])
+    const vaultLoading = ref(false)
+    const vaultDialog = ref(false)
+    const vaultForm = reactive({ id: null, ownerId: '', label: '', payerAccount: '', password: '', status: 'enabled' })
 
     // Order state
     const orderList = ref([])
@@ -692,6 +809,74 @@ createApp({
       }
     }
 
+    async function loadVault() {
+      vaultLoading.value = true
+      try {
+        const data = await api('/api/admin/payment-vault')
+        vaultList.value = data.list || []
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        vaultLoading.value = false
+      }
+    }
+
+    async function openVaultDialog(row = null) {
+      if (userList.value.length === 0) await loadUsers()
+      vaultForm.id = row?.id || null
+      vaultForm.ownerId = row?.ownerId || (userList.value[0]?.id || '')
+      vaultForm.label = row?.label || ''
+      vaultForm.payerAccount = row?.payerAccount || ''
+      vaultForm.password = ''
+      vaultForm.status = row?.status || 'enabled'
+      vaultDialog.value = true
+    }
+
+    async function saveVault() {
+      if (!vaultForm.ownerId || !vaultForm.payerAccount || (!vaultForm.id && !vaultForm.password)) {
+        ElementPlus.ElMessage.warning('请填写归属主账号、付款账号和支付密码')
+        return
+      }
+      saveLoading.value = true
+      try {
+        const body = JSON.stringify({
+          ownerId: vaultForm.ownerId,
+          label: vaultForm.label,
+          payerAccount: vaultForm.payerAccount,
+          password: vaultForm.password,
+          status: vaultForm.status
+        })
+        if (vaultForm.id) {
+          await api(`/api/admin/payment-vault/${vaultForm.id}`, { method: 'PUT', body })
+        } else {
+          await api('/api/admin/payment-vault', { method: 'POST', body })
+        }
+        vaultForm.password = ''
+        vaultDialog.value = false
+        ElementPlus.ElMessage.success('保存成功')
+        loadVault()
+      } catch (err) {
+        ElementPlus.ElMessage.error(err.message)
+      } finally {
+        saveLoading.value = false
+      }
+    }
+
+    async function deleteVault(row) {
+      try {
+        await ElementPlus.ElMessageBox.confirm(
+          `确定删除“${row.label || row.maskedPayerAccount}”吗？删除后客户端将无法自动填写该账号的支付密码。`,
+          '删除密码记录',
+          { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+        )
+        await api(`/api/admin/payment-vault/${row.id}`, { method: 'DELETE' })
+        ElementPlus.ElMessage.success('已删除')
+        loadVault()
+      } catch (err) {
+        if (err !== 'cancel' && err !== 'close') ElementPlus.ElMessage.error(err.message || '删除失败')
+      }
+    }
+
     function doOrderSearch() {
       orderPage.page = 1
       loadOrders()
@@ -805,10 +990,12 @@ createApp({
       storeList, storeTotal, storeLoading, storeSearch, storePage,
       selectedStoreIdSet, selectedStoreIds, isAllSelected,
       userList, userLoading, showDeleteUserDialog, deleteUserTarget,
+      vaultList, vaultLoading, vaultDialog, vaultForm,
       orderList, orderTotal, orderLoading, orderPage, orderSearch, orderTotalAmount, orderPaidCount,
       editExpiryDialog, editTarget, newExpiryDate, showBatchDialog, batchExpiryDate, saveLoading,
       doLogin, loadStores, switchTab, debounceSearch, doSearch, toggleSelectAll, openEditExpiry, saveExpiry, saveBatchExpiry, loadUsers, loadOrders, quickExpiry,
       toggleUserStatus, confirmDeleteUser, doDeleteUser, doOrderSearch,
+      loadVault, openVaultDialog, saveVault, deleteVault,
       formatDate, formatDateTime, expiryClass, platformLabel, platformClass, tierText, planText
     }
   }

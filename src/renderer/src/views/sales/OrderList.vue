@@ -630,14 +630,16 @@
                 <el-icon><Setting /></el-icon>
                 <span>采购配置</span>
               </div>
-              <div class="section-header-actions">
-                <el-button v-if="purchaseInfo.image" type="danger" text size="small"
+              <div class="section-header-actions selection-tools-bar">
+                <img src="/logo.png" alt="店小二" class="selection-tools-logo" />
+                <span class="selection-tools-divider"></span>
+                <el-button v-if="purchaseInfo.image" size="small"
+                  class="selection-tool-btn taobao-same-tool-btn"
                   :loading="taobaoSameSearchLoading" @click="handleSearchTaobaoSame">
-                  <el-icon><Search /></el-icon>
                   淘宝同款
                 </el-button>
-                <el-button v-if="purchaseInfo.selectedAccountId" type="primary" text size="small"
-                  @click="handleOpenPddBrowsing">
+                <el-button v-if="purchaseInfo.selectedAccountId" size="small"
+                  class="selection-tool-btn pdd-selection-tool-btn" @click="handleOpenPddBrowsing">
                   拼多多选品
                 </el-button>
               </div>
@@ -656,6 +658,7 @@
                         <div class="source-option-left">
                           <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
                           <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
+                          <span v-if="getSourceShipFrom(src.purchase_link)" class="source-option-origin">发货地：{{ getSourceShipFrom(src.purchase_link) }}</span>
                         </div>
                         <div class="source-option-actions">
                           <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
@@ -663,7 +666,7 @@
                         </div>
                       </div>
                       <div class="source-option-link-row">
-                        <span class="source-option-link">{{ shortenUrl(src.purchase_link) }}</span>
+                        <span class="source-option-link">{{ displaySourceUrl(src.purchase_link) }}</span>
                         <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src.purchase_link)"><el-icon><Link /></el-icon></el-button>
                       </div>
                     </div>
@@ -857,7 +860,7 @@
         <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" fit="cover" />
         <div class="taobao-same-source-info">
           <strong>{{ purchaseInfo.goodsName }}</strong>
-          <span>根据当前商品主图搜索淘宝同款，最多展示 8 条结果</span>
+          <span>根据当前商品主图搜索淘宝同款，最多展示 20 条结果</span>
         </div>
       </div>
 
@@ -869,12 +872,19 @@
       </el-empty>
       <el-empty v-else-if="taobaoSameResults.length === 0" description="暂无同款商品" :image-size="80" />
       <div v-else class="taobao-same-grid">
-        <div v-for="product in taobaoSameResults" :key="product.itemId || product.link" class="taobao-same-card">
+        <div
+          v-for="product in taobaoSameResults"
+          :key="product.itemId || product.link"
+          class="taobao-same-card"
+          role="button"
+          tabindex="0"
+          @click="handleOpenTaobaoSameProduct(product)"
+          @keydown.enter="handleOpenTaobaoSameProduct(product)"
+        >
           <el-image
             :src="product.img"
             fit="cover"
             class="taobao-same-image"
-            @click="handleOpenTaobaoSameProduct(product)"
           >
             <template #error>
               <div class="taobao-same-image-error"><el-icon><ShoppingBag /></el-icon></div>
@@ -889,10 +899,6 @@
             <div class="taobao-same-meta">
               <span :title="product.shop">{{ product.shop || '淘宝店铺' }}</span>
               <span>{{ product.sales || '' }}</span>
-            </div>
-            <div class="taobao-same-actions">
-              <el-button size="small" @click="handleOpenTaobaoSameProduct(product)">查看</el-button>
-              <el-button type="danger" size="small" @click="handleSelectTaobaoSameProduct(product)">选为货源</el-button>
             </div>
           </div>
         </div>
@@ -915,7 +921,8 @@
         </el-table-column>
         <el-table-column label="链接" min-width="180">
           <template #default="{ row }">
-            <el-link :href="row.purchase_link" target="_blank" style="font-size:12px;">{{ row.purchase_link }}</el-link>
+            <el-link :href="row.purchase_link" target="_blank" style="font-size:12px;">{{ displaySourceUrl(row.purchase_link) }}</el-link>
+            <div v-if="getSourceShipFrom(row.purchase_link)" class="source-manage-origin">发货地：{{ getSourceShipFrom(row.purchase_link) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="采购价" width="90" align="right">
@@ -1254,6 +1261,7 @@ function mapServerOrder(row) {
         name: item.name || '',
         sku: item.skuId ? `SKU: ${item.skuId}` : '',
         skuId: item.skuId || '',
+        skuSpec: item.skuSpec || item.sku_spec || item.specName || item.spec_name || '',
         storeId: row.store_id,
         price: parseFloat(item.price) || 0,
         quantity: item.quantity || 0,
@@ -1269,6 +1277,7 @@ function mapServerOrder(row) {
       name: row.product_name,
       sku: row.sku_id ? `SKU: ${row.sku_id}` : '',
       skuId: row.sku_id || '',
+      skuSpec: row.sku_spec || '',
       storeId: row.store_id,
       price: parseFloat(row.unit_price) || 0,
       quantity: row.quantity || 0,
@@ -1632,6 +1641,36 @@ async function handleRevealBuyerInfoInPurchase() {
   }
 }
 
+function extractSalesSkuSpec(item = {}) {
+  const explicitCandidates = [
+    item.skuSpec, item.sku_spec, item.specName, item.spec_name,
+    item.skuText, item.sku_text, item.specification, item.variantName, item.variant_name
+  ]
+  for (const candidate of explicitCandidates) {
+    const value = String(candidate || '').replace(/\s+/g, ' ').trim()
+    if (value && value !== item.name && !/^(?:SKU\s*[:：]?\s*)?\d+$/i.test(value)) return value.slice(0, 160)
+  }
+
+  const name = String(item.name || '').replace(/\s+/g, ' ').trim()
+  if (!name) return ''
+  const matches = []
+  const addMatch = value => {
+    const cleaned = String(value || '').replace(/\s+/g, '').replace(/^[,，、/|]+|[,，、/|]+$/g, '')
+    if (cleaned && !matches.includes(cleaned)) matches.push(cleaned)
+  }
+  const patterns = [
+    /\d+(?:\.\d+)?\s*(?:毫升|千克|公斤|厘米|毫米|ml|mL|ML|kg|KG|Kg|cm|CM|mm|MM|oz|OZ|升|克|斤|两|L|l|g|G|米)(?:\s*[×xX*]\s*\d+\s*(?:个|只|瓶|包|盒|罐|袋|支|件|套|箱|张|片|卷|双|条|块|粒|颗|贴)?)?/g,
+    /\d+\s*(?:个|只|瓶|包|盒|罐|袋|支|件|套|箱|张|片|卷|双|条|块|粒|颗|贴)(?:装|套装)?/g,
+    /(?:透明|黑|白|红|橙|黄|绿|青|蓝|紫|粉|灰|银|金|咖啡|棕)(?:色|款)/g,
+    /(?:特大号|加大号|大号|中号|小号|均码|\d{2,4}码|[SMLX]{1,4}码?)/gi
+  ]
+  for (const pattern of patterns) {
+    let matched
+    while ((matched = pattern.exec(name)) !== null && matches.length < 8) addMatch(matched[0])
+  }
+  return matches.slice(0, 6).join(' / ')
+}
+
 async function handlePurchase(order, item, itemIdx) {
   // 只锁定订单，不获取采购编号（编号延迟到"去下单"时生成，避免浪费）
   let lockResult
@@ -1659,12 +1698,14 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.salesOrderId = order.id
   purchaseInfo.storeId = order.storeId
   purchaseInfo.goodsName = item.name
-  purchaseInfo.sku = item.sku || ''
+  purchaseInfo.sku = String(item.sku || '').replace(/^SKU\s*[:：]?\s*/i, '')
+  purchaseInfo.skuSpec = extractSalesSkuSpec(item)
   purchaseInfo.skuId = item.skuId || item.sku_id || item.sku || ''
   purchaseInfo.quantity = item.quantity
   purchaseInfo.price = item.price || 0
   purchaseInfo.image = item.image || ''
   purchaseInfo.sourceUrl = ''
+  purchaseInfo.sourceShipFrom = ''
   purchaseInfo.platform = 'taobao'
   purchaseInfo.platformOrderNo = ''
   purchaseInfo.purchasePrice = 0
@@ -1843,6 +1884,7 @@ function applySourceToPurchase(index) {
   if (!source) return
   selectedSourceIndex.value = index
   purchaseInfo.sourceUrl = source.purchase_link || ''
+  purchaseInfo.sourceShipFrom = getSourceShipFrom(source.purchase_link)
   purchaseInfo.platform = source.platform || detectPlatformFromUrl(source.purchase_link) || 'taobao'
   purchaseInfo.purchasePrice = source.purchase_price || 0
   purchaseInfo.remark = source.remark || ''
@@ -1934,11 +1976,13 @@ const purchaseInfo = reactive({
   storeId: null,
   goodsName: '',
   sku: '',
+  skuSpec: '',
   skuId: '',
   quantity: 0,
   price: 0,
   image: '',
   sourceUrl: '',
+  sourceShipFrom: '',
   platform: 'taobao',
   platformOrderNo: '',
   purchasePrice: 0,
@@ -2418,7 +2462,9 @@ function attachTaobaoSkuMetadata(url, selection) {
     skuId: String(selection.skuId || '').trim().slice(0, 120),
     options
   }
-  if (!metadata.skuId && options.length === 0) return url
+  const shipFrom = String(selection.shipFrom || '').replace(/\s+/g, '').trim().slice(0, 80)
+  if (shipFrom) metadata.shipFrom = shipFrom
+  if (!metadata.skuId && options.length === 0 && !metadata.shipFrom) return url
   try {
     const parsed = new URL(url)
     parsed.hash = ''
@@ -2426,6 +2472,22 @@ function attachTaobaoSkuMetadata(url, selection) {
   } catch {
     return url
   }
+}
+
+function getTaobaoSourceMetadata(url) {
+  try {
+    const parsed = new URL(url)
+    if (!parsed.hash.startsWith('#dxeSku=')) return null
+    const raw = parsed.hash.slice('#dxeSku='.length)
+    const metadata = JSON.parse(decodeURIComponent(raw))
+    return metadata && typeof metadata === 'object' ? metadata : null
+  } catch {
+    return null
+  }
+}
+
+function getSourceShipFrom(url) {
+  return String(getTaobaoSourceMetadata(url)?.shipFrom || '')
 }
 
 // 精简URL显示：提取核心链接，去除追踪参数
@@ -2463,6 +2525,11 @@ function shortenUrl(url) {
   } catch {
     return url
   }
+}
+
+// SKU元数据保存在URL hash中供采购页自动回选，界面只展示淘宝商品短链接。
+function displaySourceUrl(url) {
+  return shortenUrl(url).split('#dxeSku=')[0]
 }
 
 // 打开货源链接
@@ -2510,7 +2577,7 @@ async function handleSearchTaobaoSame() {
       imgUrl: purchaseInfo.image,
       accountId: account.id,
       automatic: false,
-      limit: 8
+      limit: 20
     })
     if (result && result.success) {
       taobaoSameResults.value = result.products || result.items || []
@@ -2557,6 +2624,7 @@ async function handleOpenTaobaoSameProduct(product) {
         goodsName: purchaseInfo.goodsName,
         image: purchaseInfo.image,
         sku: purchaseInfo.sku,
+        skuSpec: purchaseInfo.skuSpec,
         quantity: purchaseInfo.quantity,
         price: purchaseInfo.price,
         purchasePrice: purchaseInfo.purchasePrice,
@@ -2579,6 +2647,12 @@ async function applyTaobaoSameProduct(product, accountId) {
   if (!purchaseInfo.skuId) {
     throw new Error('当前销售商品缺少SKU标识，无法添加货源')
   }
+  if (product.skuCaptureAttempted && !product.skuPriceCaptured) {
+    if (product.promotionPriceMasked || product.skuPriceSource === 'promotion-masked') {
+      throw new Error('当前“平台加补后”等优惠价仍显示为圆点，请等待价格显示后重试；本次未保存优惠前价')
+    }
+    throw new Error('未读取到当前SKU价格，请确认规格已完整选择后重试')
+  }
 
   const sourceLink = shortenUrl(attachTaobaoSkuMetadata(String(product.link).trim(), product.skuSelection))
   const sourceBaseLink = sourceLink.split('#dxeSku=')[0]
@@ -2586,10 +2660,11 @@ async function applyTaobaoSameProduct(product, accountId) {
     shortenUrl(source.purchase_link || '') === sourceLink
   ) || skuSources.value.find(source => {
     const existingLink = shortenUrl(source.purchase_link || '')
-    return !existingLink.includes('#dxeSku=') && existingLink === sourceBaseLink
+    return existingLink.split('#dxeSku=')[0] === sourceBaseLink
   })
-  const purchasePrice = product.price != null && Number.isFinite(Number(product.price))
-    ? Number(product.price)
+  const purchasePriceValue = product.skuPriceCaptured ? product.currentSkuPrice : product.price
+  const purchasePrice = purchasePriceValue != null && Number.isFinite(Number(purchasePriceValue))
+    ? Number(purchasePriceValue)
     : Number(existingSource?.purchase_price || 0)
 
   // “选为货源”需要真正保存SKU货源配置，而不只是回填当前采购表单。
@@ -2609,6 +2684,7 @@ async function applyTaobaoSameProduct(product, accountId) {
   if (savedIndex >= 0) applySourceToPurchase(savedIndex)
   else {
     purchaseInfo.sourceUrl = sourceLink
+    purchaseInfo.sourceShipFrom = String(product.skuSelection?.shipFrom || product.shipFrom || '')
     purchaseInfo.platform = 'taobao'
     purchaseInfo.purchasePrice = purchasePrice
   }
@@ -2618,16 +2694,9 @@ async function applyTaobaoSameProduct(product, accountId) {
     purchaseInfo.selectedAccountId = selectedAccountId
     localStorage.setItem('lastPurchaseAccount_taobao', String(selectedAccountId))
   }
-  taobaoSameDialogVisible.value = false
-  ElMessage.success(existingSource ? '淘宝货源已更新并回填' : '淘宝货源已添加并回填')
-}
-
-async function handleSelectTaobaoSameProduct(product) {
-  try {
-    await applyTaobaoSameProduct(product, taobaoSameAccountId.value)
-  } catch (error) {
-    ElMessage.error('添加淘宝货源失败: ' + (error.message || '未知错误'))
-  }
+  // 保留同款结果和滚动位置，方便为同一销售商品连续添加多个货源。
+  taobaoSameDialogVisible.value = true
+  ElMessage.success(existingSource ? '淘宝货源已更新，可继续选择其他货源' : '淘宝货源已添加，可继续选择其他货源')
 }
 
 // 拼多多选品：用采购账号 session 打开 PDD 首页
@@ -5591,7 +5660,65 @@ onUnmounted(() => {
 .section-header-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
+}
+
+.section-header-actions.selection-tools-bar {
+  padding: 4px 6px;
+  border: 1px solid #f2d8bd;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #fffaf3 0%, #fff5e8 100%);
+  box-shadow: 0 1px 3px rgba(168, 105, 45, 0.08);
+}
+
+.selection-tools-logo {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.selection-tools-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: #efd6bd;
+}
+
+.section-header-actions .selection-tool-btn {
+  height: 26px;
+  margin-left: 0;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 24px;
+  box-shadow: none;
+}
+
+.section-header-actions .taobao-same-tool-btn {
+  background: transparent;
+  color: #ff5000;
+}
+
+.section-header-actions .pdd-selection-tool-btn {
+  background: transparent;
+  color: #e02e24;
+}
+
+.section-header-actions .taobao-same-tool-btn:hover,
+.section-header-actions .taobao-same-tool-btn:focus {
+  background: #fff0e6;
+  color: #ff5000;
+}
+
+.section-header-actions .pdd-selection-tool-btn:hover,
+.section-header-actions .pdd-selection-tool-btn:focus {
+  background: #fdeceb;
+  color: #e02e24;
 }
 
 .section-header-actions :deep(.el-button + .el-button) {
@@ -5684,6 +5811,8 @@ onUnmounted(() => {
 
 .source-option-left {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -5704,6 +5833,21 @@ onUnmounted(() => {
   font-size: 15px;
   color: #f56c6c;
   font-weight: 600;
+}
+
+.source-option-origin {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f0f9eb;
+  color: #67c23a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.source-manage-origin {
+  margin-top: 3px;
+  color: #67c23a;
+  font-size: 11px;
 }
 
 .source-option-link-row {
@@ -5727,13 +5871,12 @@ onUnmounted(() => {
 }
 
 .source-and-detail {
-  display: flex;
-  gap: 12px;
-  align-items: flex-start;
+  display: block;
+  width: 100%;
 }
 
 .source-area {
-  flex: 1;
+  width: 100%;
   min-width: 0;
 }
 
@@ -5973,8 +6116,8 @@ onUnmounted(() => {
 
 .taobao-same-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
   max-height: 570px;
   padding: 2px;
   overflow-y: auto;
@@ -5985,6 +6128,7 @@ onUnmounted(() => {
   background: #fff;
   border: 1px solid #ebeef5;
   border-radius: 8px;
+  cursor: pointer;
   transition: box-shadow 0.2s, transform 0.2s;
 }
 
@@ -6061,9 +6205,4 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.taobao-same-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
-}
 </style>

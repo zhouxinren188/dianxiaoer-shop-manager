@@ -919,6 +919,8 @@ function fetchSalesOrders(storeId, options = {}) {
           order.allItems = items.map(item => ({
             skuId: String(item.skuId || ''),
             name: item.skuName || item.itemName || '',
+            skuSpec: [item.skuSpec, item.specName, item.skuText, item.specification, item.variantName]
+              .find(value => typeof value === 'string' && value.trim()) || '',
             price: parseFloat(item.jdPrice || item.price || 0) || 0,
             quantity: item.num || item.quantity || 0,
             image: normalizeImgUrl(item.imgUrl || item.image)

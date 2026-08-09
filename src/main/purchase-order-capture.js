@@ -1,6 +1,7 @@
 const { BrowserWindow, ipcMain, session, webFrameMain, app } = require('electron')
 const path = require('path')
 const http = require('http')
+const https = require('https')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
@@ -20,6 +21,8 @@ function resolveAppPath(relativePath) {
 }
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
+const PAYMENT_VAULT_SERVER = 'https://150.158.54.108'
+const PAYMENT_VAULT_CERT_FINGERPRINT = 'F4:26:38:E1:49:30:B8:81:43:48:E6:A7:B4:0C:FE:9B:AF:81:EB:DF:69:AF:DC:97:A1:54:CA:C8:C6:73:D1:B7'
 
 // 活跃的采购下单窗口 Map<purchaseNo, { win, pollTimer, resolved }>
 const activePurchaseWindows = new Map()
@@ -2469,6 +2472,311 @@ function isCheckoutPage(url, platform) {
   return patterns.some(p => lower.includes(p.toLowerCase()))
 }
 
+// 支付密码只通过独立 HTTPS 入口读取，并固定校验服务端证书指纹。
+// 返回值只在当前调用栈内短暂存在，不写文件、不写日志、不放入 renderer/localStorage。
+function paymentVaultRequest(pathname, body) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(PAYMENT_VAULT_SERVER + pathname)
+    const token = getAuthToken()
+    if (!token) return reject(new Error('当前登录已失效，无法读取密码本'))
+
+    const payload = JSON.stringify(body || {})
+    let settled = false
+    const finishReject = (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    const req = https.request({
+      hostname: urlObj.hostname,
+      port: urlObj.port || 443,
+      path: urlObj.pathname + urlObj.search,
+      method: 'POST',
+      rejectUnauthorized: false,
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      },
+      timeout: 10000
+    }, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        if (settled) return
+        settled = true
+        let json
+        try { json = JSON.parse(data) } catch (_) {}
+        if (res.statusCode < 200 || res.statusCode >= 300 || !json?.success) {
+          return reject(new Error(json?.message || `密码本请求失败 HTTP ${res.statusCode}`))
+        }
+        resolve(json.data || {})
+      })
+    })
+
+    req.on('socket', socket => {
+      socket.once('secureConnect', () => {
+        try {
+          const certificate = socket.getPeerCertificate()
+          const fingerprint = String(certificate?.fingerprint256 || '').toUpperCase()
+          if (!fingerprint || fingerprint !== PAYMENT_VAULT_CERT_FINGERPRINT) {
+            const error = new Error('密码本服务器证书校验失败')
+            finishReject(error)
+            req.destroy(error)
+          }
+        } catch (error) {
+          finishReject(new Error('密码本服务器证书校验失败'))
+          req.destroy(error)
+        }
+      })
+    })
+    req.on('error', finishReject)
+    req.on('timeout', () => {
+      const error = new Error('密码本请求超时')
+      finishReject(error)
+      req.destroy(error)
+    })
+    req.write(payload)
+    req.end()
+  })
+}
+
+/**
+ * 淘宝/天猫确认订单页仓库地址编号校验。
+ *
+ * 仓库采购的收货地址末尾会追加【采购编号】。这里在用户点击“提交订单”前，
+ * 再次核对结算页当前选中的地址，避免后台地址设置成功但结算页仍选中旧地址。
+ */
+function buildTaobaoAddressCodeGuardScript(purchaseNo) {
+  const expectedToken = JSON.stringify(`【${purchaseNo}】`)
+
+  return `
+(function() {
+  var expectedToken = ${expectedToken};
+  var url = (location.href || '').toLowerCase();
+  var isTaobaoCheckout = url.indexOf('buy.taobao.com') >= 0 ||
+                          url.indexOf('buy.tmall.com') >= 0 ||
+                          url.indexOf('buyertrade.taobao.com') >= 0;
+  if (!isTaobaoCheckout || !expectedToken) {
+    return '[DXE_ADDR_GUARD] skipped: not checkout page';
+  }
+
+  if (window.__dxeAddressCodeGuard &&
+      window.__dxeAddressCodeGuard.expectedToken === expectedToken) {
+    window.__dxeAddressCodeGuard.refresh();
+    return '[DXE_ADDR_GUARD] refreshed: ' + expectedToken;
+  }
+
+  function normalize(text) {
+    return String(text || '').replace(/\\s+/g, '');
+  }
+
+  function isVisible(el) {
+    if (!el || !el.isConnected) return false;
+    var style = window.getComputedStyle(el);
+    if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+    var rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function isAddressLike(el) {
+    if (!el) return false;
+    var marker = ((el.className || '') + ' ' + (el.id || '') + ' ' +
+      (el.getAttribute && (el.getAttribute('data-testid') || el.getAttribute('data-spm') || ''))).toLowerCase();
+    var text = normalize(el.innerText || el.textContent || '');
+    if (/address|addr|receiver|consignee|delivery/.test(marker)) return true;
+    if (text.indexOf(expectedToken) >= 0) return true;
+    return /1\\d{2}\\*{0,4}\\d{2,8}/.test(text) && /省|市|区|县|街道|镇|乡/.test(text);
+  }
+
+  function addressRoot(el) {
+    var node = el;
+    for (var i = 0; node && i < 7; i++, node = node.parentElement) {
+      if (isAddressLike(node)) return node;
+    }
+    return null;
+  }
+
+  function selectedAddressTexts() {
+    var selectors = [
+      '[class*="address"][class*="selected"]',
+      '[class*="address"][class*="active"]',
+      '[class*="address"][class*="checked"]',
+      '[class*="addr"][class*="selected"]',
+      '[class*="addr"][class*="active"]',
+      '[class*="receiver"][class*="selected"]',
+      '[class*="delivery"][class*="selected"]',
+      '[data-testid*="address"][aria-selected="true"]',
+      '[data-testid*="address"][aria-checked="true"]',
+      '[aria-selected="true"]',
+      '[aria-checked="true"]',
+      'input[type="radio"]:checked',
+      'div.addr-item-wrapper:first-child'
+    ];
+    var texts = [];
+    var seen = [];
+    selectors.forEach(function(selector) {
+      var nodes = [];
+      try { nodes = document.querySelectorAll(selector); } catch (e) { return; }
+      Array.prototype.forEach.call(nodes, function(node) {
+        var root = addressRoot(node);
+        if (!root || !isVisible(root) || seen.indexOf(root) >= 0) return;
+        seen.push(root);
+        var text = normalize(root.innerText || root.textContent || '');
+        if (text) texts.push(text);
+      });
+    });
+    return texts;
+  }
+
+  function hasVisibleExpectedToken() {
+    var nodes = document.querySelectorAll('body *');
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (!isVisible(node) || node.children.length > 0) continue;
+      if (normalize(node.textContent).indexOf(expectedToken) >= 0) return true;
+    }
+    return false;
+  }
+
+  function validateSelectedAddress() {
+    var selectedTexts = selectedAddressTexts();
+    if (selectedTexts.length > 0) {
+      for (var i = 0; i < selectedTexts.length; i++) {
+        if (selectedTexts[i].indexOf(expectedToken) >= 0) {
+          return { ok: true, method: 'selected-address', selectedText: selectedTexts[i] };
+        }
+      }
+      return { ok: false, method: 'selected-address-mismatch', selectedText: selectedTexts[0] };
+    }
+
+    if (hasVisibleExpectedToken()) {
+      return { ok: true, method: 'visible-token', selectedText: '' };
+    }
+    return { ok: false, method: 'token-not-found', selectedText: '' };
+  }
+
+  function ensureStatus(result) {
+    if (!document.body) return;
+    var status = document.getElementById('dxe-address-code-status');
+    if (!status) {
+      status = document.createElement('div');
+      status.id = 'dxe-address-code-status';
+    }
+
+    status.style.cssText = 'box-sizing:border-box;padding:8px 10px;margin-top:8px;border-radius:6px;' +
+      'font-size:12px;font-weight:600;line-height:1.4;word-break:break-all;' +
+      (result.ok
+        ? 'color:#2f855a;background:#f0fff4;border:1px solid #9ae6b4;'
+        : 'color:#c53030;background:#fff5f5;border:1px solid #feb2b2;');
+    status.textContent = result.ok
+      ? '\u2713 \u5f53\u524d\u6536\u8d27\u5730\u5740\u7f16\u53f7\u5df2\u6838\u9a8c\uff1a' + expectedToken
+      : '\u26a0 \u5f53\u524d\u6536\u8d27\u5730\u5740\u672a\u68c0\u6d4b\u5230\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u5730\u5740';
+
+    var overlay = document.getElementById('jd-product-overlay');
+    var overlayBody = overlay && overlay.children && overlay.children.length > 1 ? overlay.children[1] : null;
+    if (overlayBody) {
+      status.style.position = 'static';
+      status.style.width = 'auto';
+      status.style.zIndex = '';
+      if (status.parentNode !== overlayBody) overlayBody.appendChild(status);
+    } else {
+      status.style.position = 'fixed';
+      status.style.left = '110px';
+      status.style.top = '240px';
+      status.style.width = '330px';
+      status.style.zIndex = '2147483647';
+      if (status.parentNode !== document.body) document.body.appendChild(status);
+    }
+  }
+
+  function showBlockedNotice(result) {
+    ensureStatus(result);
+    var notice = document.getElementById('dxe-address-code-blocked-notice');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = 'dxe-address-code-blocked-notice';
+      document.body.appendChild(notice);
+    }
+    notice.style.cssText = 'position:fixed;left:50%;top:80px;transform:translateX(-50%);' +
+      'z-index:2147483647;max-width:560px;padding:14px 22px;border-radius:8px;' +
+      'background:#f56c6c;color:#fff;font-size:15px;font-weight:600;line-height:1.5;' +
+      'box-shadow:0 6px 24px rgba(0,0,0,.25);text-align:center;';
+    notice.textContent = '\u5df2\u963b\u6b62\u63d0\u4ea4\u8ba2\u5355\uff1a\u5f53\u524d\u6536\u8d27\u5730\u5740\u7f3a\u5c11\u91c7\u8d2d\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6b63\u786e\u7684\u4ed3\u5e93\u5730\u5740\u3002';
+    clearTimeout(window.__dxeAddressBlockedTimer);
+    window.__dxeAddressBlockedTimer = setTimeout(function() {
+      if (notice && notice.parentNode) notice.parentNode.removeChild(notice);
+    }, 8000);
+    console.warn('[DXE_ADDR_GUARD] blocked submit: expected=' + expectedToken + ', method=' + result.method);
+  }
+
+  function isSubmitAction(target) {
+    if (!target || !target.closest) return false;
+    var action = target.closest('button,[role="button"],a,input[type="submit"],[class*="submit"]');
+    if (!action) return false;
+    var text = normalize(action.innerText || action.textContent || action.value || action.getAttribute('aria-label') || '');
+    return /^(提交订单|提交购买|确认下单|创建订单|确认并支付|立即支付|去支付|确认付款)$/.test(text) ||
+      /提交订单|确认下单|确认并支付/.test(text);
+  }
+
+  function blockIfInvalid(event) {
+    if (event.type === 'click' && !isSubmitAction(event.target)) {
+      refresh();
+      return;
+    }
+    if (event.type === 'submit') {
+      var formText = normalize(event.target && (event.target.innerText || event.target.textContent || ''));
+      if (!/提交订单|确认下单|确认并支付|立即支付|去支付/.test(formText)) return;
+    }
+    var result = validateSelectedAddress();
+    ensureStatus(result);
+    if (result.ok) {
+      console.log('[DXE_ADDR_GUARD] submit allowed: expected=' + expectedToken + ', method=' + result.method);
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+    showBlockedNotice(result);
+    return false;
+  }
+
+  var refreshTimer = null;
+  function refresh() {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(function() {
+      ensureStatus(validateSelectedAddress());
+    }, 120);
+  }
+
+  document.addEventListener('click', blockIfInvalid, true);
+  document.addEventListener('submit', blockIfInvalid, true);
+  var observer = new MutationObserver(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var target = mutations[i].target;
+      var element = target && target.nodeType === 1 ? target : target && target.parentElement;
+      if (element && element.closest &&
+          element.closest('#dxe-address-code-status,#dxe-address-code-blocked-notice')) {
+        continue;
+      }
+      refresh();
+      break;
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked', 'data-selected'] });
+
+  window.__dxeAddressCodeGuard = {
+    expectedToken: expectedToken,
+    refresh: refresh,
+    validate: validateSelectedAddress
+  };
+  refresh();
+  console.log('[DXE_ADDR_GUARD] installed: expected=' + expectedToken);
+  return '[DXE_ADDR_GUARD] installed: ' + expectedToken;
+})()
+`
+}
+
 /**
  * 轮询检测地址填充结果，成功后通知主窗口
  */
@@ -3530,6 +3838,195 @@ function buildLoginAutoFillScript(accountName, password) {
 `
 }
 
+function waitMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getPurchaseWindowFrames(win) {
+  if (!win || win.isDestroyed()) return []
+  try {
+    const mainFrame = win.webContents.mainFrame
+    const childFrames = Array.isArray(mainFrame?.framesInSubtree) ? mainFrame.framesInSubtree : []
+    return [mainFrame, ...childFrames].filter(Boolean)
+  } catch (_) {
+    return []
+  }
+}
+
+const DETECT_ALIPAY_PAYER_ACCOUNT = `
+(function() {
+  var selectors = [
+    '.c-pay-account__account',
+    '[class*="pay-account"] [class*="account"]',
+    '[class*="payer"] [class*="account"]',
+    '[data-role="account"]'
+  ];
+  function clean(value) {
+    return String(value || '')
+      .replace(/^(支付宝账号|付款账号|支付账号|账号)\\s*[：:]?\\s*/i, '')
+      .replace(/\\s+/g, '')
+      .trim();
+  }
+  function looksLikeAccount(value) {
+    if (!value || value.length < 4 || value.length > 190) return false;
+    return value.indexOf('@') > 0 || value.indexOf('*') >= 0 || /^\\+?\\d{6,20}$/.test(value);
+  }
+  for (var i = 0; i < selectors.length; i++) {
+    var elements = document.querySelectorAll(selectors[i]);
+    for (var j = 0; j < elements.length; j++) {
+      var value = clean(elements[j].innerText || elements[j].textContent || elements[j].value);
+      if (looksLikeAccount(value)) return value;
+    }
+  }
+  var listSpans = document.querySelectorAll('li > span');
+  for (var k = 0; k < listSpans.length; k++) {
+    var listValue = clean(listSpans[k].innerText || listSpans[k].textContent || '');
+    var parentText = listSpans[k].parentElement ? (listSpans[k].parentElement.innerText || '') : '';
+    if (looksLikeAccount(listValue) && (/(账号|账户|付款人|支付宝)/.test(parentText) || listSpans.length === 1)) {
+      return listValue;
+    }
+  }
+  if (listSpans.length > 0) {
+    var legacyValue = clean(listSpans[0].innerText || listSpans[0].textContent || '');
+    if (looksLikeAccount(legacyValue)) return legacyValue;
+  }
+  var bodyText = document.body ? document.body.innerText : '';
+  var labelled = bodyText.match(/(?:付款账号|支付账号|支付宝账号|账号)\\s*[：:]?\\s*([^\\s，,。;；]{4,190})/i);
+  return labelled && looksLikeAccount(clean(labelled[1])) ? clean(labelled[1]) : '';
+})()
+`
+
+function buildAlipayPasswordFillScript(password) {
+  return `
+(function() {
+  var password = ${JSON.stringify(password || '')};
+  if (!password) return { filled: false, reason: 'empty_password' };
+  var selectors = [
+    '.my-passcode-input-native-input',
+    'input[name="password"]',
+    'input[name="payPassword"]',
+    'input[name="payPwd"]',
+    'input[type="password"]',
+    'input[autocomplete="one-time-code"][inputmode="numeric"]'
+  ];
+  function visible(el) {
+    if (!el || el.disabled || el.readOnly) return false;
+    var style = window.getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  }
+  function setValue(el, value) {
+    var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (setter && setter.set) setter.set.call(el, value);
+    else el.value = value;
+    el.focus();
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: value.slice(-1) || '' }));
+    el.blur();
+  }
+  for (var i = 0; i < selectors.length; i++) {
+    var inputs = document.querySelectorAll(selectors[i]);
+    for (var j = 0; j < inputs.length; j++) {
+      if (!visible(inputs[j])) continue;
+      setValue(inputs[j], password);
+      return { filled: true, selector: selectors[i] };
+    }
+  }
+  return { filled: false, reason: 'password_input_not_found' };
+})()
+`
+}
+
+function showPaymentVaultStatus(win, message, success = false) {
+  if (!win || win.isDestroyed()) return
+  const script = `
+    (function() {
+      var id = '__dxe_payment_vault_status';
+      var el = document.getElementById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.id = id;
+        el.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2147483647;max-width:min(420px,calc(100vw - 40px));padding:12px 18px;border-radius:6px;color:#fff;font-size:13px;line-height:1.45;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.2);font-family:Arial,"Microsoft YaHei",sans-serif;pointer-events:none;';
+        (document.body || document.documentElement).appendChild(el);
+      }
+      el.style.background = ${JSON.stringify(success ? '#22a06b' : '#d97706')};
+      el.textContent = ${JSON.stringify(String(message || ''))};
+      clearTimeout(window.__dxePaymentVaultStatusTimer);
+      window.__dxePaymentVaultStatusTimer = setTimeout(function() { if (el && el.parentNode) el.parentNode.removeChild(el); }, 8000);
+    })()
+  `
+  win.webContents.executeJavaScript(script, true).catch(() => {})
+}
+
+function setPaymentWindowLocked(win, locked) {
+  if (!win || win.isDestroyed()) return
+  try { win.setIgnoreMouseEvents(!!locked) } catch (_) {}
+  if (locked) showPaymentVaultStatus(win, '正在核验并绑定采购订单，请稍候…')
+}
+
+async function detectAlipayPayerAccount(win, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline && win && !win.isDestroyed()) {
+    const frames = getPurchaseWindowFrames(win)
+    for (const frame of frames) {
+      try {
+        const account = await frame.executeJavaScript(DETECT_ALIPAY_PAYER_ACCOUNT, true)
+        if (account) return String(account).trim()
+      } catch (_) {}
+    }
+    await waitMs(500)
+  }
+  return ''
+}
+
+async function fillAlipayPassword(win, password, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline && win && !win.isDestroyed()) {
+    const frames = getPurchaseWindowFrames(win)
+    for (const frame of frames) {
+      try {
+        const result = await frame.executeJavaScript(buildAlipayPasswordFillScript(password), true)
+        if (result?.filled) return true
+      } catch (_) {}
+    }
+    await waitMs(500)
+  }
+  return false
+}
+
+async function fillPaymentPasswordFromServerVault(win, accountId) {
+  if (!win || win.isDestroyed()) throw new Error('支付窗口已关闭')
+  const alipayDeadline = Date.now() + 15000
+  let currentUrl = ''
+  while (Date.now() < alipayDeadline && win && !win.isDestroyed()) {
+    currentUrl = win.webContents.getURL().toLowerCase()
+    if (currentUrl.includes('alipay.com') || currentUrl.includes('alipaydev.com')) break
+    await waitMs(500)
+  }
+  if (!currentUrl.includes('alipay.com') && !currentUrl.includes('alipaydev.com')) {
+    return { skipped: true, reason: 'not_alipay' }
+  }
+
+  const payerAccount = await detectAlipayPayerAccount(win)
+  if (!payerAccount) throw new Error('未能识别支付宝付款账号，请手动输入支付密码')
+
+  let password = ''
+  try {
+    const vaultData = await paymentVaultRequest('/api/payment-vault/resolve', {
+      accountId,
+      payerAccount
+    })
+    password = String(vaultData.password || '')
+    if (!password) throw new Error('密码本返回为空')
+    const filled = await fillAlipayPassword(win, password)
+    if (!filled) throw new Error('未找到可填写的支付密码框，请手动输入')
+    return { filled: true, payerAccount: vaultData.payerAccount || '' }
+  } finally {
+    password = ''
+  }
+}
+
 // ============ 拼多多登录：不自动填充（和 dl 一致，用户手动登录） ============
 // dl 不会自动填充 PDD 登录页的手机号，用户手动输入即可
 // 自动填充可能被 PDD 反爬系统检测到
@@ -3565,7 +4062,9 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       partition: partitionName,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // 地址窗口始终在后台运行，禁用隐藏窗口的定时器/渲染节流，避免自动改地址被拉长到几十秒。
+      backgroundThrottling: false
     }
   })
   // 注意：dl 不做 UA 伪装，Electron 默认 UA 对各平台正常工作
@@ -4201,6 +4700,27 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }, delay)
     }
 
+    const needsTaobaoAddressCodeGuard =
+      (platform === 'taobao' || platform === 'tmall') &&
+      (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') &&
+      !!purchaseNo
+    const taobaoAddressCodeGuardScript = needsTaobaoAddressCodeGuard
+      ? buildTaobaoAddressCodeGuardScript(purchaseNo)
+      : ''
+    function scheduleTaobaoAddressCodeGuard(reason, delay = 300) {
+      if (!taobaoAddressCodeGuardScript) return
+      setTimeout(() => {
+        if (win.isDestroyed() || resolved) return
+        win.webContents.executeJavaScript(taobaoAddressCodeGuardScript, true)
+          .then(result => {
+            if (result && !String(result).includes('skipped')) {
+              runtimeLog.writeLog('PurchaseAddressGuard', `${reason}: ${result}`)
+            }
+          })
+          .catch(error => runtimeLog.writeLog('PurchaseAddressGuard', `${reason}注入失败: ${error.message}`))
+      }, delay)
+    }
+
     // ========== 反爬指纹伪装（复用上方已获取的 ses 对象） ==========
     const chromeVersion = process.versions.chrome || '134.0.0.0'
     const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
@@ -4293,6 +4813,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       windowState.resolved = true
       console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}`)
       cleanup()
+      setPaymentWindowLocked(win, true)
+      const paymentLockWatchdog = setTimeout(() => {
+        setPaymentWindowLocked(win, false)
+        showPaymentVaultStatus(win, '订单核验耗时较长，页面已解锁；付款前请确认采购单已绑定')
+      }, 45000)
 
       // 保存Cookie（用户在窗口内可能登录了，积累了新Cookie）
       savePurchaseWindowCookies()
@@ -4307,7 +4832,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
           .then(async () => {
             console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
-            // 系统备注已在 autoCreateAndBind 内部写入，这里只发送通知事件
+            // 系统备注已在 autoCreateAndBind 内部写入；先通知主界面绑定成功，
+            // 支付密码读取/填充失败不能反向影响已完成的订单绑定。
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('purchase-order-captured', {
                 purchaseNo,
@@ -4319,9 +4845,28 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                 inventoryId: purchaseInfo.inventoryId || null
               })
             }
+
+            try {
+              const paymentResult = await fillPaymentPasswordFromServerVault(win, accountId)
+              if (paymentResult?.filled) {
+                console.log(`[PurchaseCapture] 支付密码已从服务器密码本临时填入: payer=${paymentResult.payerAccount || '已匹配'}`)
+                showPaymentVaultStatus(win, '采购订单已绑定，支付密码已从密码本填入', true)
+              } else if (paymentResult?.skipped) {
+                console.log(`[PurchaseCapture] 当前未进入支付宝支付页，跳过密码本填充: ${paymentResult.reason}`)
+              }
+            } catch (paymentError) {
+              console.warn(`[PurchaseCapture] 密码本自动填充未完成: ${paymentError.message}`)
+              showPaymentVaultStatus(win, paymentError.message || '密码本自动填充失败，请手动输入')
+            } finally {
+              clearTimeout(paymentLockWatchdog)
+              setPaymentWindowLocked(win, false)
+            }
           })
           .catch(err => {
+            clearTimeout(paymentLockWatchdog)
+            setPaymentWindowLocked(win, false)
             console.error(`[PurchaseCapture] Auto-bind 失败:`, err.message)
+            showPaymentVaultStatus(win, `采购订单绑定失败，已停止自动填充：${err.message}`)
             if (mainWindow && !mainWindow.isDestroyed()) {
               mainWindow.webContents.send('purchase-order-captured', {
                 purchaseNo,
@@ -4868,6 +5413,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       const currentUrl = win.webContents.getURL()
       console.log(`[PurchaseCapture] dom-ready: ${currentUrl.substring(0, 120)}`)
       scheduleTaobaoSkuAutoSelect('dom-ready', 450)
+      scheduleTaobaoAddressCodeGuard('dom-ready', 250)
 
       // ★ 反检测由 preload 在页面 JS 之前注入（contextIsolation=false 下 preload 直接修改页面 navigator 等）
       // 不再需要 executeJavaScript 注入 ANTI_DETECT_SCRIPT
@@ -5550,6 +6096,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.webContents.on('did-navigate', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate: ${url.substring(0, 120)}`)
+      scheduleTaobaoAddressCodeGuard('did-navigate', 350)
       // ★ 记录关键页面导航到运行日志
       const urlLower = url.toLowerCase()
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
@@ -5703,6 +6250,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.webContents.on('did-navigate-in-page', (event, url) => {
       if (win.isDestroyed() || resolved) return
       console.log(`[PurchaseCapture] did-navigate-in-page: ${url.substring(0, 120)}`)
+      scheduleTaobaoAddressCodeGuard('did-navigate-in-page', 200)
 
       // ★ 非电商平台页面跳过所有脚本注入（银行支付页等）
       if (isThirdPartyPage(url)) return
@@ -6268,6 +6816,22 @@ function checkApiResponse(res, label) {
   }
 }
 
+async function runPurchaseApiWithRetry(label, operation, attempts = 4) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation(attempt)
+    } catch (error) {
+      lastError = error
+      if (attempt >= attempts) break
+      const delay = Math.min(5000, 800 * Math.pow(2, attempt - 1))
+      console.warn(`[PurchaseCapture] ${label}失败，${delay}ms后重试 (${attempt}/${attempts}): ${error.message}`)
+      await waitMs(delay)
+    }
+  }
+  throw lastError || new Error(`${label}失败`)
+}
+
 /**
  * 自动调用服务端 API 创建采购单并绑定
  */
@@ -6277,42 +6841,46 @@ async function autoCreateAndBind(purchaseInfo, platformOrderNo, platform, captur
   console.log(`[PurchaseCapture] autoCreateAndBind 开始: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
 
   // 1. 创建采购单
-  const createRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders`, {
-    method: 'POST',
-    body: JSON.stringify({
-      purchase_no: purchaseNo,
-      sales_order_id: salesOrderId,
-      sales_order_no: salesOrderNo,
-      goods_name: goodsName,
-      goods_image: image || '',
-      sku: sku,
-      quantity: quantity,
-      source_url: sourceUrl,
-      platform: platform,
-      purchase_price: purchasePrice,
-      total_amount: totalAmount || 0,
-      shipping_fee: shippingFee || 0,
-      remark: remark,
-      purchase_type: purchaseType || 'dropship',
-      inventory_id: inventoryId || null,
-      shipping_name: shippingName || '',
-      shipping_phone: shippingPhone || '',
-      shipping_address: shippingAddress || '',
-      account_id: accountId || null
+  await runPurchaseApiWithRetry('创建采购单', async () => {
+    const createRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders`, {
+      method: 'POST',
+      body: JSON.stringify({
+        purchase_no: purchaseNo,
+        sales_order_id: salesOrderId,
+        sales_order_no: salesOrderNo,
+        goods_name: goodsName,
+        goods_image: image || '',
+        sku: sku,
+        quantity: quantity,
+        source_url: sourceUrl,
+        platform: platform,
+        purchase_price: purchasePrice,
+        total_amount: totalAmount || 0,
+        shipping_fee: shippingFee || 0,
+        remark: remark,
+        purchase_type: purchaseType || 'dropship',
+        inventory_id: inventoryId || null,
+        shipping_name: shippingName || '',
+        shipping_phone: shippingPhone || '',
+        shipping_address: shippingAddress || '',
+        account_id: accountId || null
+      })
     })
+    console.log(`[PurchaseCapture] 创建采购单响应: HTTP ${createRes.statusCode}, body=${createRes.data.substring(0, 500)}`)
+    checkApiResponse(createRes, '创建采购单')
   })
-  console.log(`[PurchaseCapture] 创建采购单响应: HTTP ${createRes.statusCode}, body=${createRes.data.substring(0, 500)}`)
-  checkApiResponse(createRes, '创建采购单')
 
   // 2. 绑定平台订单号
-  const bindRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders/${purchaseNo}/bind`, {
-    method: 'PUT',
-    body: JSON.stringify({
-      platform_order_no: platformOrderNo
+  await runPurchaseApiWithRetry('绑定平台订单号', async () => {
+    const bindRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders/${purchaseNo}/bind`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        platform_order_no: platformOrderNo
+      })
     })
+    console.log(`[PurchaseCapture] 绑定订单号响应: HTTP ${bindRes.statusCode}, body=${bindRes.data.substring(0, 500)}`)
+    checkApiResponse(bindRes, '绑定订单号')
   })
-  console.log(`[PurchaseCapture] 绑定订单号响应: HTTP ${bindRes.statusCode}, body=${bindRes.data.substring(0, 500)}`)
-  checkApiResponse(bindRes, '绑定订单号')
 
   // 2.1 绑定成功后立即写入系统备注（覆盖旧备注）
   if (salesOrderId) {
