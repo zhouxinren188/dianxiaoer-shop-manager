@@ -23,6 +23,9 @@ describe('淘宝地址管理脚本 v2', () => {
     expect(script).toContain('RESULT script_error detail=')
     expect(script).toContain("return 'injected';")
     expect(script).toContain('真实结果继续通过 __tbAddrResult 轮询获取')
+    expect(script).toContain('function normalizeAddressForMatch(value)')
+    expect(script).toContain('function addressDetailMatches(rowText, targetDetail)')
+    expect(script).not.toContain('function normalizeTaobaoAddressForMatch(value)')
     expect(new vm.Script(script).runInNewContext({
       window: { __tbAddrV2Running: true }
     })).toBe('injected')

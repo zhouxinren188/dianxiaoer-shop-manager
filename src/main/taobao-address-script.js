@@ -559,9 +559,19 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   var rowActionPattern = /^(修改|删除|设为默认|设置默认|设为默认地址|设为默认收货地址|取消默认|置顶|取消置顶)$/;
 
-  var normalizeAddressForMatch = ${normalizeTaobaoAddressForMatch.toString()};
-  var addressDetailMatches = ${taobaoAddressDetailMatches.toString()
-    .replaceAll('normalizeTaobaoAddressForMatch', 'normalizeAddressForMatch')};
+  // 必须在模板内保留静态源码。打包版主进程经过 Bytenode 字节码编译后，
+  // Function.prototype.toString() 不保证还能返回可执行源码，把函数 toString()
+  // 的结果拼进网页脚本会在用户版产生 Invalid or unexpected token。
+  function normalizeAddressForMatch(value) {
+    return String(value || '')
+      .replace(/[【】\\[\\]［］()（）]/g, '')
+      .replace(/[\\s·•・,，。;；:：\\-—_]/g, '');
+  }
+
+  function addressDetailMatches(rowText, targetDetail) {
+    var normalizedTarget = normalizeAddressForMatch(targetDetail);
+    return !!normalizedTarget && normalizeAddressForMatch(rowText).indexOf(normalizedTarget) >= 0;
+  }
 
   function actionOwner(el) {
     if (!el) return null;
