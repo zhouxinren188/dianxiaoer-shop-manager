@@ -2596,30 +2596,137 @@ function paymentVaultRequest(pathname, body) {
   })
 }
 
+async function loadServerPurchaseCookies(accountId) {
+  const startedAt = Date.now()
+  try {
+    const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+      method: 'GET'
+    })
+    if (cookieRes.statusCode !== 200 || !cookieRes.data) {
+      return {
+        cookies: [],
+        total: 0,
+        expired: 0,
+        elapsedMs: Date.now() - startedAt,
+        error: `HTTP ${cookieRes.statusCode}`
+      }
+    }
+
+    const json = JSON.parse(cookieRes.data)
+    if (json.code !== 0 || !json.data?.cookie_data) {
+      return {
+        cookies: [],
+        total: 0,
+        expired: 0,
+        elapsedMs: Date.now() - startedAt,
+        error: json.message || '服务器返回无cookie数据'
+      }
+    }
+
+    const raw = typeof json.data.cookie_data === 'string'
+      ? JSON.parse(json.data.cookie_data)
+      : json.data.cookie_data
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return {
+        cookies: [],
+        total: 0,
+        expired: 0,
+        elapsedMs: Date.now() - startedAt,
+        error: '服务器返回空cookie数据'
+      }
+    }
+
+    const now = Date.now() / 1000
+    let expired = 0
+    const cookies = raw.filter(cookie => {
+      if (cookie.expirationDate && cookie.expirationDate > 0 && cookie.expirationDate < now) {
+        expired++
+        return false
+      }
+      return true
+    })
+    return {
+      cookies,
+      total: raw.length,
+      expired,
+      elapsedMs: Date.now() - startedAt,
+      error: cookies.length > 0 ? '' : '服务器cookie均已过期'
+    }
+  } catch (error) {
+    return {
+      cookies: [],
+      total: 0,
+      expired: 0,
+      elapsedMs: Date.now() - startedAt,
+      error: error.message
+    }
+  }
+}
+
+async function clearSessionCookiesByDomains(ses, domains) {
+  const existing = await ses.cookies.get({})
+  const targets = existing.filter(cookie =>
+    domains.some(domain => cookie.domain && cookie.domain.includes(domain))
+  )
+  const results = await Promise.all(targets.map(async cookie => {
+    try {
+      const secure = cookie.secure || false
+      const url = (secure ? 'https://' : 'http://') +
+        (cookie.domain || '').replace(/^\./, '') + (cookie.path || '/')
+      await ses.cookies.remove(url, cookie.name)
+      return true
+    } catch (_) {
+      return false
+    }
+  }))
+  return {
+    total: targets.length,
+    removed: results.filter(Boolean).length,
+    failed: results.filter(result => !result).length
+  }
+}
+
 /**
- * 淘宝/天猫确认订单页仓库地址编号校验。
+ * 淘宝/天猫确认订单页收货地址校验。
  *
  * 仓库采购的收货地址末尾会追加【采购编号】。这里在用户点击“提交订单”前，
  * 再次核对结算页当前选中的地址，避免后台地址设置成功但结算页仍选中旧地址。
+ * 三方代发没有采购编号，优先核对【派件联系号码】，必要时使用收件人姓名与电话尾号联合核验。
  */
-function buildTaobaoAddressCodeGuardScript(purchaseNo) {
-  const expectedToken = JSON.stringify(`【${purchaseNo}】`)
+function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
+  const purchaseType = String(purchaseInfo.purchaseType || '')
+  const shippingAddress = String(purchaseInfo.shippingAddress || '')
+  const contactMatch = shippingAddress.match(/【派件(?:前)?联系([^】]+)】/)
+  const contactDigits = String(contactMatch?.[1] || '').replace(/\D/g, '')
+  const shippingPhoneDigits = String(purchaseInfo.shippingPhone || '').replace(/\D/g, '')
+  const mode = purchaseType === 'dropship' ? 'dropship' : 'warehouse'
+  const guardConfig = JSON.stringify({
+    mode,
+    expectedToken: mode === 'warehouse' ? `【${purchaseNo}】` : '',
+    contactDigits,
+    expectedName: String(purchaseInfo.shippingName || '').trim(),
+    shippingPhoneDigits
+  })
 
   return `
 (function() {
-  var expectedToken = ${expectedToken};
+  var config = ${guardConfig};
+  var expectedToken = config.expectedToken || '';
+  var guardKey = [config.mode, expectedToken, config.contactDigits, config.expectedName, config.shippingPhoneDigits].join('|');
   var url = (location.href || '').toLowerCase();
   var isTaobaoCheckout = url.indexOf('buy.taobao.com') >= 0 ||
                           url.indexOf('buy.tmall.com') >= 0 ||
                           url.indexOf('buyertrade.taobao.com') >= 0;
-  if (!isTaobaoCheckout || !expectedToken) {
+  var hasDropshipIdentity = config.mode === 'dropship' &&
+    (config.contactDigits || (config.expectedName && config.shippingPhoneDigits));
+  if (!isTaobaoCheckout || (config.mode === 'warehouse' ? !expectedToken : !hasDropshipIdentity)) {
     return '[DXE_ADDR_GUARD] skipped: not checkout page';
   }
 
   if (window.__dxeAddressCodeGuard &&
-      window.__dxeAddressCodeGuard.expectedToken === expectedToken) {
+      window.__dxeAddressCodeGuard.guardKey === guardKey) {
     window.__dxeAddressCodeGuard.refresh();
-    return '[DXE_ADDR_GUARD] refreshed: ' + expectedToken;
+    return '[DXE_ADDR_GUARD] refreshed: mode=' + config.mode;
   }
 
   function normalize(text) {
@@ -2695,8 +2802,25 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
     var selectedTexts = selectedAddressTexts();
     if (selectedTexts.length > 0) {
       for (var i = 0; i < selectedTexts.length; i++) {
-        if (selectedTexts[i].indexOf(expectedToken) >= 0) {
-          return { ok: true, method: 'selected-address', selectedText: selectedTexts[i] };
+        var selectedText = selectedTexts[i];
+        if (config.mode === 'warehouse' && selectedText.indexOf(expectedToken) >= 0) {
+          return { ok: true, method: 'warehouse-purchase-code', selectedText: selectedText };
+        }
+        if (config.mode === 'dropship') {
+          var selectedDigits = selectedText.replace(/\D/g, '');
+          var contactMatched = config.contactDigits.length >= 4 &&
+            selectedDigits.indexOf(config.contactDigits) >= 0;
+          if (contactMatched) {
+            return { ok: true, method: 'dropship-contact-marker', selectedText: selectedText };
+          }
+
+          var nameMatched = !!config.expectedName &&
+            selectedText.indexOf(normalize(config.expectedName)) >= 0;
+          var phoneTail = config.shippingPhoneDigits.slice(-4);
+          var phoneMatched = phoneTail.length === 4 && selectedDigits.indexOf(phoneTail) >= 0;
+          if (nameMatched && phoneMatched) {
+            return { ok: true, method: 'dropship-name-phone', selectedText: selectedText };
+          }
         }
       }
       return { ok: false, method: 'selected-address-mismatch', selectedText: selectedTexts[0] };
@@ -2718,9 +2842,15 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
       (result.ok
         ? 'color:#2f855a;background:#f0fff4;border:1px solid #9ae6b4;'
         : 'color:#c53030;background:#fff5f5;border:1px solid #feb2b2;');
-    status.textContent = result.ok
-      ? '\u2713 \u5f53\u524d\u6536\u8d27\u5730\u5740\u7f16\u53f7\u5df2\u6838\u9a8c\uff1a' + expectedToken
-      : '\u26a0 \u5f53\u524d\u6536\u8d27\u5730\u5740\u672a\u68c0\u6d4b\u5230\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u5730\u5740';
+    if (config.mode === 'dropship') {
+      status.textContent = result.ok
+        ? '\u2713 \u5f53\u524d\u4e09\u65b9\u4ee3\u53d1\u6536\u8d27\u4fe1\u606f\u5df2\u6838\u9a8c'
+        : '\u26a0 \u5f53\u524d\u6536\u8d27\u5730\u5740\u4e0e\u4e09\u65b9\u4ee3\u53d1\u4fe1\u606f\u4e0d\u5339\u914d\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u5730\u5740';
+    } else {
+      status.textContent = result.ok
+        ? '\u2713 \u5f53\u524d\u6536\u8d27\u5730\u5740\u7f16\u53f7\u5df2\u6838\u9a8c\uff1a' + expectedToken
+        : '\u26a0 \u5f53\u524d\u6536\u8d27\u5730\u5740\u672a\u68c0\u6d4b\u5230\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u5730\u5740';
+    }
 
     var overlay = document.getElementById('jd-product-overlay');
     var overlayBody = overlay && overlay.children && overlay.children.length > 1 ? overlay.children[1] : null;
@@ -2751,12 +2881,14 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
       'z-index:2147483647;max-width:560px;padding:14px 22px;border-radius:8px;' +
       'background:#f56c6c;color:#fff;font-size:15px;font-weight:600;line-height:1.5;' +
       'box-shadow:0 6px 24px rgba(0,0,0,.25);text-align:center;';
-    notice.textContent = '\u5df2\u963b\u6b62\u63d0\u4ea4\u8ba2\u5355\uff1a\u5f53\u524d\u6536\u8d27\u5730\u5740\u7f3a\u5c11\u91c7\u8d2d\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6b63\u786e\u7684\u4ed3\u5e93\u5730\u5740\u3002';
+    notice.textContent = config.mode === 'dropship'
+      ? '\u5df2\u963b\u6b62\u63d0\u4ea4\u8ba2\u5355\uff1a\u5f53\u524d\u6536\u8d27\u5730\u5740\u672a\u5339\u914d\u4ee3\u53d1\u6536\u4ef6\u4eba\u4fe1\u606f\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6b63\u786e\u5730\u5740\u3002'
+      : '\u5df2\u963b\u6b62\u63d0\u4ea4\u8ba2\u5355\uff1a\u5f53\u524d\u6536\u8d27\u5730\u5740\u7f3a\u5c11\u91c7\u8d2d\u7f16\u53f7 ' + expectedToken + '\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6b63\u786e\u7684\u4ed3\u5e93\u5730\u5740\u3002';
     clearTimeout(window.__dxeAddressBlockedTimer);
     window.__dxeAddressBlockedTimer = setTimeout(function() {
       if (notice && notice.parentNode) notice.parentNode.removeChild(notice);
     }, 8000);
-    console.warn('[DXE_ADDR_GUARD] blocked submit: expected=' + expectedToken + ', method=' + result.method);
+    console.warn('[DXE_ADDR_GUARD] blocked submit: mode=' + config.mode + ', method=' + result.method);
   }
 
   function isSubmitAction(target) {
@@ -2780,7 +2912,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
     var result = validateSelectedAddress();
     ensureStatus(result);
     if (result.ok) {
-      console.log('[DXE_ADDR_GUARD] submit allowed: expected=' + expectedToken + ', method=' + result.method);
+      console.log('[DXE_ADDR_GUARD] submit allowed: mode=' + config.mode + ', method=' + result.method);
       return;
     }
     event.preventDefault();
@@ -2815,13 +2947,13 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo) {
   observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-selected', 'aria-checked', 'data-selected'] });
 
   window.__dxeAddressCodeGuard = {
-    expectedToken: expectedToken,
+    guardKey: guardKey,
     refresh: refresh,
     validate: validateSelectedAddress
   };
   refresh();
-  console.log('[DXE_ADDR_GUARD] installed: expected=' + expectedToken);
-  return '[DXE_ADDR_GUARD] installed: ' + expectedToken;
+  console.log('[DXE_ADDR_GUARD] installed: mode=' + config.mode);
+  return '[DXE_ADDR_GUARD] installed: mode=' + config.mode;
 })()
 `
 }
@@ -4622,6 +4754,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
   ipcMain.handle('open-purchase-order-window', async (event, params) => {
     const { accountId, accountName, password, purchaseUrl, platform, purchaseInfo } = params
     const { purchaseNo } = purchaseInfo
+    const openStartedAt = Date.now()
+    const logOpenTiming = (step, detail = '') => {
+      runtimeLog.writeLog(
+        'PurchaseOpenTiming',
+        `step=${step}, elapsedMs=${Date.now() - openStartedAt}${detail ? `, ${detail}` : ''}`
+      )
+    }
+    logOpenTiming('start', `platform=${platform}, purchaseNo=${purchaseNo || ''}`)
 
     // 已打开的采购窗口直接聚焦，避免重复请求返利转链。
     if (activePurchaseWindows.has(purchaseNo)) {
@@ -4636,9 +4776,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       ? decodeTaobaoSkuSourceUrl(purchaseUrl)
       : { url: purchaseUrl, selection: null }
     const savedTaobaoSku = decodedTaobaoSource.selection
+    // 淘宝/PDD 必须以服务端 Cookie 为准。请求与返利转链并行进行，避免两段网络等待串行累加。
+    const prefetchedServerCookies = (platform === 'taobao' || platform === 'tmall' || platform === 'pinduoduo')
+      ? loadServerPurchaseCookies(accountId)
+      : null
     const rebateResult = (platform === 'taobao' || platform === 'tmall')
       ? await resolveTaobaoRebatePurchaseUrl(decodedTaobaoSource.url)
       : { url: decodedTaobaoSource.url, converted: false, reason: 'not_taobao_platform' }
+    logOpenTiming('rebate_resolved', `converted=${rebateResult.converted === true}`)
     // 返利短链需要先完成淘宝落地跳转，不能向短链强行追加 skuId。
     // SKU 仍由商品页加载后的自动选中脚本恢复；仅原链接回退时才追加 skuId。
     const effectivePurchaseUrl = rebateResult.converted
@@ -4670,12 +4815,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 其他平台：partition 有有效 cookie 时信任 partition（更新鲜），否则从服务器恢复
     const ses = session.fromPartition(partitionName)
     let needServerRestore = true
+    let validPlatformCookieCount = 0
     try {
       const partitionCookies = await ses.cookies.get({})
       // 按平台检测 cookie：必须属于该平台域名且未过期
       const PLATFORM_DOMAINS = {
         pinduoduo: ['pinduoduo.com', 'yangkeduo.com'],
         taobao: ['taobao.com', 'tmall.com'],
+        tmall: ['taobao.com', 'tmall.com'],
         '1688': ['1688.com', 'alibaba.com'],
         douyin: ['douyin.com', 'jinritemai.com']
       }
@@ -4687,12 +4834,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             (!c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
           )
         : partitionCookies.filter(c => !c.expirationDate || c.expirationDate <= 0 || c.expirationDate > now)
+      validPlatformCookieCount = validPlatformCookies.length
+      logOpenTiming('local_cookies_checked', `valid=${validPlatformCookieCount}`)
 
       // PDD 平台：即使 partition 有 PDDAccessToken 也必须从服务器恢复
       if (platform === 'pinduoduo') {
         console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）`)
       // 淘宝平台：即使 partition 有有效 cookie 也必须从服务器恢复
-      } else if (platform === 'taobao') {
+      } else if (platform === 'taobao' || platform === 'tmall') {
         console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条淘宝 cookie，但仍需服务器恢复（SUB/cookie2可能服务端已失效）`)
       // 其他平台：partition 有有效 cookie 时信任 partition，跳过服务器恢复
       } else if (validPlatformCookies.length > 0) {
@@ -4704,87 +4853,38 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
     } catch (e) {
       console.warn('[PurchaseCapture] Partition cookie检查失败:', e.message)
-    }
-
-    // PDD 平台：恢复前先清除 partition 中该平台域名的旧 cookie
-    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点），与服务器的新格式（有前导点）不同
-    // ses.cookies.set() 不会删除旧格式 cookie，导致新旧并存，PDD 优先使用旧的失效 cookie
-    if (needServerRestore && platform === 'pinduoduo') {
-      try {
-        const pddDomains = ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
-        const existing = await ses.cookies.get({})
-        const oldPddCookies = existing.filter(c =>
-          pddDomains.some(d => c.domain && c.domain.includes(d))
-        )
-        for (const old of oldPddCookies) {
-          try {
-            const secure = old.secure || false
-            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
-            await ses.cookies.remove(url, old.name)
-          } catch (e) { /* ignore */ }
-        }
-        if (oldPddCookies.length > 0) console.log(`[PurchaseCapture] PDD 旧 cookie 已清除: ${oldPddCookies.length} 条`)
-      } catch (clearErr) {
-        console.warn(`[PurchaseCapture] PDD 旧 cookie 清除失败:`, clearErr.message)
-      }
-    }
-
-    // 淘宝平台：恢复前先清除 partition 中该平台域名的旧 cookie
-    // 原因：旧 cookie 可能是 hostOnly（domain 无前导点如 taobao.com），
-    // 与服务器新格式（有前导点如 .taobao.com）不同，Chromium 视为不同 cookie
-    // 新旧并存时淘宝优先使用旧的失效 cookie，导致滑块验证或登录重定向
-    if (needServerRestore && platform === 'taobao') {
-      try {
-        const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
-        const existing = await ses.cookies.get({})
-        const oldTbCookies = existing.filter(c =>
-          tbDomains.some(d => c.domain && c.domain.includes(d))
-        )
-        for (const old of oldTbCookies) {
-          try {
-            const secure = old.secure || false
-            const url = (secure ? 'https://' : 'http://') + (old.domain || '').replace(/^\./, '') + (old.path || '/')
-            await ses.cookies.remove(url, old.name)
-          } catch (e) { /* ignore */ }
-        }
-        if (oldTbCookies.length > 0) console.log(`[PurchaseCapture] 淘宝旧 cookie 已清除: ${oldTbCookies.length} 条`)
-      } catch (clearErr) {
-        console.warn(`[PurchaseCapture] 淘宝旧 cookie 清除失败:`, clearErr.message)
-      }
+      logOpenTiming('local_cookies_check_failed', `error=${String(e.message || '').slice(0, 120)}`)
     }
 
     if (needServerRestore) {
-      let serverCookies = []
-      try {
-        const cookieRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
-          method: 'GET'
-        })
-        if (cookieRes.statusCode === 200 && cookieRes.data) {
-          const json = JSON.parse(cookieRes.data)
-          if (json.code === 0 && json.data && json.data.cookie_data) {
-            const raw = typeof json.data.cookie_data === 'string'
-              ? JSON.parse(json.data.cookie_data)
-              : json.data.cookie_data
-            if (Array.isArray(raw) && raw.length > 0) {
-              const now = Date.now() / 1000
-              let skipped = 0
-              serverCookies = raw.filter(ck => {
-                if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) {
-                  skipped++
-                  return false
-                }
-                return true
-              })
-              console.log(`[PurchaseCapture] Cookies loaded from server: ${serverCookies.length}/${raw.length} (${skipped} expired)`)
-            }
-          } else {
-            console.warn(`[PurchaseCapture] 服务器返回无cookie数据`)
-          }
-        } else {
-          console.warn(`[PurchaseCapture] Cookie服务器请求失败: statusCode=${cookieRes.statusCode}`)
+      const serverCookieResult = prefetchedServerCookies
+        ? await prefetchedServerCookies
+        : await loadServerPurchaseCookies(accountId)
+      const serverCookies = serverCookieResult.cookies
+      logOpenTiming(
+        'server_cookies_ready',
+        `count=${serverCookies.length}, requestMs=${serverCookieResult.elapsedMs}, error=${serverCookieResult.error || 'none'}`
+      )
+
+      // 只有拿到有效的服务端 Cookie 后才清理本地旧 Cookie。服务端偶发失败时保留本地会话，
+      // 避免“请求失败 -> 本地登录态也被清空”。删除改为并发执行，减少几十条 Cookie 逐条等待。
+      if (serverCookies.length > 0 && (platform === 'pinduoduo' || platform === 'taobao' || platform === 'tmall')) {
+        try {
+          const domains = platform === 'pinduoduo'
+            ? ['yangkeduo.com', 'pinduoduo.com', 'pdd.net']
+            : ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
+          const clearResult = await clearSessionCookiesByDomains(ses, domains)
+          console.log(`[PurchaseCapture] ${platform} 旧 cookie 已清除: ${clearResult.removed}/${clearResult.total} 条`)
+          logOpenTiming(
+            'old_cookies_cleared',
+            `total=${clearResult.total}, removed=${clearResult.removed}, failed=${clearResult.failed}`
+          )
+        } catch (clearErr) {
+          console.warn(`[PurchaseCapture] ${platform} 旧 cookie 清除失败:`, clearErr.message)
+          logOpenTiming('old_cookies_clear_failed', `error=${String(clearErr.message || '').slice(0, 120)}`)
         }
-      } catch (e) {
-        console.warn('[PurchaseCapture] Cookie load failed:', e.message)
+      } else if (serverCookies.length === 0) {
+        console.warn(`[PurchaseCapture] 服务端 Cookie 不可用，保留本地 ${validPlatformCookieCount} 条有效 ${platform} Cookie`)
       }
 
       // 将服务器加载的 Cookie 并发写入 partition session（避免逐条await导致10s+卡顿）
@@ -4811,9 +4911,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           const setOk = results.filter(r => r !== null).length
           const setFail = results.filter(r => r === null).length
           console.log(`[PurchaseCapture] Cookies restored to session: ${setOk} ok, ${setFail} failed`)
+          logOpenTiming('server_cookies_restored', `ok=${setOk}, failed=${setFail}`)
           flushStorageDataAsync(ses)
         } catch (e) {
           console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
+          logOpenTiming('server_cookies_restore_failed', `error=${String(e.message || '').slice(0, 120)}`)
         }
       }
     }
@@ -4865,6 +4967,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         preload: PRELOAD_ENABLED ? preloadPath : undefined
       }
     })
+    logOpenTiming('window_created')
 
     const taobaoSkuAutoSelectScript = savedTaobaoSku
       ? buildTaobaoSkuAutoSelectScript(savedTaobaoSku)
@@ -4881,12 +4984,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }, delay)
     }
 
+    const dropshipContactMarker = String(purchaseInfo.shippingAddress || '')
+      .match(/【派件(?:前)?联系([^】]+)】/)
+    const hasDropshipGuardIdentity = purchaseInfo.purchaseType === 'dropship' && (
+      (dropshipContactMarker && String(dropshipContactMarker[1] || '').replace(/\D/g, '').length >= 4) ||
+      (String(purchaseInfo.shippingName || '').trim() &&
+        String(purchaseInfo.shippingPhone || '').replace(/\D/g, '').length >= 4)
+    )
     const needsTaobaoAddressCodeGuard =
-      (platform === 'taobao' || platform === 'tmall') &&
-      (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') &&
-      !!purchaseNo
+      (platform === 'taobao' || platform === 'tmall') && (
+        ((purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') && !!purchaseNo) ||
+        hasDropshipGuardIdentity
+      )
     const taobaoAddressCodeGuardScript = needsTaobaoAddressCodeGuard
-      ? buildTaobaoAddressCodeGuardScript(purchaseNo)
+      ? buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo)
       : ''
     function scheduleTaobaoAddressCodeGuard(reason, delay = 300) {
       if (!taobaoAddressCodeGuardScript) return
@@ -5523,6 +5634,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (!message) return
       if (message.startsWith('[DXE_SKU_AUTO]')) {
         runtimeLog.writeLog('PurchaseSku', message)
+        console.log(`[PurchaseCapture] ${message}`)
+        return
+      }
+      if (message.startsWith('[DXE_ADDR_GUARD]')) {
+        runtimeLog.writeLog('PurchaseAddressGuard', message)
         console.log(`[PurchaseCapture] ${message}`)
         return
       }
@@ -6665,6 +6781,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // ★ 监控页面标题变化 — 特别捕获"网络异常"等支付错误页
     win.on('page-title-updated', (event, title) => {
       runtimeLog.writeLog('PurchaseTitle', `页面标题: ${title}`)
+      logOpenTiming('page_title_updated', `titleLength=${String(title || '').length}`)
       if (title.includes('网络异常') || title.includes('网络错误') || title.includes('风险')) {
         runtimeLog.writeLog('PurchaseError', `★ 支付页面标题含错误关键词: "${title}"`)
         console.log(`[PurchaseCapture] ★ 支付页面标题含错误关键词: "${title}"`)
@@ -6683,13 +6800,16 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）
     console.log(`[PurchaseCapture] Loading product page: ${effectivePurchaseUrl.substring(0, 120)}`)
     runtimeLog.writeLog('PurchaseWin', `加载商品页: ${effectivePurchaseUrl.substring(0, 200)}`)
+    logOpenTiming('load_url_start')
 
     // 拼多多：不再需要清除缓存（dl 不做缓存清理，Electron 默认 UA 正常工作）
 
     try {
       await win.loadURL(effectivePurchaseUrl)
+      logOpenTiming('load_url_completed')
     } catch (e) {
       console.error('[PurchaseCapture] loadURL failed:', e.message)
+      logOpenTiming('load_url_failed', `error=${String(e.message || '').slice(0, 120)}`)
     }
 
     // 地址设置延迟启动：等商品信息成功提取后再启动（避免cookie过期时两个窗口同时撞上登录页）
