@@ -15,7 +15,13 @@ const {
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
-  isTaobaoCookieDomain
+  isTaobaoCookieDomain,
+  isTaobaoRiskRet,
+  isTaobaoTokenRet,
+  extractTaobaoVerificationUrl,
+  shouldRetryWithRefreshedToken,
+  classifyTaobaoAuthenticationSnapshot,
+  TAOBAO_SEARCH_RISK_COOLDOWN_MS
 } = taobaoSameSearch
 
 describe('淘宝按图搜同款', () => {
@@ -135,8 +141,48 @@ describe('淘宝按图搜同款', () => {
     expect(isTaobaoCookieDomain('h5api.m.taobao.com')).toBe(true)
     expect(isTaobaoCookieDomain('.tmall.hk')).toBe(true)
     expect(isTaobaoCookieDomain('.pinduoduo.com')).toBe(false)
-    expect(getTaobaoSamePartition(7)).toBe('persist:dianxiaoer-tb-account-7')
+    expect(getTaobaoSamePartition(7)).toBe('persist:purchase-7')
     expect(getTaobaoPurchasePartition(7)).toBe('persist:purchase-7')
+  })
+
+  it('识别淘宝风控并只接受淘宝验证地址', () => {
+    expect(isTaobaoRiskRet('RGV587_ERROR::SM::被挤爆啦')).toBe(true)
+    expect(isTaobaoRiskRet('FAIL_SYS_USER_VALIDATE::安全验证')).toBe(true)
+    expect(isTaobaoRiskRet('SUCCESS::调用成功')).toBe(false)
+    expect(extractTaobaoVerificationUrl({
+      data: { url: 'https://login.taobao.com/member/login.jhtml' }
+    })).toBe('https://login.taobao.com/member/login.jhtml')
+    expect(extractTaobaoVerificationUrl({
+      data: { url: 'https://evil.example.com/steal' }
+    })).toBe('')
+    expect(TAOBAO_SEARCH_RISK_COOLDOWN_MS).toBeGreaterThanOrEqual(30 * 60 * 1000)
+  })
+
+  it('Token错误只有读到不同的新Token时才允许受控重试', () => {
+    expect(isTaobaoTokenRet('TOKEN_EXPIRED::令牌过期')).toBe(true)
+    expect(shouldRetryWithRefreshedToken('TOKEN_EXPIRED', 'old', 'new')).toBe(true)
+    expect(shouldRetryWithRefreshedToken('TOKEN_EXPIRED', 'same', 'same')).toBe(false)
+    expect(shouldRetryWithRefreshedToken('TOKEN_EXPIRED', 'old', '')).toBe(false)
+    expect(shouldRetryWithRefreshedToken('RGV587_ERROR', 'old', 'new')).toBe(false)
+  })
+
+  it('识别淘宝首次自动登录倒计时且不误判普通商品页', () => {
+    expect(classifyTaobaoAuthenticationSnapshot({
+      title: '淘宝登录',
+      text: '是否继续使用上次登录的账号？8秒后将自动登录'
+    }).automaticLoginPending).toBe(true)
+    expect(classifyTaobaoAuthenticationSnapshot({
+      title: '淘宝登录',
+      text: '正在为您登录，请稍候'
+    }).automaticLoginPending).toBe(true)
+    expect(classifyTaobaoAuthenticationSnapshot({
+      title: '淘宝商品详情',
+      text: '店铺优惠后 ￥29.9 预计8小时内发货'
+    }).automaticLoginPending).toBe(false)
+    expect(classifyTaobaoAuthenticationSnapshot({
+      title: '淘宝登录',
+      text: '请输入账号和密码登录'
+    }).automaticLoginPending).toBe(false)
   })
 
   it('商品页选择货源时使用当前页面的淘宝商品ID和链接', () => {

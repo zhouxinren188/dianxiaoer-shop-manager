@@ -52,7 +52,7 @@ function execCmd(conn, cmd) {
       let stderr = ''
       stream.on('data', d => stdout += d.toString())
       stream.stderr.on('data', d => stderr += d.toString())
-      stream.on('close', () => resolve({ stdout, stderr }))
+      stream.on('close', (code) => resolve({ code, stdout, stderr }))
     })
   })
 }
@@ -101,6 +101,77 @@ async function uploadFiles(files) {
   }
 }
 
+function getBusinessServerFiles() {
+  return [
+    { local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` },
+    { local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` },
+    { local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` },
+    { local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` },
+    { local: path.join(ROOT, 'server', 'services', 'store-cookie-policy.js'), remote: `${BUSINESS_REMOTE_DIR}/services/store-cookie-policy.js` },
+    { local: path.join(ROOT, 'server', 'services', 'shipping-timeliness-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/shipping-timeliness-service.js` },
+    { local: path.join(ROOT, 'server', 'config', 'shipping-timeliness-defaults.json'), remote: `${BUSINESS_REMOTE_DIR}/config/shipping-timeliness-defaults.json` }
+  ]
+}
+
+async function deployBusinessServerOnly() {
+  console.log('[Server] 上传业务服务代码...')
+  await uploadFiles(getBusinessServerFiles())
+
+  const conn = await createConnection()
+  try {
+    console.log('[Server] 使用 stop/start 重启 dianxiaoer-server...')
+    await execCmd(conn, `${NSSM} stop dianxiaoer-server`)
+    await new Promise(resolve => setTimeout(resolve, 3000))
+    const started = await execCmd(conn, `${NSSM} start dianxiaoer-server`)
+    if (started.code !== 0) throw new Error('业务服务启动失败: ' + (started.stderr || started.stdout))
+    await new Promise(resolve => setTimeout(resolve, 7000))
+
+    const health = await execCmd(conn, 'curl.exe -s --max-time 10 http://localhost:3002/health')
+    if (health.code !== 0 || !health.stdout.includes('"status":"ok"')) {
+      throw new Error('业务服务健康检查失败: ' + (health.stderr || health.stdout))
+    }
+    console.log('[Server] Health:', health.stdout.trim())
+
+    // 主动执行一次同一套回填函数，避免仅凭“文件上传成功”判断部署完成。
+    const verifyCode = `
+const { pool } = require('./db');
+const { backfillRecentObservations } = require('./services/shipping-timeliness-service');
+(async () => {
+  const [tables] = await pool.execute("SHOW TABLES LIKE 'shipping_timeliness_observations'");
+  if (!tables.length) throw new Error('shipping_timeliness_observations table missing');
+  const [columns] = await pool.execute('SHOW COLUMNS FROM shipping_timeliness_observations');
+  const [indexes] = await pool.execute('SHOW INDEX FROM shipping_timeliness_observations');
+  const backfill = await backfillRecentObservations(pool, 10000);
+  const [[stats]] = await pool.execute(
+    "SELECT COUNT(*) AS total, SUM(outcome='delivered') AS delivered, SUM(outcome='dispatch_risk') AS dispatch_risk FROM shipping_timeliness_observations"
+  );
+  console.log('SHIPPING_VERIFY=' + JSON.stringify({
+    table: true,
+    columns: columns.map(row => row.Field),
+    indexes: [...new Set(indexes.map(row => row.Key_name))],
+    backfill,
+    stats
+  }));
+  await pool.end();
+})().catch(async error => {
+  console.error('SHIPPING_VERIFY_ERROR=' + error.message);
+  try { await pool.end(); } catch (_) {}
+  process.exit(1);
+});`
+    const verifyEncoded = Buffer.from(verifyCode, 'utf8').toString('base64')
+    const verify = await execCmd(
+      conn,
+      `cd /d "${BUSINESS_REMOTE_DIR}" && node -e "eval(Buffer.from('${verifyEncoded}','base64').toString('utf8'))"`
+    )
+    if (verify.code !== 0 || !verify.stdout.includes('SHIPPING_VERIFY=')) {
+      throw new Error('时效数据表或回填验证失败: ' + (verify.stderr || verify.stdout))
+    }
+    console.log('[Server]', verify.stdout.trim())
+  } finally {
+    conn.end()
+  }
+}
+
 function notifyServer(ver) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ version: ver, changelog: `全量更新 v${ver}` })
@@ -137,6 +208,13 @@ async function main() {
 
   console.log('=== 店小二全量发布 ===')
   console.log('版本:', version)
+
+  if (process.argv.includes('--server-only')) {
+    console.log('模式: 仅部署业务服务，不发布客户端更新')
+    await deployBusinessServerOnly()
+    console.log('=== 业务服务部署及数据验证完成 ===')
+    return
+  }
 
   // 1. 构建
   const skipBuild = process.argv.includes('--skip-build')
@@ -199,10 +277,7 @@ async function main() {
   smallFiles.push({ local: localAdminFile, remote: `${REMOTE_DIR}/public/admin/index.html` })
 
   // 业务服务与客户端功能必须同步发布，避免客户端已出现入口而 3002 API 仍为旧版。
-  smallFiles.push({ local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` })
-  smallFiles.push({ local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` })
-  smallFiles.push({ local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` })
-  smallFiles.push({ local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` })
+  smallFiles.push(...getBusinessServerFiles())
   const localSmsEnvFile = path.join(ROOT, 'server', '.env.sms')
   if (fs.existsSync(localSmsEnvFile)) {
     smallFiles.push({ local: localSmsEnvFile, remote: `${BUSINESS_REMOTE_DIR}/.env.sms` })

@@ -225,6 +225,25 @@ function buildTaobaoSelectedSkuExtractionScript() {
     }
     return null;
   }
+  var promotionPriceLabelPattern = /(?:秒杀价|活动价|券后价|到手价|店铺优惠后|平台优惠后|平台加补后|会员价|促销价|特惠价|折后价|优惠价)/;
+  var currentPriceLabelPattern = /(?:秒杀价|活动价|券后价|到手价|店铺优惠后|平台优惠后|平台加补后|会员价|促销价|特惠价|折后价|优惠价|现价)/;
+  var originalPriceMarkerPattern = /优惠前|原价|市场价|日常价/;
+  function currentPricePart(text) {
+    var normalized = clean(text, 180).replace(/,/g, '');
+    var originalMarkerIndex = normalized.search(originalPriceMarkerPattern);
+    return originalMarkerIndex >= 0 ? normalized.slice(0, originalMarkerIndex) : normalized;
+  }
+  function parseCurrentPrice(text) {
+    var currentText = currentPricePart(text);
+    if (!currentText) return null;
+    var labeled = currentText.match(/(?:秒杀价|活动价|券后价|到手价|店铺优惠后|平台优惠后|平台加补后|会员价|促销价|特惠价|折后价|优惠价|现价)\\s*[¥￥]?\\s*(\\d+(?:\\.\\d{1,2})?)/);
+    if (labeled) return Number(labeled[1]);
+    // 已出现优惠价标签却没有紧随其后的数值时，不能退化为读取标题中的“9包/15包”等数字。
+    if (currentPriceLabelPattern.test(currentText)) return null;
+    var currency = currentText.match(/[¥￥]\\s*(\\d+(?:\\.\\d{1,2})?)/);
+    if (currency) return Number(currency[1]);
+    return parsePrice(currentText);
+  }
   // 淘宝新版详情数据通常在 skuCore.sku2info[skuId] 中，优先使用SKU专属价格。
   function priceFromSkuInfo(value, depth) {
     if (value == null || depth > 5) return null;
@@ -277,19 +296,38 @@ function buildTaobaoSelectedSkuExtractionScript() {
     }
   }
   var promotionPriceMasked = false;
+  var promotionVisited = new Set();
+  function inspectPromotionElement(promotionElement) {
+    if (promotionPriceMasked || !promotionElement || promotionVisited.has(promotionElement)) return;
+    promotionVisited.add(promotionElement);
+    if (!visible(promotionElement) || promotionElement.closest('#__dxe_sales_product_overlay__')) return;
+    var promotionText = clean(promotionElement.textContent, 180);
+    if (!currentPriceLabelPattern.test(promotionText)) return;
+    // 当前优惠价显示为圆点、或只剩“￥”而原价仍存在时，必须等待淘宝返回真实价格。
+    var visiblyMasked = /[•·]{2,}|\\.{3,}/.test(currentPricePart(promotionText));
+    if (visiblyMasked || (originalPriceMarkerPattern.test(promotionText) && parseCurrentPrice(promotionText) == null)) {
+      promotionPriceMasked = true;
+    }
+  }
   var promotionNodes = document.querySelectorAll('[class*="Price"],[class*="price"],[class*="Belt"],[class*="belt"]');
   for (var promotionIndex = 0; promotionIndex < promotionNodes.length && promotionIndex < 800; promotionIndex++) {
-    var promotionElement = promotionNodes[promotionIndex];
-    if (!visible(promotionElement)) continue;
-    var promotionText = clean(promotionElement.textContent, 180);
-    if (!/(?:秒杀价|活动价|券后价|到手价|店铺优惠后|平台优惠后|平台加补后|会员价|促销价|特惠价|折后价|优惠价)/.test(promotionText) || !/(?:优惠前|原价|市场价|日常价)/.test(promotionText)) continue;
-    var promotionBeforeOriginal = promotionText.split(/优惠前|原价|市场价|日常价/)[0];
-    if (parsePrice(promotionBeforeOriginal) == null) {
-      promotionPriceMasked = true;
-      break;
+    inspectPromotionElement(promotionNodes[promotionIndex]);
+  }
+  // 淘宝部分新版活动组件使用完全哈希化类名，不能再依赖类名中包含 price。
+  if (!promotionPriceMasked) {
+    var genericPromotionNodes = document.querySelectorAll('span,div,p,strong,em,b');
+    for (var genericPromotionIndex = 0; genericPromotionIndex < genericPromotionNodes.length && genericPromotionIndex < 7000; genericPromotionIndex++) {
+      var genericPromotionElement = genericPromotionNodes[genericPromotionIndex];
+      var genericPromotionText = clean(genericPromotionElement && genericPromotionElement.textContent, 180);
+      if (!genericPromotionText || genericPromotionText.length > 160 || !currentPriceLabelPattern.test(genericPromotionText)) continue;
+      inspectPromotionElement(genericPromotionElement);
+      if (promotionPriceMasked) break;
     }
   }
   var priceSelectors = [
+    '#tbpcDetail_SkuPanelBody [class*="beltPrice"] [class*="highlightPrice"]',
+    '#tbpcDetail_SkuPanelBody [class*="normalPrice"] [class*="highlightPrice"]',
+    '#tbpcDetail_SkuPanelBody [class*="priceWrap"] [class*="highlightPrice"]',
     '[class*="Price--"] [class*="priceText--"]',
     '[class*="priceWrap--"] [class*="priceText--"]',
     '[class*="priceText--"]', '[class*="PriceText--"]',
@@ -303,32 +341,62 @@ function buildTaobaoSelectedSkuExtractionScript() {
   ];
   var bestPrice = null;
   var bestScore = -Infinity;
+  var bestPriceKind = '';
+  var bestPriceLabel = '';
+  var bestPromotionPrice = null;
+  var bestPromotionScore = -Infinity;
+  var bestPromotionLabel = '';
   var priceCandidates = [];
   var visitedPriceElements = new Set();
   var skuRect = roots.length > 0 ? roots[0].getBoundingClientRect() : null;
-  priceSelectors.forEach(function(selector, selectorIndex) {
-    Array.from(document.querySelectorAll(selector)).forEach(function(element) {
-      if (visitedPriceElements.has(element)) return;
+  function findPromotionPriceLabel(element, text) {
+      var directMatch = currentPricePart(text).match(promotionPriceLabelPattern);
+      if (directMatch) return directMatch[0];
+      var current = element;
+      for (var depth = 0; current && depth < 5; depth++) {
+        if (typeof current.querySelector === 'function') {
+          var titleElement = current.querySelector('[class*="title"],[class*="Title"]');
+          var titleText = clean(titleElement && titleElement.textContent, 80);
+          var titleMatch = titleText.match(promotionPriceLabelPattern);
+          if (titleMatch) return titleMatch[0];
+        }
+        var contextText = clean(current.textContent, 240);
+        var contextMatch = contextText.match(promotionPriceLabelPattern);
+        if (contextMatch) return contextMatch[0];
+        if (current.id === 'tbpcDetail_SkuPanelBody') break;
+        current = current.parentElement;
+      }
+      return '';
+  }
+  function registerPriceCandidate(element, selector, selectorIndex, fallback) {
+      if (!element || visitedPriceElements.has(element)) return;
       visitedPriceElements.add(element);
       if (!visible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
       var cls = String(element.className || '') + ' ' + String(element.parentElement && element.parentElement.className || '');
       var style = getComputedStyle(element);
-      if (/line-through/.test(style.textDecorationLine || '') || /(?:origin|original|market|delete|delPrice|linePrice)/i.test(cls)) return;
-      var text = clean(element.textContent, 120);
+      if (/line-through/.test(style.textDecorationLine || '') || /(?:origin|original|market|delete|delPrice|linePrice|subPrice)/i.test(cls)) return;
+      var text = clean(element.textContent, 180);
       var attributePrice = element.getAttribute('data-price') || element.getAttribute('content') || '';
-      var originalMarkerIndex = text.search(/优惠前|原价|市场价|日常价/);
-      var currentPriceText = originalMarkerIndex >= 0 ? text.slice(0, originalMarkerIndex) : text;
-      var textPrice = parsePrice(currentPriceText);
+      var originalMarkerIndex = text.search(originalPriceMarkerPattern);
+      var textPrice = parseCurrentPrice(text);
       // 活动区域只剩“优惠前/原价”数字时，不能把划线价当成当前SKU成交价。
       if (originalMarkerIndex >= 0 && textPrice == null) return;
-      var value = textPrice || parsePrice(attributePrice);
-      if (value == null) return;
+      var value = textPrice != null ? textPrice : parsePrice(attributePrice);
+      if (value == null || !Number.isFinite(value) || value <= 0) return;
+      var priceLabel = findPromotionPriceLabel(element, text);
+      var priceKind = priceLabel ? 'promotion' : 'base';
       var rect = element.getBoundingClientRect();
-      var isGeneric = selectorIndex >= priceSelectors.length - 2;
-      var numericParts = text.replace(/,/g, '').match(/\\d+(?:\\.\\d{1,2})?/g) || [];
-      if (isGeneric && (text.length > 45 || numericParts.length > 2 || rect.height > 100)) return;
-      var score = (priceSelectors.length - selectorIndex) * 18 + Math.min(parseFloat(style.fontSize || '0'), 42) * 2;
+      var numericParts = currentPricePart(text).match(/\\d+(?:\\.\\d{1,2})?/g) || [];
+      if (fallback && (!/[¥￥]/.test(text) && !currentPriceLabelPattern.test(text))) return;
+      if (fallback && (text.length > 120 || numericParts.length > 3 || rect.width > 620 || rect.height > 120)) return;
+      var isGeneric = fallback || selectorIndex >= priceSelectors.length - 2;
+      if (isGeneric && (text.length > 120 || numericParts.length > 3 || rect.height > 120)) return;
+      var score = fallback
+        ? 80 + Math.min(parseFloat(style.fontSize || '0'), 42) * 2
+        : (priceSelectors.length - selectorIndex) * 18 + Math.min(parseFloat(style.fontSize || '0'), 42) * 2;
       if (/priceText|highlightPrice|promotionPrice|salePrice/i.test(cls)) score += 45;
+      if (priceKind === 'promotion') score += 75;
+      else if (currentPriceLabelPattern.test(text)) score += 55;
       if (/[¥￥]/.test(text)) score += 20;
       if (rect.top > 50 && rect.top < 800) score += 15;
       if (rect.left > window.innerWidth * 0.25) score += 10;
@@ -338,22 +406,59 @@ function buildTaobaoSelectedSkuExtractionScript() {
         if (Math.abs(rect.left - skuRect.left) < 420) score += 25;
       }
       priceCandidates.push({
-        value: value, text: text.slice(0, 45), className: cls.slice(0, 90),
-        selector: selector, score: Math.round(score),
+        value: value, text: text.slice(0, 60), className: cls.slice(0, 90),
+        selector: selector, score: Math.round(score), kind: priceKind, label: priceLabel,
         top: Math.round(rect.top), left: Math.round(rect.left)
       });
-      if (score > bestScore) { bestScore = score; bestPrice = value; }
+      if (score > bestScore) {
+        bestScore = score;
+        bestPrice = value;
+        bestPriceKind = priceKind;
+        bestPriceLabel = priceLabel;
+      }
+      if (priceKind === 'promotion' && score > bestPromotionScore) {
+        bestPromotionScore = score;
+        bestPromotionPrice = value;
+        bestPromotionLabel = priceLabel;
+      }
+  }
+  priceSelectors.forEach(function(selector, selectorIndex) {
+    Array.from(document.querySelectorAll(selector)).forEach(function(element) {
+      registerPriceCandidate(element, selector, selectorIndex, false);
     });
   });
+  if (priceCandidates.length === 0 && !promotionPriceMasked) {
+    var genericPriceNodes = document.querySelectorAll('span,div,p,strong,em,b');
+    for (var genericPriceIndex = 0; genericPriceIndex < genericPriceNodes.length && genericPriceIndex < 7000; genericPriceIndex++) {
+      var genericPriceElement = genericPriceNodes[genericPriceIndex];
+      var genericPriceText = clean(genericPriceElement && genericPriceElement.textContent, 180);
+      if (!genericPriceText || (!/[¥￥]/.test(genericPriceText) && !currentPriceLabelPattern.test(genericPriceText))) continue;
+      registerPriceCandidate(genericPriceElement, 'visible-text-fallback', priceSelectors.length, true);
+    }
+  }
   priceCandidates.sort(function(a, b) { return b.score - a.score; });
+
+  // 页面明确标注的“平台加补后/店铺优惠后”等价格，比 sku2info 内可能仍是原价的字段更可靠。
+  var resolvedPrice = promotionPriceMasked
+    ? null
+    : (bestPromotionPrice != null ? bestPromotionPrice : (skuDataPrice != null ? skuDataPrice : bestPrice));
+  var resolvedPriceSource = promotionPriceMasked
+    ? 'promotion-masked'
+    : (bestPromotionPrice != null ? 'visible-dom' : (skuDataPrice != null ? 'sku-data' : (bestPrice != null ? 'visible-dom' : '')));
+  var resolvedPriceKind = promotionPriceMasked
+    ? 'promotion-masked'
+    : (bestPromotionPrice != null ? 'promotion' : (skuDataPrice != null ? 'sku-data' : bestPriceKind));
+  var resolvedPriceLabel = bestPromotionPrice != null ? bestPromotionLabel : bestPriceLabel;
 
   return {
     skuId: skuId,
     options: options.slice(0, 12),
     shipFrom: shipFrom,
     shippingCandidates: shippingCandidates.slice(0, 4),
-    price: promotionPriceMasked ? null : (skuDataPrice != null ? skuDataPrice : bestPrice),
-    priceSource: promotionPriceMasked ? 'promotion-masked' : (skuDataPrice != null ? 'sku-data' : (bestPrice != null ? 'visible-dom' : '')),
+    price: resolvedPrice,
+    priceSource: resolvedPriceSource,
+    priceKind: resolvedPriceKind,
+    priceLabel: resolvedPriceLabel,
     promotionPriceMasked: promotionPriceMasked,
     priceCandidates: priceCandidates.slice(0, 6)
   };
