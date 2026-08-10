@@ -15,6 +15,8 @@ const ABNORMAL_PATTERN = /拒收|退回|退件|退款|拦截成功|返件/
 const SIGNED_STATUS_PATTERN = /已签收|已妥投|已取件/
 const PICKED_UP_STATUS_PATTERN = /已揽件|已揽收/
 const ABNORMAL_STATUS_PATTERN = /退回|拒收|退款|拦截|返件/
+const NETWORK_ENTRY_STATUS_PATTERN = /运输中|转运中|已发出|已发往/
+const NETWORK_ENTRY_PATTERN = /(?:快件|包裹|邮件).{0,12}(?:已发往|发往|已发出|离开|到达.{0,12}(?:转运|集散|分拨|中转))|(?:转运|集散|分拨|中转)(?:中心|站).{0,12}(?:已发出|发往|运输中)/
 
 let cachedConfig = null
 let cachedAdministrativeLookup = null
@@ -274,6 +276,13 @@ function isPickupEvent(event) {
   return PICKED_UP_STATUS_PATTERN.test(event.statusTag) || PICKED_UP_PATTERN.test(event.context)
 }
 
+function isNetworkEntryEvent(event) {
+  if (/等待揽收|待揽收|仓库已接单|打印完成|商品已经下单|包裹正在打包/.test(event.context)) return false
+  return isPickupEvent(event) ||
+    NETWORK_ENTRY_STATUS_PATTERN.test(event.statusTag) ||
+    NETWORK_ENTRY_PATTERN.test(event.context)
+}
+
 function isSignedEvent(event) {
   return SIGNED_STATUS_PATTERN.test(event.statusTag) || SIGNED_PATTERN.test(event.context)
 }
@@ -322,10 +331,10 @@ function extractTrackingRoute(tracking, referenceDate = new Date()) {
   const withRegion = events
     .map(event => ({ event, region: extractRegionFromTrackingContext(event.context) }))
     .filter(item => item.region.province)
-  const pickupRegion = withRegion.find(item => isPickupEvent(item.event))
+  const networkEntryRegion = withRegion.find(item => isNetworkEntryEvent(item.event))
   const signedRegions = withRegion.filter(item => isSignedEvent(item.event))
   return {
-    origin: pickupRegion?.region || withRegion[0]?.region || null,
+    origin: networkEntryRegion?.region || withRegion[0]?.region || null,
     destination: signedRegions.at(-1)?.region || withRegion.at(-1)?.region || null
   }
 }
@@ -335,17 +344,19 @@ function extractTrackingMilestones(tracking, referenceDate = new Date()) {
   if (events.length < 2) return null
   if (events.some(isAbnormalEvent)) return null
 
-  const pickups = []
+  const networkEntries = []
   const signed = []
   for (const event of events) {
     const time = parseTrackingTime(event.time, referenceDate)
     if (!time) continue
-    if (isPickupEvent(event)) pickups.push(time)
+    if (isNetworkEntryEvent(event)) networkEntries.push(time)
     if (isSignedEvent(event)) signed.push(time)
   }
-  if (!pickups.length || !signed.length) return null
+  if (!networkEntries.length || !signed.length) return null
 
-  const pickedUpAt = new Date(Math.min(...pickups.map(item => item.getTime())))
+  // 部分快递轨迹缺少明确“揽收”节点，但首个“已发往/运输中”已经能证明包裹进入物流网络。
+  // 字段沿用 picked_up_at 以兼容现有数据表，语义统一为“首次有效进入物流网络时间”。
+  const pickedUpAt = new Date(Math.min(...networkEntries.map(item => item.getTime())))
   const signedAt = new Date(Math.max(...signed.map(item => item.getTime())))
   const transitHours = (signedAt.getTime() - pickedUpAt.getTime()) / 3600000
   if (!Number.isFinite(transitHours) || transitHours < 2 || transitHours > 24 * 15) return null
@@ -371,11 +382,30 @@ function isSameDispatchContext(orderedAt, requestedAt) {
   const ordered = normalizeContextDate(orderedAt)
   const requested = normalizeContextDate(requestedAt)
   if (!ordered || !requested) return false
-  const orderedWeekend = ordered.getDay() === 0 || ordered.getDay() === 6
-  const requestedWeekend = requested.getDay() === 0 || requested.getDay() === 6
-  if (orderedWeekend !== requestedWeekend) return false
   const hourDistance = Math.abs(ordered.getHours() - requested.getHours())
   return Math.min(hourDistance, 24 - hourDistance) <= 2
+}
+
+function getDispatchTimeBucket(value, config = loadTimelinessConfig()) {
+  const parsed = normalizeContextDate(value)
+  if (!parsed) return null
+  const configuredHours = Number(config.dispatchTimeBucketHours || 2)
+  const bucketHours = Math.max(1, Math.min(Number.isFinite(configuredHours) ? configuredHours : 2, 6))
+  const startHour = Math.floor(parsed.getHours() / bucketHours) * bucketHours
+  return {
+    startHour,
+    endHour: Math.min(24, startHour + bucketHours),
+    dayType: 'all'
+  }
+}
+
+function isSameCalendarDay(left, right) {
+  const first = normalizeContextDate(left)
+  const second = normalizeContextDate(right)
+  if (!first || !second) return false
+  return first.getFullYear() === second.getFullYear() &&
+    first.getMonth() === second.getMonth() &&
+    first.getDate() === second.getDate()
 }
 
 function getRegionGroup(province, config) {
@@ -458,7 +488,7 @@ function buildSourcePerformance(sourceKey, observations, config, requestedAt) {
   const matches = observations.filter(row => row.source_key === sourceKey)
   if (!matches.length) return null
   const minimums = config.minimumSamples || {}
-  // 不假设统一的商家截单时间，只拿工作日类型相同、下单小时相近的历史订单比较。
+  // 不假设统一的商家截单时间，只拿下单小时相近的历史订单比较。
   const contextualMatches = matches.filter(row => isSameDispatchContext(row.ordered_at, requestedAt))
   const dispatchHours = contextualMatches
     .filter(row => (!row.outcome || row.outcome === 'delivered'))
@@ -487,6 +517,65 @@ function buildSourcePerformance(sourceKey, observations, config, requestedAt) {
   return performance
 }
 
+function buildRegionalDispatchPerformance(origin, observations, config, requestedAt) {
+  if (!origin?.province) return null
+  const requestedBucket = getDispatchTimeBucket(requestedAt, config)
+  if (!requestedBucket) return null
+  const candidates = observations
+    .filter(row => (!row.outcome || row.outcome === 'delivered'))
+    .map(row => {
+      const dispatchHours = Number(row.dispatch_hours)
+      const orderedAt = normalizeContextDate(row.ordered_at)
+      const bucket = getDispatchTimeBucket(orderedAt, config)
+      if (!orderedAt || !bucket || !Number.isFinite(dispatchHours) || dispatchHours < 0 || dispatchHours > 24 * 10) return null
+      if (bucket.startHour !== requestedBucket.startHour) return null
+      const pickedUpAt = normalizeContextDate(row.picked_up_at) || new Date(orderedAt.getTime() + dispatchHours * 3600000)
+      return { row, dispatchHours, orderedAt, pickedUpAt, bucket }
+    })
+    .filter(Boolean)
+
+  const cityMatches = candidates.filter(item =>
+    origin.city && item.row.origin_province === origin.province && item.row.origin_city === origin.city
+  )
+  const provinceMatches = candidates.filter(item => item.row.origin_province === origin.province)
+  const originGroup = getRegionGroup(origin.province, config)
+  const regionMatches = originGroup
+    ? candidates.filter(item => getRegionGroup(item.row.origin_province, config) === originGroup)
+    : []
+  const minimums = config.minimumSamples || {}
+  let matches = []
+  let basis = ''
+  if (cityMatches.length >= Number(minimums.cityDispatchTimeBucket || 5)) {
+    matches = cityMatches
+    basis = 'cityTimeBucket'
+  } else if (provinceMatches.length >= Number(minimums.provinceDispatchTimeBucket || 10)) {
+    matches = provinceMatches
+    basis = 'provinceTimeBucket'
+  } else if (regionMatches.length >= Number(minimums.regionDispatchTimeBucket || 20)) {
+    matches = regionMatches
+    basis = 'regionTimeBucket'
+  }
+  if (!matches.length) return null
+
+  const dispatchHours = matches.map(item => item.dispatchHours)
+  const sameDayCount = matches.filter(item => isSameCalendarDay(item.orderedAt, item.pickedUpAt)).length
+  return {
+    basis,
+    confidence: basis === 'cityTimeBucket' ? 'high' : basis === 'provinceTimeBucket' ? 'medium' : 'low',
+    regionGroup: basis === 'regionTimeBucket' ? originGroup : '',
+    province: basis === 'regionTimeBucket' ? '' : origin.province,
+    city: basis === 'cityTimeBucket' ? origin.city : '',
+    dayType: 'all',
+    startHour: requestedBucket.startHour,
+    endHour: requestedBucket.endHour,
+    sampleCount: matches.length,
+    sameDayCount,
+    sameDayRate: matches.length ? sameDayCount / matches.length : 0,
+    dispatchP50Hours: percentile(dispatchHours, 0.5),
+    dispatchP80Hours: percentile(dispatchHours, 0.8)
+  }
+}
+
 function inferSourceOrigin(sourceKey, observations) {
   if (!sourceKey) return null
   const counts = new Map()
@@ -506,24 +595,36 @@ function inferSourceOrigin(sourceKey, observations) {
   return [...counts.values()].sort((a, b) => b.count - a.count)[0]?.region || null
 }
 
-function applySourcePerformance(baseEstimate, performance, config) {
-  if (!baseEstimate || !performance) return baseEstimate
-  const estimate = { ...baseEstimate, sourcePerformance: performance }
+function applySourcePerformance(baseEstimate, performance, config, regionalDispatchPerformance = null) {
+  if (!baseEstimate) return baseEstimate
+  const estimate = { ...baseEstimate }
+  if (performance) estimate.sourcePerformance = performance
+  if (regionalDispatchPerformance) estimate.regionalDispatchPerformance = regionalDispatchPerformance
   const baselineDispatch = Number(config.defaultDispatchHours || 24)
+  const dispatchPerformance = Number.isFinite(performance?.dispatchP80Hours)
+    ? performance
+    : Number.isFinite(regionalDispatchPerformance?.dispatchP80Hours)
+      ? regionalDispatchPerformance
+      : null
 
-  if (Number.isFinite(performance.dispatchP80Hours)) {
+  if (dispatchPerformance) {
+    estimate.dispatchBasis = dispatchPerformance === performance ? 'source' : regionalDispatchPerformance.basis
     if (Number.isFinite(estimate.routeP80Hours)) {
-      estimate.scoreHours = estimate.routeP80Hours + performance.dispatchP80Hours
-      estimate.minDays = Math.max(1, Math.floor((estimate.routeP50Hours + performance.dispatchP50Hours) / 24))
+      estimate.scoreHours = estimate.routeP80Hours + dispatchPerformance.dispatchP80Hours
+      estimate.minDays = Math.max(1, Math.floor((estimate.routeP50Hours + dispatchPerformance.dispatchP50Hours) / 24))
       estimate.maxDays = Math.max(estimate.minDays, Math.ceil(estimate.scoreHours / 24))
     } else {
-      const dispatchAdjustment = performance.dispatchP80Hours - baselineDispatch
+      const dispatchAdjustment = dispatchPerformance.dispatchP80Hours - baselineDispatch
       estimate.scoreHours = Math.max(24, estimate.scoreHours + dispatchAdjustment)
+      const fallbackRouteMinHours = Math.max(0, estimate.minDays * 24 - baselineDispatch)
+      estimate.minDays = Math.max(1, Math.floor((fallbackRouteMinHours + dispatchPerformance.dispatchP50Hours) / 24))
       estimate.maxDays = Math.max(estimate.minDays, Math.ceil(estimate.scoreHours / 24))
     }
+  } else {
+    estimate.dispatchBasis = 'default'
   }
 
-  if (performance.dispatchRisk === 'high') {
+  if (performance?.dispatchRisk === 'high') {
     const riskPenalty = performance.unshippedRate * Number(config.riskPenaltyHours || 48)
     estimate.scoreHours += riskPenalty
     estimate.maxDays = Math.max(estimate.maxDays, Math.ceil(estimate.scoreHours / 24))
@@ -542,10 +643,12 @@ function recommendSources({ destination, sources, observations = [], config = lo
     const origin = explicitOrigin.province ? explicitOrigin : (inferSourceOrigin(sourceKey, observations) || explicitOrigin)
     const historyEstimate = buildHistoryEstimate(origin, destinationRegion, observations, config)
     const sourcePerformance = buildSourcePerformance(sourceKey, observations, config, requestedAt)
+    const regionalDispatchPerformance = buildRegionalDispatchPerformance(origin, observations, config, requestedAt)
     const estimate = applySourcePerformance(
       historyEstimate || getFallbackEstimate(origin, destinationRegion, config),
       sourcePerformance,
-      config
+      config,
+      regionalDispatchPerformance
     )
     return {
       id: source.id ?? String(index),
@@ -591,14 +694,14 @@ async function recordTimelinessObservation(pool, order, tracking, options = {}) 
 
   const milestones = extractTrackingMilestones(tracking, referenceDate)
   const trackingEvents = normalizeTrackingEntries(tracking)
-  const hasPickup = trackingEvents.some(isPickupEvent)
+  const hasNetworkEntry = trackingEvents.some(isNetworkEntryEvent)
   const orderAgeHours = referenceDate && !Number.isNaN(referenceDate.getTime())
     ? (Date.now() - referenceDate.getTime()) / 3600000
     : 0
   const status = String(options.status || order.status || '')
   let outcome = 'delivered'
   if (!milestones) {
-    if (hasPickup) return { recorded: false, reason: 'waiting_for_delivery' }
+    if (hasNetworkEntry) return { recorded: false, reason: 'waiting_for_delivery' }
     if (options.confirmedUnshippedFailure === true) outcome = 'unshipped_failed'
     else if (
       options.verifiedByPlatformSync === true &&
@@ -715,11 +818,19 @@ async function recommendSourcesFromDatabase(pool, payload) {
   const originProvinces = [...new Set(sources.map(source =>
     normalizeRegion(source.ship_from || source.shipFrom).province
   ).filter(Boolean))]
+  // 大区时段回退需要同时读取同大区其它省份的已签收样本；路线P80仍会在内存中按真实起终点过滤。
+  const queryOriginProvinces = [...new Set(originProvinces.flatMap(province => {
+    const group = getRegionGroup(province, config)
+    return [province, ...(group ? (config.regionGroups?.[group] || []) : [])]
+  }))]
+  const requestedBucket = getDispatchTimeBucket(payload?.requested_at || new Date(), config)
   const filters = []
   const params = []
-  if (destination.province && originProvinces.length) {
-    filters.push(`(outcome='delivered' AND destination_province=? AND origin_province IN (${originProvinces.map(() => '?').join(',')}))`)
-    params.push(destination.province, ...originProvinces)
+  if (queryOriginProvinces.length) {
+    const timeBucketSql = requestedBucket ? ' AND HOUR(ordered_at)>=? AND HOUR(ordered_at)<?' : ''
+    filters.push(`(outcome='delivered' AND origin_province IN (${queryOriginProvinces.map(() => '?').join(',')})${timeBucketSql})`)
+    params.push(...queryOriginProvinces)
+    if (requestedBucket) params.push(requestedBucket.startHour, requestedBucket.endHour)
   }
   if (sourceKeys.length) {
     filters.push(`source_key IN (${sourceKeys.map(() => '?').join(',')})`)
@@ -729,7 +840,7 @@ async function recommendSourcesFromDatabase(pool, payload) {
   const [observations] = await pool.execute(
     `SELECT source_key, outcome, origin_province, origin_city, origin_county,
             destination_province, destination_city, destination_county,
-            ordered_at, dispatch_hours, transit_hours, total_hours
+            ordered_at, picked_up_at, dispatch_hours, transit_hours, total_hours
        FROM shipping_timeliness_observations
       WHERE (
         signed_at >= DATE_SUB(NOW(), INTERVAL ${lookbackDays} DAY)
@@ -758,6 +869,8 @@ module.exports = {
   extractTrackingMilestones,
   percentile,
   isSameDispatchContext,
+  getDispatchTimeBucket,
+  buildRegionalDispatchPerformance,
   getFallbackEstimate,
   recommendSources,
   recordTimelinessObservation,

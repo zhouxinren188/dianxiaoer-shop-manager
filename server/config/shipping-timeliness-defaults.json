@@ -1,12 +1,16 @@
 {
-  "version": 1,
+  "version": 2,
   "lookbackDays": 90,
   "minimumSamples": {
     "cityRoute": 3,
     "provinceRoute": 5,
-    "sourceDispatch": 2,
+    "cityDispatchTimeBucket": 5,
+    "provinceDispatchTimeBucket": 10,
+    "regionDispatchTimeBucket": 20,
+    "sourceDispatch": 5,
     "sourceRisk": 5
   },
+  "dispatchTimeBucketHours": 2,
   "defaultDispatchHours": 24,
   "unshippedOverdueHours": 72,
   "riskPenaltyHours": 48,

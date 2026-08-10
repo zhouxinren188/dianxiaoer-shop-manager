@@ -664,16 +664,20 @@
                             class="source-option-eta"
                             :title="sourceTimelinessTitle(getSourceTimeliness(src, idx))"
                           >预计 {{ formatTimelinessDays(getSourceTimeliness(src, idx).estimate) }}</span>
-                          <span v-if="getSourceTimeliness(src, idx)?.recommended" class="source-option-recommended">推荐</span>
                           <span v-if="getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
                         </div>
-                        <div class="source-option-actions">
-                          <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
-                          <el-button link type="danger" size="small" @click.stop="handleDeleteSource(src, idx)"><el-icon><Delete /></el-icon></el-button>
+                        <div class="source-option-recommendation">
+                          <span v-if="getSourceTimeliness(src, idx)?.priceLowest && !getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-price-lowest"><el-icon><PriceTag /></el-icon>价格最低</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.bestTimeliness && !getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-best-timeliness"><el-icon><Lightning /></el-icon>最优时效</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-purchase-preferred"><el-icon><StarFilled /></el-icon>采购优选</span>
                         </div>
                       </div>
                       <div class="source-option-link-row">
                         <span class="source-option-link">{{ displaySourceUrl(src.purchase_link) }}</span>
+                        <div class="source-option-actions">
+                          <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
+                          <el-button link type="danger" size="small" @click.stop="handleDeleteSource(src, idx)"><el-icon><Delete /></el-icon></el-button>
+                        </div>
                         <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src)">查看商品</el-button>
                       </div>
                     </div>
@@ -1240,7 +1244,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, StarFilled, Lightning, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
 import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, fetchSalesOrderSmsContext, sendSalesOrderSms, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
 import { FRAUD_WATERMARK_URL, SUSPECT_WATERMARK_URL } from '@/assets/watermark'
@@ -2686,14 +2690,21 @@ function sourceTimelinessTitle(result) {
   const estimate = result?.estimate
   if (!estimate) return ''
   const sourcePerformance = estimate.sourcePerformance
+  const regionalDispatch = estimate.regionalDispatchPerformance
   const sourceText = sourcePerformance
     ? `；该货源发货样本 ${sourcePerformance.dispatchSampleCount || 0} 单` +
       (sourcePerformance.unshippedCount ? `，超时未发/未发取消 ${sourcePerformance.unshippedCount} 单` : '')
     : ''
+  const regionalText = regionalDispatch && estimate.dispatchBasis !== 'source'
+    ? `；按${regionalDispatch.regionGroup || (regionalDispatch.city ? `${regionalDispatch.province}${regionalDispatch.city}` : regionalDispatch.province)}` +
+      ` ${String(regionalDispatch.startHour).padStart(2, '0')}:00-${String(regionalDispatch.endHour).padStart(2, '0')}:00` +
+      ` 样本 ${regionalDispatch.sampleCount || 0} 单计算发货准备时间` +
+      `，当天进入物流 ${(Number(regionalDispatch.sameDayRate || 0) * 100).toFixed(0)}%`
+    : ''
   if (estimate.confidence === 'high' || estimate.confidence === 'medium') {
-    return `根据近90天 ${estimate.sampleCount || 0} 个同路线已签收订单计算${sourceText}`
+    return `根据近90天 ${estimate.sampleCount || 0} 个同路线已签收订单计算${regionalText}${sourceText}`
   }
-  return `同路线样本不足，使用服务器默认时效配置估算${sourceText}`
+  return `同路线样本不足，使用服务器默认时效配置估算${regionalText}${sourceText}`
 }
 
 async function refreshSourceTimeliness() {
@@ -2729,20 +2740,70 @@ async function refreshSourceTimeliness() {
     const sourcePriceMap = new Map(sources.map(source => [String(source.id), Number(source.purchase_price || 0)]))
     const resultItems = (result?.results || []).map(item => ({
       ...item,
-      purchase_price: sourcePriceMap.get(String(item.id)) || null
+      purchase_price: sourcePriceMap.get(String(item.id)) || null,
+      priceLowest: false,
+      bestTimeliness: false,
+      purchasePreferred: false,
+      recommended: false
     }))
+
+    const pricedItems = resultItems.filter(item => Number(item.purchase_price) > 0)
+    if (pricedItems.length >= 2) {
+      const bestPrice = Math.min(...pricedItems.map(item => Number(item.purchase_price)))
+      for (const item of pricedItems) {
+        item.priceLowest = Math.abs(Number(item.purchase_price) - bestPrice) < 0.001
+      }
+    }
+
     const comparable = resultItems.filter(item => item.estimate && Number.isFinite(Number(item.estimate.scoreHours)))
     if (comparable.length >= 2) {
-      const bestScore = Math.min(...comparable.map(item => Number(item.estimate.scoreHours)))
-      const fastest = comparable.filter(item => Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01)
-      const pricedFastest = fastest.filter(item => Number(item.purchase_price) > 0)
-      if (pricedFastest.length >= 2) {
-        const bestPrice = Math.min(...pricedFastest.map(item => Number(item.purchase_price)))
-        for (const item of comparable) {
-          item.recommended = fastest.includes(item) && Math.abs(Number(item.purchase_price) - bestPrice) < 0.001
+      const eligible = comparable.filter(item => item.estimate.dispatchRisk !== 'high')
+      if (eligible.length > 0) {
+        const bestScore = Math.min(...eligible.map(item => Number(item.estimate.scoreHours)))
+        for (const item of eligible) {
+          item.bestTimeliness = Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01
         }
       }
     }
+
+    for (const item of resultItems) {
+      item.purchasePreferred = item.priceLowest && item.bestTimeliness
+      item.recommended = item.purchasePreferred
+    }
+    console.warn('[采购时效推荐][诊断]', JSON.stringify({
+      destination: result?.destination ? {
+        province: result.destination.province || '',
+        city: result.destination.city || '',
+        county: result.destination.county || ''
+      } : null,
+      sources: resultItems.map(item => ({
+        id: item.id,
+        shipFrom: item.ship_from || '',
+        origin: item.origin ? {
+          province: item.origin.province || '',
+          city: item.origin.city || '',
+          county: item.origin.county || ''
+        } : null,
+        purchasePrice: item.purchase_price,
+        priceLowest: !!item.priceLowest,
+        bestTimeliness: !!item.bestTimeliness,
+        purchasePreferred: !!item.purchasePreferred,
+        estimate: item.estimate ? {
+          minDays: item.estimate.minDays,
+          maxDays: item.estimate.maxDays,
+          scoreHours: item.estimate.scoreHours,
+          basis: item.estimate.basis,
+          confidence: item.estimate.confidence,
+          sampleCount: item.estimate.sampleCount,
+          routeP50Hours: item.estimate.routeP50Hours,
+          routeP80Hours: item.estimate.routeP80Hours,
+          dispatchBasis: item.estimate.dispatchBasis || 'default',
+          regionalDispatchPerformance: item.estimate.regionalDispatchPerformance || null,
+          sourcePerformance: item.estimate.sourcePerformance || null,
+          dispatchRisk: item.estimate.dispatchRisk || ''
+        } : null
+      }))
+    }))
     const nextMap = {}
     for (const item of resultItems) nextMap[String(item.id)] = item
     sourceTimelinessMap.value = nextMap
@@ -6306,10 +6367,19 @@ onUnmounted(() => {
 
 .source-option-left {
   display: flex;
+  flex: 1;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.source-option-recommendation {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: 10px;
 }
 
 .source-option-actions {
@@ -6339,23 +6409,43 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.source-option-recommended {
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: linear-gradient(135deg, #ff8a34, #ff5a1f);
-  color: #fff;
+.source-option-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
   line-height: 18px;
   white-space: nowrap;
 }
 
+.source-option-badge .el-icon {
+  font-size: 14px;
+}
+
+.source-option-price-lowest {
+  color: #319447;
+  background: #f3fff5;
+  border: 1px solid #91d5a0;
+}
+
+.source-option-best-timeliness {
+  color: #2f6ee5;
+  background: #f4f8ff;
+  border: 1px solid #9bbcff;
+}
+
+.source-option-purchase-preferred {
+  color: #f08a00;
+  background: #fffaf0;
+  border: 1px solid #f4a11a;
+  box-shadow: 0 2px 5px rgba(240, 138, 0, 0.12);
+}
+
 .source-option-eta {
-  color: #8a5a27;
-  background: #fff7e8;
-  border: 1px solid #f6d9ad;
-  border-radius: 4px;
-  padding: 1px 6px;
+  color: #4b5563;
   font-size: 12px;
   line-height: 18px;
   white-space: nowrap;
