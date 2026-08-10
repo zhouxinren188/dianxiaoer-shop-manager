@@ -632,6 +632,7 @@ async function initDB() {
         UNIQUE KEY uk_purchase_order (purchase_order_id),
         KEY idx_route_city (origin_province, origin_city, destination_province, destination_city),
         KEY idx_route_province (origin_province, destination_province),
+        KEY idx_origin_dispatch (origin_province, origin_city, ordered_at),
         KEY idx_source_outcome (source_key, outcome),
         KEY idx_signed_at (signed_at),
         KEY idx_owner (owner_id)
@@ -651,6 +652,9 @@ async function initDB() {
     } catch(e) { /* 已兼容可空字段 */ }
     try {
       await connection.execute('CREATE INDEX idx_source_outcome ON shipping_timeliness_observations(source_key, outcome)')
+    } catch(e) { /* 索引已存在 */ }
+    try {
+      await connection.execute('CREATE INDEX idx_origin_dispatch ON shipping_timeliness_observations(origin_province, origin_city, ordered_at)')
     } catch(e) { /* 索引已存在 */ }
 
     // ======== 采购单售后状态字段 ========
