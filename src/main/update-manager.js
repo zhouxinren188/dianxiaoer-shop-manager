@@ -2,6 +2,7 @@ const { app, ipcMain } = require('electron')
 const http = require('http')
 const { configureUpdater, getAutoUpdater } = require('./updater')
 const { getCurrentVersion, clearHotUpdate, downloadAndApplyUpdate } = require('./hot-updater')
+const runtimeLog = require('./runtime-logger')
 
 const UPDATE_SERVER = 'http://150.158.54.108:3001'
 
@@ -11,6 +12,8 @@ let currentUpdateType = null // 'full' | 'hot' | null
 let updateInfo = null // 服务端返回的更新信息
 let retryCount = 0
 const MAX_RETRY = 3
+let checkPromise = null
+let downloadPromise = null
 
 // 发送事件到渲染进程
 function send(channel, data) {
@@ -45,7 +48,19 @@ function checkServerForUpdate() {
 }
 
 // 检查更新（manual=true 时为手动触发，失败会通知前端）
-async function checkForUpdates(manual = false) {
+function checkForUpdates(manual = false) {
+  if (checkPromise) {
+    runtimeLog.writeLog('UPDATER', `reuse_check pid=${process.pid} manual=${manual}`)
+    return checkPromise
+  }
+
+  checkPromise = performUpdateCheck(manual).finally(() => {
+    checkPromise = null
+  })
+  return checkPromise
+}
+
+async function performUpdateCheck(manual = false) {
   if (state === 'downloading' || state === 'ready') return // 下载中或已就绪不重复检查
 
   // 从 error 状态恢复，允许重试
@@ -95,20 +110,37 @@ async function checkForUpdates(manual = false) {
 
 // 开始下载
 async function startDownload() {
+  if (downloadPromise) {
+    runtimeLog.writeLog('UPDATER', `reuse_download pid=${process.pid} type=${currentUpdateType || 'unknown'}`)
+    return downloadPromise
+  }
   if (state === 'downloading' || !updateInfo || !currentUpdateType) return
 
   state = 'downloading'
   retryCount = 0
+  const downloadType = currentUpdateType
+  runtimeLog.writeLog(
+    'UPDATER',
+    `download_start pid=${process.pid} type=${downloadType} version=${updateInfo.version || 'unknown'}`
+  )
 
-  if (currentUpdateType === 'full') {
-    startFullDownload()
-  } else if (currentUpdateType === 'hot') {
-    startHotDownload()
-  }
+  downloadPromise = (downloadType === 'full' ? startFullDownload() : startHotDownload())
+    .catch((err) => {
+      console.error('[UpdateManager] download task failed:', err.message)
+      if (state === 'downloading') {
+        state = 'error'
+        send('um-update-error', { message: formatFullUpdateError(err) })
+      }
+    })
+    .finally(() => {
+      downloadPromise = null
+    })
+
+  return downloadPromise
 }
 
 // 全量更新下载（通过 electron-updater）
-function startFullDownload() {
+async function startFullDownload() {
   let autoUpdater
   try {
     autoUpdater = getAutoUpdater()
@@ -120,7 +152,7 @@ function startFullDownload() {
 
   // 先触发 electron-updater 的 checkForUpdates，它会验证 latest.yml
   // 然后自动触发 download-progress 和 update-downloaded 事件
-  autoUpdater.checkForUpdates().then((result) => {
+  return autoUpdater.checkForUpdates().then((result) => {
     if (result && result.updateInfo) {
       const fullVersion = result.updateInfo.version
       const appVersion = app.getVersion()
@@ -132,10 +164,10 @@ function startFullDownload() {
         return
       }
       console.log('[UpdateManager] electron-updater 确认版本:', fullVersion)
-      autoUpdater.downloadUpdate().catch((err) => {
+      return autoUpdater.downloadUpdate().catch((err) => {
         console.error('[UpdateManager] 全量下载失败:', err.message)
         state = 'error'
-        send('um-update-error', { message: '全量下载失败: ' + err.message })
+        send('um-update-error', { message: formatFullUpdateError(err) })
       })
     } else {
       state = 'error'
@@ -149,6 +181,18 @@ function startFullDownload() {
 }
 
 // 热更新下载
+function isMissingUpdaterTempFileError(error) {
+  const message = String(error?.message || error || '')
+  return /ENOENT/i.test(message) && /rename/i.test(message) && /temp-.*\.exe/i.test(message)
+}
+
+function formatFullUpdateError(error) {
+  if (isMissingUpdaterTempFileError(error)) {
+    return '更新安装包落盘失败，可能有另一个店小二窗口同时更新。请关闭其他正式版窗口后重试'
+  }
+  return '全量下载失败: ' + String(error?.message || error || '未知错误')
+}
+
 async function startHotDownload() {
   const downloadUrl = `${UPDATE_SERVER}/api/update/download`
   const expectedSha256 = updateInfo.sha256 || ''
@@ -274,6 +318,7 @@ function initUpdateManager(win) {
     })
 
     autoUpdater.on('update-downloaded', (info) => {
+      runtimeLog.writeLog('UPDATER', `download_ready pid=${process.pid} type=full version=${info.version}`)
       console.log('[UpdateManager] 全量更新下载完成:', info.version)
       state = 'ready'
       send('um-update-ready', { type: 'full' })
@@ -288,10 +333,14 @@ function initUpdateManager(win) {
     })
 
     autoUpdater.on('error', (err) => {
+      runtimeLog.writeLog(
+        'UPDATER',
+        `download_error pid=${process.pid} state=${state} missing_temp=${isMissingUpdaterTempFileError(err)} message=${String(err.message || err).replace(/[\r\n\t]+/g, ' ').slice(0, 800)}`
+      )
       console.error('[UpdateManager] electron-updater 错误:', err.message)
       if (state === 'downloading') {
         state = 'error'
-        send('um-update-error', { message: '全量更新失败: ' + err.message })
+        send('um-update-error', { message: formatFullUpdateError(err) })
       }
     })
   }

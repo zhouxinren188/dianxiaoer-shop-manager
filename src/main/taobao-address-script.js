@@ -58,7 +58,8 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   )
 
   return `
-(async function() {
+(function() {
+  (async function() {
   if (window.__tbAddrV2Running) return 'already_running';
   window.__tbAddrV2Running = true;
   window.__tbAddrResult = null;
@@ -909,12 +910,17 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   }
 
   return finish('save_unconfirmed', 'no_success_evidence');
-})().catch(function(error) {
-  window.__tbAddrResult = 'script_error';
-  window.__tbAddrResultDetail = error && error.message ? error.message : String(error);
-  console.log('[AddressAutoFill][TB] RESULT script_error detail=' + String(window.__tbAddrResultDetail || 'unknown').replace(/\s+/g, ' ').slice(0, 240));
-  return 'script_error';
-})
+  })().catch(function(error) {
+    window.__tbAddrResult = 'script_error';
+    window.__tbAddrResultDetail = error && error.message ? error.message : String(error);
+    window.__tbAddrV2Running = false;
+    console.log('[AddressAutoFill][TB] RESULT script_error detail=' + String(window.__tbAddrResultDetail || 'unknown').replace(/\s+/g, ' ').slice(0, 240));
+  });
+  // 不把长时间运行的异步任务作为 executeJavaScript 的返回值。
+  // 淘宝 SPA 在任务执行期间重建上下文时，Electron 否则会把正常的页面切换
+  // 误报为整段脚本执行失败；真实结果继续通过 __tbAddrResult 轮询获取。
+  return 'injected';
+})()
 `
 }
 

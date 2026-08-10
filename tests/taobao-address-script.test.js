@@ -21,6 +21,11 @@ describe('淘宝地址管理脚本 v2', () => {
 
     expect(() => new vm.Script(script)).not.toThrow()
     expect(script).toContain('RESULT script_error detail=')
+    expect(script).toContain("return 'injected';")
+    expect(script).toContain('真实结果继续通过 __tbAddrResult 轮询获取')
+    expect(new vm.Script(script).runInNewContext({
+      window: { __tbAddrV2Running: true }
+    })).toBe('injected')
   })
 
   it('页面导航导致执行上下文销毁时判定为可恢复注入中断', () => {

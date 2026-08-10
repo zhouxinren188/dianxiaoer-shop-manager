@@ -2,6 +2,7 @@ const { BrowserWindow, ipcMain, session, webFrameMain, app } = require('electron
 const path = require('path')
 const http = require('http')
 const https = require('https')
+const vm = require('vm')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
@@ -4159,6 +4160,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   let taobaoAddressInjectInFlight = false
   let taobaoAddressReinjectRequested = false
   let taobaoAddressInjectAttempt = 0
+  let taobaoAddressScriptStarted = false
 
   function sendAddressSetupDone(extra = {}) {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4172,7 +4174,16 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   }
 
   // 转发后台窗口的console.log + 检测地址操作成功信号
-  addrWin.webContents.on('console-message', (event, level, message) => {
+  addrWin.webContents.on('console-message', (event, levelOrDetails, legacyMessage, legacyLine, legacySourceId) => {
+    const consoleDetails = levelOrDetails && typeof levelOrDetails === 'object'
+      ? levelOrDetails
+      : {
+          level: levelOrDetails,
+          message: legacyMessage,
+          lineNumber: legacyLine,
+          sourceId: legacySourceId
+        }
+    const message = String(consoleDetails.message || '')
     if (message.includes('[AddressAutoFill]') || message.includes('[PurchaseCapture]')) {
       console.log(`[AddrSetupWin] ${message}`)
     }
@@ -4180,6 +4191,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     if (message.includes('[AddressAutoFill][TB]')) {
       const stageMatch = message.match(/\[AddressAutoFill\]\[TB\]\s+([A-Z_]+)/)
       addressLastStage = stageMatch?.[1] || addressLastStage
+      if (addressLastStage === 'START') taobaoAddressScriptStarted = true
       addressProgressDeadline = Math.min(
         addressStartedAt + addressAbsoluteTimeoutMs,
         Math.max(addressProgressDeadline, Date.now() + addressProgressGraceMs)
@@ -4240,6 +4252,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     taobaoAddressInjectInFlight = true
     taobaoAddressReinjectRequested = false
     const attempt = ++taobaoAddressInjectAttempt
+    taobaoAddressScriptStarted = false
     try {
       const protectedAddresses = getActiveTaobaoProtectedAddresses(purchaseInfo.accountId)
       const script = buildTaobaoAddressManagerScript(
@@ -4248,7 +4261,26 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
         parsedAddr,
         { protectedAddresses }
       )
-      runtimeLog.writeLog('AddrSetupWin', `淘宝地址清理保护队列: count=${protectedAddresses.length}, injectAttempt=${attempt}`)
+      try {
+        // 校验的是本次真实地址数据生成出的完整脚本，能把数据转义/拼接问题
+        // 与淘宝页面执行上下文问题明确区分开。
+        new vm.Script(script)
+      } catch (syntaxError) {
+        lastAddressIssue = 'script_error'
+        runtimeLog.writeLog(
+          'AddrSetupWin',
+          `淘宝地址脚本语法校验失败: attempt=${attempt}, error=${String(syntaxError?.message || syntaxError).replace(/\s+/g, ' ').substring(0, 400)}`
+        )
+        return
+      }
+
+      const probe = await addrWin.webContents.executeJavaScript(
+        `'ready=' + document.readyState + ',host=' + location.host + ',path=' + location.pathname`
+      )
+      runtimeLog.writeLog(
+        'AddrSetupWin',
+        `淘宝地址注入前探针: attempt=${attempt}, ${String(probe || 'empty').substring(0, 180)}, scriptBytes=${Buffer.byteLength(script, 'utf8')}, protected=${protectedAddresses.length}`
+      )
       const result = await addrWin.webContents.executeJavaScript(script)
       runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行完成: attempt=${attempt}, result=${String(result || 'none').substring(0, 80)}`)
       if (result === 'script_error' && !addrWin.isDestroyed()) {
@@ -4258,10 +4290,16 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       }
     } catch (err) {
       const errorText = String(err?.message || err || 'unknown').replace(/\s+/g, ' ').substring(0, 400)
-      if (isTransientTaobaoAddressInjectionError(err)) {
-        // 页面切换使旧执行上下文失效不是脚本业务失败，等待新文档稳定后补注入。
+      const canRetry = taobaoAddressInjectAttempt < 3 &&
+        (isTransientTaobaoAddressInjectionError(err) || !taobaoAddressScriptStarted)
+      if (canRetry) {
+        // 语法已经在主进程校验通过；页面探针/脚本仍在 START 前失败，只可能是
+        // SPA 正在替换执行上下文。最多补注入三次，避免业务脚本失败时盲目重试。
         taobaoAddressReinjectRequested = true
-        runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本注入被页面切换中断: attempt=${attempt}, error=${errorText}`)
+        runtimeLog.writeLog(
+          'AddrSetupWin',
+          `淘宝地址脚本注入被页面切换中断: attempt=${attempt}, started=${taobaoAddressScriptStarted}, retry=${taobaoAddressInjectAttempt < 3}, error=${errorText}`
+        )
       } else {
         lastAddressIssue = 'script_error'
         runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行失败: attempt=${attempt}, error=${errorText}`)

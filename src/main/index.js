@@ -33,6 +33,23 @@ const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 
+// Packaged builds share the same electron-updater cache directory. Running two
+// packaged instances at once can make one updater delete the other updater's
+// temp installer immediately before it is renamed into place. Keep development
+// mode independent so a developer can still run it alongside the installed app.
+const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else if (app.isPackaged) {
+  app.on('second-instance', () => {
+    const existingWindow = BrowserWindow.getAllWindows()[0]
+    if (!existingWindow || existingWindow.isDestroyed()) return
+    if (existingWindow.isMinimized()) existingWindow.restore()
+    existingWindow.show()
+    existingWindow.focus()
+  })
+}
+
 // 退出确认标志 — 防止 close 事件循环
 let isQuitting = false
 
@@ -949,6 +966,8 @@ registerPacketCaptureIpc()
 registerSupplyOrderIpc()
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return
+
   // ★ 启动日志：写入桌面运行日志文件，方便用户版问题排查
   // 使用 app.getVersion()（package.json版本号），不用 getCurrentVersion()（可能被旧热更新覆盖）
   runtimeLog.logStartup(app.getVersion())
@@ -1056,6 +1075,10 @@ app.on('window-all-closed', () => {
 // 应用退出前刷盘所有 persist: 分区数据（关键！防止重启后cookie丢失）
 // persist: 分区的数据存储在磁盘，但 Chromium 会缓冲写入，如果不主动 flush，退出时可能丢失
 app.on('before-quit', () => {
+  // app.quit()/electron-updater.quitAndInstall() emits before-quit before
+  // BrowserWindow's close event. Mark this as an intentional shutdown so the
+  // normal user-facing close confirmation cannot block updater installation.
+  isQuitting = true
   try {
     // 扫描所有 partition session 并 flush（Electron 的 session API 不提供列举方法，
     // 所以 flush defaultSession + 已知的 partition pattern）
