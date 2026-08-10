@@ -7,7 +7,8 @@ const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
 const {
   buildTaobaoAddressManagerScript,
-  TAOBAO_TERMINAL_FAILURE_RESULTS
+  TAOBAO_TERMINAL_FAILURE_RESULTS,
+  isTransientTaobaoAddressInjectionError
 } = require('./taobao-address-script')
 const {
   decodeTaobaoSkuSourceUrl,
@@ -4154,6 +4155,10 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
   let addrDone = false
   let lastAddressIssue = ''
+  let taobaoAddressInjectTimer = null
+  let taobaoAddressInjectInFlight = false
+  let taobaoAddressReinjectRequested = false
+  let taobaoAddressInjectAttempt = 0
 
   function sendAddressSetupDone(extra = {}) {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4218,6 +4223,59 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   let last1688ManagerInjectTime = 0  // ★ 防止页面刷新后立即重复注入1688管理脚本
   let injected1688Count = 0           // ★ 限制1688管理脚本最多注入2次，防止循环
 
+  function scheduleTaobaoAddressInjection() {
+    if (!parsedAddr || addrDone || addrWin.isDestroyed()) return
+    taobaoAddressReinjectRequested = true
+    if (taobaoAddressInjectTimer) clearTimeout(taobaoAddressInjectTimer)
+    taobaoAddressInjectTimer = setTimeout(runTaobaoAddressInjection, 650)
+  }
+
+  async function runTaobaoAddressInjection() {
+    taobaoAddressInjectTimer = null
+    if (addrDone || addrWin.isDestroyed()) return
+    // SPA 的 did-navigate / did-navigate-in-page / dom-ready 可能连续到达。
+    // 同一时刻只允许一份长任务脚本运行；运行期间的新导航在 finally 中合并补注入。
+    if (taobaoAddressInjectInFlight) return
+
+    taobaoAddressInjectInFlight = true
+    taobaoAddressReinjectRequested = false
+    const attempt = ++taobaoAddressInjectAttempt
+    try {
+      const protectedAddresses = getActiveTaobaoProtectedAddresses(purchaseInfo.accountId)
+      const script = buildTaobaoAddressManagerScript(
+        purchaseInfo.shippingName,
+        purchaseInfo.shippingPhone,
+        parsedAddr,
+        { protectedAddresses }
+      )
+      runtimeLog.writeLog('AddrSetupWin', `淘宝地址清理保护队列: count=${protectedAddresses.length}, injectAttempt=${attempt}`)
+      const result = await addrWin.webContents.executeJavaScript(script)
+      runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行完成: attempt=${attempt}, result=${String(result || 'none').substring(0, 80)}`)
+      if (result === 'script_error' && !addrWin.isDestroyed()) {
+        const detail = await addrWin.webContents.executeJavaScript('window.__tbAddrResultDetail || "unknown"').catch(() => 'unknown')
+        lastAddressIssue = 'script_error'
+        runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本内部异常: attempt=${attempt}, detail=${String(detail).replace(/\s+/g, ' ').substring(0, 400)}`)
+      }
+    } catch (err) {
+      const errorText = String(err?.message || err || 'unknown').replace(/\s+/g, ' ').substring(0, 400)
+      if (isTransientTaobaoAddressInjectionError(err)) {
+        // 页面切换使旧执行上下文失效不是脚本业务失败，等待新文档稳定后补注入。
+        taobaoAddressReinjectRequested = true
+        runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本注入被页面切换中断: attempt=${attempt}, error=${errorText}`)
+      } else {
+        lastAddressIssue = 'script_error'
+        runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行失败: attempt=${attempt}, error=${errorText}`)
+        console.error(`[AddrSetupWin] Taobao address script failed: ${errorText}`)
+      }
+    } finally {
+      taobaoAddressInjectInFlight = false
+      if (taobaoAddressReinjectRequested && !addrDone && !addrWin.isDestroyed()) {
+        if (taobaoAddressInjectTimer) clearTimeout(taobaoAddressInjectTimer)
+        taobaoAddressInjectTimer = setTimeout(runTaobaoAddressInjection, 900)
+      }
+    }
+  }
+
   // 注入地址脚本的统一入口
   function injectAddressScripts(url) {
     if (addrDone) return
@@ -4230,23 +4288,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     if (isTaobaoAddressPage && !urlLower.includes('_____tmd_____') && !urlLower.includes('login_jump')) {
       console.log('[AddrSetupWin] Taobao address manager page detected')
       runtimeLog.writeLog('AddrSetupWin', `淘宝地址页命中: ${urlLower.substring(0, 160)}`)
-      if (parsedAddr) {
-        setTimeout(() => {
-          if (addrWin.isDestroyed() || addrDone) return
-          const protectedAddresses = getActiveTaobaoProtectedAddresses(purchaseInfo.accountId)
-          const script = buildTaobaoAddressManagerScript(
-            purchaseInfo.shippingName,
-            purchaseInfo.shippingPhone,
-            parsedAddr,
-            { protectedAddresses }
-          )
-          runtimeLog.writeLog('AddrSetupWin', `淘宝地址清理保护队列: count=${protectedAddresses.length}`)
-          addrWin.webContents.executeJavaScript(script).catch((err) => {
-            lastAddressIssue = 'script_error'
-            runtimeLog.writeLog('AddrSetupWin', `淘宝地址脚本执行失败: ${err.message}`)
-          })
-        }, 500)
-      }
+      scheduleTaobaoAddressInjection()
       return
     }
 
@@ -4464,12 +4506,21 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       return
     }
 
-    const checkScript = 'window.__addrManagerResult || window.__addrDialogResult || window.__tbAddrResult || window.__pddAddrResult || null'
+    const checkScript = `({
+      result: window.__addrManagerResult || window.__addrDialogResult || window.__tbAddrResult || window.__pddAddrResult || null,
+      detail: window.__tbAddrResultDetail || ''
+    })`
     addrWin.webContents.executeJavaScript(checkScript)
-      .then(result => {
+      .then(state => {
+        const result = state && typeof state === 'object' ? state.result : state
+        const resultDetail = state && typeof state === 'object' ? String(state.detail || '') : ''
         if (!result || addrDone) return
         console.log(`[AddrSetupWin] Address setup result: ${result}`)
-        runtimeLog.writeLog('AddrSetupWin', `地址设置结果: platform=${platform}, purchaseNo=${purchaseNo}, result=${result}`)
+        runtimeLog.writeLog(
+          'AddrSetupWin',
+          `地址设置结果: platform=${platform}, purchaseNo=${purchaseNo}, result=${result}` +
+          (resultDetail ? `, detail=${resultDetail.replace(/\s+/g, ' ').substring(0, 400)}` : '')
+        )
 
         if (result === 'success' || result === 'submitted') {
           clearInterval(checkTimer)

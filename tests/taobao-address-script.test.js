@@ -6,7 +6,8 @@ const {
   buildTaobaoAddressManagerScript,
   normalizeTaobaoAddressForMatch,
   taobaoAddressDetailMatches,
-  TAOBAO_TERMINAL_FAILURE_RESULTS
+  TAOBAO_TERMINAL_FAILURE_RESULTS,
+  isTransientTaobaoAddressInjectionError
 } = taobaoAddressScript
 
 describe('淘宝地址管理脚本 v2', () => {
@@ -19,6 +20,13 @@ describe('淘宝地址管理脚本 v2', () => {
     })
 
     expect(() => new vm.Script(script)).not.toThrow()
+    expect(script).toContain('RESULT script_error detail=')
+  })
+
+  it('页面导航导致执行上下文销毁时判定为可恢复注入中断', () => {
+    expect(isTransientTaobaoAddressInjectionError(new Error('Execution context was destroyed, most likely because of a navigation.'))).toBe(true)
+    expect(isTransientTaobaoAddressInjectionError(new Error('Render frame was disposed before WebFrameMain could be accessed'))).toBe(true)
+    expect(isTransientTaobaoAddressInjectionError(new Error('Unexpected token in injected script'))).toBe(false)
   })
 
   it('通过 JSON 序列化安全嵌入地址数据', () => {

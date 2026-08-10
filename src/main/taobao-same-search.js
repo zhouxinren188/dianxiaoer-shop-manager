@@ -1041,28 +1041,49 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   function createSelectRow() {
     var row = document.createElement('div');
     row.id = '__dxe_same_source_row__';
-    row.style.cssText = 'position:fixed;left:20px;top:146px;z-index:2147483001;display:flex;align-items:center;width:auto;height:34px;margin:0;padding:0;box-sizing:border-box;';
+    row.setAttribute('data-name', 'dianxiaoer-source');
+    row.setAttribute('data-label', '\u9009\u8d27\u6e90');
     var button = document.createElement('button');
     button.id = '__dxe_same_source_control__';
     button.type = 'button';
-    button.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;height:30px;padding:2px 8px 2px 4px;border:1px solid #ff6500;border-radius:6px;background:#fff7f0;color:#ff6500;font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:24px;white-space:nowrap;cursor:pointer;box-shadow:none;';
+    button.title = '\u9009\u4e3a\u8d27\u6e90';
+    button.setAttribute('aria-label', '\u9009\u4e3a\u8d27\u6e90');
     if (logoDataUrl) {
       var logo = document.createElement('img');
       logo.src = logoDataUrl;
       logo.alt = '\u5e97\u5c0f\u4e8c';
-      logo.style.cssText = 'display:block;width:22px;height:22px;flex:0 0 22px;border-radius:6px;object-fit:cover;margin-right:5px;';
+      logo.setAttribute('data-dxe-source-logo', '1');
       button.appendChild(logo);
     }
-    var label = appendText(button, 'span', '\u9009\u4e3a\u8d27\u6e90');
-    button.addEventListener('mouseenter', function() { if (!button.disabled) button.style.opacity = '.78'; });
-    button.addEventListener('mouseleave', function() { button.style.opacity = '1'; });
+    var label = appendText(button, 'span', '\u9009\u8d27\u6e90');
+    label.setAttribute('data-dxe-source-label', '1');
+    var tooltip = appendText(row, 'span', '\u9009\u4e3a\u8d27\u6e90');
+    tooltip.setAttribute('data-dxe-source-tooltip', '1');
+    var tooltipArrow = document.createElement('i');
+    tooltipArrow.setAttribute('data-dxe-source-tooltip-arrow', '1');
+    tooltip.appendChild(tooltipArrow);
+    button.addEventListener('mouseenter', function() {
+      if (button.disabled) return;
+      if (row.getAttribute('data-dxe-placement') === 'toolkit') {
+        button.style.background = 'rgba(255,80,0,.08)';
+        tooltip.style.display = 'block';
+      } else button.style.opacity = '.78';
+    });
+    button.addEventListener('mouseleave', function() {
+      button.style.opacity = '1';
+      if (row.getAttribute('data-dxe-placement') === 'toolkit') {
+        button.style.background = 'transparent';
+        tooltip.style.display = 'none';
+      }
+    });
     button.addEventListener('click', function(event) {
       event.preventDefault();
       event.stopPropagation();
       if (button.disabled) return;
       button.disabled = true;
       button.style.cursor = 'default';
-      label.textContent = '\u6b63\u5728\u9009\u62e9...';
+      tooltip.style.display = 'none';
+      label.textContent = '\u9009\u62e9\u4e2d...';
       emitPriceState('select-source-click', true);
       window.open('dianxiaoer://select-taobao-same-source', '_blank');
     });
@@ -1070,14 +1091,64 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     return row;
   }
 
+  function findTaobaoToolkitList() {
+    return document.querySelector('#J_Toolkit .tb-toolkit-list-new') ||
+      document.querySelector('#J_Toolkit .tb-toolkit-list') ||
+      document.querySelector('#tb-toolkit-new .tb-toolkit-list-new');
+  }
+
+  function styleSelectRow(row, placement) {
+    var button = row.querySelector('#__dxe_same_source_control__');
+    var logo = row.querySelector('[data-dxe-source-logo="1"]');
+    var label = row.querySelector('[data-dxe-source-label="1"]');
+    var tooltip = row.querySelector('[data-dxe-source-tooltip="1"]');
+    var tooltipArrow = row.querySelector('[data-dxe-source-tooltip-arrow="1"]');
+    row.setAttribute('data-dxe-placement', placement);
+    if (placement === 'toolkit') {
+      row.className = 'toolkit-item-new toolkit-item-link dxe-toolkit-source-item';
+      row.removeAttribute('data-label');
+      row.style.cssText = 'position:relative;z-index:1;display:flex;flex:0 0 48px;align-items:center;justify-content:center;width:100%;min-width:0;height:48px;margin:0;padding:0;box-sizing:border-box;overflow:visible;';
+      button.className = 'dxe-toolkit-source-button';
+      button.removeAttribute('title');
+      button.style.cssText = 'appearance:none;display:flex;align-items:center;justify-content:center;width:100%;min-width:0;height:48px;margin:0;padding:0;border:0;background:transparent;color:#333;cursor:pointer;box-shadow:none;overflow:hidden;';
+      if (logo) logo.style.cssText = 'display:block;width:22px;height:22px;flex:0 0 22px;margin:0;border-radius:5px;object-fit:cover;';
+      if (label) {
+        label.className = 'toolkit-label dxe-toolkit-source-label';
+        label.style.cssText = 'display:none;';
+      }
+      if (tooltip) tooltip.style.cssText = 'display:none;position:absolute;right:calc(100% + 9px);top:50%;z-index:2147483002;transform:translateY(-50%);padding:7px 10px;border-radius:6px;background:rgba(24,24,24,.92);color:#fff;font-family:"Microsoft YaHei",sans-serif;font-size:13px;font-style:normal;font-weight:400;line-height:18px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.18);';
+      if (tooltipArrow) tooltipArrow.style.cssText = 'position:absolute;left:100%;top:50%;width:0;height:0;transform:translateY(-50%);border-top:6px solid transparent;border-bottom:6px solid transparent;border-left:6px solid rgba(24,24,24,.92);';
+    } else {
+      row.className = '';
+      row.setAttribute('data-label', '\u9009\u8d27\u6e90');
+      row.style.cssText = 'position:fixed;left:20px;top:146px;z-index:2147483001;display:flex;align-items:center;width:auto;height:34px;margin:0;padding:0;box-sizing:border-box;';
+      button.className = '';
+      button.title = '\u9009\u4e3a\u8d27\u6e90';
+      button.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;height:30px;padding:2px 8px 2px 4px;border:1px solid #ff6500;border-radius:6px;background:#fff7f0;color:#ff6500;font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:24px;white-space:nowrap;cursor:pointer;box-shadow:none;';
+      if (logo) logo.style.cssText = 'display:block;width:22px;height:22px;flex:0 0 22px;border-radius:6px;object-fit:cover;margin-right:5px;';
+      if (label) {
+        label.className = '';
+        label.style.cssText = '';
+      }
+      if (tooltip) tooltip.style.cssText = 'display:none;';
+    }
+  }
+
   function placeSelectRow() {
     var existing = document.getElementById('__dxe_same_source_row__');
-    if (existing && existing.isConnected) return true;
     if (!document.body) return false;
-    // 独立悬浮在销售商品信息窗上方，不再插入淘宝标题容器，也不修改淘宝
-    // flex/grid 布局；部分活动价组件会因父级结构变化而只保留“￥”占位。
-    var row = createSelectRow();
-    document.body.appendChild(row);
+    var row = existing && existing.isConnected ? existing : createSelectRow();
+    var toolkitList = findTaobaoToolkitList();
+    if (toolkitList) {
+      if (row.parentElement !== toolkitList || toolkitList.firstElementChild !== row) {
+        toolkitList.insertBefore(row, toolkitList.firstChild);
+      }
+      if (row.getAttribute('data-dxe-placement') !== 'toolkit') styleSelectRow(row, 'toolkit');
+      return true;
+    }
+    // 极少数页面没有淘宝工具条时保留独立浮窗，确保仍可选货源。
+    if (row.parentElement !== document.body) document.body.appendChild(row);
+    if (row.getAttribute('data-dxe-placement') !== 'fallback') styleSelectRow(row, 'fallback');
     return true;
   }
 
@@ -1205,7 +1276,7 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
         "(function(){var button=document.getElementById('__dxe_same_source_control__');" +
         "if(!button)return;button.disabled=false;button.style.cursor='pointer';" +
         "var label=button.querySelector('span');if(label)label.textContent=" +
-        JSON.stringify(selected.product.promotionPriceMasked ? '优惠价未显示，重试' : '重新选为货源') + ";})()"
+        JSON.stringify(selected.product.promotionPriceMasked ? '价格重试' : '重新选择') + ";})()"
       ).catch(() => {})
     }
   }
@@ -1332,6 +1403,57 @@ function extractItemsArray(resultJson) {
     try { items = JSON.parse(items) } catch (_) { items = [] }
   }
   return Array.isArray(items) ? items : []
+}
+
+function summarizeTaobaoSearchResponse(resultJson, responseBody) {
+  const collectionPaths = []
+  const objectShapes = []
+  const seen = new Set()
+  const visit = (value, path, depth) => {
+    if (collectionPaths.length >= 24 || depth > 4 || value === null || value === undefined) return
+    if (Array.isArray(value)) {
+      collectionPaths.push(path + '=array(' + value.length + ')')
+      if (value.length > 0 && depth < 4) visit(value[0], path + '[0]', depth + 1)
+      return
+    }
+    if (typeof value === 'string') {
+      const text = value.trim()
+      if ((text.startsWith('[') || text.startsWith('{')) && text.length <= 2 * 1024 * 1024) {
+        try {
+          const parsed = JSON.parse(text)
+          collectionPaths.push(path + '=json-' + (Array.isArray(parsed) ? 'array(' + parsed.length + ')' : 'object'))
+          visit(parsed, path + '$json', depth + 1)
+        } catch (_) {}
+      }
+      return
+    }
+    if (typeof value !== 'object' || seen.has(value)) return
+    seen.add(value)
+    const entries = Object.entries(value)
+    if (path.includes('[0]') && objectShapes.length < 12) {
+      objectShapes.push(path + '={' + entries.slice(0, 30).map(([key]) => key).join(',') + '}')
+    }
+    for (const [key, nested] of entries) {
+      visit(nested, path ? path + '.' + key : key, depth + 1)
+      if (collectionPaths.length >= 24) break
+    }
+  }
+
+  const data = resultJson && typeof resultJson.data === 'object' && resultJson.data !== null
+    ? resultJson.data
+    : null
+  visit(data, 'data', 0)
+  const body = String(responseBody || '')
+  return JSON.stringify({
+    bodyBytes: Buffer.byteLength(body, 'utf8'),
+    bodySha256: crypto.createHash('sha256').update(body).digest('hex').slice(0, 16),
+    ret: Array.isArray(resultJson?.ret) ? resultJson.ret.slice(0, 3) : resultJson?.ret,
+    topLevelKeys: resultJson && typeof resultJson === 'object' ? Object.keys(resultJson).slice(0, 20) : [],
+    dataKeys: data ? Object.keys(data).slice(0, 30) : [],
+    itemsArrayCount: extractItemsArray(resultJson).length,
+    collectionPaths,
+    objectShapes
+  })
 }
 
 function enqueueSearch(partition, task) {
@@ -1491,11 +1613,17 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             source: 'taobao-mtop-hsq-34850'
           }
         }
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '搜同款返回空结果: attempt=' + (attempt + 1) +
+          ', response=' + summarizeTaobaoSearchResponse(resultJson, responseBody)
+        )
         if (attempt < 2) {
           const delays = automatic ? [1500, 6000] : [500, 900]
           await sleep(delays[Math.min(attempt, delays.length - 1)])
           continue
         }
+        runtimeLog.writeLog('TaobaoSame', '搜同款失败: 淘宝接口调用成功，但解析结果为空；未自动扩大请求次数')
         return {
           success: false,
           message: '淘宝接口调用成功，但未返回同款商品',
@@ -1548,6 +1676,7 @@ module.exports = {
   normalizeTaobaoPriceValue,
   firstTaobaoPrice,
   normalizeTaobaoSearchItems,
+  summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
   buildTaobaoSameSelection,
   buildTaobaoSameProductInjection,

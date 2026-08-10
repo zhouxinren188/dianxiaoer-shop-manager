@@ -6,6 +6,7 @@ const {
   normalizeTaobaoPriceValue,
   firstTaobaoPrice,
   normalizeTaobaoSearchItems,
+  summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
   buildTaobaoSameSelection,
   buildTaobaoSameProductInjection,
@@ -77,6 +78,25 @@ describe('淘宝按图搜同款', () => {
 
     expect(products).toHaveLength(20)
     expect(products.at(-1).itemId).toBe('20')
+  })
+
+  it('空结果诊断仅记录响应结构和列表路径', () => {
+    const summary = JSON.parse(summarizeTaobaoSearchResponse({
+      ret: ['SUCCESS::调用成功'],
+      data: {
+        itemsArray: '[]',
+        result: { items: [{ itemId: '123', title: '不应写入日志的标题' }] }
+      }
+    }, '{"mock":"body"}'))
+
+    expect(summary.ret).toEqual(['SUCCESS::调用成功'])
+    expect(summary.dataKeys).toEqual(['itemsArray', 'result'])
+    expect(summary.collectionPaths).toContain('data.itemsArray=json-array(0)')
+    expect(summary.collectionPaths).toContain('data.result.items=array(1)')
+    expect(summary.itemsArrayCount).toBe(0)
+    expect(summary.objectShapes).toContain('data.result.items[0]={itemId,title}')
+    expect(JSON.stringify(summary)).not.toContain('不应写入日志的标题')
+    expect(summary.bodySha256).toHaveLength(16)
   })
 
   it('兼容JSON和JSONP响应', () => {
@@ -164,7 +184,7 @@ describe('淘宝按图搜同款', () => {
     expect(selection.product.promotionPriceMasked).toBe(true)
   })
 
-  it('生成可执行的淘宝商品页浮窗和选货源注入脚本', () => {
+  it('生成可执行的淘宝商品页浮窗和工具条选货源注入脚本', () => {
     const script = buildTaobaoSameProductInjection({
       goodsName: '销售订单商品',
       skuSpec: '1300ml单壶',
@@ -180,6 +200,16 @@ describe('淘宝按图搜同款', () => {
     expect(script).toContain('1300ml单壶')
     expect(script).not.toContain('-webkit-line-clamp:3')
     expect(script).toContain('position:fixed;left:20px;top:146px')
+    expect(script).toContain('#J_Toolkit .tb-toolkit-list-new')
+    expect(script).toContain('toolkitList.firstElementChild !== row')
+    expect(script).toContain('toolkitList.insertBefore(row, toolkitList.firstChild)')
+    expect(script).toContain("styleSelectRow(row, 'toolkit')")
+    expect(script).toContain('dxe-toolkit-source-item')
+    expect(script).toContain('flex:0 0 48px')
+    expect(script).toContain('toolkit-label dxe-toolkit-source-label')
+    expect(script).toContain("label.style.cssText = 'display:none;'")
+    expect(script).toContain('data-dxe-source-tooltip')
+    expect(script).toContain('right:calc(100% + 9px)')
     expect(script).toContain('document.body.appendChild(row)')
     expect(script).not.toContain("titleBlock.insertAdjacentElement('afterend', row)")
     expect(script).not.toContain("parent.style.flexWrap = 'wrap'")

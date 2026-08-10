@@ -11,6 +11,18 @@ function taobaoAddressDetailMatches(rowText, targetDetail) {
   return !!normalizedTarget && normalizeTaobaoAddressForMatch(rowText).includes(normalizedTarget)
 }
 
+function isTransientTaobaoAddressInjectionError(error) {
+  const message = String(error && error.message ? error.message : (error || '')).toLowerCase()
+  return message.includes('execution context was destroyed') ||
+    message.includes('cannot find context with specified id') ||
+    message.includes('frame was disposed') ||
+    message.includes('render frame') ||
+    message.includes('webcontents was destroyed') ||
+    message.includes('object has been destroyed') ||
+    message.includes('navigation') ||
+    message.includes('err_aborted')
+}
+
 const TAOBAO_ADDRESS_ROLLING_LIMIT = 10
 const TAOBAO_ADDRESS_CLEANUP_BATCH = 5
 
@@ -900,7 +912,7 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 })().catch(function(error) {
   window.__tbAddrResult = 'script_error';
   window.__tbAddrResultDetail = error && error.message ? error.message : String(error);
-  console.log('[AddressAutoFill][TB] RESULT script_error');
+  console.log('[AddressAutoFill][TB] RESULT script_error detail=' + String(window.__tbAddrResultDetail || 'unknown').replace(/\s+/g, ' ').slice(0, 240));
   return 'script_error';
 })
 `
@@ -922,5 +934,6 @@ module.exports = {
   buildTaobaoAddressManagerScript,
   normalizeTaobaoAddressForMatch,
   taobaoAddressDetailMatches,
+  isTransientTaobaoAddressInjectionError,
   TAOBAO_TERMINAL_FAILURE_RESULTS
 }

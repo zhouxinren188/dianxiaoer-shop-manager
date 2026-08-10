@@ -857,10 +857,36 @@
       class="taobao-same-dialog"
     >
       <div class="taobao-same-source">
-        <el-image v-if="purchaseInfo.image" :src="purchaseInfo.image" fit="cover" />
+        <div class="taobao-same-source-media">
+          <el-image
+            v-if="purchaseInfo.image"
+            :src="purchaseInfo.image"
+            fit="cover"
+            :preview-src-list="[purchaseInfo.image]"
+            preview-teleported
+            hide-on-click-modal
+          />
+          <div v-else class="taobao-same-source-image-empty"><el-icon><ShoppingBag /></el-icon></div>
+          <span>销售商品</span>
+        </div>
         <div class="taobao-same-source-info">
-          <strong>{{ purchaseInfo.goodsName }}</strong>
-          <span>根据当前商品主图搜索淘宝同款，最多展示 20 条结果</span>
+          <div class="taobao-same-source-heading">
+            <span>当前销售商品</span>
+            <template v-if="taobaoSameFromHistory">
+              <el-tag size="small" type="info" effect="plain">历史结果</el-tag>
+              <el-button link type="primary" :loading="taobaoSameSearchLoading" @click="handleSearchTaobaoSame(true)">重新搜索</el-button>
+            </template>
+          </div>
+          <strong :title="purchaseInfo.goodsName">{{ purchaseInfo.goodsName }}</strong>
+          <div v-if="purchaseInfo.skuSpec" class="taobao-same-source-sku">
+            <span>销售规格</span>
+            <b>{{ purchaseInfo.skuSpec }}</b>
+          </div>
+          <div class="taobao-same-source-note">
+            <span>根据当前商品主图搜索，最多展示 20 条淘宝同款</span>
+            <span v-if="purchaseInfo.price != null" class="taobao-same-source-order-meta">订单单价 <b>¥{{ Number(purchaseInfo.price || 0).toFixed(2) }}</b></span>
+            <span v-if="purchaseInfo.quantity" class="taobao-same-source-order-meta">数量 <b>{{ purchaseInfo.quantity }}</b></span>
+          </div>
         </div>
       </div>
 
@@ -881,6 +907,7 @@
           @click="handleOpenTaobaoSameProduct(product)"
           @keydown.enter="handleOpenTaobaoSameProduct(product)"
         >
+          <span v-if="isTaobaoSameSource(product)" class="taobao-same-source-badge">货源</span>
           <el-image
             :src="product.img"
             fit="cover"
@@ -1219,6 +1246,7 @@ import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventory, batchQuerySkuBindings, fetchInventoryById, updateInventory, updatePackageNum } from '@/api/warehouse'
+import { buildTaobaoSameHistoryKey, collectTaobaoSourceItemIds, extractTaobaoItemId, readTaobaoSameHistory, saveTaobaoSameHistory } from '@/utils/taobaoSameHistory'
 
 // ==================== 筛选项配置 ====================
 
@@ -2141,6 +2169,8 @@ const taobaoSameSearchLoading = ref(false)
 const taobaoSameResults = ref([])
 const taobaoSameSearchError = ref('')
 const taobaoSameAccountId = ref(null)
+const taobaoSameFromHistory = ref(false)
+const taobaoSameHistoryKey = ref('')
 
 // 货源管理
 const skuSources = ref([])
@@ -2722,7 +2752,23 @@ function getTaobaoSameSearchAccount() {
   return remembered || accounts.find(account => account.online || account.status === 'online') || accounts[0]
 }
 
-async function handleSearchTaobaoSame() {
+const taobaoSameSourceItemIds = computed(() => collectTaobaoSourceItemIds(skuSources.value))
+
+function isTaobaoSameSource(product) {
+  const itemId = extractTaobaoItemId(product)
+  return !!itemId && taobaoSameSourceItemIds.value.has(itemId)
+}
+
+function currentTaobaoSameHistoryKey(accountId) {
+  return buildTaobaoSameHistoryKey({
+    userId: localStorage.getItem('currentUser') || '',
+    accountId,
+    skuId: purchaseInfo.skuId,
+    imageUrl: purchaseInfo.image
+  })
+}
+
+async function handleSearchTaobaoSame(forceRefresh = false) {
   if (taobaoSameSearchLoading.value) return
   if (!purchaseInfo.image) {
     ElMessage.warning('当前商品没有可用于搜索的主图')
@@ -2740,8 +2786,26 @@ async function handleSearchTaobaoSame() {
 
   taobaoSameAccountId.value = account.id
   taobaoSameDialogVisible.value = true
-  taobaoSameSearchLoading.value = true
   taobaoSameSearchError.value = ''
+  taobaoSameHistoryKey.value = currentTaobaoSameHistoryKey(account.id)
+
+  if (forceRefresh !== true) {
+    const history = readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
+    if (history) {
+      taobaoSameResults.value = history.products
+      taobaoSameFromHistory.value = true
+      taobaoSameSearchLoading.value = false
+      console.info('[淘宝同款] 已加载历史搜索结果', {
+        skuId: purchaseInfo.skuId,
+        count: history.products.length,
+        cachedAt: new Date(history.cachedAt).toISOString()
+      })
+      return
+    }
+  }
+
+  taobaoSameSearchLoading.value = true
+  taobaoSameFromHistory.value = false
   taobaoSameResults.value = []
   try {
     const result = await window.electronAPI.invoke('search-taobao-same-product', {
@@ -2754,6 +2818,8 @@ async function handleSearchTaobaoSame() {
       taobaoSameResults.value = result.products || result.items || []
       if (taobaoSameResults.value.length === 0) {
         taobaoSameSearchError.value = '淘宝接口调用成功，但未返回同款商品'
+      } else {
+        saveTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value, taobaoSameResults.value)
       }
       return
     }
@@ -3146,6 +3212,8 @@ function onPurchaseDialogClosed() {
   taobaoSameResults.value = []
   taobaoSameSearchError.value = ''
   taobaoSameAccountId.value = null
+  taobaoSameFromHistory.value = false
+  taobaoSameHistoryKey.value = ''
   // 对话框关闭时，如果采购未完成（非captured状态），需要解锁订单
   // captured状态时后端创建采购单已自动解锁
   if (purchaseInfo.captureStatus !== 'captured' && purchaseInfo.salesOrderId) {
@@ -6366,39 +6434,140 @@ onUnmounted(() => {
 
 .taobao-same-source {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
+  align-items: stretch;
+  gap: 16px;
+  padding: 12px 14px;
   margin-bottom: 16px;
-  background: #fff7f0;
-  border: 1px solid #ffe2cc;
-  border-radius: 8px;
+  background: linear-gradient(135deg, #fffaf6 0%, #fff5ed 100%);
+  border: 1px solid #ffd9bd;
+  border-radius: 10px;
 }
 
-.taobao-same-source :deep(.el-image) {
-  width: 52px;
-  height: 52px;
+.taobao-same-source-media {
+  position: relative;
+  width: 96px;
+  height: 96px;
   flex-shrink: 0;
-  border-radius: 6px;
+}
+
+.taobao-same-source-media :deep(.el-image),
+.taobao-same-source-image-empty {
+  width: 96px;
+  height: 96px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 122, 0, 0.16);
+  border-radius: 8px;
+  background: #fff;
+  cursor: zoom-in;
+}
+
+.taobao-same-source-image-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #c0c4cc;
+  cursor: default;
+  font-size: 30px;
+}
+
+.taobao-same-source-media > span {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  padding: 3px 7px;
+  border-radius: 0 7px 0 7px;
+  background: rgba(255, 80, 0, 0.92);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
 }
 
 .taobao-same-source-info {
   display: flex;
+  flex: 1;
   min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  justify-content: center;
+  gap: 6px;
+}
+
+.taobao-same-source-heading {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 7px;
+}
+
+.taobao-same-source-heading > span {
+  color: #ff5000;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.taobao-same-source-heading :deep(.el-tag) {
+  height: 20px;
+}
+
+.taobao-same-source-heading :deep(.el-button) {
+  height: 20px;
+  padding: 0 2px;
+  font-size: 12px;
 }
 
 .taobao-same-source-info strong {
+  display: -webkit-box;
   overflow: hidden;
   color: #303133;
+  font-size: 15px;
+  line-height: 21px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.taobao-same-source-sku {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.taobao-same-source-sku span {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #ffede1;
+  color: #ff5000;
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.taobao-same-source-sku b {
+  overflow: hidden;
+  color: #d94800;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.taobao-same-source-info span {
+.taobao-same-source-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
   color: #909399;
   font-size: 12px;
+}
+
+.taobao-same-source-order-meta {
+  padding-left: 14px;
+  border-left: 1px solid #f0d8c6;
+}
+
+.taobao-same-source-order-meta b {
+  color: #606266;
+  font-weight: 600;
 }
 
 .taobao-same-loading {
@@ -6413,18 +6582,34 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
-  max-height: 570px;
+  max-height: min(570px, calc(100vh - 300px));
   padding: 2px;
   overflow-y: auto;
 }
 
 .taobao-same-card {
+  position: relative;
   overflow: hidden;
   background: #fff;
   border: 1px solid #ebeef5;
   border-radius: 8px;
   cursor: pointer;
   transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.taobao-same-source-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  padding: 3px 8px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #ff7a00, #ff4d00);
+  box-shadow: 0 2px 8px rgba(255, 80, 0, 0.28);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .taobao-same-card:hover {
