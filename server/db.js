@@ -603,6 +603,56 @@ async function initDB() {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN pickup_address VARCHAR(500) DEFAULT '' COMMENT '物流取件地址'")
     } catch(e) { /* 列已存在 */ }
 
+    // ======== 采购物流时效学习样本 ========
+    // 仅保存省/市/区县和时间节点，不保存收件人、电话或完整收货地址。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS shipping_timeliness_observations (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        purchase_order_id INT NOT NULL,
+        owner_id INT DEFAULT NULL,
+        platform_order_no VARCHAR(100) DEFAULT '',
+        platform VARCHAR(20) DEFAULT '',
+        source_key VARCHAR(180) DEFAULT '',
+        origin_raw VARCHAR(100) DEFAULT '',
+        origin_province VARCHAR(40) NOT NULL,
+        origin_city VARCHAR(60) DEFAULT '',
+        origin_county VARCHAR(60) DEFAULT '',
+        destination_province VARCHAR(40) NOT NULL,
+        destination_city VARCHAR(60) DEFAULT '',
+        destination_county VARCHAR(60) DEFAULT '',
+        ordered_at DATETIME DEFAULT NULL,
+        picked_up_at DATETIME DEFAULT NULL,
+        signed_at DATETIME DEFAULT NULL,
+        dispatch_hours DECIMAL(10,2) DEFAULT NULL,
+        transit_hours DECIMAL(10,2) DEFAULT NULL,
+        total_hours DECIMAL(10,2) DEFAULT NULL,
+        outcome VARCHAR(30) DEFAULT 'delivered',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_purchase_order (purchase_order_id),
+        KEY idx_route_city (origin_province, origin_city, destination_province, destination_city),
+        KEY idx_route_province (origin_province, destination_province),
+        KEY idx_source_outcome (source_key, outcome),
+        KEY idx_signed_at (signed_at),
+        KEY idx_owner (owner_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    try {
+      await connection.execute("ALTER TABLE shipping_timeliness_observations ADD COLUMN total_hours DECIMAL(10,2) DEFAULT NULL AFTER transit_hours")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE shipping_timeliness_observations ADD COLUMN source_key VARCHAR(180) DEFAULT '' AFTER platform")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE shipping_timeliness_observations ADD COLUMN outcome VARCHAR(30) DEFAULT 'delivered' AFTER total_hours")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute('ALTER TABLE shipping_timeliness_observations MODIFY picked_up_at DATETIME DEFAULT NULL, MODIFY signed_at DATETIME DEFAULT NULL, MODIFY transit_hours DECIMAL(10,2) DEFAULT NULL')
+    } catch(e) { /* 已兼容可空字段 */ }
+    try {
+      await connection.execute('CREATE INDEX idx_source_outcome ON shipping_timeliness_observations(source_key, outcome)')
+    } catch(e) { /* 索引已存在 */ }
+
     // ======== 采购单售后状态字段 ========
     try {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN aftersale_status VARCHAR(30) DEFAULT 'none' COMMENT '售后状态: none/pending_refund/pending_merchant_handle/pending_return_refund/pending_return_tracking/closed'")

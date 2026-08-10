@@ -80,6 +80,11 @@ export function checkPurchaseBinding(id) {
   return get(`/api/purchase-orders/${id}/binding-check`)
 }
 
+// 根据实际收货地址和各货源发货地，查询服务器学习得到的物流时效推荐。
+export function recommendShippingSources(data) {
+  return post('/api/shipping-timeliness/recommend', data)
+}
+
 // 查询售后采购单列表（仅返回 aftersale_status != 'none' 的记录）
 export function fetchPurchaseAftersaleOrders(params) {
   return get('/api/purchase-orders/aftersale', params)

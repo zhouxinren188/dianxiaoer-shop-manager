@@ -1350,7 +1350,7 @@ function normalizeTaobaoSearchItems(items, limit = 20) {
     )
     const link = normalizeProductLink(item.auctionURL || item.url || item.itemUrl, itemId)
     if (!itemId && !link) continue
-    products.push({
+    const product = {
       itemId,
       title,
       price,
@@ -1366,7 +1366,19 @@ function normalizeTaobaoSearchItems(items, limit = 20) {
       ),
       img: image,
       link
-    })
+    }
+    const shopId = String(
+      item.shopId || item.shop_id || item.shopInfo?.shopId || item.shopInfo?.shop_id ||
+      item.sellerInfo?.shopId || item.sellerInfo?.shop_id || ''
+    ).trim()
+    const sellerId = String(
+      item.sellerId || item.seller_id || item.userId || item.user_id ||
+      item.shopInfo?.sellerId || item.shopInfo?.userId ||
+      item.sellerInfo?.sellerId || item.sellerInfo?.userId || ''
+    ).trim()
+    if (shopId) product.shopId = shopId
+    if (sellerId) product.sellerId = sellerId
+    products.push(product)
     if (products.length >= limit) break
   }
   return products

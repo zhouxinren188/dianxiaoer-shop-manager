@@ -659,6 +659,13 @@
                           <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
                           <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
                           <span v-if="getSourceShipFrom(src.purchase_link)" class="source-option-origin">发货地：{{ getSourceShipFrom(src.purchase_link) }}</span>
+                          <span
+                            v-if="getSourceTimeliness(src, idx)?.estimate"
+                            class="source-option-eta"
+                            :title="sourceTimelinessTitle(getSourceTimeliness(src, idx))"
+                          >预计 {{ formatTimelinessDays(getSourceTimeliness(src, idx).estimate) }}</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.recommended" class="source-option-recommended">推荐</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
                         </div>
                         <div class="source-option-actions">
                           <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
@@ -1242,7 +1249,7 @@ function getWatermarkUrl(issueEvent) {
   if (issueEvent === '疑似打假') return SUSPECT_WATERMARK_URL
   return ''
 }
-import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo } from '@/api/purchaseOrder'
+import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo, recommendShippingSources } from '@/api/purchaseOrder'
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventory, batchQuerySkuBindings, fetchInventoryById, updateInventory, updatePackageNum } from '@/api/warehouse'
@@ -1859,8 +1866,11 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.quantity = item.quantity
   purchaseInfo.price = item.price || 0
   purchaseInfo.image = item.image || ''
+  skuSources.value = []
+  selectedSourceIndex.value = -1
   purchaseInfo.sourceUrl = ''
   purchaseInfo.sourceShipFrom = ''
+  sourceTimelinessMap.value = {}
   purchaseInfo.platform = 'taobao'
   purchaseInfo.platformOrderNo = ''
   purchaseInfo.purchasePrice = 0
@@ -2006,6 +2016,7 @@ async function loadSkuSourcesMap() {
 async function loadSkuSources(skuId) {
   skuSources.value = []
   selectedSourceIndex.value = -1
+  sourceTimelinessMap.value = {}
   if (!skuId) return
   try {
     const res = await fetchSkuPurchaseConfigList(skuId)
@@ -2176,6 +2187,9 @@ const taobaoSameHistoryKey = ref('')
 const skuSources = ref([])
 const skuHasSourcesCache = reactive({})  // skuId → boolean，缓存是否有货源链接
 const selectedSourceIndex = ref(-1)
+const sourceTimelinessMap = ref({})
+let sourceTimelinessTimer = null
+let sourceTimelinessRequestId = 0
 const sourceManageVisible = ref(false)
 const sourceFormVisible = ref(false)
 const sourceFormMode = ref('add')
@@ -2615,13 +2629,19 @@ function attachTaobaoSkuMetadata(url, selection) {
     .filter(item => item.text || item.valueId)
     .slice(0, 12)
   const metadata = {
-    v: 1,
+    v: 2,
     skuId: String(selection.skuId || '').trim().slice(0, 120),
     options
   }
   const shipFrom = String(selection.shipFrom || '').replace(/\s+/g, '').trim().slice(0, 80)
   if (shipFrom) metadata.shipFrom = shipFrom
-  if (!metadata.skuId && options.length === 0 && !metadata.shipFrom) return url
+  const shopId = String(selection.shopId || '').trim().slice(0, 120)
+  const sellerId = String(selection.sellerId || '').trim().slice(0, 120)
+  const shopName = String(selection.shopName || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+  if (shopId) metadata.shopId = shopId
+  if (sellerId) metadata.sellerId = sellerId
+  if (shopName) metadata.shopName = shopName
+  if (!metadata.skuId && options.length === 0 && !metadata.shipFrom && !metadata.shopId && !metadata.sellerId && !metadata.shopName) return url
   try {
     const parsed = new URL(url)
     parsed.hash = ''
@@ -2646,6 +2666,108 @@ function getTaobaoSourceMetadata(url) {
 function getSourceShipFrom(url) {
   return String(getTaobaoSourceMetadata(url)?.shipFrom || '')
 }
+
+function sourceTimelinessKey(source, index) {
+  return String(source?.id ?? index)
+}
+
+function getSourceTimeliness(source, index) {
+  return sourceTimelinessMap.value[sourceTimelinessKey(source, index)] || null
+}
+
+function formatTimelinessDays(estimate) {
+  if (!estimate) return ''
+  const min = Number(estimate.minDays || 0)
+  const max = Number(estimate.maxDays || min)
+  return min === max ? `${min}天` : `${min}-${max}天`
+}
+
+function sourceTimelinessTitle(result) {
+  const estimate = result?.estimate
+  if (!estimate) return ''
+  const sourcePerformance = estimate.sourcePerformance
+  const sourceText = sourcePerformance
+    ? `；该货源发货样本 ${sourcePerformance.dispatchSampleCount || 0} 单` +
+      (sourcePerformance.unshippedCount ? `，超时未发/未发取消 ${sourcePerformance.unshippedCount} 单` : '')
+    : ''
+  if (estimate.confidence === 'high' || estimate.confidence === 'medium') {
+    return `根据近90天 ${estimate.sampleCount || 0} 个同路线已签收订单计算${sourceText}`
+  }
+  return `同路线样本不足，使用服务器默认时效配置估算${sourceText}`
+}
+
+async function refreshSourceTimeliness() {
+  const requestId = ++sourceTimelinessRequestId
+  if (!purchaseDialogVisible.value || !purchaseInfo.shippingAddress || skuSources.value.length === 0) {
+    sourceTimelinessMap.value = {}
+    return
+  }
+  const requestedDestination = purchaseInfo.shippingAddress
+  const sources = skuSources.value
+    .map((source, index) => ({
+      id: sourceTimelinessKey(source, index),
+      ship_from: getSourceShipFrom(source.purchase_link),
+      purchase_link: source.purchase_link,
+      purchase_price: Number(source.purchase_price || 0)
+    }))
+  if (sources.length === 0) {
+    sourceTimelinessMap.value = {}
+    return
+  }
+
+  try {
+    const result = await recommendShippingSources({
+      destination: requestedDestination,
+      sources,
+      requested_at: new Date().toISOString()
+    })
+    if (
+      requestId !== sourceTimelinessRequestId ||
+      !purchaseDialogVisible.value ||
+      requestedDestination !== purchaseInfo.shippingAddress
+    ) return
+    const sourcePriceMap = new Map(sources.map(source => [String(source.id), Number(source.purchase_price || 0)]))
+    const resultItems = (result?.results || []).map(item => ({
+      ...item,
+      purchase_price: sourcePriceMap.get(String(item.id)) || null
+    }))
+    const comparable = resultItems.filter(item => item.estimate && Number.isFinite(Number(item.estimate.scoreHours)))
+    if (comparable.length >= 2) {
+      const bestScore = Math.min(...comparable.map(item => Number(item.estimate.scoreHours)))
+      const fastest = comparable.filter(item => Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01)
+      const pricedFastest = fastest.filter(item => Number(item.purchase_price) > 0)
+      if (pricedFastest.length >= 2) {
+        const bestPrice = Math.min(...pricedFastest.map(item => Number(item.purchase_price)))
+        for (const item of comparable) {
+          item.recommended = fastest.includes(item) && Math.abs(Number(item.purchase_price) - bestPrice) < 0.001
+        }
+      }
+    }
+    const nextMap = {}
+    for (const item of resultItems) nextMap[String(item.id)] = item
+    sourceTimelinessMap.value = nextMap
+  } catch (error) {
+    if (requestId === sourceTimelinessRequestId) sourceTimelinessMap.value = {}
+    console.warn('[采购时效推荐] 获取失败:', error.message)
+  }
+}
+
+function scheduleSourceTimelinessRefresh() {
+  if (sourceTimelinessTimer) clearTimeout(sourceTimelinessTimer)
+  sourceTimelinessTimer = setTimeout(() => {
+    sourceTimelinessTimer = null
+    refreshSourceTimeliness()
+  }, 350)
+}
+
+watch(
+  [
+    () => purchaseDialogVisible.value,
+    () => purchaseInfo.shippingAddress,
+    () => skuSources.value.map(source => `${source.id || ''}:${getSourceShipFrom(source.purchase_link)}:${source.purchase_price || 0}`).join('|')
+  ],
+  scheduleSourceTimelinessRefresh
+)
 
 // 精简URL显示：提取核心链接，去除追踪参数
 function shortenUrl(url) {
@@ -2851,7 +2973,9 @@ async function handleOpenTaobaoSameProduct(product) {
       price: product.price == null ? null : Number(product.price),
       originalPrice: product.originalPrice == null ? null : Number(product.originalPrice),
       sales: String(product.sales || ''),
-      shop: String(product.shop || '')
+      shop: String(product.shop || ''),
+      shopId: String(product.shopId || ''),
+      sellerId: String(product.sellerId || '')
     }
     const result = await window.electronAPI.invoke('open-taobao-same-product', {
       accountId: taobaoSameAccountId.value,
@@ -2891,7 +3015,12 @@ async function applyTaobaoSameProduct(product, accountId) {
     throw new Error('未读取到当前SKU价格，请确认规格已完整选择后重试')
   }
 
-  const sourceLink = shortenUrl(attachTaobaoSkuMetadata(String(product.link).trim(), product.skuSelection))
+  const sourceLink = shortenUrl(attachTaobaoSkuMetadata(String(product.link).trim(), {
+    ...(product.skuSelection || {}),
+    shopId: product.shopId,
+    sellerId: product.sellerId,
+    shopName: product.shop
+  }))
   const sourceBaseLink = sourceLink.split('#dxeSku=')[0]
   const existingSource = skuSources.value.find(source =>
     shortenUrl(source.purchase_link || '') === sourceLink
@@ -3864,6 +3993,8 @@ onUnmounted(() => {
   purchaseDialogVisible.value = false
   // 清理京东同步自动开启定时器
   if (jdSyncAutoStartTimer) { clearTimeout(jdSyncAutoStartTimer); jdSyncAutoStartTimer = null }
+  if (sourceTimelinessTimer) { clearTimeout(sourceTimelinessTimer); sourceTimelinessTimer = null }
+  sourceTimelinessRequestId++
   // 清理采购相关 IPC 监听器
   cleanupPurchaseListeners()
   // 清理自动同步 IPC 监听器
@@ -6145,6 +6276,7 @@ onUnmounted(() => {
 }
 
 .source-option {
+  flex-shrink: 0;
   padding: 12px;
   background: #f9fafb;
   border: 2px solid #e5e7eb;
@@ -6204,6 +6336,39 @@ onUnmounted(() => {
   background: #f0f9eb;
   color: #67c23a;
   font-size: 12px;
+  white-space: nowrap;
+}
+
+.source-option-recommended {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #ff8a34, #ff5a1f);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.source-option-eta {
+  color: #8a5a27;
+  background: #fff7e8;
+  border: 1px solid #f6d9ad;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.source-option-risk {
+  color: #d9485f;
+  background: #fff1f3;
+  border: 1px solid #ffc9d2;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 18px;
   white-space: nowrap;
 }
 

@@ -26,6 +26,11 @@ const {
   normalizeSourceType,
   parseCookieData
 } = require('./services/store-cookie-policy')
+const {
+  recordTimelinessObservation,
+  backfillRecentObservations,
+  recommendSourcesFromDatabase
+} = require('./services/shipping-timeliness-service')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.33-purchase-perf'
@@ -3930,6 +3935,23 @@ app.put('/api/sku-purchase-config/update-price', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// ============ 采购物流时效推荐 ============
+
+app.post('/api/shipping-timeliness/recommend', async (req, res) => {
+  try {
+    const { destination, sources, requested_at } = req.body || {}
+    if (!destination || !Array.isArray(sources)) {
+      return res.json(fail('destination 和 sources 不能为空'))
+    }
+    if (sources.length > 30) return res.json(fail('单次最多比较 30 个货源'))
+    const result = await recommendSourcesFromDatabase(pool, { destination, sources, requested_at })
+    res.json(ok(result))
+  } catch (err) {
+    console.error('[ShippingTimeliness] 推荐计算失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // ============ 采购账号管理 ============
 
 app.get('/api/purchase-accounts', async (req, res) => {
@@ -5350,7 +5372,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, owner_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -5434,6 +5456,23 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       )
     }
 
+    try {
+      const learned = await recordTimelinessObservation(
+        pool,
+        localOrder,
+        order_info.logistics_tracking || [],
+        { status: newStatus || localOrder.status, verifiedByPlatformSync: true }
+      )
+      if (learned.recorded && learned.outcome === 'delivered') {
+        console.log(`[ShippingTimeliness] 已学习订单 ${localOrder.purchase_no}: ${learned.transitHours.toFixed(1)} 小时`)
+      } else if (learned.recorded) {
+        console.log(`[ShippingTimeliness] 已记录货源发货风险 ${localOrder.purchase_no}: ${learned.outcome}`)
+      }
+    } catch (learnError) {
+      // 学习失败不能阻断订单物流同步。
+      console.warn(`[ShippingTimeliness] 订单 ${localOrder.purchase_no} 学习失败:`, learnError.message)
+    }
+
     res.json(ok({
       status: newStatus || localOrder.status,
       logistics_no: order_info.logistics_no || localOrder.logistics_no,
@@ -5465,7 +5504,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
 
     // 获取本地已绑定的采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, purchase_no, platform_order_no, platform, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      'SELECT id, owner_id, account_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
       [ownerId, '']
     )
 
@@ -5503,6 +5542,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
     }
 
     let matchedCount = 0
+    const timelinessLearningTasks = []
 
     for (const platformOrder of orders) {
       const localOrder = localOrders.find(lo => lo.platform_order_no === platformOrder.order_no)
@@ -5583,6 +5623,24 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         )
         console.log(`[Browser-Sync-Batch] 更新订单 ${localOrder.purchase_no}: status=${newStatus}, logistics=${platformOrder.logistics_no || '无'}`)
       }
+
+      timelinessLearningTasks.push(
+        recordTimelinessObservation(
+          pool,
+          localOrder,
+          platformOrder.logistics_tracking || [],
+          { status: newStatus, verifiedByPlatformSync: true }
+        ).catch(error => {
+          console.warn(`[ShippingTimeliness] 订单 ${localOrder.purchase_no} 学习失败:`, error.message)
+          return { recorded: false }
+        })
+      )
+    }
+
+    if (timelinessLearningTasks.length > 0) {
+      const learned = await Promise.all(timelinessLearningTasks)
+      const learnedCount = learned.filter(item => item.recorded).length
+      if (learnedCount > 0) console.log(`[ShippingTimeliness] 本次批量同步新增/更新 ${learnedCount} 条时效样本`)
     }
 
     console.log(`[Browser-Sync-Batch] 完成: 匹配 ${matchedCount} 条`)
@@ -7398,6 +7456,20 @@ function startExpiredStoreCheck() {
   setInterval(autoDisableExpiredStores, 60 * 60 * 1000)
 }
 
+function startShippingTimelinessLearning() {
+  const learn = async () => {
+    try {
+      const result = await backfillRecentObservations(pool, 10000)
+      console.log(`[ShippingTimeliness] 历史学习完成: 扫描 ${result.scanned} 条，生成 ${result.recorded} 条样本，跳过原因 ${JSON.stringify(result.reasons || {})}`)
+    } catch (err) {
+      // 后台学习失败不影响业务服务启动，下一轮会继续重试。
+      console.warn('[ShippingTimeliness] 历史学习失败:', err.message)
+    }
+  }
+  setTimeout(learn, 5000)
+  setInterval(learn, 6 * 60 * 60 * 1000)
+}
+
 // ============ 启动 ============
 
 const PORT = process.env.PORT || 3002
@@ -7407,6 +7479,7 @@ initDB().then(() => {
   startLockCleanup()
   initPurchaseNoCache()
   startExpiredStoreCheck()
+  startShippingTimelinessLearning()
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] 后端服务已启动: http://0.0.0.0:${PORT}`)
   })
