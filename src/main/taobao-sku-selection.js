@@ -143,6 +143,113 @@ function buildTaobaoSelectedSkuExtractionScript() {
     return label ? clean(label.textContent, 80).replace(/[：:]$/, '') : '';
   }
 
+  function normalizeShopName(value) {
+    var text = clean(value, 100)
+      .replace(/^(?:店铺名称|店铺|商家)[:：\\s]*/, '')
+      .replace(/[›>]+$/, '')
+      .trim();
+    // 新版商品页的父容器会把“店名 + 评分 + 发货时效”拼成一段文本。
+    // 评分信息不是店铺名称；遇到这些稳定指标时只保留前面的真实店名。
+    var metricIndex = text.search(/(?:累计\\s*)?\\d+(?:\\.\\d+)?\\s*(?:88VIP)?好评率|(?:88VIP)?好评率|平均\\s*\\d+\\s*(?:小时|天|秒)|客服(?:满意度|平均)|平均\\s*\\d+\\s*小时退款/);
+    if (metricIndex >= 0) text = text.slice(0, metricIndex).trim();
+    if (!text || text.length < 2 || text.length > 60) return '';
+    if (/^(?:淘宝|淘宝网|淘宝网首页|天猫|天猫首页|我的淘宝|购物车|收藏夹|免费开店|客服|联系客服|进店|进入店铺|店铺|商家)$/.test(text)) return '';
+    if (/[¥￥]/.test(text) || /(?:已售|销量|评价|优惠前|优惠后)/.test(text)) return '';
+    return text;
+  }
+  var shopCandidates = [];
+  function registerShopCandidate(name, score, source) {
+    var normalized = normalizeShopName(name);
+    if (!normalized) return;
+    if (/(?:旗舰店|专卖店|专营店|企业店|官方店|工厂店|品牌店|淘宝店|店)$/.test(normalized)) score += 45;
+    var existing = shopCandidates.find(function(item) { return item.name === normalized; });
+    if (existing) {
+      if (score > existing.score) {
+        existing.score = score;
+        existing.source = source;
+      }
+      return;
+    }
+    shopCandidates.push({ name: normalized, score: score, source: source });
+  }
+  // 2026版详情页真实店名是 shopName 叶子span，title与文本都只包含店名。
+  // 必须先于同名父容器读取，否则父容器会混入评分和发货说明。
+  var preciseShopSelectors = [
+    'span[class*="shopName"][title]', 'span[class*="ShopName"][title]',
+    '[class*="shopNameWrap"] > span[class*="shopName"]',
+    '[class*="ShopNameWrap"] > span[class*="ShopName"]'
+  ];
+  preciseShopSelectors.forEach(function(selector, selectorIndex) {
+    Array.from(document.querySelectorAll(selector)).slice(0, 20).forEach(function(element) {
+      if (!visible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
+      var title = element.getAttribute && element.getAttribute('title');
+      registerShopCandidate(title || element.textContent || element.innerText, 260 - selectorIndex * 3, 'shop-name-leaf');
+    });
+  });
+  var shopSelectors = [
+    '[class*="shopName"]', '[class*="ShopName"]',
+    '[class*="storeName"]', '[class*="StoreName"]',
+    '[class*="sellerName"]', '[class*="SellerName"]',
+    '.shop-name', '.slogo-shopname', '#J_ShopInfo .shop-name', '#shopExtra .shop-name'
+  ];
+  shopSelectors.forEach(function(selector, selectorIndex) {
+    Array.from(document.querySelectorAll(selector)).slice(0, 80).forEach(function(element) {
+      if (!visible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
+      var rect = element.getBoundingClientRect();
+      var score = 150 - selectorIndex * 2;
+      if (rect.top >= 0 && rect.top < 380) score += 25;
+      registerShopCandidate(element.textContent || element.innerText, score, selector);
+    });
+  });
+  Array.from(document.querySelectorAll('a[href]')).slice(0, 1800).forEach(function(element) {
+    if (!visible(element) || element.closest('#__dxe_sales_product_overlay__')) return;
+    var rawHref = element.getAttribute('href') || '';
+    var shopLink = false;
+    try {
+      var hrefUrl = new URL(rawHref, location.href);
+      var hrefHost = hrefUrl.hostname.toLowerCase();
+      var hrefPath = hrefUrl.pathname.toLowerCase();
+      shopLink = /(?:^|\\.)(?:shop|store)\\.(?:taobao|tmall)\\.com$/.test(hrefHost) ||
+        /\\/(?:shop|store)(?:\\/|_|\\.|$)|view_shop/.test(hrefPath) ||
+        ((hrefHost.endsWith('.tmall.com') || hrefHost.endsWith('.tmall.hk')) && !/(?:item\\.htm|detail|item\\/)/.test(hrefPath));
+    } catch (_) {}
+    if (!shopLink) return;
+    var rect = element.getBoundingClientRect();
+    var score = 120;
+    if (rect.top >= 0 && rect.top < 380) score += 30;
+    registerShopCandidate(element.textContent || element.innerText || element.getAttribute('title'), score, 'shop-link');
+  });
+  function collectStateShopNames(root, depth, seen) {
+    if (!root || typeof root !== 'object' || depth > 7 || seen.has(root)) return;
+    seen.add(root);
+    var nameKeys = ['shopName', 'shopTitle', 'storeName', 'sellerName', 'sellerNick'];
+    for (var nameIndex = 0; nameIndex < nameKeys.length; nameIndex++) {
+      var nameKey = nameKeys[nameIndex];
+      if (typeof root[nameKey] === 'string') {
+        registerShopCandidate(root[nameKey], 135 - nameIndex * 6 - depth * 2, 'state.' + nameKey);
+      }
+    }
+    if (root.shopInfo && typeof root.shopInfo === 'object' && typeof root.shopInfo.title === 'string') {
+      registerShopCandidate(root.shopInfo.title, 145 - depth * 2, 'state.shopInfo.title');
+    }
+    if (root.sellerInfo && typeof root.sellerInfo === 'object' && typeof root.sellerInfo.shopTitle === 'string') {
+      registerShopCandidate(root.sellerInfo.shopTitle, 145 - depth * 2, 'state.sellerInfo.shopTitle');
+    }
+    var containerKeys = ['data','props','pageProps','pageData','detail','item','shop','shopInfo','seller','sellerInfo','componentsVO','global','model'];
+    for (var containerIndex = 0; containerIndex < containerKeys.length; containerIndex++) {
+      try { collectStateShopNames(root[containerKeys[containerIndex]], depth + 1, seen); } catch (_) {}
+    }
+  }
+  var shopStateRoots = [
+    window.__INITIAL_STATE__, window.__INIT_DATA__, window.__INITIAL_DATA__,
+    window.__GLOBAL_DATA__, window.__NEXT_DATA__, window.__ICE_DATA__, window.g_config
+  ];
+  for (var shopStateIndex = 0; shopStateIndex < shopStateRoots.length; shopStateIndex++) {
+    try { collectStateShopNames(shopStateRoots[shopStateIndex], 0, new WeakSet()); } catch (_) {}
+  }
+  shopCandidates.sort(function(a, b) { return b.score - a.score; });
+  var shopName = shopCandidates.length > 0 ? shopCandidates[0].name : '';
+
   var selectedSelectors = [
     '[aria-checked="true"]', '[aria-selected="true"]', '.tb-selected',
     '[class*="valueItem"][class*="selected"]', '[class*="valueItem"][class*="Selected"]',
@@ -453,6 +560,8 @@ function buildTaobaoSelectedSkuExtractionScript() {
   return {
     skuId: skuId,
     options: options.slice(0, 12),
+    shopName: shopName,
+    shopCandidates: shopCandidates.slice(0, 4),
     shipFrom: shipFrom,
     shippingCandidates: shippingCandidates.slice(0, 4),
     price: resolvedPrice,

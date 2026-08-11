@@ -32,9 +32,20 @@ function runPriceExtraction(priceText, options = {}) {
     getAttribute: () => null,
     closest: () => null
   }
+  const shopElement = options.shopName ? {
+    className: 'shopName--hash',
+    parentElement: null,
+    isConnected: true,
+    innerText: options.shopName,
+    textContent: options.shopName,
+    getBoundingClientRect: () => ({ width: 180, height: 32, top: 110, left: 80, bottom: 142 }),
+    getAttribute: (name) => name === 'title' ? (options.shopTitle || null) : null,
+    closest: () => null
+  } : null
   const document = {
     querySelectorAll(selector) {
       if (selector.includes('[aria-checked="true"]')) return [selectedOption]
+      if (shopElement && selector.includes('[class*="shopName"]')) return [shopElement]
       if (options.directSelector && selector.includes('[class*="highlightPrice"]')) return [priceElement]
       if (selector === 'span,div,p,strong,em,b') return [priceElement]
       return []
@@ -156,6 +167,19 @@ describe('淘宝货源SKU记录与回选', () => {
     expect(result.price).toBe(219)
     expect(result.priceKind).toBe('promotion')
     expect(result.priceLabel).toBe('平台加补后')
+  })
+
+  it('选择货源时从当前商品页提取店铺名称', () => {
+    const result = runPriceExtraction('店铺优惠后￥28.9', {
+      directSelector: true,
+      shopName: '富光爱德家专卖店4.6好评率89%平均2天内发货',
+      shopTitle: '富光爱德家专卖店'
+    })
+    expect(result.shopName).toBe('富光爱德家专卖店')
+    expect(result.shopCandidates[0]).toMatchObject({
+      name: '富光爱德家专卖店',
+      source: 'shop-name-leaf'
+    })
   })
 
   it('没有优惠标题的 highlightPrice 只标记为普通价', () => {

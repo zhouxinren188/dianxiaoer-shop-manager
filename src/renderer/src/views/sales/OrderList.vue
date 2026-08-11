@@ -656,7 +656,12 @@
                       @click="applySourceToPurchase(idx)">
                       <div class="source-option-header">
                         <div class="source-option-left">
-                          <el-tag size="small" :type="platformTagType(src.platform)">{{ platformLabel(src.platform) }}</el-tag>
+                          <el-tag
+                            size="small"
+                            class="source-shop-tag"
+                            :type="platformTagType(src.platform)"
+                            :title="sourceLabelTitle(src)"
+                          >{{ sourceDisplayLabel(src) }}</el-tag>
                           <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
                           <span v-if="getSourceShipFrom(src.purchase_link)" class="source-option-origin">发货地：{{ getSourceShipFrom(src.purchase_link) }}</span>
                           <span
@@ -948,9 +953,14 @@
       destroy-on-close
     >
       <el-table :data="skuSources" stripe border size="small" style="margin-bottom:12px;" :header-cell-style="{ background: '#f5f7fa', fontWeight: 600 }">
-        <el-table-column label="平台" width="100" align="center">
+        <el-table-column label="店铺/平台" width="150" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="platformTagType(row.platform)">{{ platformLabel(row.platform) }}</el-tag>
+            <el-tag
+              size="small"
+              class="source-shop-tag"
+              :type="platformTagType(row.platform)"
+              :title="sourceLabelTitle(row)"
+            >{{ sourceDisplayLabel(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="链接" min-width="180">
@@ -1253,7 +1263,7 @@ import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo, recommen
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventory, batchQuerySkuBindings, fetchInventoryById, updateInventory, updatePackageNum } from '@/api/warehouse'
-import { buildTaobaoSameHistoryKey, collectTaobaoSourceItemIds, extractTaobaoItemId, readTaobaoSameHistory, saveTaobaoSameHistory } from '@/utils/taobaoSameHistory'
+import { buildTaobaoSameHistoryKey, extractTaobaoItemId, readTaobaoSameHistory, saveTaobaoSameHistory } from '@/utils/taobaoSameHistory'
 
 // ==================== 筛选项配置 ====================
 
@@ -2609,12 +2619,12 @@ watch(() => purchaseInfo.platform, (platform) => {
 })
 
 function platformLabel(val) {
-  const map = { taobao: '淘宝/天猫', pinduoduo: '拼多多', '1688': '阿里巴巴' }
+  const map = { taobao: '淘宝/天猫', tmall: '天猫', pinduoduo: '拼多多', '1688': '阿里巴巴' }
   return map[val] || val
 }
 
 function platformTagType(val) {
-  const map = { taobao: 'danger', pinduoduo: 'warning', '1688': '', douyin: 'success' }
+  const map = { taobao: 'danger', tmall: 'danger', pinduoduo: 'warning', '1688': '', douyin: 'success' }
   return map[val] || 'info'
 }
 
@@ -2665,6 +2675,41 @@ function getTaobaoSourceMetadata(url) {
 
 function getSourceShipFrom(url) {
   return String(getTaobaoSourceMetadata(url)?.shipFrom || '')
+}
+
+function getSourceShopName(url) {
+  return String(getTaobaoSourceMetadata(url)?.shopName || '').replace(/\s+/g, ' ').trim()
+}
+
+function sourceMarketplaceType(source) {
+  const url = String(source?.purchase_link || '')
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    if (host === 'tmall.com' || host.endsWith('.tmall.com') || host === 'tmall.hk' || host.endsWith('.tmall.hk')) {
+      return 'tmall'
+    }
+    if (host === 'taobao.com' || host.endsWith('.taobao.com') || host === 'tb.cn' || host.endsWith('.tb.cn')) {
+      return 'taobao'
+    }
+  } catch {}
+  return source?.platform || detectPlatformFromUrl(url) || 'unknown'
+}
+
+function sourceMarketplaceLabel(source) {
+  const type = sourceMarketplaceType(source)
+  const map = { taobao: '淘宝', tmall: '天猫', pinduoduo: '拼多多', '1688': '阿里巴巴' }
+  return map[type] || platformLabel(type) || '未知平台'
+}
+
+function sourceDisplayLabel(source) {
+  const shopName = getSourceShopName(source?.purchase_link)
+  return shopName || sourceMarketplaceLabel(source)
+}
+
+function sourceLabelTitle(source) {
+  const marketplace = sourceMarketplaceLabel(source)
+  const shopName = getSourceShopName(source?.purchase_link)
+  return shopName ? `${shopName}（${marketplace}）` : marketplace
 }
 
 function sourceTimelinessKey(source, index) {
@@ -2850,6 +2895,52 @@ async function openSourceLink(source) {
   }
 
   try {
+    // 淘宝/天猫“查看商品”复用同款商品窗口：展示销售商品信息，
+    // 并把当前货源作为已绑定状态传入，从该入口也能直接取消绑定。
+    if (platform === 'taobao' || platform === 'tmall') {
+      const metadata = getTaobaoSourceMetadata(url) || {}
+      const itemId = extractTaobaoItemId(url)
+      const result = await window.electronAPI.invoke('open-taobao-same-product', {
+        accountId: account.id,
+        url,
+        sameItem: {
+          itemId,
+          link: String(url),
+          title: '',
+          img: '',
+          price: source?.purchase_price == null ? null : Number(source.purchase_price),
+          originalPrice: null,
+          sales: '',
+          shop: String(metadata.shopName || ''),
+          shopId: String(metadata.shopId || ''),
+          sellerId: String(metadata.sellerId || '')
+        },
+        binding: {
+          isBound: true,
+          sourceId: source?.id ?? null,
+          itemId,
+          purchaseLink: String(url),
+          reopenSameResults: false
+        },
+        sourceProduct: {
+          goodsName: purchaseInfo.goodsName,
+          image: purchaseInfo.image,
+          sku: purchaseInfo.sku,
+          skuSpec: purchaseInfo.skuSpec,
+          quantity: purchaseInfo.quantity,
+          price: purchaseInfo.price,
+          purchasePrice: purchaseInfo.purchasePrice,
+          shippingName: purchaseInfo.shippingName,
+          shippingPhone: purchaseInfo.shippingPhone,
+          shippingAddress: purchaseInfo.shippingAddress
+        }
+      })
+      if (!result?.success) {
+        ElMessage.error(result?.message || '打开商品失败')
+      }
+      return
+    }
+
     const result = await window.electronAPI.invoke('open-purchase-url', {
       accountId: account.id,
       url,
@@ -2869,16 +2960,27 @@ function getTaobaoSameSearchAccount() {
     account.platform === 'taobao' || account.platform === 'tmall'
   )
   if (accounts.length === 0) return null
+
+  // 搜同款必须与采购弹窗当前选中的账号保持一致。否则搜索结果页和后续
+  // 商品窗口会进入另一个持久化分区，界面显示的账号与实际 Cookie 不一致。
+  const selected = accounts.find(account =>
+    String(account.id) === String(purchaseInfo.selectedAccountId || '')
+  )
+  if (selected) return selected
+
   const lastId = localStorage.getItem('lastPurchaseAccount_taobao')
   const remembered = lastId ? accounts.find(account => String(account.id) === String(lastId)) : null
   return remembered || accounts.find(account => account.online || account.status === 'online') || accounts[0]
 }
 
-const taobaoSameSourceItemIds = computed(() => collectTaobaoSourceItemIds(skuSources.value))
+function findTaobaoSameSource(product) {
+  const itemId = extractTaobaoItemId(product)
+  if (!itemId) return null
+  return skuSources.value.find(source => extractTaobaoItemId(source?.purchase_link || '') === itemId) || null
+}
 
 function isTaobaoSameSource(product) {
-  const itemId = extractTaobaoItemId(product)
-  return !!itemId && taobaoSameSourceItemIds.value.has(itemId)
+  return !!findTaobaoSameSource(product)
 }
 
 function currentTaobaoSameHistoryKey(accountId) {
@@ -2963,6 +3065,7 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
 async function handleOpenTaobaoSameProduct(product) {
   if (!product?.link || !taobaoSameAccountId.value) return
   try {
+    const boundSource = findTaobaoSameSource(product)
     // Vue会把列表项包装成响应式Proxy，Electron IPC无法直接结构化克隆。
     // 只提取允许传入主进程的普通字段，避免 DataCloneError。
     const sameItem = {
@@ -2981,6 +3084,13 @@ async function handleOpenTaobaoSameProduct(product) {
       accountId: taobaoSameAccountId.value,
       url: sameItem.link,
       sameItem,
+      binding: {
+        isBound: !!boundSource,
+        sourceId: boundSource?.id == null ? null : Number(boundSource.id),
+        itemId: String(extractTaobaoItemId(product) || ''),
+        purchaseLink: String(boundSource?.purchase_link || ''),
+        reopenSameResults: true
+      },
       sourceProduct: {
         goodsName: purchaseInfo.goodsName,
         image: purchaseInfo.image,
@@ -3063,6 +3173,27 @@ async function applyTaobaoSameProduct(product, accountId) {
   // 保留同款结果和滚动位置，方便为同一销售商品连续添加多个货源。
   taobaoSameDialogVisible.value = true
   ElMessage.success(existingSource ? '淘宝货源已更新，可继续选择其他货源' : '淘宝货源已添加，可继续选择其他货源')
+}
+
+async function removeTaobaoSameProductBinding(data) {
+  const itemId = String(data?.binding?.itemId || extractTaobaoItemId(data?.product) || '')
+  const matchedSource = skuSources.value.find(source =>
+    itemId && extractTaobaoItemId(source?.purchase_link || '') === itemId
+  )
+  const sourceId = data?.binding?.sourceId || matchedSource?.id
+  if (!sourceId) {
+    await loadSkuSources(purchaseInfo.skuId)
+    throw new Error('未找到对应的货源配置，请刷新后重试')
+  }
+
+  await deleteSkuPurchaseConfig(sourceId)
+  await loadSkuSources(purchaseInfo.skuId)
+  await nextTick()
+  const shouldReopenSameResults = !!data?.binding?.reopenSameResults && taobaoSameResults.value.length > 0
+  taobaoSameDialogVisible.value = shouldReopenSameResults
+  ElMessage.success(shouldReopenSameResults
+    ? '淘宝货源绑定已取消，可继续选择其他货源'
+    : '淘宝货源绑定已取消')
 }
 
 // 拼多多选品：用采购账号 session 打开 PDD 首页
@@ -3319,6 +3450,12 @@ function setupPurchaseListeners() {
   })
   // 淘宝同款商品页中的“选为货源”按钮回传
   unsubTaobaoSameSource = window.electronAPI.onUpdate('taobao-same-source-selected', (data) => {
+    if (data?.action === 'unbind') {
+      removeTaobaoSameProductBinding(data).catch(error => {
+        ElMessage.error('取消淘宝货源失败: ' + error.message)
+      })
+      return
+    }
     if (!data?.product) return
     applyTaobaoSameProduct(data.product, data.accountId).catch(error => {
       ElMessage.error('选择淘宝货源失败: ' + error.message)
@@ -6310,6 +6447,13 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.source-shop-tag {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .source-option-actions {

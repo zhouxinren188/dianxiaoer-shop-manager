@@ -8,6 +8,8 @@ const {
   normalizeTaobaoSearchItems,
   summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
+  detectTaobaoMarketplace,
+  prepareTaobaoSameProductUrl,
   buildTaobaoSameSelection,
   buildTaobaoSameProductInjection,
   getTaobaoSamePartition,
@@ -16,13 +18,34 @@ const {
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
   isTaobaoCookieDomain,
+  isTaobaoSearchCarrierUrl,
   isTaobaoRiskRet,
+  isTaobaoBusyRet,
+  isTaobaoVerificationRet,
+  sanitizeTaobaoRetText,
+  extractTaobaoRetMessage,
   isTaobaoTokenRet,
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
   classifyTaobaoAuthenticationSnapshot,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS
 } = taobaoSameSearch
+
+describe('淘宝货源商品页 SKU 恢复', () => {
+  it('从货源链接读取已保存规格并把 skuId 带入实际商品网址', () => {
+    const selection = {
+      skuId: '778899',
+      options: [{ group: '颜色', text: '奶油白四层', valueId: '1627207:28320' }]
+    }
+    const sourceUrl = 'https://item.taobao.com/item.htm?id=123#dxeSku=' +
+      encodeURIComponent(JSON.stringify(selection))
+    const target = prepareTaobaoSameProductUrl(sourceUrl)
+
+    expect(new URL(target.url).searchParams.get('skuId')).toBe('778899')
+    expect(target.url).not.toContain('#dxeSku=')
+    expect(target.selection.options[0].text).toBe('奶油白四层')
+  })
+})
 
 describe('淘宝按图搜同款', () => {
   it('规范化远程图片地址并拒绝无效协议', () => {
@@ -145,9 +168,26 @@ describe('淘宝按图搜同款', () => {
     expect(getTaobaoPurchasePartition(7)).toBe('persist:purchase-7')
   })
 
+  it('把淘宝过期占位商品识别为正常搜同款承载页', () => {
+    expect(isTaobaoSearchCarrierUrl(
+      'https://h5.m.taobao.com/awp/core/detail.htm?id=620000000000000000'
+    )).toBe(true)
+    expect(isTaobaoSearchCarrierUrl(
+      'https://h5.m.taobao.com/detailplugin/expired.html?itemId=620000000000000000&'
+    )).toBe(true)
+    expect(isTaobaoSearchCarrierUrl(
+      'https://h5.m.taobao.com/detailplugin/expired.html?itemId=123'
+    )).toBe(false)
+    expect(isTaobaoSearchCarrierUrl('https://sec.taobao.com/verify')).toBe(false)
+  })
+
   it('识别淘宝风控并只接受淘宝验证地址', () => {
     expect(isTaobaoRiskRet('RGV587_ERROR::SM::被挤爆啦')).toBe(true)
     expect(isTaobaoRiskRet('FAIL_SYS_USER_VALIDATE::安全验证')).toBe(true)
+    expect(isTaobaoBusyRet('RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试!')).toBe(true)
+    expect(isTaobaoBusyRet('FAIL_SYS_USER_VALIDATE::安全验证')).toBe(false)
+    expect(isTaobaoVerificationRet('FAIL_SYS_USER_VALIDATE::安全验证')).toBe(true)
+    expect(isTaobaoVerificationRet('RGV587_ERROR::SM::被挤爆啦')).toBe(false)
     expect(isTaobaoRiskRet('SUCCESS::调用成功')).toBe(false)
     expect(extractTaobaoVerificationUrl({
       data: { url: 'https://login.taobao.com/member/login.jhtml' }
@@ -156,6 +196,13 @@ describe('淘宝按图搜同款', () => {
       data: { url: 'https://evil.example.com/steal' }
     })).toBe('')
     expect(TAOBAO_SEARCH_RISK_COOLDOWN_MS).toBeGreaterThanOrEqual(30 * 60 * 1000)
+  })
+
+  it('展示淘宝可读返回原因并隐藏返回内容中的链接', () => {
+    const ret = 'RGV587_ERROR::SM::哎哟喂,被挤爆啦,请稍后重试!'
+    expect(extractTaobaoRetMessage(ret)).toBe('哎哟喂,被挤爆啦,请稍后重试!')
+    expect(sanitizeTaobaoRetText('RGV587::请访问 https://example.com/token?a=secret\n后重试'))
+      .toBe('RGV587::请访问 [链接已隐藏] 后重试')
   })
 
   it('Token错误只有读到不同的新Token时才允许受控重试', () => {
@@ -211,6 +258,37 @@ describe('淘宝按图搜同款', () => {
     expect(isTaobaoProductPageUrl('https://example.com/item.htm?id=222')).toBe(false)
   })
 
+  it('优先沿用同款结果店铺名，商品页店铺名只作兜底，并准确区分淘宝与天猫链接', () => {
+    const selection = buildTaobaoSameSelection({
+      accountId: 7,
+      sameItem: { itemId: '111', shop: '搜索接口旧店铺名' }
+    }, 'https://detail.tmall.com/item.htm?id=222', {
+      skuId: '333',
+      shopName: '富光爱德家专卖店',
+      shopCandidates: [{ name: '富光爱德家专卖店', source: 'shop-link', score: 190 }],
+      price: 29.9
+    })
+
+    expect(selection.product.shop).toBe('搜索接口旧店铺名')
+    expect(selection.product.shopSource).toBe('same-search-result')
+    expect(selection.product.marketplace).toBe('tmall')
+    expect(selection.product.shopCandidates[0].source).toBe('shop-link')
+    expect(detectTaobaoMarketplace('https://item.taobao.com/item.htm?id=1')).toBe('taobao')
+    expect(detectTaobaoMarketplace('https://detail.tmall.com/item.htm?id=1')).toBe('tmall')
+    expect(detectTaobaoMarketplace('https://detail.tmall.hk/item.htm?id=1')).toBe('tmall')
+    expect(detectTaobaoMarketplace('https://example.com/item.htm?id=1')).toBe('')
+
+    const fallback = buildTaobaoSameSelection({
+      accountId: 7,
+      sameItem: { itemId: '111', shop: '' }
+    }, 'https://item.taobao.com/item.htm?id=222', {
+      shopName: '商品页兜底店铺',
+      price: 19.9
+    })
+    expect(fallback.product.shop).toBe('商品页兜底店铺')
+    expect(fallback.product.shopSource).toBe('product-page-fallback')
+  })
+
   it('商品页没有读到SKU价时必须标记失败，禁止静默使用搜索列表价', () => {
     const selection = buildTaobaoSameSelection({
       accountId: 7,
@@ -245,22 +323,42 @@ describe('淘宝按图搜同款', () => {
     expect(script).toContain('销售规格')
     expect(script).toContain('1300ml单壶')
     expect(script).not.toContain('-webkit-line-clamp:3')
-    expect(script).toContain('position:fixed;left:20px;top:146px')
+    expect(script).toContain('position:fixed;z-index:2147483001')
+    expect(script).toContain('position:fixed;right:530px;top:656px')
+    expect(script).toContain(') - 510')
+    expect(script).toContain(') + 510')
     expect(script).toContain('#J_Toolkit .tb-toolkit-list-new')
-    expect(script).toContain('toolkitList.firstElementChild !== row')
-    expect(script).toContain('toolkitList.insertBefore(row, toolkitList.firstChild)')
-    expect(script).toContain("styleSelectRow(row, 'toolkit')")
-    expect(script).toContain('dxe-toolkit-source-item')
-    expect(script).toContain('flex:0 0 48px')
+    expect(script).not.toContain('toolkitList.insertBefore')
+    expect(script).toContain("styleSelectRow(row, 'floating-toolkit')")
+    expect(script).toContain('dxe-floating-source-item')
+    expect(script).toContain('position:fixed')
+    expect(script).toContain("toolkitList.closest('#J_Toolkit')")
     expect(script).toContain('toolkit-label dxe-toolkit-source-label')
-    expect(script).toContain("label.style.cssText = 'display:none;'")
+    expect(script).toContain("label.style.cssText = 'display:inline-block")
     expect(script).toContain('data-dxe-source-tooltip')
     expect(script).toContain('right:calc(100% + 9px)')
+    expect(script).toContain('row.parentElement !== document.body')
     expect(script).toContain('document.body.appendChild(row)')
     expect(script).not.toContain("titleBlock.insertAdjacentElement('afterend', row)")
     expect(script).not.toContain("parent.style.flexWrap = 'wrap'")
     expect(script).not.toContain("row.style.gridColumn = '1 / -1'")
     expect(script).toContain('}, 100);')
     expect(script).toContain('dianxiaoer://select-taobao-same-source')
+    expect(script).toContain('dianxiaoer://remove-taobao-same-source')
+    expect(script).not.toContain('price-recovery-reload')
+    expect(script).not.toContain('scheduleSkuPriceRecovery')
+    expect(script).not.toContain('location.replace(')
+    expect(script).toContain('clearSkuClickDiagnostics')
+    expect(script).toContain("sku-click-stable-3500ms")
+    expect(script).toContain('[DXE_SAME_PRODUCT] skipped-non-product')
+
+    const boundScript = buildTaobaoSameProductInjection({}, '', 'diag-1', {
+      isBound: true,
+      sourceId: 12,
+      itemId: '123'
+    })
+    expect(boundScript).toContain('"isBound":true')
+    expect(boundScript).toContain('"sourceId":12')
+    expect(boundScript).toContain('left:10px;top:190px')
   })
 })

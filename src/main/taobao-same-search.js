@@ -9,7 +9,10 @@ const { getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 const {
   normalizeTaobaoSkuSelection,
-  buildTaobaoSelectedSkuExtractionScript
+  decodeTaobaoSkuSourceUrl,
+  addTaobaoSkuIdToUrl,
+  buildTaobaoSelectedSkuExtractionScript,
+  buildTaobaoSkuAutoSelectScript
 } = require('./taobao-sku-selection')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
@@ -185,6 +188,20 @@ function isTaobaoVerificationUrl(url) {
     lower.includes('verify')
 }
 
+function isTaobaoSearchCarrierUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''))
+    if (parsed.hostname !== 'h5.m.taobao.com') return false
+    if (parsed.pathname === '/awp/core/detail.htm') {
+      return parsed.searchParams.get('id') === '620000000000000000'
+    }
+    if (parsed.pathname === '/detailplugin/expired.html') {
+      return parsed.searchParams.get('itemId') === '620000000000000000'
+    }
+  } catch (_) {}
+  return false
+}
+
 function classifyTaobaoAuthenticationSnapshot(snapshot = {}) {
   const text = [snapshot.title, snapshot.text]
     .map(value => String(value || ''))
@@ -241,6 +258,31 @@ function isTaobaoRiskRet(retText) {
   return /RGV587|FAIL_SYS_USER_VALIDATE/i.test(String(retText || ''))
 }
 
+function isTaobaoBusyRet(retText) {
+  return /RGV587/i.test(String(retText || ''))
+}
+
+function isTaobaoVerificationRet(retText) {
+  return /FAIL_SYS_USER_VALIDATE/i.test(String(retText || ''))
+}
+
+function sanitizeTaobaoRetText(retText, maxLength = 240) {
+  return String(retText || '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/https?:\/\/\S+/gi, '[链接已隐藏]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+}
+
+function extractTaobaoRetMessage(retText) {
+  const sanitized = sanitizeTaobaoRetText(retText, 180)
+  if (!sanitized) return ''
+  const parts = sanitized.split('::').map(part => part.trim()).filter(Boolean)
+  const readable = [...parts].reverse().find(part => !/^[A-Z0-9_:-]+$/i.test(part))
+  return (readable || parts[parts.length - 1] || sanitized).slice(0, 120)
+}
+
 function isTaobaoTokenRet(retText) {
   return /TOKEN_(?:EMPTY|EXPIRED|ILLEGAL)|SESSION_EXPIRED/i.test(String(retText || ''))
 }
@@ -280,6 +322,14 @@ function showSearchWindow(state, title) {
   state.win.focus()
 }
 
+function hideReadySearchWindow(state) {
+  if (!state || !state.win || state.win.isDestroyed()) return
+  const currentUrl = state.win.webContents.getURL()
+  if (isTaobaoLoginPageUrl(currentUrl) || isTaobaoVerificationUrl(currentUrl)) return
+  state.win.setTitle('淘宝搜同款')
+  if (state.win.isVisible()) state.win.hide()
+}
+
 async function waitForTaobaoSearchPageStable(win, timeoutMs = 12000) {
   const startedAt = Date.now()
   let lastUrl = ''
@@ -295,6 +345,62 @@ async function waitForTaobaoSearchPageStable(win, timeoutMs = 12000) {
     await sleep(150)
   }
   return win.webContents.getURL()
+}
+
+async function waitForTaobaoVerificationResolution(state, timeoutMs = TAOBAO_SEARCH_AUTH_TIMEOUT) {
+  const startedAt = Date.now()
+  let latest = { ready: false, url: '', reason: 'verification_pending' }
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!state?.win || state.win.isDestroyed()) return { ...latest, reason: 'window_destroyed' }
+    const url = state.win.webContents.getURL()
+    latest.url = url
+
+    // 登录/验证地址可能在8秒自动确认后自行跳回承载页，不能看到一次登录页就立即判失败。
+    if (!isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url)) {
+      const remainingMs = Math.max(600, timeoutMs - (Date.now() - startedAt))
+      const authState = await waitForTaobaoSearchAuthentication(
+        state,
+        Math.min(remainingMs, 3000),
+        TAOBAO_SEARCH_AUTH_STABLE_MS
+      )
+      latest = { ...authState, url: authState.url || url }
+      if (authState.ready) {
+        return {
+          ...latest,
+          ready: true,
+          carrierPage: isTaobaoSearchCarrierUrl(authState.url || url),
+          waitMs: Date.now() - startedAt
+        }
+      }
+    }
+    await sleep(200)
+  }
+
+  return { ...latest, waitMs: Date.now() - startedAt }
+}
+
+async function openTaobaoVerificationAndWait(state, verificationUrl) {
+  const win = state.win
+  state.bootstrapComplete = false
+  state.verificationPending = true
+  showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
+  try {
+    await win.loadURL(verificationUrl)
+  } catch (error) {
+    const currentUrl = win.isDestroyed() ? '' : win.webContents.getURL()
+    if (!currentUrl || !String(error.message || '').includes('ERR_ABORTED')) {
+      runtimeLog.writeLog('TaobaoSame', '打开淘宝验证地址失败: ' + error.message)
+    }
+  }
+
+  const resolution = await waitForTaobaoVerificationResolution(state)
+  if (resolution.ready) {
+    state.verificationPending = false
+    state.bootstrapComplete = true
+    hideReadySearchWindow(state)
+  }
+  return resolution
 }
 
 async function bootstrapSearchWindow(state) {
@@ -344,7 +450,9 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
       nodeIntegration: false,
       partition,
       backgroundThrottling: false,
-      webSecurity: false
+      // 必须保留 Chromium 正常的同源/CORS 语义，让页面XHR自然携带 Origin、
+      // Sec-Fetch-Site 等浏览器安全上下文；关闭后淘宝会把请求识别成异常环境。
+      webSecurity: true
     }
   })
   const chromeVersion = process.versions.chrome || '134.0.6998.205'
@@ -360,6 +468,7 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
     initializing: null,
     bootstrapComplete: false,
     firstSearchPrepared: false,
+    verificationPending: false,
     lastNavigationAt: Date.now(),
     lastNavigationUrl: ''
   }
@@ -372,6 +481,10 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
     state.lastNavigationUrl = String(url || '')
     if (isTaobaoLoginPageUrl(url)) showSearchWindow(state, '淘宝搜同款 - 请登录淘宝')
     if (isTaobaoVerificationUrl(url)) showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
+    if (state.verificationPending && !isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url)) {
+      // “商品过期不存在”是正常承载页，不是安全验证失败页。
+      win.setTitle(isTaobaoSearchCarrierUrl(url) ? '淘宝搜同款 - 会话恢复中' : '淘宝搜同款')
+    }
   })
   win.webContents.on('did-navigate-in-page', (_event, url) => {
     state.lastNavigationAt = Date.now()
@@ -710,6 +823,9 @@ function pageXhrPostAndCapture(win, requestUrl, postBody) {
     const expectedTime = expected.searchParams.get('t')
     const expectedSign = expected.searchParams.get('sign')
     let requestId = ''
+    let requestDiagnostic = {}
+    let responseDiagnostic = {}
+    const extraHeadersByRequestId = new Map()
     let settled = false
     let timeout
 
@@ -722,20 +838,65 @@ function pageXhrPostAndCapture(win, requestUrl, postBody) {
       settled = true
       cleanup()
       if (error) reject(error)
-      else resolve(body)
+      else resolve({ body, request: requestDiagnostic, response: responseDiagnostic })
     }
     const onMessage = async (_event, method, params) => {
       try {
+        const mergeSafeHeaders = (headers = {}) => {
+          const entries = Object.entries(headers)
+          const header = (name) => {
+            const match = entries.find(([key]) => String(key).toLowerCase() === name.toLowerCase())
+            return match ? String(match[1] || '') : ''
+          }
+          requestDiagnostic = {
+            ...requestDiagnostic,
+            origin: header('Origin') || requestDiagnostic.origin || '',
+            referer: sanitizeDiagnosticPageUrl(header('Referer')) || requestDiagnostic.referer || '',
+            userAgent: header('User-Agent') || requestDiagnostic.userAgent || '',
+            secChUa: header('sec-ch-ua') || requestDiagnostic.secChUa || '',
+            secFetchSite: header('Sec-Fetch-Site') || requestDiagnostic.secFetchSite || '',
+            contentType: header('Content-Type') || requestDiagnostic.contentType || '',
+            cookieHeaderPresent: !!header('Cookie')
+          }
+        }
+        if (method === 'Network.requestWillBeSentExtraInfo') {
+          extraHeadersByRequestId.set(params.requestId, params.headers || {})
+          if (requestId && params.requestId === requestId) mergeSafeHeaders(params.headers || {})
+          return
+        }
         if (method === 'Network.requestWillBeSent') {
           const url = params.request && params.request.url
           if (!url || !url.toLowerCase().includes(TB_IMAGE_SEARCH_API_PATH)) return
           const parsed = new URL(url)
           if (parsed.searchParams.get('t') === expectedTime && parsed.searchParams.get('sign') === expectedSign) {
             requestId = params.requestId
+            const headers = params.request.headers || {}
+            const header = (name) => headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || ''
+            requestDiagnostic = {
+              method: params.request.method || '',
+              origin: header('Origin'),
+              referer: sanitizeDiagnosticPageUrl(header('Referer')),
+              userAgent: header('User-Agent'),
+              secChUa: header('sec-ch-ua'),
+              secFetchSite: header('Sec-Fetch-Site'),
+              contentType: header('Content-Type'),
+              initiatorType: params.initiator?.type || ''
+            }
+            mergeSafeHeaders(extraHeadersByRequestId.get(requestId) || {})
           }
           return
         }
         if (!requestId || params.requestId !== requestId) return
+        if (method === 'Network.responseReceived') {
+          responseDiagnostic = {
+            status: Number(params.response?.status || 0),
+            protocol: params.response?.protocol || '',
+            mimeType: params.response?.mimeType || '',
+            fromDiskCache: !!params.response?.fromDiskCache,
+            fromServiceWorker: !!params.response?.fromServiceWorker
+          }
+          return
+        }
         if (method === 'Network.loadingFailed') {
           finish(new Error('淘宝图片搜索请求失败: ' + (params.errorText || '网络错误')))
           return
@@ -871,6 +1032,130 @@ function isTaobaoProductPageUrl(value) {
   }
 }
 
+function isTaobaoItemDetailPageUrl(value) {
+  if (!isTaobaoProductPageUrl(value) || isTaobaoLoginPageUrl(value) || isTaobaoVerificationUrl(value)) return false
+  try {
+    const url = new URL(String(value || ''))
+    const host = url.hostname.toLowerCase()
+    return !!url.searchParams.get('id') && (
+      host === 'item.taobao.com' ||
+      host === 'detail.tmall.com' ||
+      host === 'detail.tmall.hk'
+    )
+  } catch (_) {
+    return false
+  }
+}
+
+function shortFingerprint(value) {
+  const text = String(value || '')
+  if (!text) return ''
+  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 12)
+}
+
+function summarizeBixiTokens(tokens) {
+  if (!tokens) return { coherent: false }
+  return {
+    coherent: !!(tokens.bxUa && tokens.bxUmidToken && tokens.bxEt),
+    bxUa: { length: String(tokens.bxUa || '').length, fp: shortFingerprint(tokens.bxUa) },
+    bxUmidToken: { length: String(tokens.bxUmidToken || '').length, fp: shortFingerprint(tokens.bxUmidToken) },
+    bxEt: { length: String(tokens.bxEt || '').length, fp: shortFingerprint(tokens.bxEt) }
+  }
+}
+
+function sanitizeDiagnosticPageUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''))
+    return parsed.protocol + '//' + parsed.hostname + parsed.pathname
+  } catch (_) {
+    return ''
+  }
+}
+
+async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
+  const win = state.win
+  let page = {}
+  try {
+    page = await win.webContents.executeJavaScript(`(function () {
+      return {
+        href: String(location.href || ''),
+        origin: String(location.origin || ''),
+        referrer: String(document.referrer || ''),
+        userAgent: String(navigator.userAgent || ''),
+        platform: String(navigator.platform || ''),
+        language: String(navigator.language || ''),
+        webdriver: navigator.webdriver === true,
+        readyState: String(document.readyState || ''),
+        visibilityState: String(document.visibilityState || ''),
+        resourceCount: (performance.getEntriesByType('resource') || []).length
+      };
+    })()`, true)
+  } catch (error) {
+    page = { readError: String(error.message || error).slice(0, 120) }
+  }
+
+  const cookies = await state.ses.cookies.get({})
+  const taobaoCookies = cookies.filter(cookie => isTaobaoCookieDomain(cookie.domain))
+  const cookieNames = new Set(taobaoCookies.map(cookie => cookie.name))
+  const criticalNames = ['unb', 'cookie17', 'cookie2', '_m_h5_tk', '_m_h5_tk_enc', 'sgcookie', 't', 'tracknick', 'cna']
+  return {
+    accountId: state.accountId,
+    partition: state.partition,
+    chrome: process.versions.chrome || '',
+    electron: process.versions.electron || '',
+    page: {
+      url: sanitizeDiagnosticPageUrl(page.href),
+      carrier: isTaobaoSearchCarrierUrl(page.href),
+      origin: page.origin || '',
+      referrer: sanitizeDiagnosticPageUrl(page.referrer),
+      userAgent: page.userAgent || '',
+      platform: page.platform || '',
+      language: page.language || '',
+      webdriver: page.webdriver === true,
+      readyState: page.readyState || '',
+      visibilityState: page.visibilityState || '',
+      resourceCount: Number(page.resourceCount || 0),
+      readError: page.readError || ''
+    },
+    cookies: {
+      taobaoCount: taobaoCookies.length,
+      critical: Object.fromEntries(criticalNames.map(name => [name, cookieNames.has(name)]))
+    },
+    token: { present: !!token, length: String(token || '').length, fp: shortFingerprint(token) },
+    bixi: summarizeBixiTokens(bixiTokens)
+  }
+}
+
+function detectTaobaoMarketplace(value) {
+  try {
+    const host = new URL(String(value || '')).hostname.toLowerCase()
+    if (host === 'tmall.com' || host.endsWith('.tmall.com') || host === 'tmall.hk' || host.endsWith('.tmall.hk')) {
+      return 'tmall'
+    }
+    if (host === 'taobao.com' || host.endsWith('.taobao.com') || host === 'tb.cn' || host.endsWith('.tb.cn')) {
+      return 'taobao'
+    }
+  } catch (_) {}
+  return ''
+}
+
+function prepareTaobaoSameProductUrl(rawUrl, explicitSelection = null) {
+  const decoded = decodeTaobaoSkuSourceUrl(rawUrl)
+  const suppliedSelection = explicitSelection && typeof explicitSelection === 'object'
+    ? normalizeTaobaoSkuSelection(explicitSelection)
+    : null
+  const selection = suppliedSelection && (
+    suppliedSelection.skuId || suppliedSelection.options.length > 0 || suppliedSelection.shipFrom
+  )
+    ? suppliedSelection
+    : decoded.selection
+
+  return {
+    url: selection ? addTaobaoSkuIdToUrl(decoded.url, selection) : decoded.url,
+    selection
+  }
+}
+
 function buildTaobaoSameSelection(context = {}, currentPageUrl = '', skuSnapshot = null) {
   const sameItem = context.sameItem || {}
   let itemId = String(sameItem.itemId || '').trim()
@@ -880,6 +1165,7 @@ function buildTaobaoSameSelection(context = {}, currentPageUrl = '', skuSnapshot
     itemId = parsed.searchParams.get('id') || itemId
   } catch (_) {}
   const product = { ...sameItem, itemId, link }
+  product.marketplace = detectTaobaoMarketplace(link)
   if (skuSnapshot && typeof skuSnapshot === 'object') {
     product.skuCaptureAttempted = true
     const skuSelection = normalizeTaobaoSkuSelection(skuSnapshot)
@@ -887,6 +1173,20 @@ function buildTaobaoSameSelection(context = {}, currentPageUrl = '', skuSnapshot
     product.shipFrom = String(skuSelection.shipFrom || '')
     product.shippingCandidates = Array.isArray(skuSnapshot.shippingCandidates)
       ? skuSnapshot.shippingCandidates.slice(0, 4)
+      : []
+    const resultShopName = String(sameItem.shop || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+    const pageShopName = String(skuSnapshot.shopName || '').replace(/\s+/g, ' ').trim().slice(0, 100)
+    // 同款接口结果卡片已经携带店铺名，且不受详情页DOM结构变化影响。
+    // 只有卡片缺失店铺名时才使用详情页提取结果兜底。
+    if (resultShopName) {
+      product.shop = resultShopName
+      product.shopSource = 'same-search-result'
+    } else if (pageShopName) {
+      product.shop = pageShopName
+      product.shopSource = 'product-page-fallback'
+    }
+    product.shopCandidates = Array.isArray(skuSnapshot.shopCandidates)
+      ? skuSnapshot.shopCandidates.slice(0, 4)
       : []
     const currentSkuPrice = Number(skuSnapshot.price)
     product.skuPriceCaptured = Number.isFinite(currentSkuPrice) && currentSkuPrice > 0
@@ -920,7 +1220,7 @@ function getTaobaoSameLogoDataUrl() {
   return ''
 }
 
-function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', diagnosticId = '') {
+function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', diagnosticId = '', bindingState = {}) {
   const safeSource = {
     goodsName: String(sourceProduct.goodsName || ''),
     image: String(sourceProduct.image || ''),
@@ -933,11 +1233,41 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     shippingPhone: String(sourceProduct.shippingPhone || ''),
     shippingAddress: String(sourceProduct.shippingAddress || '')
   }
+  const safeBinding = {
+    isBound: !!bindingState.isBound,
+    sourceId: bindingState.sourceId == null ? null : bindingState.sourceId,
+    itemId: String(bindingState.itemId || ''),
+    purchaseLink: String(bindingState.purchaseLink || '')
+  }
   return `
 (function() {
   var info = ${JSON.stringify(safeSource)};
+  var binding = ${JSON.stringify(safeBinding)};
   var logoDataUrl = ${JSON.stringify(logoDataUrl)};
   var diagnosticId = ${JSON.stringify(String(diagnosticId || ''))};
+
+  function isCurrentProductDocument() {
+    try {
+      var currentUrl = new URL(location.href);
+      var host = currentUrl.hostname.toLowerCase();
+      return !!currentUrl.searchParams.get('id') && (
+        host === 'item.taobao.com' ||
+        host === 'detail.tmall.com' ||
+        host === 'detail.tmall.hk'
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  if (!isCurrentProductDocument()) {
+    var staleOverlay = document.getElementById('__dxe_sales_product_overlay__');
+    var staleControl = document.getElementById('__dxe_same_source_row__');
+    if (staleOverlay) staleOverlay.remove();
+    if (staleControl) staleControl.remove();
+    if (window.__dxeSameSourceObserver) window.__dxeSameSourceObserver.disconnect();
+    return '[DXE_SAME_PRODUCT] skipped-non-product';
+  }
 
   function appendText(parent, tag, text, css) {
     var element = document.createElement(tag);
@@ -985,6 +1315,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
 
   var lastPriceDiagnosticSignature = '';
   var priceDiagnosticTimer = null;
+  var skuClickDiagnosticTimers = [];
   var lastGenericPriceDiagnosticAt = 0;
   function emitPriceState(reason, force) {
     try {
@@ -1059,7 +1390,16 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   }
 
   function schedulePriceState(reason, delay, force) {
-    setTimeout(function() { emitPriceState(reason, force); }, delay || 0);
+    var timer = setTimeout(function() {
+      skuClickDiagnosticTimers = skuClickDiagnosticTimers.filter(function(item) { return item !== timer; });
+      emitPriceState(reason, force);
+    }, delay || 0);
+    skuClickDiagnosticTimers.push(timer);
+  }
+
+  function clearSkuClickDiagnostics() {
+    skuClickDiagnosticTimers.forEach(function(timer) { clearTimeout(timer); });
+    skuClickDiagnosticTimers = [];
   }
 
   function installPriceDiagnostics() {
@@ -1078,11 +1418,11 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
         text: String(target.getAttribute('aria-label') || target.getAttribute('title') || target.textContent || '')
           .replace(/\s+/g, ' ').trim().slice(0, 120)
       });
+      clearSkuClickDiagnostics();
       emitPriceState('sku-click-before', true);
-      schedulePriceState('sku-click-200ms', 200, true);
-      schedulePriceState('sku-click-800ms', 800, true);
-      schedulePriceState('sku-click-2000ms', 2000, true);
-      schedulePriceState('sku-click-5000ms', 5000, true);
+      schedulePriceState('sku-click-300ms', 300, true);
+      schedulePriceState('sku-click-1200ms', 1200, true);
+      schedulePriceState('sku-click-stable-3500ms', 3500, true);
     }, true);
     emitPriceState('diagnostic-installed', true);
   }
@@ -1094,7 +1434,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
 
     var overlay = document.createElement('aside');
     overlay.id = '__dxe_sales_product_overlay__';
-    overlay.style.cssText = 'position:fixed;left:20px;top:190px;width:185px;max-height:calc(100vh - 210px);z-index:2147483000;overflow:hidden;box-sizing:border-box;border:1px solid #ebeef5;border-radius:8px;background:#fff;box-shadow:0 4px 18px rgba(0,0,0,.14);color:#303133;font-family:"Microsoft YaHei",sans-serif;font-size:12px;line-height:1.5;';
+    overlay.style.cssText = 'position:fixed;left:10px;top:190px;width:185px;max-height:calc(100vh - 210px);z-index:2147483000;overflow:hidden;box-sizing:border-box;border:1px solid #ebeef5;border-radius:8px;background:#fff;box-shadow:0 4px 18px rgba(0,0,0,.14);color:#303133;font-family:"Microsoft YaHei",sans-serif;font-size:12px;line-height:1.5;';
 
     var header = document.createElement('div');
     header.style.cssText = 'display:flex;align-items:center;height:40px;padding:0 12px;box-sizing:border-box;border-bottom:1px solid #eee;background:#fafafa;user-select:none;cursor:move;';
@@ -1211,15 +1551,18 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   }
 
   function createSelectRow() {
+    var isBound = !!binding.isBound;
+    var actionText = isBound ? '\u53d6\u6d88\u7ed1\u5b9a' : '\u7ed1\u5b9a\u8d27\u6e90';
     var row = document.createElement('div');
     row.id = '__dxe_same_source_row__';
     row.setAttribute('data-name', 'dianxiaoer-source');
-    row.setAttribute('data-label', '\u9009\u8d27\u6e90');
+    row.setAttribute('data-label', actionText);
+    row.setAttribute('data-dxe-bound', isBound ? '1' : '0');
     var button = document.createElement('button');
     button.id = '__dxe_same_source_control__';
     button.type = 'button';
-    button.title = '\u9009\u4e3a\u8d27\u6e90';
-    button.setAttribute('aria-label', '\u9009\u4e3a\u8d27\u6e90');
+    button.title = actionText;
+    button.setAttribute('aria-label', actionText);
     if (logoDataUrl) {
       var logo = document.createElement('img');
       logo.src = logoDataUrl;
@@ -1227,23 +1570,23 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
       logo.setAttribute('data-dxe-source-logo', '1');
       button.appendChild(logo);
     }
-    var label = appendText(button, 'span', '\u9009\u8d27\u6e90');
+    var label = appendText(button, 'span', actionText);
     label.setAttribute('data-dxe-source-label', '1');
-    var tooltip = appendText(row, 'span', '\u9009\u4e3a\u8d27\u6e90');
+    var tooltip = appendText(row, 'span', actionText);
     tooltip.setAttribute('data-dxe-source-tooltip', '1');
     var tooltipArrow = document.createElement('i');
     tooltipArrow.setAttribute('data-dxe-source-tooltip-arrow', '1');
     tooltip.appendChild(tooltipArrow);
     button.addEventListener('mouseenter', function() {
       if (button.disabled) return;
-      if (row.getAttribute('data-dxe-placement') === 'toolkit') {
+      if (row.getAttribute('data-dxe-placement') === 'floating-toolkit') {
         button.style.background = 'rgba(255,80,0,.08)';
-        tooltip.style.display = 'block';
+        if (label && label.style.display === 'none') tooltip.style.display = 'block';
       } else button.style.opacity = '.78';
     });
     button.addEventListener('mouseleave', function() {
       button.style.opacity = '1';
-      if (row.getAttribute('data-dxe-placement') === 'toolkit') {
+      if (row.getAttribute('data-dxe-placement') === 'floating-toolkit') {
         button.style.background = 'transparent';
         tooltip.style.display = 'none';
       }
@@ -1255,9 +1598,13 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
       button.disabled = true;
       button.style.cursor = 'default';
       tooltip.style.display = 'none';
-      label.textContent = '\u9009\u62e9\u4e2d...';
-      emitPriceState('select-source-click', true);
-      window.open('dianxiaoer://select-taobao-same-source', '_blank');
+      label.textContent = isBound ? '\u53d6\u6d88\u4e2d...' : '\u7ed1\u5b9a\u4e2d...';
+      if (isBound) {
+        window.open('dianxiaoer://remove-taobao-same-source', '_blank');
+      } else {
+        emitPriceState('select-source-click', true);
+        window.open('dianxiaoer://select-taobao-same-source', '_blank');
+      }
     });
     row.appendChild(button);
     return row;
@@ -1276,27 +1623,28 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     var tooltip = row.querySelector('[data-dxe-source-tooltip="1"]');
     var tooltipArrow = row.querySelector('[data-dxe-source-tooltip-arrow="1"]');
     row.setAttribute('data-dxe-placement', placement);
-    if (placement === 'toolkit') {
-      row.className = 'toolkit-item-new toolkit-item-link dxe-toolkit-source-item';
+    var isBound = row.getAttribute('data-dxe-bound') === '1';
+    if (placement === 'floating-toolkit') {
+      row.className = 'dxe-floating-source-item';
       row.removeAttribute('data-label');
-      row.style.cssText = 'position:relative;z-index:1;display:flex;flex:0 0 48px;align-items:center;justify-content:center;width:100%;min-width:0;height:48px;margin:0;padding:0;box-sizing:border-box;overflow:visible;';
+      row.style.cssText = 'position:fixed;z-index:2147483001;display:flex;align-items:center;justify-content:center;width:118px;height:40px;margin:0;padding:0;box-sizing:border-box;border:1px solid ' + (isBound ? '#fbc4c4' : '#ffd4b8') + ';border-radius:8px;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.08);overflow:visible;';
       button.className = 'dxe-toolkit-source-button';
       button.removeAttribute('title');
-      button.style.cssText = 'appearance:none;display:flex;align-items:center;justify-content:center;width:100%;min-width:0;height:48px;margin:0;padding:0;border:0;background:transparent;color:#333;cursor:pointer;box-shadow:none;overflow:hidden;';
+      button.style.cssText = 'appearance:none;display:flex;align-items:center;justify-content:center;width:116px;height:38px;margin:0;padding:0 10px;border:0;border-radius:7px;background:transparent;color:' + (isBound ? '#f56c6c' : '#ff6500') + ';font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:20px;white-space:nowrap;cursor:pointer;box-shadow:none;overflow:hidden;';
       if (logo) logo.style.cssText = 'display:block;width:22px;height:22px;flex:0 0 22px;margin:0;border-radius:5px;object-fit:cover;';
       if (label) {
         label.className = 'toolkit-label dxe-toolkit-source-label';
-        label.style.cssText = 'display:none;';
+        label.style.cssText = 'display:inline-block;margin-left:6px;font-weight:500;';
       }
       if (tooltip) tooltip.style.cssText = 'display:none;position:absolute;right:calc(100% + 9px);top:50%;z-index:2147483002;transform:translateY(-50%);padding:7px 10px;border-radius:6px;background:rgba(24,24,24,.92);color:#fff;font-family:"Microsoft YaHei",sans-serif;font-size:13px;font-style:normal;font-weight:400;line-height:18px;white-space:nowrap;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.18);';
       if (tooltipArrow) tooltipArrow.style.cssText = 'position:absolute;left:100%;top:50%;width:0;height:0;transform:translateY(-50%);border-top:6px solid transparent;border-bottom:6px solid transparent;border-left:6px solid rgba(24,24,24,.92);';
     } else {
       row.className = '';
       row.setAttribute('data-label', '\u9009\u8d27\u6e90');
-      row.style.cssText = 'position:fixed;left:20px;top:146px;z-index:2147483001;display:flex;align-items:center;width:auto;height:34px;margin:0;padding:0;box-sizing:border-box;';
+      row.style.cssText = 'position:fixed;right:530px;top:656px;z-index:2147483001;display:flex;align-items:center;width:auto;height:34px;margin:0;padding:0;box-sizing:border-box;';
       button.className = '';
-      button.title = '\u9009\u4e3a\u8d27\u6e90';
-      button.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;height:30px;padding:2px 8px 2px 4px;border:1px solid #ff6500;border-radius:6px;background:#fff7f0;color:#ff6500;font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:24px;white-space:nowrap;cursor:pointer;box-shadow:none;';
+      button.title = isBound ? '\u53d6\u6d88\u7ed1\u5b9a' : '\u7ed1\u5b9a\u8d27\u6e90';
+      button.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;height:30px;padding:2px 8px 2px 4px;border:1px solid ' + (isBound ? '#f56c6c' : '#ff6500') + ';border-radius:6px;background:' + (isBound ? '#fff5f5' : '#fff7f0') + ';color:' + (isBound ? '#f56c6c' : '#ff6500') + ';font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:24px;white-space:nowrap;cursor:pointer;box-shadow:none;';
       if (logo) logo.style.cssText = 'display:block;width:22px;height:22px;flex:0 0 22px;border-radius:6px;object-fit:cover;margin-right:5px;';
       if (label) {
         label.className = '';
@@ -1310,18 +1658,38 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     var existing = document.getElementById('__dxe_same_source_row__');
     if (!document.body) return false;
     var row = existing && existing.isConnected ? existing : createSelectRow();
+    // 必须作为独立浮层挂到 body。不要插入淘宝原生 #J_Toolkit 组件树，
+    // 避免 React/风控把第三方节点纳入商品详情页状态更新。
+    if (row.parentElement !== document.body) document.body.appendChild(row);
     var toolkitList = findTaobaoToolkitList();
     if (toolkitList) {
-      if (row.parentElement !== toolkitList || toolkitList.firstElementChild !== row) {
-        toolkitList.insertBefore(row, toolkitList.firstChild);
+      var toolkitRoot = toolkitList.closest('#J_Toolkit') || toolkitList;
+      var toolkitRect = toolkitRoot.getBoundingClientRect();
+      // 刷新过程中淘宝会先创建一个尚未参与布局的工具条节点（rect为0）。
+      // 此时若直接按它定位，按钮会被放到页面左上角并看起来像“消失”。
+      // 只有工具条真正可见时才贴靠定位，否则先保留右上角兜底浮窗并继续重试。
+      var toolkitVisible = toolkitRect.width >= 32 && toolkitRect.height >= 32 &&
+        toolkitRect.right > 0 && toolkitRect.left < window.innerWidth &&
+        toolkitRect.bottom > 0 && toolkitRect.top < window.innerHeight;
+      if (toolkitVisible) {
+        if (row.getAttribute('data-dxe-placement') !== 'floating-toolkit') styleSelectRow(row, 'floating-toolkit');
+        var rowWidth = 118;
+        var rowHeight = 40;
+        var left = Math.max(8, Math.min(window.innerWidth - rowWidth - 8, Math.round(toolkitRect.left + (toolkitRect.width - 48) / 2) - 510));
+        var top = Math.max(8, Math.min(window.innerHeight - rowHeight - 8, Math.round(toolkitRect.top - 52) + 510));
+        row.style.left = left + 'px';
+        row.style.right = 'auto';
+        row.style.top = top + 'px';
+        return true;
       }
-      if (row.getAttribute('data-dxe-placement') !== 'toolkit') styleSelectRow(row, 'toolkit');
-      return true;
     }
-    // 极少数页面没有淘宝工具条时保留独立浮窗，确保仍可选货源。
-    if (row.parentElement !== document.body) document.body.appendChild(row);
+    // 极少数页面没有淘宝工具条时显示在右上侧，仍保持独立浮窗。
     if (row.getAttribute('data-dxe-placement') !== 'fallback') styleSelectRow(row, 'fallback');
-    return true;
+    var fallbackRect = row.getBoundingClientRect();
+    row.style.left = Math.max(8, window.innerWidth - fallbackRect.width - 530) + 'px';
+    row.style.right = 'auto';
+    row.style.top = Math.max(8, Math.min(window.innerHeight - fallbackRect.height - 8, 656)) + 'px';
+    return false;
   }
 
   function initialize() {
@@ -1357,13 +1725,17 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
 }
 
 async function openTaobaoSameProductPage(params, ownerWebContents) {
+  const openStartedAt = Date.now()
   const accountId = params && params.accountId
-  const url = String((params && params.url) || '').trim()
+  const originalUrl = String((params && params.url) || '').trim()
+  const productTarget = prepareTaobaoSameProductUrl(originalUrl, params && params.skuSelection)
+  const url = productTarget.url
+  const savedTaobaoSku = productTarget.selection
   if (!accountId || !isTaobaoProductPageUrl(url)) {
     return { success: false, message: '淘宝商品链接或采购账号无效' }
   }
 
-  await getOrCreateTaobaoSearchWindow(accountId)
+  runtimeLog.writeLog('TaobaoSame', '请求打开同款商品页: accountId=' + accountId + ', url=' + url.slice(0, 180))
   // 隐藏搜索页继续使用独立分区，商品详情页改用与正式采购下单完全相同的
   // purchase分区。活动价会依赖该分区内的登录上下文与站点存储。
   const productPartition = getTaobaoPurchasePartition(accountId)
@@ -1376,12 +1748,21 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   const context = {
     accountId,
     sourceProduct: params.sourceProduct || {},
-    sameItem: { ...(params.sameItem || {}), link: url }
+    sameItem: { ...(params.sameItem || {}), link: originalUrl || url },
+    binding: {
+      isBound: !!params.binding?.isBound,
+      sourceId: params.binding?.sourceId ?? null,
+      itemId: String(params.binding?.itemId || ''),
+      purchaseLink: String(params.binding?.purchaseLink || ''),
+      reopenSameResults: !!params.binding?.reopenSameResults
+    }
   }
   const diagnosticId = `${accountId}-${++productWindowSequence}-${Date.now().toString(36)}`
   const productWindow = new BrowserWindow({
     width: 1200,
     height: 800,
+    show: true,
+    backgroundColor: '#ffffff',
     title: '淘宝同款商品',
     webPreferences: {
       contextIsolation: true,
@@ -1390,12 +1771,56 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
       partition: productPartition
     }
   })
+  productWindow.show()
+  productWindow.focus()
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '同款商品窗口已创建: accountId=' + accountId +
+    ', window=' + diagnosticId +
+    ', ms=' + (Date.now() - openStartedAt)
+  )
   productWindows.add(productWindow)
   attachTaobaoProductPriceDiagnostics(productWindow, diagnosticId)
   const chromeVersion = process.versions.chrome || '134.0.6998.205'
   productWindow.webContents.setUserAgent(
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
   )
+
+  const injectionTimers = new Set()
+  const skuAutoSelectScript = savedTaobaoSku
+    ? buildTaobaoSkuAutoSelectScript(savedTaobaoSku)
+    : ''
+  const scheduleSkuAutoSelect = (reason, delay = 350) => {
+    if (!skuAutoSelectScript) return
+    const timer = setTimeout(() => {
+      injectionTimers.delete(timer)
+      if (productWindow.isDestroyed()) return
+      const currentUrl = productWindow.webContents.getURL()
+      if (!isTaobaoItemDetailPageUrl(currentUrl)) {
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '货源商品SKU自动回选已跳过: window=' + diagnosticId + ', reason=' + reason + ', page=non-product'
+        )
+        return
+      }
+      productWindow.webContents.executeJavaScript(skuAutoSelectScript, true)
+        .then(result => {
+          runtimeLog.writeLog(
+            'TaobaoSame',
+            '货源商品SKU自动回选: window=' + diagnosticId +
+              ', reason=' + reason +
+              ', skuId=' + (savedTaobaoSku.skuId || '') +
+              ', options=' + savedTaobaoSku.options.length +
+              ', result=' + String(result || '')
+          )
+        })
+        .catch(error => runtimeLog.writeLog(
+          'TaobaoSame',
+          '货源商品SKU自动回选失败: window=' + diagnosticId + ', reason=' + reason + ', error=' + error.message
+        ))
+    }, delay)
+    injectionTimers.add(timer)
+  }
 
   let selecting = false
   const selectCurrentProduct = async () => {
@@ -1435,7 +1860,11 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
       ', priceCaptured=' + !!selected.product.skuPriceCaptured +
        ', priceSource=' + (selected.product.skuPriceSource || '') +
        ', priceKind=' + (selected.product.skuPriceKind || '') +
-       ', priceLabel=' + (selected.product.skuPriceLabel || '') +
+      ', priceLabel=' + (selected.product.skuPriceLabel || '') +
+      ', marketplace=' + (selected.product.marketplace || '') +
+      ', shop=' + (selected.product.shop || '') +
+      ', shopSource=' + (selected.product.shopSource || '') +
+      ', shopCandidates=' + JSON.stringify(selected.product.shopCandidates || []) +
       ', shipFrom=' + (selected.product.shipFrom || '') +
       ', candidates=' + JSON.stringify(selected.product.skuPriceCandidates || []) +
       ', shippingCandidates=' + JSON.stringify(selected.product.shippingCandidates || [])
@@ -1454,28 +1883,165 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
       ).catch(() => {})
     }
   }
+  const removeCurrentProductBinding = () => {
+    if (selecting || productWindow.isDestroyed()) return
+    selecting = true
+    if (ownerWebContents && !ownerWebContents.isDestroyed()) {
+      ownerWebContents.send('taobao-same-source-selected', {
+        action: 'unbind',
+        accountId,
+        binding: context.binding,
+        product: context.sameItem
+      })
+      const ownerWindow = BrowserWindow.fromWebContents(ownerWebContents)
+      if (ownerWindow && !ownerWindow.isDestroyed()) {
+        ownerWindow.show()
+        ownerWindow.focus()
+      }
+    }
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '商品页取消货源绑定: accountId=' + accountId +
+      ', window=' + diagnosticId +
+      ', sourceId=' + (context.binding.sourceId ?? '') +
+      ', itemId=' + context.binding.itemId
+    )
+    setTimeout(() => {
+      if (!productWindow.isDestroyed()) productWindow.close()
+    }, 120)
+  }
   productWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
     if (targetUrl.startsWith('dianxiaoer://select-taobao-same-source')) selectCurrentProduct().catch(() => {})
+    if (targetUrl.startsWith('dianxiaoer://remove-taobao-same-source')) removeCurrentProductBinding()
     return { action: 'deny' }
   })
   productWindow.webContents.on('will-navigate', (event, targetUrl) => {
-    if (!targetUrl.startsWith('dianxiaoer://select-taobao-same-source')) return
+    const selectingSource = targetUrl.startsWith('dianxiaoer://select-taobao-same-source')
+    const removingSource = targetUrl.startsWith('dianxiaoer://remove-taobao-same-source')
+    if (!selectingSource && !removingSource) return
     event.preventDefault()
-    selectCurrentProduct().catch(() => {})
+    if (removingSource) removeCurrentProductBinding()
+    else selectCurrentProduct().catch(() => {})
   })
 
   const logoDataUrl = getTaobaoSameLogoDataUrl()
-  const inject = () => {
+  const injectionScript = buildTaobaoSameProductInjection(
+    context.sourceProduct,
+    logoDataUrl,
+    diagnosticId,
+    context.binding
+  )
+  const readControlState = () => productWindow.webContents.executeJavaScript(`(function () {
+    var row = document.getElementById('__dxe_same_source_row__');
+    if (!row || !row.isConnected) return { exists: false, visible: false, placement: '' };
+    var rect = row.getBoundingClientRect();
+    var style = getComputedStyle(row);
+    return {
+      exists: true,
+      visible: rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
+        rect.left < window.innerWidth && rect.top < window.innerHeight &&
+        style.display !== 'none' && style.visibility !== 'hidden',
+      placement: String(row.getAttribute('data-dxe-placement') || ''),
+      left: Math.round(rect.left),
+      top: Math.round(rect.top)
+    };
+  })()`, true)
+  const inject = async (reason, force = false) => {
     if (productWindow.isDestroyed()) return
-    const script = buildTaobaoSameProductInjection(context.sourceProduct, logoDataUrl, diagnosticId)
-    productWindow.webContents.executeJavaScript(script, true).catch(error => {
-      runtimeLog.writeLog('TaobaoSame', '商品页控件注入失败: ' + error.message)
+    try {
+      const currentUrl = productWindow.webContents.getURL()
+      if (!isTaobaoItemDetailPageUrl(currentUrl)) {
+        await productWindow.webContents.executeJavaScript(`(function () {
+          var overlay = document.getElementById('__dxe_sales_product_overlay__');
+          var control = document.getElementById('__dxe_same_source_row__');
+          if (overlay) overlay.remove();
+          if (control) control.remove();
+          if (window.__dxeSameSourceObserver) window.__dxeSameSourceObserver.disconnect();
+          return '[DXE_SAME_PRODUCT] cleaned-non-product';
+        })()`, true).catch(() => null)
+        runtimeLog.writeLog('TaobaoSame', '商品页控件注入已跳过: window=' + diagnosticId + ', reason=' + reason + ', page=non-product')
+        return
+      }
+      const before = force ? null : await readControlState()
+      if (before && before.exists && before.visible) return
+      const result = await productWindow.webContents.executeJavaScript(injectionScript, true)
+      const after = await readControlState().catch(() => null)
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '商品页控件注入: window=' + diagnosticId +
+        ', reason=' + reason +
+        ', result=' + String(result || '') +
+        ', state=' + JSON.stringify(after || {})
+      )
+    } catch (error) {
+      runtimeLog.writeLog('TaobaoSame', '商品页控件注入失败: window=' + diagnosticId + ', reason=' + reason + ', error=' + error.message)
+    }
+  }
+  const scheduleInject = (reason, forceFirst = false) => {
+    ;[0, 450, 1600].forEach((delay, index) => {
+      const timer = setTimeout(() => {
+        injectionTimers.delete(timer)
+        inject(reason + '-' + index, forceFirst && index === 0).catch(() => {})
+      }, delay)
+      injectionTimers.add(timer)
     })
   }
-  // DOM就绪立即注入；脚本内的MutationObserver负责淘宝SPA后续异步重绘，
-  // 无需在did-finish-load时再次重建浮窗和按钮。
-  productWindow.webContents.on('dom-ready', inject)
+  // 页面内MutationObserver只能守护当前document。手动刷新会销毁整个document，
+  // 因此主进程还要在新DOM、完整加载和主框架导航三个阶段核验并按需重注入。
+  productWindow.webContents.on('dom-ready', () => {
+    scheduleInject('dom-ready', true)
+    scheduleSkuAutoSelect('dom-ready', 350)
+  })
+  productWindow.webContents.once('dom-ready', () => {
+    runtimeLog.writeLog('TaobaoSame', '同款商品页DOM就绪: window=' + diagnosticId + ', ms=' + (Date.now() - openStartedAt))
+  })
+  productWindow.webContents.on('did-finish-load', () => {
+    scheduleInject('did-finish-load')
+    scheduleSkuAutoSelect('did-finish-load', 450)
+  })
+  productWindow.webContents.on('did-navigate', (_event, targetUrl) => {
+    let page = 'other'
+    if (isTaobaoLoginPageUrl(targetUrl)) page = 'login'
+    else if (isTaobaoVerificationUrl(targetUrl)) page = 'verification'
+    else if (isTaobaoItemDetailPageUrl(targetUrl)) page = 'product'
+    let target = ''
+    try {
+      const parsed = new URL(String(targetUrl || ''))
+      target = parsed.origin + parsed.pathname
+    } catch (_) {}
+    runtimeLog.writeLog('TaobaoSame', '同款商品页导航: window=' + diagnosticId + ', page=' + page + ', target=' + target.slice(0, 180))
+    scheduleInject('did-navigate')
+    scheduleSkuAutoSelect('did-navigate', 550)
+  })
+  productWindow.webContents.on('did-fail-load', (_event, code, description, targetUrl, isMainFrame) => {
+    if (!isMainFrame) return
+    let target = ''
+    try {
+      const parsed = new URL(String(targetUrl || ''))
+      target = parsed.origin + parsed.pathname
+    } catch (_) {}
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '同款商品页加载失败: window=' + diagnosticId +
+        ', code=' + code +
+        ', description=' + String(description || '').slice(0, 120) +
+        ', target=' + target.slice(0, 180)
+    )
+  })
+  productWindow.webContents.on('render-process-gone', (_event, details) => {
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '同款商品页渲染进程退出: window=' + diagnosticId +
+        ', reason=' + String(details?.reason || '') +
+        ', exitCode=' + String(details?.exitCode ?? '')
+    )
+  })
+  productWindow.on('unresponsive', () => {
+    runtimeLog.writeLog('TaobaoSame', '同款商品页无响应: window=' + diagnosticId)
+  })
   productWindow.on('closed', () => {
+    for (const timer of injectionTimers) clearTimeout(timer)
+    injectionTimers.clear()
     productWindows.delete(productWindow)
     runtimeLog.writeLog('TaobaoPriceDiag', `window=${diagnosticId}, closed`)
   })
@@ -1484,9 +2050,10 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   runtimeLog.writeLog(
     'TaobaoSame',
     '打开同款商品页: accountId=' + accountId +
-    ', window=' + diagnosticId +
-    ', partition=' + productPartition +
-    ', loginCookie=' + (hasTaobaoLoginCookie(productCookies) ? 'YES' : 'NO')
+      ', window=' + diagnosticId +
+      ', partition=' + productPartition +
+      ', loginCookie=' + (hasTaobaoLoginCookie(productCookies) ? 'YES' : 'NO') +
+      ', totalMs=' + (Date.now() - openStartedAt)
   )
   return { success: true }
 }
@@ -1726,6 +2293,9 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       }
     }
 
+    // 验证或自动登录已经跳回普通淘宝承载页时，窗口本身没有需要用户操作的内容。
+    hideReadySearchWindow(state)
+
     const activeRisk = searchRiskCooldowns.get(partition)
     if (activeRisk && activeRisk.until > Date.now()) {
       const verificationCompleted = authState.ready && Number(state.lastNavigationAt || 0) > activeRisk.triggeredAt
@@ -1742,7 +2312,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
           success: false,
           needVerification: true,
           retryAfterMs,
-          message: '淘宝已限制当前搜索会话，软件已停止继续请求，请稍后再试'
+          message: activeRisk.message || '淘宝限制了当前搜索请求，请稍后再试'
         }
       }
     } else if (activeRisk) {
@@ -1770,6 +2340,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
 
     let lastMessage = ''
     let emptyResultRetryUsed = false
+    let riskRetryUsed = false
     for (let attempt = 0; attempt < 3; attempt++) {
       const token = await waitForTaobaoMtopToken(ses, attempt === 0 ? 1200 : 2000)
       if (!token) {
@@ -1779,22 +2350,135 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       // Bixi参数每次MTOP尝试都从当前页面重新读取，不跨搜索缓存旧值。
       const bixiTokens = await readTaobaoPageBixiTokens(win)
       const request = buildTaobaoImageSearchRequest({ token, imageBase64, bixiTokens })
-      const responseBody = await pageXhrPostAndCapture(win, request.url, request.body)
+      const requestEnvironment = await readTaobaoSearchRequestEnvironment(state, token, bixiTokens)
+      runtimeLog.writeLog(
+        'TaobaoSameDiag',
+        'request attempt=' + (attempt + 1) + ' ' + JSON.stringify(requestEnvironment)
+      )
+      const networkStartedAt = Date.now()
+      const responseCapture = await pageXhrPostAndCapture(win, request.url, request.body)
+      const responseBody = responseCapture.body
       const resultJson = parseMtopJson(responseBody)
       const retText = String(((resultJson.ret || [])[0] || ''))
+      runtimeLog.writeLog(
+        'TaobaoSameDiag',
+        'response attempt=' + (attempt + 1) +
+        ', ms=' + (Date.now() - networkStartedAt) +
+        ', ret=' + sanitizeTaobaoRetText(retText, 160) +
+        ', network=' + JSON.stringify(responseCapture.request || {}) +
+        ', transport=' + JSON.stringify(responseCapture.response || {}) +
+        ', bodyFp=' + shortFingerprint(responseBody)
+      )
       lastMessage = retText || '淘宝图片搜索失败'
 
-      if (isTaobaoRiskRet(retText)) {
+      if (isTaobaoBusyRet(retText)) {
+        const returnedMessage = extractTaobaoRetMessage(retText) || '请稍后重试'
         const verificationUrl = extractTaobaoVerificationUrl(resultJson)
+        if (verificationUrl) {
+          const triggeredAt = Date.now()
+          searchRiskCooldowns.set(partition, {
+            triggeredAt,
+            until: triggeredAt + TAOBAO_SEARCH_RISK_COOLDOWN_MS,
+            reason: sanitizeTaobaoRetText(retText, 120),
+            message: '淘宝返回：' + returnedMessage
+          })
+          state.firstSearchPrepared = false
+          if (!riskRetryUsed && attempt < 2) {
+            riskRetryUsed = true
+            const resolution = await openTaobaoVerificationAndWait(state, verificationUrl)
+            if (resolution.ready) {
+              searchRiskCooldowns.delete(partition)
+              await sleep(500)
+              runtimeLog.writeLog(
+                'TaobaoSame',
+                'RGV587携带的淘宝登录/验证流程已在原会话完成，执行唯一一次受控重试: accountId=' + accountId +
+                ', finalPage=' + (resolution.carrierPage ? 'carrier' : 'taobao') +
+                ', waitMs=' + resolution.waitMs
+              )
+              continue
+            }
+            runtimeLog.writeLog(
+              'TaobaoSame',
+              'RGV587携带淘宝登录/验证地址，窗口仍需用户处理: accountId=' + accountId +
+              ', finalUrlType=' + (isTaobaoLoginPageUrl(resolution.url) ? 'login' : (isTaobaoVerificationUrl(resolution.url) ? 'verify' : 'unstable')) +
+              ', waitMs=' + resolution.waitMs
+            )
+          } else {
+            state.bootstrapComplete = false
+            state.verificationPending = true
+            win.loadURL(verificationUrl).catch(error => {
+              runtimeLog.writeLog('TaobaoSame', '打开淘宝登录/验证地址失败: ' + error.message)
+            })
+            showSearchWindow(state, '淘宝搜同款 - 请完成登录或安全验证')
+          }
+          return {
+            success: false,
+            needVerification: true,
+            retryAfterMs: TAOBAO_SEARCH_RISK_COOLDOWN_MS,
+            message: '淘宝要求完成登录或安全验证，请在弹窗中完成后重新搜索'
+          }
+        }
+
+        if (!riskRetryUsed && attempt < 2) {
+          riskRetryUsed = true
+          await waitForTaobaoSearchPageStable(win, 3000)
+          await sleep(500)
+          const retryAuth = await waitForTaobaoSearchAuthentication(state, 3000, 300)
+          if (retryAuth.ready) {
+            runtimeLog.writeLog(
+              'TaobaoSame',
+              '淘宝接口繁忙但原会话仍稳定，执行唯一一次受控重试: accountId=' + accountId
+            )
+            continue
+          }
+        }
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '淘宝同款接口返回繁忙，已停止本次请求并保留原会话: accountId=' + accountId +
+          ', ret=' + sanitizeTaobaoRetText(retText) +
+          ', verificationUrl=NO'
+        )
+        return {
+          success: false,
+          retryable: true,
+          message: '淘宝返回：' + returnedMessage
+        }
+      }
+
+      if (isTaobaoVerificationRet(retText)) {
+        const verificationUrl = extractTaobaoVerificationUrl(resultJson)
+        const returnedMessage = extractTaobaoRetMessage(retText)
         const triggeredAt = Date.now()
         searchRiskCooldowns.set(partition, {
           triggeredAt,
           until: triggeredAt + TAOBAO_SEARCH_RISK_COOLDOWN_MS,
-          reason: retText.substring(0, 120)
+          reason: sanitizeTaobaoRetText(retText, 120),
+          message: returnedMessage ? '淘宝返回：' + returnedMessage : ''
         })
         state.firstSearchPrepared = false
-        if (verificationUrl) {
+        if (verificationUrl && !riskRetryUsed && attempt < 2) {
+          riskRetryUsed = true
+          const resolution = await openTaobaoVerificationAndWait(state, verificationUrl)
+          if (resolution.ready) {
+            searchRiskCooldowns.delete(partition)
+            await sleep(500)
+            runtimeLog.writeLog(
+              'TaobaoSame',
+              '淘宝验证/自动登录已在原会话完成，执行唯一一次受控重试: accountId=' + accountId +
+              ', finalPage=' + (resolution.carrierPage ? 'carrier' : 'taobao') +
+              ', waitMs=' + resolution.waitMs
+            )
+            continue
+          }
+          runtimeLog.writeLog(
+            'TaobaoSame',
+            '淘宝验证窗口仍需用户处理: accountId=' + accountId +
+            ', finalUrlType=' + (isTaobaoLoginPageUrl(resolution.url) ? 'login' : (isTaobaoVerificationUrl(resolution.url) ? 'verify' : 'unstable')) +
+            ', waitMs=' + resolution.waitMs
+          )
+        } else if (verificationUrl) {
           state.bootstrapComplete = false
+          state.verificationPending = true
           win.loadURL(verificationUrl).catch(error => {
             runtimeLog.writeLog('TaobaoSame', '打开淘宝验证地址失败: ' + error.message)
           })
@@ -1803,6 +2487,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         runtimeLog.writeLog(
           'TaobaoSame',
           '淘宝安全验证命中，已停止请求且保留原会话: accountId=' + accountId +
+          ', ret=' + sanitizeTaobaoRetText(retText) +
           ', verificationUrl=' + (verificationUrl ? 'YES' : 'NO') +
           ', cooldownMs=' + TAOBAO_SEARCH_RISK_COOLDOWN_MS
         )
@@ -1812,7 +2497,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
           retryAfterMs: TAOBAO_SEARCH_RISK_COOLDOWN_MS,
           message: verificationUrl
             ? '淘宝要求安全验证，请在弹窗中完成后重新搜索'
-            : '淘宝已限制当前搜索会话，软件已停止继续请求，请稍后再试'
+            : (returnedMessage ? '淘宝返回：' + returnedMessage : '淘宝限制了当前搜索请求，请稍后再试')
         }
       }
 
@@ -1925,6 +2610,8 @@ module.exports = {
   normalizeTaobaoSearchItems,
   summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
+  detectTaobaoMarketplace,
+  prepareTaobaoSameProductUrl,
   buildTaobaoSameSelection,
   buildTaobaoSameProductInjection,
   getTaobaoSamePartition,
@@ -1933,7 +2620,12 @@ module.exports = {
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
   isTaobaoCookieDomain,
+  isTaobaoSearchCarrierUrl,
   isTaobaoRiskRet,
+  isTaobaoBusyRet,
+  isTaobaoVerificationRet,
+  sanitizeTaobaoRetText,
+  extractTaobaoRetMessage,
   isTaobaoTokenRet,
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
