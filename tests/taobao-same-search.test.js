@@ -18,6 +18,8 @@ const {
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
   isTaobaoCookieDomain,
+  isTaobaoIdentityCookie,
+  buildTaobaoSessionIdentity,
   isTaobaoSearchCarrierUrl,
   isTaobaoRiskRet,
   isTaobaoBusyRet,
@@ -28,6 +30,10 @@ const {
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
   classifyTaobaoAuthenticationSnapshot,
+  readTaobaoSearchAuthenticationPageState,
+  TAOBAO_SEARCH_AUTH_TIMEOUT,
+  TAOBAO_SEARCH_AUTH_STABLE_MS,
+  TAOBAO_SEARCH_WARM_STABLE_MS,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS
 } = taobaoSameSearch
 
@@ -168,6 +174,39 @@ describe('淘宝按图搜同款', () => {
     expect(getTaobaoPurchasePartition(7)).toBe('persist:purchase-7')
   })
 
+  it('使用不可逆关键Cookie指纹识别搜索身份变化且不记录原值', () => {
+    const cookies = [
+      { name: 'cookie2', value: 'cookie-secret', domain: '.taobao.com', path: '/' },
+      { name: 'unb', value: '123456789', domain: '.taobao.com', path: '/' },
+      { name: '_m_h5_tk', value: 'token-raw', domain: '.taobao.com', path: '/' },
+      { name: 'unrelated', value: 'ignored', domain: '.taobao.com', path: '/' }
+    ]
+    const identity = buildTaobaoSessionIdentity(cookies, 'token-one')
+    const reordered = buildTaobaoSessionIdentity([...cookies].reverse(), 'token-one')
+    const changedCookie = buildTaobaoSessionIdentity(
+      cookies.map(cookie => cookie.name === 'cookie2' ? { ...cookie, value: 'cookie-new' } : cookie),
+      'token-one'
+    )
+    const changedToken = buildTaobaoSessionIdentity(cookies, 'token-two')
+
+    expect(identity.fingerprint).toBe(reordered.fingerprint)
+    expect(changedCookie.fingerprint).not.toBe(identity.fingerprint)
+    expect(changedToken.fingerprint).toBe(identity.fingerprint)
+    expect(changedToken.tokenFingerprint).not.toBe(identity.tokenFingerprint)
+    expect(identity.cookieNames).toEqual(['cookie2', 'unb'])
+    expect(JSON.stringify(identity)).not.toContain('cookie-secret')
+    expect(JSON.stringify(identity)).not.toContain('123456789')
+    expect(isTaobaoIdentityCookie(cookies[0])).toBe(true)
+    expect(isTaobaoIdentityCookie(cookies[2])).toBe(false)
+  })
+
+  it('冷搜索等待完整自动登录稳定，身份一致的热搜索仅做短健康检查', () => {
+    expect(TAOBAO_SEARCH_AUTH_TIMEOUT).toBeGreaterThanOrEqual(20000)
+    expect(TAOBAO_SEARCH_AUTH_STABLE_MS).toBeGreaterThanOrEqual(1200)
+    expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeGreaterThan(0)
+    expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeLessThan(TAOBAO_SEARCH_AUTH_STABLE_MS)
+  })
+
   it('把淘宝过期占位商品识别为正常搜同款承载页', () => {
     expect(isTaobaoSearchCarrierUrl(
       'https://h5.m.taobao.com/awp/core/detail.htm?id=620000000000000000'
@@ -230,6 +269,40 @@ describe('淘宝按图搜同款', () => {
       title: '淘宝登录',
       text: '请输入账号和密码登录'
     }).automaticLoginPending).toBe(false)
+  })
+
+  it('检查全部frame的登录和验证URL而不只依赖页面文字', async () => {
+    const mainFrame = {
+      url: 'https://h5.m.taobao.com/awp/core/detail.htm?id=620000000000000000',
+      framesInSubtree: [],
+      executeJavaScript: async () => ({
+        title: '淘宝商品页',
+        text: '普通商品内容',
+        readyState: 'complete'
+      })
+    }
+    const loginFrame = {
+      url: 'https://login.taobao.com/member/login.jhtml',
+      executeJavaScript: async () => ({ title: '', text: '', readyState: 'complete' })
+    }
+    mainFrame.framesInSubtree = [loginFrame]
+    const win = {
+      isDestroyed: () => false,
+      webContents: { mainFrame }
+    }
+
+    await expect(readTaobaoSearchAuthenticationPageState(win)).resolves.toMatchObject({
+      needLogin: true,
+      needVerification: false,
+      frameHost: 'login.taobao.com'
+    })
+
+    loginFrame.url = 'https://sec.taobao.com/verify'
+    await expect(readTaobaoSearchAuthenticationPageState(win)).resolves.toMatchObject({
+      needLogin: false,
+      needVerification: true,
+      frameHost: 'sec.taobao.com'
+    })
   })
 
   it('商品页选择货源时使用当前页面的淘宝商品ID和链接', () => {

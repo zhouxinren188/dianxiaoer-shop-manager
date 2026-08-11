@@ -26,9 +26,13 @@ const DIRECT_JPEG_BYTES = 500 * 1024
 const SEARCH_REQUEST_TIMEOUT = 25000
 // 淘宝首次在新持久会话中打开时可能出现8秒自动登录确认倒计时。
 // 超时必须覆盖倒计时结束后的页面跳转与Token稳定时间。
-const TAOBAO_SEARCH_AUTH_TIMEOUT = 12000
-const TAOBAO_SEARCH_AUTH_STABLE_MS = 600
+const TAOBAO_SEARCH_AUTH_TIMEOUT = 20000
+const TAOBAO_SEARCH_AUTH_STABLE_MS = 1200
+const TAOBAO_SEARCH_WARM_STABLE_MS = 250
 const TAOBAO_SEARCH_RISK_COOLDOWN_MS = 30 * 60 * 1000
+const TAOBAO_IDENTITY_COOKIE_NAMES = new Set([
+  'unb', 'cookie17', 'cookie2', 'tracknick', 'lgc'
+])
 
 const searchWindowStates = new Map()
 const searchQueues = new Map()
@@ -100,6 +104,59 @@ function isTaobaoCookieDomain(domain) {
 
 function hasTaobaoLoginCookie(cookies) {
   return (cookies || []).some(cookie => cookie && (cookie.name === 'unb' || cookie.name === 'cookie17'))
+}
+
+function isTaobaoIdentityCookie(cookie) {
+  return !!cookie &&
+    TAOBAO_IDENTITY_COOKIE_NAMES.has(String(cookie.name || '')) &&
+    isTaobaoCookieDomain(cookie.domain)
+}
+
+function taobaoIdentityCookieKey(cookie) {
+  return [
+    String(cookie?.name || ''),
+    String(cookie?.domain || '').replace(/^\./, '').toLowerCase(),
+    String(cookie?.path || '/')
+  ].join('@')
+}
+
+function createTaobaoIdentityCookieMap(cookies) {
+  return new Map((cookies || [])
+    .filter(isTaobaoIdentityCookie)
+    .map(cookie => [taobaoIdentityCookieKey(cookie), shortFingerprint(cookie.value || '')]))
+}
+
+function buildTaobaoSessionIdentity(cookies, token = '') {
+  const identityCookies = (cookies || [])
+    .filter(isTaobaoIdentityCookie)
+    .map(cookie => ({
+      name: String(cookie.name || ''),
+      domain: String(cookie.domain || '').replace(/^\./, '').toLowerCase(),
+      path: String(cookie.path || '/'),
+      valueFp: shortFingerprint(cookie.value || '')
+    }))
+    .sort((left, right) =>
+      left.name.localeCompare(right.name) ||
+      left.domain.localeCompare(right.domain) ||
+      left.path.localeCompare(right.path) ||
+      left.valueFp.localeCompare(right.valueFp)
+    )
+  const serialized = identityCookies
+    .map(cookie => `${cookie.name}@${cookie.domain}${cookie.path}:${cookie.valueFp}`)
+    .join('|')
+  return {
+    fingerprint: serialized ? shortFingerprint(serialized) : '',
+    cookieCount: identityCookies.length,
+    cookieNames: [...new Set(identityCookies.map(cookie => cookie.name))],
+    tokenFingerprint: token ? shortFingerprint(token) : '',
+    tokenPresent: !!token
+  }
+}
+
+async function readTaobaoSessionIdentity(ses) {
+  const cookies = await ses.cookies.get({})
+  const token = await getTaobaoMtopToken(ses)
+  return buildTaobaoSessionIdentity(cookies, token)
 }
 
 function getTaobaoSamePartition(accountId) {
@@ -219,13 +276,47 @@ function classifyTaobaoAuthenticationSnapshot(snapshot = {}) {
 }
 
 async function readTaobaoSearchAuthenticationPageState(win) {
-  if (!win || win.isDestroyed()) return { automaticLoginPending: false, frameCount: 0 }
+  if (!win || win.isDestroyed()) {
+    return {
+      automaticLoginPending: false,
+      needLogin: false,
+      needVerification: false,
+      frameCount: 0,
+      mainReadyState: ''
+    }
+  }
   const mainFrame = win.webContents.mainFrame
   const frames = mainFrame
     ? Array.from(new Set([mainFrame, ...(mainFrame.framesInSubtree || [])]))
     : []
   let inspected = 0
+  let mainReadyState = ''
   for (const frame of frames) {
+    const frameUrl = String(frame?.url || '')
+    if (isTaobaoLoginPageUrl(frameUrl)) {
+      let frameHost = ''
+      try { frameHost = new URL(frameUrl).hostname } catch (_) {}
+      return {
+        automaticLoginPending: false,
+        needLogin: true,
+        needVerification: false,
+        frameCount: inspected,
+        frameHost,
+        mainReadyState
+      }
+    }
+    if (isTaobaoVerificationUrl(frameUrl)) {
+      let frameHost = ''
+      try { frameHost = new URL(frameUrl).hostname } catch (_) {}
+      return {
+        automaticLoginPending: false,
+        needLogin: false,
+        needVerification: true,
+        frameCount: inspected,
+        frameHost,
+        mainReadyState
+      }
+    }
     try {
       const snapshot = await frame.executeJavaScript(`(function () {
         var bodyText = document.body ? String(document.body.innerText || '') : '';
@@ -236,22 +327,32 @@ async function readTaobaoSearchAuthenticationPageState(win) {
         };
       })()`)
       inspected++
+      if (frame === mainFrame) mainReadyState = snapshot.readyState || ''
       const classified = classifyTaobaoAuthenticationSnapshot(snapshot)
       if (classified.automaticLoginPending) {
         let frameHost = ''
         try { frameHost = new URL(frame.url || '').hostname } catch (_) {}
         return {
           automaticLoginPending: true,
+          needLogin: false,
+          needVerification: false,
           frameCount: inspected,
           frameHost,
-          readyState: snapshot.readyState || ''
+          readyState: snapshot.readyState || '',
+          mainReadyState
         }
       }
     } catch (_) {
       // 导航过程中旧frame可能被销毁，下一轮会读取新frame。
     }
   }
-  return { automaticLoginPending: false, frameCount: inspected }
+  return {
+    automaticLoginPending: false,
+    needLogin: false,
+    needVerification: false,
+    frameCount: inspected,
+    mainReadyState
+  }
 }
 
 function isTaobaoRiskRet(retText) {
@@ -426,6 +527,34 @@ async function bootstrapSearchWindow(state) {
   return state.initializing
 }
 
+function invalidateTaobaoSearchIdentity(state, cookie, cause, removed) {
+  if (!state || !isTaobaoIdentityCookie(cookie)) return false
+  const cookieKey = taobaoIdentityCookieKey(cookie)
+  const cookieValueFp = shortFingerprint(cookie.value || '')
+  const previousValueFp = state.identityCookieFingerprints?.get(cookieKey) || ''
+  if (removed) {
+    if (!previousValueFp) return false
+    state.identityCookieFingerprints.delete(cookieKey)
+  } else {
+    if (previousValueFp === cookieValueFp) return false
+    state.identityCookieFingerprints.set(cookieKey, cookieValueFp)
+  }
+  state.sessionGeneration = Number(state.sessionGeneration || 0) + 1
+  state.identityDirty = true
+  state.firstSearchPrepared = false
+  state.bootstrapComplete = false
+  state.lastIdentityMutationAt = Date.now()
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '搜索身份环境已失效: accountId=' + state.accountId +
+      ', generation=' + state.sessionGeneration +
+      ', cookie=' + String(cookie.name || '') +
+      ', cause=' + String(cause || 'unknown') +
+      ', removed=' + !!removed
+  )
+  return true
+}
+
 async function getOrCreateTaobaoSearchWindow(accountId) {
   // 搜同款窗口按账号长期复用，并与该账号正常登录/采购共用最终持久分区。
   // 这样后续商品可以沿用完整站点存储、页面环境和已经稳定的MTOP Token。
@@ -469,11 +598,27 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
     bootstrapComplete: false,
     firstSearchPrepared: false,
     verificationPending: false,
+    sessionGeneration: 0,
+    identityDirty: false,
+    lastIdentityMutationAt: 0,
+    lastAuthenticatedIdentityFingerprint: '',
+    lastAuthenticatedGeneration: -1,
+    lastSuccessfulIdentityFingerprint: '',
+    lastSuccessfulGeneration: -1,
+    identityCookieFingerprints: createTaobaoIdentityCookieMap(cookies),
     lastNavigationAt: Date.now(),
     lastNavigationUrl: ''
   }
+  state.cookieChangeListener = (_event, cookie, cause, removed) => {
+    invalidateTaobaoSearchIdentity(state, cookie, cause, removed)
+  }
+  ses.cookies.on('changed', state.cookieChangeListener)
   searchWindowStates.set(partition, state)
   win.on('closed', () => {
+    if (state.cookieChangeListener) {
+      try { ses.cookies.removeListener('changed', state.cookieChangeListener) } catch (_) {}
+      state.cookieChangeListener = null
+    }
     if (searchWindowStates.get(partition) === state) searchWindowStates.delete(partition)
   })
   win.webContents.on('did-navigate', (_event, url) => {
@@ -697,6 +842,24 @@ async function waitForTaobaoSearchAuthentication(
       await sleep(200)
       continue
     }
+    if (authenticationPage.needLogin) {
+      return {
+        ...latest,
+        needLogin: true,
+        needVerification: false,
+        reason: 'login_frame',
+        frameHost: authenticationPage.frameHost || ''
+      }
+    }
+    if (authenticationPage.needVerification) {
+      return {
+        ...latest,
+        needLogin: false,
+        needVerification: true,
+        reason: 'verification_frame',
+        frameHost: authenticationPage.frameHost || ''
+      }
+    }
     if (automaticLoginDetectedAt) {
       runtimeLog.writeLog(
         'TaobaoSame',
@@ -710,24 +873,39 @@ async function waitForTaobaoSearchAuthentication(
     const cookies = await state.ses.cookies.get({})
     const loginCookieReady = hasTaobaoLoginCookie(cookies)
     const token = await getTaobaoMtopToken(state.ses)
+    const identity = buildTaobaoSessionIdentity(cookies, token)
     const loading = state.win.webContents.isLoading()
+    const pageReady = authenticationPage.mainReadyState === 'complete'
     latest = {
       ready: false,
       needLogin: !loginCookieReady,
       needVerification: false,
       pendingAutomaticLogin: false,
       token,
-      url
+      url,
+      identityFingerprint: identity.fingerprint,
+      tokenFingerprint: identity.tokenFingerprint,
+      sessionGeneration: Number(state.sessionGeneration || 0),
+      pageReady
     }
 
-    if (loginCookieReady && token && !loading) {
-      const signature = url + '|' + token
+    if (loginCookieReady && token && !loading && pageReady) {
+      const signature = [
+        url,
+        identity.fingerprint,
+        identity.tokenFingerprint,
+        Number(state.sessionGeneration || 0)
+      ].join('|')
       if (signature !== stableSignature) {
         stableSignature = signature
         stableSince = Date.now()
       }
       const navigationStable = Date.now() - Number(state.lastNavigationAt || 0) >= stableMs
-      if (navigationStable && Date.now() - stableSince >= stableMs) {
+      const identityMutationStable = Date.now() - Number(state.lastIdentityMutationAt || 0) >= stableMs
+      if (navigationStable && identityMutationStable && Date.now() - stableSince >= stableMs) {
+        state.identityDirty = false
+        state.lastAuthenticatedIdentityFingerprint = identity.fingerprint
+        state.lastAuthenticatedGeneration = Number(state.sessionGeneration || 0)
         return { ...latest, ready: true, needLogin: false, reason: 'stable' }
       }
     } else {
@@ -1098,9 +1276,20 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
   const taobaoCookies = cookies.filter(cookie => isTaobaoCookieDomain(cookie.domain))
   const cookieNames = new Set(taobaoCookies.map(cookie => cookie.name))
   const criticalNames = ['unb', 'cookie17', 'cookie2', '_m_h5_tk', '_m_h5_tk_enc', 'sgcookie', 't', 'tracknick', 'cna']
+  const identity = buildTaobaoSessionIdentity(cookies, token)
   return {
     accountId: state.accountId,
     partition: state.partition,
+    session: {
+      generation: Number(state.sessionGeneration || 0),
+      lastSuccessfulGeneration: Number(state.lastSuccessfulGeneration ?? -1),
+      identityDirty: state.identityDirty === true,
+      identityFp: identity.fingerprint,
+      lastSuccessfulIdentityFp: state.lastSuccessfulIdentityFingerprint || '',
+      lastIdentityMutationAgeMs: state.lastIdentityMutationAt
+        ? Math.max(0, Date.now() - state.lastIdentityMutationAt)
+        : null
+    },
     chrome: process.versions.chrome || '',
     electron: process.versions.electron || '',
     page: {
@@ -2228,7 +2417,24 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     let win = state.win
     let ses = state.ses
     const searchStartedAt = Date.now()
-    const warmReuse = !!state.firstSearchPrepared
+    const initialIdentity = await readTaobaoSessionIdentity(ses)
+    const warmReuse = !!state.firstSearchPrepared &&
+      state.identityDirty !== true &&
+      Number(state.sessionGeneration || 0) === Number(state.lastSuccessfulGeneration ?? -1) &&
+      !!initialIdentity.fingerprint &&
+      initialIdentity.fingerprint === state.lastSuccessfulIdentityFingerprint
+    if (state.firstSearchPrepared && !warmReuse) {
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '热搜索身份已变化，重新预热承载页: accountId=' + accountId +
+          ', generation=' + Number(state.sessionGeneration || 0) +
+          ', lastSuccessfulGeneration=' + Number(state.lastSuccessfulGeneration ?? -1) +
+          ', identityDirty=' + (state.identityDirty === true) +
+          ', identityMatch=' + (initialIdentity.fingerprint === state.lastSuccessfulIdentityFingerprint)
+      )
+      state.firstSearchPrepared = false
+      state.bootstrapComplete = false
+    }
     runtimeLog.writeLog(
       'TaobaoSame',
       '开始搜同款: accountId=' + accountId +
@@ -2246,11 +2452,12 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       await bootstrapSearchWindow(state)
     }
 
-    // 首次搜索等待完整登录环境稳定；成功预热后的搜索只做一次快速健康检查。
+    // 只有关键登录Cookie身份和成功代际完全一致时才允许热复用；
+    // 首次、Cookie被外部恢复或账号身份发生变化后，都必须重新等待完整环境稳定。
     let authState = await waitForTaobaoSearchAuthentication(
       state,
       TAOBAO_SEARCH_AUTH_TIMEOUT,
-      warmReuse ? 0 : TAOBAO_SEARCH_AUTH_STABLE_MS
+      warmReuse ? TAOBAO_SEARCH_WARM_STABLE_MS : TAOBAO_SEARCH_AUTH_STABLE_MS
     )
     if (authState.needLogin && authState.reason === 'login_cookie_missing') {
       const restoredState = await restoreTaobaoSearchSession(accountId, state, authState.reason)
@@ -2342,6 +2549,26 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     let emptyResultRetryUsed = false
     let riskRetryUsed = false
     for (let attempt = 0; attempt < 3; attempt++) {
+      const requestIdentity = await readTaobaoSessionIdentity(ses)
+      const identityChangedAfterAuthentication = state.identityDirty === true ||
+        Number(state.sessionGeneration || 0) !== Number(authState.sessionGeneration ?? -1) ||
+        requestIdentity.fingerprint !== authState.identityFingerprint
+      if (identityChangedAfterAuthentication) {
+        state.firstSearchPrepared = false
+        state.bootstrapComplete = false
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '请求发送前检测到账号身份被改写，已停止本次接口调用: accountId=' + accountId +
+            ', authenticatedGeneration=' + Number(authState.sessionGeneration ?? -1) +
+            ', currentGeneration=' + Number(state.sessionGeneration || 0) +
+            ', identityMatch=' + (requestIdentity.fingerprint === authState.identityFingerprint)
+        )
+        return {
+          success: false,
+          retryable: true,
+          message: '淘宝账号会话刚刚更新，搜索环境正在同步，请重新搜索'
+        }
+      }
       const token = await waitForTaobaoMtopToken(ses, attempt === 0 ? 1200 : 2000)
       if (!token) {
         runtimeLog.writeLog('TaobaoSame', '搜索请求已停止: 当前会话没有稳定的_m_h5_tk')
@@ -2387,6 +2614,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             riskRetryUsed = true
             const resolution = await openTaobaoVerificationAndWait(state, verificationUrl)
             if (resolution.ready) {
+              authState = resolution
               searchRiskCooldowns.delete(partition)
               await sleep(500)
               runtimeLog.writeLog(
@@ -2460,6 +2688,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
           riskRetryUsed = true
           const resolution = await openTaobaoVerificationAndWait(state, verificationUrl)
           if (resolution.ready) {
+            authState = resolution
             searchRiskCooldowns.delete(partition)
             await sleep(500)
             runtimeLog.writeLog(
@@ -2528,8 +2757,27 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         const rawItems = extractItemsArray(resultJson)
         const products = normalizeTaobaoSearchItems(rawItems, limit)
         if (products.length > 0) {
-          state.firstSearchPrepared = true
+          const successfulIdentity = await readTaobaoSessionIdentity(ses)
+          const successfulGeneration = Number(state.sessionGeneration || 0)
+          const canReuseSuccessfulEnvironment = state.identityDirty !== true &&
+            successfulGeneration === Number(authState.sessionGeneration ?? -1) &&
+            successfulIdentity.fingerprint === authState.identityFingerprint
+          state.firstSearchPrepared = canReuseSuccessfulEnvironment
           state.lastSuccessfulSearchAt = Date.now()
+          if (canReuseSuccessfulEnvironment) {
+            state.lastSuccessfulIdentityFingerprint = successfulIdentity.fingerprint
+            state.lastSuccessfulGeneration = successfulGeneration
+          } else {
+            state.lastSuccessfulIdentityFingerprint = ''
+            state.lastSuccessfulGeneration = -1
+            state.bootstrapComplete = false
+            runtimeLog.writeLog(
+              'TaobaoSame',
+              '搜索响应期间账号身份发生变化，本次结果保留但禁止后续热复用: accountId=' + accountId +
+                ', authenticatedGeneration=' + Number(authState.sessionGeneration ?? -1) +
+                ', currentGeneration=' + successfulGeneration
+            )
+          }
           searchRiskCooldowns.delete(partition)
           const pricedCount = products.filter(product => product.price !== null).length
           runtimeLog.writeLog(
@@ -2537,6 +2785,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             '搜同款成功: count=' + products.length +
             ', priced=' + pricedCount +
             ', mode=' + (warmReuse ? 'WARM_REUSE' : 'COLD_PREPARE') +
+            ', nextWarmReuse=' + canReuseSuccessfulEnvironment +
             ', totalMs=' + (Date.now() - requestStartedAt)
           )
           if (pricedCount < products.length) {
@@ -2620,6 +2869,8 @@ module.exports = {
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
   isTaobaoCookieDomain,
+  isTaobaoIdentityCookie,
+  buildTaobaoSessionIdentity,
   isTaobaoSearchCarrierUrl,
   isTaobaoRiskRet,
   isTaobaoBusyRet,
@@ -2630,5 +2881,9 @@ module.exports = {
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
   classifyTaobaoAuthenticationSnapshot,
+  readTaobaoSearchAuthenticationPageState,
+  TAOBAO_SEARCH_AUTH_TIMEOUT,
+  TAOBAO_SEARCH_AUTH_STABLE_MS,
+  TAOBAO_SEARCH_WARM_STABLE_MS,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS
 }
