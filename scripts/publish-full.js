@@ -126,9 +126,13 @@ async function deployBusinessServerOnly() {
     await new Promise(resolve => setTimeout(resolve, 3000))
     const started = await execCmd(conn, `${NSSM} start dianxiaoer-server`)
     if (started.code !== 0) throw new Error('业务服务启动失败: ' + (started.stderr || started.stdout))
-    await new Promise(resolve => setTimeout(resolve, 7000))
-
-    const health = await execCmd(conn, 'curl.exe -s --max-time 10 http://localhost:3002/health')
+    let health = { code: 1, stdout: '', stderr: '' }
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, attempt === 1 ? 7000 : 5000))
+      health = await execCmd(conn, 'curl.exe -s --max-time 10 http://localhost:3002/health')
+      if (health.code === 0 && health.stdout.includes('"status":"ok"')) break
+      console.log(`[Server] Health 第 ${attempt} 次尚未就绪，继续等待...`)
+    }
     if (health.code !== 0 || !health.stdout.includes('"status":"ok"')) {
       throw new Error('业务服务健康检查失败: ' + (health.stderr || health.stdout))
     }
