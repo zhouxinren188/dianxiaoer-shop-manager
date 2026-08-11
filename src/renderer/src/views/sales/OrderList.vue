@@ -660,11 +660,11 @@
                           <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
                           <span v-if="getSourceShipFrom(src.purchase_link)" class="source-option-origin">发货地：{{ getSourceShipFrom(src.purchase_link) }}</span>
                           <span
-                            v-if="getSourceTimeliness(src, idx)?.estimate"
+                            v-if="getSourceShipFrom(src.purchase_link) && getSourceTimeliness(src, idx)?.estimate"
                             class="source-option-eta"
                             :title="sourceTimelinessTitle(getSourceTimeliness(src, idx))"
-                          >预计 {{ formatTimelinessDays(getSourceTimeliness(src, idx).estimate) }}</span>
-                          <span v-if="getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
+                          >预计 {{ formatEstimatedArrival(getSourceTimeliness(src, idx).estimate) }}</span>
+                          <span v-if="getSourceShipFrom(src.purchase_link) && getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
                         </div>
                         <div class="source-option-recommendation">
                           <span v-if="getSourceTimeliness(src, idx)?.priceLowest && !getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-price-lowest"><el-icon><PriceTag /></el-icon>价格最低</span>
@@ -2679,11 +2679,63 @@ function getSourceTimeliness(source, index) {
   return sourceTimelinessMap.value[sourceTimelinessKey(source, index)] || null
 }
 
-function formatTimelinessDays(estimate) {
+function getEstimatedArrivalAt(estimate) {
+  if (!estimate) return null
+  const requestedAt = new Date(estimate.requestedAt || Date.now())
+  const expectedHours = Number(estimate.expectedHours)
+  const routeP50Hours = Number(estimate.routeP50Hours)
+  const dispatchPerformance = estimate.dispatchBasis === 'source'
+    ? estimate.sourcePerformance
+    : estimate.regionalDispatchPerformance
+  const dispatchP50Hours = Number(dispatchPerformance?.dispatchP50Hours)
+  const learnedP50Hours = Number.isFinite(routeP50Hours) && routeP50Hours > 0 &&
+    Number.isFinite(dispatchP50Hours) && dispatchP50Hours >= 0
+    ? routeP50Hours + dispatchP50Hours
+    : NaN
+  const fallbackTransitP50Hours = {
+    sameCity: 8,
+    sameProvince: 18,
+    sameRegion: 30,
+    crossRegion: 48,
+    remote: 96
+  }
+  const fallbackRouteP50Hours = Number(
+    estimate.fallbackRouteP50Hours ?? fallbackTransitP50Hours[estimate.basis]
+  )
+  const fallbackExpectedHours = Number.isFinite(fallbackRouteP50Hours) && fallbackRouteP50Hours >= 0 &&
+    Number.isFinite(dispatchP50Hours) && dispatchP50Hours >= 0
+    ? fallbackRouteP50Hours + dispatchP50Hours
+    : NaN
+  const scoreHours = Number(estimate.scoreHours)
+  const fallbackHours = Number(estimate.maxDays || 0) * 24
+  const hours = Number.isFinite(expectedHours) && expectedHours > 0
+    ? expectedHours
+    : Number.isFinite(learnedP50Hours) && learnedP50Hours > 0
+      ? learnedP50Hours
+      : Number.isFinite(fallbackExpectedHours) && fallbackExpectedHours > 0
+        ? fallbackExpectedHours
+      : Number.isFinite(scoreHours) && scoreHours > 0
+        ? scoreHours
+        : fallbackHours
+  if (Number.isNaN(requestedAt.getTime()) || !Number.isFinite(hours) || hours <= 0) return null
+  return new Date(requestedAt.getTime() + hours * 3600000)
+}
+
+function formatEstimatedArrival(estimate) {
   if (!estimate) return ''
-  const min = Number(estimate.minDays || 0)
-  const max = Number(estimate.maxDays || min)
-  return min === max ? `${min}天` : `${min}-${max}天`
+  const arrivalAt = getEstimatedArrivalAt(estimate)
+  if (!arrivalAt) return '待计算'
+  const requestedAt = new Date(estimate.requestedAt || Date.now())
+  const requestedDay = new Date(requestedAt.getFullYear(), requestedAt.getMonth(), requestedAt.getDate())
+  const arrivalDay = new Date(arrivalAt.getFullYear(), arrivalAt.getMonth(), arrivalAt.getDate())
+  const calendarDays = Math.round((arrivalDay.getTime() - requestedDay.getTime()) / 86400000)
+  if (calendarDays === 0) return '今日抵达'
+  if (calendarDays === 1) return '明日抵达'
+  if (calendarDays === 2) return '后日抵达'
+  const yearText = arrivalAt.getFullYear() === requestedAt.getFullYear()
+    ? ''
+    : `${arrivalAt.getFullYear()}年`
+  return `${yearText}${arrivalAt.getMonth() + 1}月${arrivalAt.getDate()}日抵达`
 }
 
 function sourceTimelinessTitle(result) {
@@ -2727,10 +2779,11 @@ async function refreshSourceTimeliness() {
   }
 
   try {
+    const requestedAt = new Date()
     const result = await recommendShippingSources({
       destination: requestedDestination,
       sources,
-      requested_at: new Date().toISOString()
+      requested_at: requestedAt.toISOString()
     })
     if (
       requestId !== sourceTimelinessRequestId ||
@@ -2740,6 +2793,7 @@ async function refreshSourceTimeliness() {
     const sourcePriceMap = new Map(sources.map(source => [String(source.id), Number(source.purchase_price || 0)]))
     const resultItems = (result?.results || []).map(item => ({
       ...item,
+      estimate: item.estimate ? { ...item.estimate, requestedAt: requestedAt.toISOString() } : item.estimate,
       purchase_price: sourcePriceMap.get(String(item.id)) || null,
       priceLowest: false,
       bestTimeliness: false,
@@ -2755,13 +2809,26 @@ async function refreshSourceTimeliness() {
       }
     }
 
-    const comparable = resultItems.filter(item => item.estimate && Number.isFinite(Number(item.estimate.scoreHours)))
+    const comparable = resultItems.filter(item =>
+      String(item.ship_from || '').trim() &&
+      item.estimate &&
+      Number.isFinite(Number(item.estimate.scoreHours))
+    )
     if (comparable.length >= 2) {
       const eligible = comparable.filter(item => item.estimate.dispatchRisk !== 'high')
       if (eligible.length > 0) {
         const bestScore = Math.min(...eligible.map(item => Number(item.estimate.scoreHours)))
-        for (const item of eligible) {
-          item.bestTimeliness = Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01
+        const fastest = eligible.filter(item => Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01)
+        const pricedFastest = fastest.filter(item => Number(item.purchase_price) > 0)
+        let timelinessWinners = fastest
+        if (pricedFastest.length >= 2) {
+          const lowestFastestPrice = Math.min(...pricedFastest.map(item => Number(item.purchase_price)))
+          timelinessWinners = pricedFastest.filter(item =>
+            Math.abs(Number(item.purchase_price) - lowestFastestPrice) < 0.001
+          )
+        }
+        for (const item of timelinessWinners) {
+          item.bestTimeliness = true
         }
       }
     }
@@ -2791,12 +2858,15 @@ async function refreshSourceTimeliness() {
         estimate: item.estimate ? {
           minDays: item.estimate.minDays,
           maxDays: item.estimate.maxDays,
+          expectedHours: item.estimate.expectedHours,
           scoreHours: item.estimate.scoreHours,
+          estimatedArrivalAt: getEstimatedArrivalAt(item.estimate)?.toISOString() || '',
           basis: item.estimate.basis,
           confidence: item.estimate.confidence,
           sampleCount: item.estimate.sampleCount,
           routeP50Hours: item.estimate.routeP50Hours,
           routeP80Hours: item.estimate.routeP80Hours,
+          fallbackRouteP50Hours: item.estimate.fallbackRouteP50Hours,
           dispatchBasis: item.estimate.dispatchBasis || 'default',
           regionalDispatchPerformance: item.estimate.regionalDispatchPerformance || null,
           sourcePerformance: item.estimate.sourcePerformance || null,
