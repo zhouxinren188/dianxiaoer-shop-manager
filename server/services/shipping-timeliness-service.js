@@ -2,6 +2,10 @@ const fs = require('fs')
 const path = require('path')
 
 const DEFAULT_CONFIG_PATH = path.join(__dirname, '..', 'config', 'shipping-timeliness-defaults.json')
+const DEFAULT_EXTERNAL_BASELINE_PATHS = [
+  path.join(__dirname, '..', 'config', 'shipping-timeliness-kdniao-shuyang.json'),
+  path.join(__dirname, '..', 'config', 'shipping-timeliness-kdniao-shanghai-outbound.json')
+]
 const PROVINCES = [
   '北京', '天津', '上海', '重庆',
   '河北', '山西', '辽宁', '吉林', '黑龙江', '江苏', '浙江', '安徽', '福建', '江西',
@@ -20,12 +24,58 @@ const NETWORK_ENTRY_PATTERN = /(?:快件|包裹|邮件).{0,12}(?:已发往|发�
 
 let cachedConfig = null
 let cachedAdministrativeLookup = null
+let cachedExternalRouteBaselines = null
 
 function loadTimelinessConfig(configPath = DEFAULT_CONFIG_PATH) {
   if (cachedConfig && configPath === DEFAULT_CONFIG_PATH) return cachedConfig
   const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'))
   if (configPath === DEFAULT_CONFIG_PATH) cachedConfig = parsed
   return parsed
+}
+
+function loadExternalRouteBaselines(filePath) {
+  const useDefaultFiles = !filePath
+  if (cachedExternalRouteBaselines && useDefaultFiles) {
+    return cachedExternalRouteBaselines
+  }
+  const files = useDefaultFiles ? DEFAULT_EXTERNAL_BASELINE_PATHS : [filePath]
+  const routeMap = new Map()
+  const parsedFiles = []
+  for (const currentPath of files) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(currentPath, 'utf8'))
+      parsedFiles.push(parsed)
+      for (const route of Array.isArray(parsed?.routes) ? parsed.routes : []) {
+        const cityRouteKey = [
+          normalizeDivisionName(route?.originProvince),
+          normalizeDivisionName(route?.originCity),
+          normalizeDivisionName(route?.destinationProvince),
+          normalizeDivisionName(route?.destinationCity)
+        ].join('|')
+        const key = cityRouteKey.replace(/\|/g, '')
+          ? cityRouteKey
+          : String(route?.key || '')
+        routeMap.set(key, route)
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        console.warn('[ShippingTimeliness] 读取外部线路基线失败:', error.message)
+      }
+    }
+  }
+  const generatedAt = parsedFiles
+    .map(item => String(item?.generatedAt || ''))
+    .filter(Boolean)
+    .sort()
+    .at(-1) || ''
+  const normalized = {
+    version: 1,
+    provider: 'kdniao',
+    generatedAt,
+    routes: [...routeMap.values()]
+  }
+  if (useDefaultFiles) cachedExternalRouteBaselines = normalized
+  return normalized
 }
 
 function cleanAddressText(value) {
@@ -39,7 +89,10 @@ function cleanAddressText(value) {
 
 function normalizeProvinceName(value) {
   const text = cleanAddressText(value)
-  return PROVINCES.find(name => text.includes(name)) || ''
+  const prefixMatch = PROVINCES
+    .filter(name => text.startsWith(name))
+    .sort((left, right) => right.length - left.length)[0]
+  return prefixMatch || PROVINCES.find(name => text.includes(name)) || ''
 }
 
 function normalizeRegion(value) {
@@ -60,13 +113,24 @@ function normalizeRegion(value) {
 
   let rest = raw.slice(raw.indexOf(province) + province.length)
     .replace(/^(?:省|壮族自治区|回族自治区|维吾尔自治区|自治区|特别行政区)/, '')
-  const cityMatch = rest.match(/^([\u4e00-\u9fa5]{2,10}?)(?:市|自治州|地区|盟)/)
-  let city = cityMatch ? cityMatch[1] : ''
-  if (cityMatch) rest = rest.slice(cityMatch[0].length)
+  const lookup = getAdministrativeLookup()
+  const administrativeCityMatch = lookup.cityPattern?.exec(rest)
+  const administrativeCityEntry = administrativeCityMatch?.index === 0
+    ? lookup.cityRegions[administrativeCityMatch[0]]
+    : null
+  const administrativeCityRegion = regionFromAdministrativeEntry(administrativeCityEntry, raw)
+  let city = administrativeCityRegion?.province === province ? administrativeCityRegion.city : ''
+  if (city) {
+    rest = rest.slice(administrativeCityMatch[0].length)
+  } else {
+    const cityMatch = rest.match(/^([\u4e00-\u9fa5]{2,10}?)(?:市|自治州|地区|盟)/)
+    city = cityMatch ? cityMatch[1] : ''
+    if (cityMatch) rest = rest.slice(cityMatch[0].length)
+  }
 
   // 货源页常只返回“河北保定”这种无行政区后缀的短文本。
   if (!city && rest && rest.length <= 8) {
-    city = rest.replace(/(?:市|州|地区|盟).*$/, '').slice(0, 6)
+    city = rest.replace(/(?:市|地区|盟).*$/, '').slice(0, 6)
     rest = ''
   }
 
@@ -82,7 +146,7 @@ function normalizeRegion(value) {
 function normalizeDivisionName(value) {
   return String(value || '')
     .replace(/特别行政区|自治州|自治县|自治区|地区|盟$/g, '')
-    .replace(/[省市区县旗州]$/g, '')
+    .replace(/[省市区县旗]$/g, '')
     .trim()
 }
 
@@ -432,13 +496,98 @@ function getFallbackEstimate(origin, destination, config) {
   }
   const range = config.fallbackDays?.[key]
   if (!Array.isArray(range) || range.length !== 2) return null
+  const fallbackRouteP50Hours = Number(config.fallbackTransitP50Hours?.[key])
+  const expectedRouteHours = Number.isFinite(fallbackRouteP50Hours)
+    ? fallbackRouteP50Hours
+    : ((Number(range[0]) + Number(range[1])) / 2) * 24 - Number(config.defaultDispatchHours || 24)
+  const fallbackRouteP80Hours = Math.max(
+    expectedRouteHours,
+    Number(range[1]) * 24 - Number(config.defaultDispatchHours || 24)
+  )
   return {
     minDays: Number(range[0]),
     maxDays: Number(range[1]),
+    expectedHours: expectedRouteHours + Number(config.defaultDispatchHours || 24),
+    fallbackRouteP50Hours: expectedRouteHours,
+    routeP50Hours: expectedRouteHours,
+    routeP80Hours: fallbackRouteP80Hours,
     scoreHours: Number(range[1]) * 24,
     basis: key,
     confidence: 'default',
     sampleCount: 0
+  }
+}
+
+function sameDivision(left, right) {
+  const leftName = normalizeDivisionName(left)
+  const rightName = normalizeDivisionName(right)
+  return Boolean(leftName && rightName && leftName === rightName)
+}
+
+function buildExternalRouteEstimate(
+  origin,
+  destination,
+  config,
+  baselineData = loadExternalRouteBaselines()
+) {
+  if (!origin?.province || !origin?.city || !destination?.province || !destination?.city) return null
+  const candidates = (baselineData?.routes || []).filter(route =>
+    sameDivision(route.originProvince, origin.province) &&
+    sameDivision(route.originCity, origin.city) &&
+    sameDivision(route.destinationProvince, destination.province) &&
+    sameDivision(route.destinationCity, destination.city)
+  )
+  if (!candidates.length) return null
+  const exactCountyMatch = candidates.find(route =>
+    route.originCounty && origin.county && sameDivision(route.originCounty, origin.county) &&
+    route.destinationCounty && destination.county && sameDivision(route.destinationCounty, destination.county)
+  )
+  const destinationCountyMatch = candidates.find(route =>
+    route.destinationCounty && destination.county && sameDivision(route.destinationCounty, destination.county)
+  )
+  const originCountyMatch = candidates.find(route =>
+    route.originCounty && origin.county && sameDivision(route.originCounty, origin.county)
+  )
+  const route = exactCountyMatch || destinationCountyMatch || originCountyMatch || candidates[0]
+  const routeP50Hours = Number(route.transitHours)
+  if (!Number.isFinite(routeP50Hours) || routeP50Hours <= 0 || routeP50Hours > 24 * 15) return null
+  const p80Buffer = Math.max(0, Number(config.externalRouteP80BufferHours || 12))
+  const routeP80Hours = Math.max(routeP50Hours, Number(route.transitP80Hours) || routeP50Hours + p80Buffer)
+  const defaultDispatchHours = Number(config.defaultDispatchHours || 24)
+  return {
+    minDays: Math.max(1, Math.floor((routeP50Hours + defaultDispatchHours) / 24)),
+    maxDays: Math.max(1, Math.ceil((routeP80Hours + defaultDispatchHours) / 24)),
+    expectedHours: routeP50Hours + defaultDispatchHours,
+    scoreHours: routeP80Hours + defaultDispatchHours,
+    routeP50Hours,
+    routeP80Hours,
+    basis: 'externalCityRoute',
+    confidence: 'external',
+    sampleCount: 0,
+    externalProvider: String(baselineData.provider || 'kdniao'),
+    externalCollectedAt: route.collectedAt || baselineData.generatedAt || null,
+    externalDeliveryTime: route.deliveryTime || '',
+    externalDeliveryDayOffset: Number.isFinite(Number(route.deliveryDayOffset))
+      ? Number(route.deliveryDayOffset)
+      : null
+  }
+}
+
+function getDefaultDispatchPerformance(requestedAt, config) {
+  const requested = normalizeContextDate(requestedAt) || new Date()
+  const cutoffHour = Math.max(0, Math.min(23, Number(config.defaultDispatchCutoffHour ?? 17)))
+  const cutoff = new Date(requested)
+  cutoff.setHours(cutoffHour, 0, 0, 0)
+  if (requested.getTime() >= cutoff.getTime()) cutoff.setDate(cutoff.getDate() + 1)
+  const dispatchHours = Math.max(0, (cutoff.getTime() - requested.getTime()) / 3600000)
+  return {
+    basis: 'defaultCutoff',
+    confidence: 'default',
+    cutoffHour,
+    sampleCount: 0,
+    sameDayRate: isSameCalendarDay(requested, cutoff) ? 1 : 0,
+    dispatchP50Hours: dispatchHours,
+    dispatchP80Hours: dispatchHours
   }
 }
 
@@ -474,6 +623,7 @@ function buildHistoryEstimate(origin, destination, observations, config) {
   return {
     minDays: Math.max(1, Math.floor((p50 + defaultDispatchHours) / 24)),
     maxDays: Math.max(1, Math.ceil((p80 + defaultDispatchHours) / 24)),
+    expectedHours: p50 + defaultDispatchHours,
     scoreHours: p80 + defaultDispatchHours,
     routeP50Hours: p50,
     routeP80Hours: p80,
@@ -595,33 +745,39 @@ function inferSourceOrigin(sourceKey, observations) {
   return [...counts.values()].sort((a, b) => b.count - a.count)[0]?.region || null
 }
 
-function applySourcePerformance(baseEstimate, performance, config, regionalDispatchPerformance = null) {
+function applySourcePerformance(baseEstimate, performance, config, regionalDispatchPerformance = null, requestedAt = new Date()) {
   if (!baseEstimate) return baseEstimate
   const estimate = { ...baseEstimate }
   if (performance) estimate.sourcePerformance = performance
   if (regionalDispatchPerformance) estimate.regionalDispatchPerformance = regionalDispatchPerformance
   const baselineDispatch = Number(config.defaultDispatchHours || 24)
-  const dispatchPerformance = Number.isFinite(performance?.dispatchP80Hours)
+  const learnedDispatchPerformance = Number.isFinite(performance?.dispatchP80Hours)
     ? performance
     : Number.isFinite(regionalDispatchPerformance?.dispatchP80Hours)
       ? regionalDispatchPerformance
       : null
+  const dispatchPerformance = learnedDispatchPerformance || getDefaultDispatchPerformance(requestedAt, config)
 
   if (dispatchPerformance) {
-    estimate.dispatchBasis = dispatchPerformance === performance ? 'source' : regionalDispatchPerformance.basis
+    estimate.dispatchBasis = dispatchPerformance === performance
+      ? 'source'
+      : dispatchPerformance === regionalDispatchPerformance
+        ? regionalDispatchPerformance.basis
+        : dispatchPerformance.basis
     if (Number.isFinite(estimate.routeP80Hours)) {
+      estimate.expectedHours = estimate.routeP50Hours + dispatchPerformance.dispatchP50Hours
       estimate.scoreHours = estimate.routeP80Hours + dispatchPerformance.dispatchP80Hours
       estimate.minDays = Math.max(1, Math.floor((estimate.routeP50Hours + dispatchPerformance.dispatchP50Hours) / 24))
       estimate.maxDays = Math.max(estimate.minDays, Math.ceil(estimate.scoreHours / 24))
     } else {
       const dispatchAdjustment = dispatchPerformance.dispatchP80Hours - baselineDispatch
+      const expectedDispatchAdjustment = dispatchPerformance.dispatchP50Hours - baselineDispatch
+      estimate.expectedHours = Math.max(24, Number(estimate.expectedHours || estimate.scoreHours) + expectedDispatchAdjustment)
       estimate.scoreHours = Math.max(24, estimate.scoreHours + dispatchAdjustment)
       const fallbackRouteMinHours = Math.max(0, estimate.minDays * 24 - baselineDispatch)
       estimate.minDays = Math.max(1, Math.floor((fallbackRouteMinHours + dispatchPerformance.dispatchP50Hours) / 24))
       estimate.maxDays = Math.max(estimate.minDays, Math.ceil(estimate.scoreHours / 24))
     }
-  } else {
-    estimate.dispatchBasis = 'default'
   }
 
   if (performance?.dispatchRisk === 'high') {
@@ -642,13 +798,15 @@ function recommendSources({ destination, sources, observations = [], config = lo
     const explicitOrigin = normalizeRegion(shipFrom)
     const origin = explicitOrigin.province ? explicitOrigin : (inferSourceOrigin(sourceKey, observations) || explicitOrigin)
     const historyEstimate = buildHistoryEstimate(origin, destinationRegion, observations, config)
+    const externalEstimate = buildExternalRouteEstimate(origin, destinationRegion, config)
     const sourcePerformance = buildSourcePerformance(sourceKey, observations, config, requestedAt)
     const regionalDispatchPerformance = buildRegionalDispatchPerformance(origin, observations, config, requestedAt)
     const estimate = applySourcePerformance(
-      historyEstimate || getFallbackEstimate(origin, destinationRegion, config),
+      historyEstimate || externalEstimate || getFallbackEstimate(origin, destinationRegion, config),
       sourcePerformance,
       config,
-      regionalDispatchPerformance
+      regionalDispatchPerformance,
+      requestedAt
     )
     return {
       id: source.id ?? String(index),
@@ -871,7 +1029,10 @@ module.exports = {
   isSameDispatchContext,
   getDispatchTimeBucket,
   buildRegionalDispatchPerformance,
+  getDefaultDispatchPerformance,
   getFallbackEstimate,
+  buildExternalRouteEstimate,
+  loadExternalRouteBaselines,
   recommendSources,
   recordTimelinessObservation,
   backfillRecentObservations,

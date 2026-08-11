@@ -12,6 +12,8 @@
   },
   "dispatchTimeBucketHours": 2,
   "defaultDispatchHours": 24,
+  "defaultDispatchCutoffHour": 17,
+  "externalRouteP80BufferHours": 12,
   "unshippedOverdueHours": 72,
   "riskPenaltyHours": 48,
   "riskRateThreshold": 0.3,
@@ -36,6 +38,13 @@
       4,
       7
     ]
+  },
+  "fallbackTransitP50Hours": {
+    "sameCity": 8,
+    "sameProvince": 18,
+    "sameRegion": 30,
+    "crossRegion": 48,
+    "remote": 96
   },
   "remoteProvinces": [
     "新疆",
