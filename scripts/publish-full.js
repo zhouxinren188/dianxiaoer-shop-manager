@@ -109,7 +109,9 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'store-cookie-policy.js'), remote: `${BUSINESS_REMOTE_DIR}/services/store-cookie-policy.js` },
     { local: path.join(ROOT, 'server', 'services', 'shipping-timeliness-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/shipping-timeliness-service.js` },
-    { local: path.join(ROOT, 'server', 'config', 'shipping-timeliness-defaults.json'), remote: `${BUSINESS_REMOTE_DIR}/config/shipping-timeliness-defaults.json` }
+    { local: path.join(ROOT, 'server', 'config', 'shipping-timeliness-defaults.json'), remote: `${BUSINESS_REMOTE_DIR}/config/shipping-timeliness-defaults.json` },
+    { local: path.join(ROOT, 'server', 'config', 'shipping-timeliness-kdniao-shanghai-outbound.json'), remote: `${BUSINESS_REMOTE_DIR}/config/shipping-timeliness-kdniao-shanghai-outbound.json` },
+    { local: path.join(ROOT, 'server', 'config', 'shipping-timeliness-kdniao-shuyang.json'), remote: `${BUSINESS_REMOTE_DIR}/config/shipping-timeliness-kdniao-shuyang.json` }
   ]
 }
 
