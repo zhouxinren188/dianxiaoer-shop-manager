@@ -1,13 +1,19 @@
 {
-  "version": 1,
+  "version": 2,
   "lookbackDays": 90,
   "minimumSamples": {
     "cityRoute": 3,
     "provinceRoute": 5,
-    "sourceDispatch": 2,
+    "cityDispatchTimeBucket": 5,
+    "provinceDispatchTimeBucket": 10,
+    "regionDispatchTimeBucket": 20,
+    "sourceDispatch": 5,
     "sourceRisk": 5
   },
+  "dispatchTimeBucketHours": 2,
   "defaultDispatchHours": 24,
+  "defaultDispatchCutoffHour": 17,
+  "externalRouteP80BufferHours": 12,
   "unshippedOverdueHours": 72,
   "riskPenaltyHours": 48,
   "riskRateThreshold": 0.3,
@@ -32,6 +38,13 @@
       4,
       7
     ]
+  },
+  "fallbackTransitP50Hours": {
+    "sameCity": 8,
+    "sameProvince": 18,
+    "sameRegion": 30,
+    "crossRegion": 48,
+    "remote": 96
   },
   "remoteProvinces": [
     "新疆",

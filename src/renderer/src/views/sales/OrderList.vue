@@ -665,20 +665,24 @@
                           <span v-if="src.purchase_price" class="source-option-price">¥{{ Number(src.purchase_price).toFixed(2) }}</span>
                           <span v-if="getSourceShipFrom(src.purchase_link)" class="source-option-origin">发货地：{{ getSourceShipFrom(src.purchase_link) }}</span>
                           <span
-                            v-if="getSourceTimeliness(src, idx)?.estimate"
+                            v-if="getSourceShipFrom(src.purchase_link) && getSourceTimeliness(src, idx)?.estimate"
                             class="source-option-eta"
                             :title="sourceTimelinessTitle(getSourceTimeliness(src, idx))"
-                          >预计 {{ formatTimelinessDays(getSourceTimeliness(src, idx).estimate) }}</span>
-                          <span v-if="getSourceTimeliness(src, idx)?.recommended" class="source-option-recommended">推荐</span>
-                          <span v-if="getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
+                          >预计 {{ formatEstimatedArrival(getSourceTimeliness(src, idx).estimate) }}</span>
+                          <span v-if="getSourceShipFrom(src.purchase_link) && getSourceTimeliness(src, idx)?.estimate?.dispatchRisk === 'high'" class="source-option-risk">发货风险</span>
                         </div>
-                        <div class="source-option-actions">
-                          <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
-                          <el-button link type="danger" size="small" @click.stop="handleDeleteSource(src, idx)"><el-icon><Delete /></el-icon></el-button>
+                        <div class="source-option-recommendation">
+                          <span v-if="getSourceTimeliness(src, idx)?.priceLowest && !getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-price-lowest"><el-icon><PriceTag /></el-icon>价格最低</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.bestTimeliness && !getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-best-timeliness"><el-icon><Lightning /></el-icon>最优时效</span>
+                          <span v-if="getSourceTimeliness(src, idx)?.purchasePreferred" class="source-option-badge source-option-purchase-preferred"><el-icon><StarFilled /></el-icon>采购优选</span>
                         </div>
                       </div>
                       <div class="source-option-link-row">
                         <span class="source-option-link">{{ displaySourceUrl(src.purchase_link) }}</span>
+                        <div class="source-option-actions">
+                          <el-button link type="primary" size="small" @click.stop="openEditSourceForm(src, idx)"><el-icon><Edit /></el-icon></el-button>
+                          <el-button link type="danger" size="small" @click.stop="handleDeleteSource(src, idx)"><el-icon><Delete /></el-icon></el-button>
+                        </div>
                         <el-button link type="primary" size="small" class="source-link-open-btn" @click.stop="openSourceLink(src)">查看商品</el-button>
                       </div>
                     </div>
@@ -1250,7 +1254,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, Lock } from '@element-plus/icons-vue'
+import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, StarFilled, Lightning, Lock } from '@element-plus/icons-vue'
 import { fetchStores, updateStoreSyncTime } from '@/api/store'
 import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, fetchSalesOrderSmsContext, sendSalesOrderSms, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
 import { FRAUD_WATERMARK_URL, SUSPECT_WATERMARK_URL } from '@/assets/watermark'
@@ -2720,25 +2724,84 @@ function getSourceTimeliness(source, index) {
   return sourceTimelinessMap.value[sourceTimelinessKey(source, index)] || null
 }
 
-function formatTimelinessDays(estimate) {
+function getEstimatedArrivalAt(estimate) {
+  if (!estimate) return null
+  const requestedAt = new Date(estimate.requestedAt || Date.now())
+  const expectedHours = Number(estimate.expectedHours)
+  const routeP50Hours = Number(estimate.routeP50Hours)
+  const dispatchPerformance = estimate.dispatchBasis === 'source'
+    ? estimate.sourcePerformance
+    : estimate.regionalDispatchPerformance
+  const dispatchP50Hours = Number(dispatchPerformance?.dispatchP50Hours)
+  const learnedP50Hours = Number.isFinite(routeP50Hours) && routeP50Hours > 0 &&
+    Number.isFinite(dispatchP50Hours) && dispatchP50Hours >= 0
+    ? routeP50Hours + dispatchP50Hours
+    : NaN
+  const fallbackTransitP50Hours = {
+    sameCity: 8,
+    sameProvince: 18,
+    sameRegion: 30,
+    crossRegion: 48,
+    remote: 96
+  }
+  const fallbackRouteP50Hours = Number(
+    estimate.fallbackRouteP50Hours ?? fallbackTransitP50Hours[estimate.basis]
+  )
+  const fallbackExpectedHours = Number.isFinite(fallbackRouteP50Hours) && fallbackRouteP50Hours >= 0 &&
+    Number.isFinite(dispatchP50Hours) && dispatchP50Hours >= 0
+    ? fallbackRouteP50Hours + dispatchP50Hours
+    : NaN
+  const scoreHours = Number(estimate.scoreHours)
+  const fallbackHours = Number(estimate.maxDays || 0) * 24
+  const hours = Number.isFinite(expectedHours) && expectedHours > 0
+    ? expectedHours
+    : Number.isFinite(learnedP50Hours) && learnedP50Hours > 0
+      ? learnedP50Hours
+      : Number.isFinite(fallbackExpectedHours) && fallbackExpectedHours > 0
+        ? fallbackExpectedHours
+      : Number.isFinite(scoreHours) && scoreHours > 0
+        ? scoreHours
+        : fallbackHours
+  if (Number.isNaN(requestedAt.getTime()) || !Number.isFinite(hours) || hours <= 0) return null
+  return new Date(requestedAt.getTime() + hours * 3600000)
+}
+
+function formatEstimatedArrival(estimate) {
   if (!estimate) return ''
-  const min = Number(estimate.minDays || 0)
-  const max = Number(estimate.maxDays || min)
-  return min === max ? `${min}天` : `${min}-${max}天`
+  const arrivalAt = getEstimatedArrivalAt(estimate)
+  if (!arrivalAt) return '待计算'
+  const requestedAt = new Date(estimate.requestedAt || Date.now())
+  const requestedDay = new Date(requestedAt.getFullYear(), requestedAt.getMonth(), requestedAt.getDate())
+  const arrivalDay = new Date(arrivalAt.getFullYear(), arrivalAt.getMonth(), arrivalAt.getDate())
+  const calendarDays = Math.round((arrivalDay.getTime() - requestedDay.getTime()) / 86400000)
+  if (calendarDays === 0) return '今日抵达'
+  if (calendarDays === 1) return '明日抵达'
+  if (calendarDays === 2) return '后日抵达'
+  const yearText = arrivalAt.getFullYear() === requestedAt.getFullYear()
+    ? ''
+    : `${arrivalAt.getFullYear()}年`
+  return `${yearText}${arrivalAt.getMonth() + 1}月${arrivalAt.getDate()}日抵达`
 }
 
 function sourceTimelinessTitle(result) {
   const estimate = result?.estimate
   if (!estimate) return ''
   const sourcePerformance = estimate.sourcePerformance
+  const regionalDispatch = estimate.regionalDispatchPerformance
   const sourceText = sourcePerformance
     ? `；该货源发货样本 ${sourcePerformance.dispatchSampleCount || 0} 单` +
       (sourcePerformance.unshippedCount ? `，超时未发/未发取消 ${sourcePerformance.unshippedCount} 单` : '')
     : ''
+  const regionalText = regionalDispatch && estimate.dispatchBasis !== 'source'
+    ? `；按${regionalDispatch.regionGroup || (regionalDispatch.city ? `${regionalDispatch.province}${regionalDispatch.city}` : regionalDispatch.province)}` +
+      ` ${String(regionalDispatch.startHour).padStart(2, '0')}:00-${String(regionalDispatch.endHour).padStart(2, '0')}:00` +
+      ` 样本 ${regionalDispatch.sampleCount || 0} 单计算发货准备时间` +
+      `，当天进入物流 ${(Number(regionalDispatch.sameDayRate || 0) * 100).toFixed(0)}%`
+    : ''
   if (estimate.confidence === 'high' || estimate.confidence === 'medium') {
-    return `根据近90天 ${estimate.sampleCount || 0} 个同路线已签收订单计算${sourceText}`
+    return `根据近90天 ${estimate.sampleCount || 0} 个同路线已签收订单计算${regionalText}${sourceText}`
   }
-  return `同路线样本不足，使用服务器默认时效配置估算${sourceText}`
+  return `同路线样本不足，使用服务器默认时效配置估算${regionalText}${sourceText}`
 }
 
 async function refreshSourceTimeliness() {
@@ -2761,10 +2824,11 @@ async function refreshSourceTimeliness() {
   }
 
   try {
+    const requestedAt = new Date()
     const result = await recommendShippingSources({
       destination: requestedDestination,
       sources,
-      requested_at: new Date().toISOString()
+      requested_at: requestedAt.toISOString()
     })
     if (
       requestId !== sourceTimelinessRequestId ||
@@ -2774,20 +2838,87 @@ async function refreshSourceTimeliness() {
     const sourcePriceMap = new Map(sources.map(source => [String(source.id), Number(source.purchase_price || 0)]))
     const resultItems = (result?.results || []).map(item => ({
       ...item,
-      purchase_price: sourcePriceMap.get(String(item.id)) || null
+      estimate: item.estimate ? { ...item.estimate, requestedAt: requestedAt.toISOString() } : item.estimate,
+      purchase_price: sourcePriceMap.get(String(item.id)) || null,
+      priceLowest: false,
+      bestTimeliness: false,
+      purchasePreferred: false,
+      recommended: false
     }))
-    const comparable = resultItems.filter(item => item.estimate && Number.isFinite(Number(item.estimate.scoreHours)))
+
+    const pricedItems = resultItems.filter(item => Number(item.purchase_price) > 0)
+    if (pricedItems.length >= 2) {
+      const bestPrice = Math.min(...pricedItems.map(item => Number(item.purchase_price)))
+      for (const item of pricedItems) {
+        item.priceLowest = Math.abs(Number(item.purchase_price) - bestPrice) < 0.001
+      }
+    }
+
+    const comparable = resultItems.filter(item =>
+      String(item.ship_from || '').trim() &&
+      item.estimate &&
+      Number.isFinite(Number(item.estimate.scoreHours))
+    )
     if (comparable.length >= 2) {
-      const bestScore = Math.min(...comparable.map(item => Number(item.estimate.scoreHours)))
-      const fastest = comparable.filter(item => Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01)
-      const pricedFastest = fastest.filter(item => Number(item.purchase_price) > 0)
-      if (pricedFastest.length >= 2) {
-        const bestPrice = Math.min(...pricedFastest.map(item => Number(item.purchase_price)))
-        for (const item of comparable) {
-          item.recommended = fastest.includes(item) && Math.abs(Number(item.purchase_price) - bestPrice) < 0.001
+      const eligible = comparable.filter(item => item.estimate.dispatchRisk !== 'high')
+      if (eligible.length > 0) {
+        const bestScore = Math.min(...eligible.map(item => Number(item.estimate.scoreHours)))
+        const fastest = eligible.filter(item => Math.abs(Number(item.estimate.scoreHours) - bestScore) < 0.01)
+        const pricedFastest = fastest.filter(item => Number(item.purchase_price) > 0)
+        let timelinessWinners = fastest
+        if (pricedFastest.length >= 2) {
+          const lowestFastestPrice = Math.min(...pricedFastest.map(item => Number(item.purchase_price)))
+          timelinessWinners = pricedFastest.filter(item =>
+            Math.abs(Number(item.purchase_price) - lowestFastestPrice) < 0.001
+          )
+        }
+        for (const item of timelinessWinners) {
+          item.bestTimeliness = true
         }
       }
     }
+
+    for (const item of resultItems) {
+      item.purchasePreferred = item.priceLowest && item.bestTimeliness
+      item.recommended = item.purchasePreferred
+    }
+    console.warn('[采购时效推荐][诊断]', JSON.stringify({
+      destination: result?.destination ? {
+        province: result.destination.province || '',
+        city: result.destination.city || '',
+        county: result.destination.county || ''
+      } : null,
+      sources: resultItems.map(item => ({
+        id: item.id,
+        shipFrom: item.ship_from || '',
+        origin: item.origin ? {
+          province: item.origin.province || '',
+          city: item.origin.city || '',
+          county: item.origin.county || ''
+        } : null,
+        purchasePrice: item.purchase_price,
+        priceLowest: !!item.priceLowest,
+        bestTimeliness: !!item.bestTimeliness,
+        purchasePreferred: !!item.purchasePreferred,
+        estimate: item.estimate ? {
+          minDays: item.estimate.minDays,
+          maxDays: item.estimate.maxDays,
+          expectedHours: item.estimate.expectedHours,
+          scoreHours: item.estimate.scoreHours,
+          estimatedArrivalAt: getEstimatedArrivalAt(item.estimate)?.toISOString() || '',
+          basis: item.estimate.basis,
+          confidence: item.estimate.confidence,
+          sampleCount: item.estimate.sampleCount,
+          routeP50Hours: item.estimate.routeP50Hours,
+          routeP80Hours: item.estimate.routeP80Hours,
+          fallbackRouteP50Hours: item.estimate.fallbackRouteP50Hours,
+          dispatchBasis: item.estimate.dispatchBasis || 'default',
+          regionalDispatchPerformance: item.estimate.regionalDispatchPerformance || null,
+          sourcePerformance: item.estimate.sourcePerformance || null,
+          dispatchRisk: item.estimate.dispatchRisk || ''
+        } : null
+      }))
+    }))
     const nextMap = {}
     for (const item of resultItems) nextMap[String(item.id)] = item
     sourceTimelinessMap.value = nextMap
@@ -6443,6 +6574,7 @@ onUnmounted(() => {
 
 .source-option-left {
   display: flex;
+  flex: 1;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
@@ -6454,6 +6586,14 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.source-option-recommendation {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: 10px;
 }
 
 .source-option-actions {
@@ -6483,23 +6623,43 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-.source-option-recommended {
-  padding: 2px 7px;
-  border-radius: 4px;
-  background: linear-gradient(135deg, #ff8a34, #ff5a1f);
-  color: #fff;
+.source-option-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
   font-size: 12px;
   font-weight: 600;
   line-height: 18px;
   white-space: nowrap;
 }
 
+.source-option-badge .el-icon {
+  font-size: 14px;
+}
+
+.source-option-price-lowest {
+  color: #319447;
+  background: #f3fff5;
+  border: 1px solid #91d5a0;
+}
+
+.source-option-best-timeliness {
+  color: #2f6ee5;
+  background: #f4f8ff;
+  border: 1px solid #9bbcff;
+}
+
+.source-option-purchase-preferred {
+  color: #f08a00;
+  background: #fffaf0;
+  border: 1px solid #f4a11a;
+  box-shadow: 0 2px 5px rgba(240, 138, 0, 0.12);
+}
+
 .source-option-eta {
-  color: #8a5a27;
-  background: #fff7e8;
-  border: 1px solid #f6d9ad;
-  border-radius: 4px;
-  padding: 1px 6px;
+  color: #4b5563;
   font-size: 12px;
   line-height: 18px;
   white-space: nowrap;

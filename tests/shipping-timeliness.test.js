@@ -9,6 +9,11 @@ const {
   extractTrackingRoute,
   extractTrackingMilestones,
   isSameDispatchContext,
+  getDispatchTimeBucket,
+  buildRegionalDispatchPerformance,
+  getDefaultDispatchPerformance,
+  buildExternalRouteEstimate,
+  loadExternalRouteBaselines,
   recommendSources,
   recordTimelinessObservation,
   recommendSourcesFromDatabase,
@@ -21,12 +26,140 @@ function sourceUrl(shipFrom) {
 }
 
 describe('采购物流时效学习与推荐', () => {
+  it('无发货样本时按17点截单计算预计进入物流网络时间', () => {
+    const config = loadTimelinessConfig()
+    expect(getDefaultDispatchPerformance('2026-08-11 16:00:00', config)).toMatchObject({
+      basis: 'defaultCutoff',
+      cutoffHour: 17,
+      sameDayRate: 1,
+      dispatchP50Hours: 1,
+      dispatchP80Hours: 1
+    })
+    expect(getDefaultDispatchPerformance('2026-08-11 18:00:00', config)).toMatchObject({
+      basis: 'defaultCutoff',
+      cutoffHour: 17,
+      sameDayRate: 0,
+      dispatchP50Hours: 23,
+      dispatchP80Hours: 23
+    })
+  })
+
+  it('真实历史路线不足时读取一次性外部线路基线', () => {
+    const config = loadTimelinessConfig()
+    const estimate = buildExternalRouteEstimate(
+      normalizeRegion('江苏省盐城市盐都区'),
+      normalizeRegion('江苏省宿迁市沭阳县'),
+      config,
+      {
+        provider: 'kdniao',
+        generatedAt: '2026-08-11T10:00:00.000Z',
+        routes: [{
+          originProvince: '江苏省',
+          originCity: '盐城市',
+          originCounty: '盐都区',
+          destinationProvince: '江苏省',
+          destinationCity: '宿迁市',
+          destinationCounty: '沭阳县',
+          transitHours: 19,
+          deliveryDayOffset: 1,
+          deliveryTime: '08月12日下午可达'
+        }]
+      }
+    )
+
+    expect(estimate).toMatchObject({
+      basis: 'externalCityRoute',
+      confidence: 'external',
+      routeP50Hours: 19,
+      routeP80Hours: 31,
+      externalProvider: 'kdniao',
+      externalDeliveryDayOffset: 1
+    })
+
+    const guangzhouEstimate = buildExternalRouteEstimate(
+      normalizeRegion('广东广州'),
+      normalizeRegion('江苏省宿迁市沭阳县'),
+      config,
+      {
+        provider: 'kdniao',
+        routes: [{
+          originProvince: '广东省',
+          originCity: '广州市',
+          originCounty: '荔湾区',
+          destinationProvince: '江苏省',
+          destinationCity: '宿迁市',
+          destinationCounty: '沭阳县',
+          transitHours: 43,
+          deliveryDayOffset: 2
+        }]
+      }
+    )
+    expect(guangzhouEstimate).toMatchObject({
+      basis: 'externalCityRoute',
+      routeP50Hours: 43,
+      externalDeliveryDayOffset: 2
+    })
+  })
+
+  it('本地快递鸟基线不含凭证且全国发沭阳、上海发全国均可命中', () => {
+    const config = loadTimelinessConfig()
+    const baseline = loadExternalRouteBaselines()
+    expect(baseline.routes.length).toBeGreaterThanOrEqual(680)
+    expect(new Set(baseline.routes.map(route => route.key)).size).toBe(baseline.routes.length)
+    const cityRouteKeys = baseline.routes.map(route => {
+      const origin = normalizeRegion(`${route.originProvince}${route.originCity}`)
+      const destination = normalizeRegion(`${route.destinationProvince}${route.destinationCity}`)
+      return `${origin.province}|${origin.city}|${destination.province}|${destination.city}`
+    })
+    expect(new Set(cityRouteKeys).size).toBe(cityRouteKeys.length)
+    expect(JSON.stringify(baseline)).not.toMatch(/EBusinessID|ApiKey|DataSign/i)
+    for (const route of baseline.routes) {
+      const origin = normalizeRegion(`${route.originProvince}${route.originCity}`)
+      const destination = normalizeRegion(`${route.destinationProvince}${route.destinationCity}${route.destinationCounty || ''}`)
+      expect(buildExternalRouteEstimate(origin, destination, config, baseline)).not.toBeNull()
+    }
+    expect(buildExternalRouteEstimate(
+      normalizeRegion('上海市浦东新区'),
+      normalizeRegion('广东省广州市天河区'),
+      config,
+      baseline
+    )).toMatchObject({
+      basis: 'externalCityRoute',
+      externalProvider: 'kdniao'
+    })
+  })
+
+  it('默认路线会叠加17点截单等待而不是固定24小时', () => {
+    const config = loadTimelinessConfig()
+    const result = recommendSources({
+      destination: '江苏省连云港市海州区',
+      sources: [{ id: 'salt-city', ship_from: '江苏省盐城市盐都区' }],
+      observations: [],
+      config,
+      requestedAt: new Date('2026-08-11 10:00:00')
+    })
+    expect(result.results[0].estimate).toMatchObject({
+      basis: 'sameProvince',
+      dispatchBasis: 'defaultCutoff',
+      expectedHours: 25
+    })
+  })
+
   it('识别完整收货地址和淘宝短发货地', () => {
     expect(normalizeRegion('河南省郑州市金水区未来路88号')).toMatchObject({
       province: '河南', city: '郑州', county: '金水'
     })
     expect(normalizeRegion('河北保定')).toMatchObject({
       province: '河北', city: '保定'
+    })
+    expect(normalizeRegion('广东潮州')).toMatchObject({
+      province: '广东', city: '潮州'
+    })
+    expect(normalizeRegion('江苏常州')).toMatchObject({
+      province: '江苏', city: '常州'
+    })
+    expect(normalizeRegion('青海海南藏族自治州')).toMatchObject({
+      province: '青海', city: '海南藏族'
     })
     expect(getSourceShipFrom(sourceUrl('江苏南京'))).toBe('江苏南京')
   })
@@ -53,6 +186,19 @@ describe('采购物流时效学习与推荐', () => {
 
     expect(route.origin).toMatchObject({ province: '浙江', city: '金华', county: '义乌' })
     expect(route.destination).toMatchObject({ province: '江苏', city: '宿迁', county: '沭阳' })
+  })
+
+  it('缺少明确揽收节点时使用首个有效发往节点作为进入物流时间', () => {
+    const result = extractTrackingMilestones([
+      { time: '2026-08-05 18:09', context: '仓库已接单' },
+      { time: '2026-08-06 21:24', context: '【金华市】快件已发往义乌转运中心', status_tag: '运输中' },
+      { time: '2026-08-06 23:47', context: '【金华市】快件已发往淮安转运中心', status_tag: '运输中' },
+      { time: '2026-08-07 15:20', context: '您的包裹已签收', status_tag: '已签收' }
+    ], new Date('2026-08-05 18:07'))
+
+    expect(result).not.toBeNull()
+    expect(result.pickedUpAt).toEqual(new Date('2026-08-06 21:24:00'))
+    expect(result.transitHours).toBeCloseTo(17.93, 2)
   })
 
   it('将旧链路补成2001的物流年份纠正为采购单年份', () => {
@@ -121,6 +267,28 @@ describe('采购物流时效学习与推荐', () => {
     expect(toGuangzhou.results.find(item => item.id === 'nanjing').recommended).toBe(false)
   })
 
+  it('无路线样本时使用正常快递运输中位值估算抵达日期', () => {
+    const config = loadTimelinessConfig()
+    const result = recommendSources({
+      destination: '广东省东莞市',
+      sources: [
+        { id: 'in-province', ship_from: '广东潮州' },
+        { id: 'cross-region', ship_from: '江苏常州' }
+      ],
+      config,
+      requestedAt: new Date('2026-08-11 10:00:00')
+    })
+
+    const inProvince = result.results.find(item => item.id === 'in-province')
+    const crossRegion = result.results.find(item => item.id === 'cross-region')
+    expect(inProvince.origin.city).toBe('潮州')
+    expect(inProvince.estimate.fallbackRouteP50Hours).toBe(18)
+    expect(inProvince.estimate.expectedHours).toBe(25)
+    expect(crossRegion.origin.city).toBe('常州')
+    expect(crossRegion.estimate.fallbackRouteP50Hours).toBe(48)
+    expect(crossRegion.estimate.expectedHours).toBe(55)
+  })
+
   it('时效相同的货源只推荐采购价更低的一条', () => {
     const config = loadTimelinessConfig()
     const result = recommendSources({
@@ -148,9 +316,10 @@ describe('采购物流时效学习与推荐', () => {
     }))
     const ordered_at = '2026-08-10 18:00:00'
     const sourceRows = [
-      ...[6, 8, 10].map(hours => ({ source_key: getSourceKey(fastLink), outcome: 'delivered', dispatch_hours: hours, ordered_at })),
-      ...[48, 60, 72].map(hours => ({ source_key: getSourceKey(slowLink), outcome: 'delivered', dispatch_hours: hours, ordered_at })),
+      ...[6, 7, 8, 9, 10].map(hours => ({ source_key: getSourceKey(fastLink), outcome: 'delivered', dispatch_hours: hours, ordered_at })),
+      ...[48, 54, 60, 66, 72].map(hours => ({ source_key: getSourceKey(slowLink), outcome: 'delivered', dispatch_hours: hours, ordered_at })),
       { source_key: getSourceKey(slowLink), outcome: 'unshipped_overdue', dispatch_hours: null, ordered_at },
+      { source_key: getSourceKey(slowLink), outcome: 'unshipped_failed', dispatch_hours: null, ordered_at },
       { source_key: getSourceKey(slowLink), outcome: 'unshipped_failed', dispatch_hours: null, ordered_at }
     ]
     const result = recommendSources({
@@ -172,10 +341,208 @@ describe('采购物流时效学习与推荐', () => {
     expect(slow.estimate.dispatchRisk).toBe('high')
   })
 
-  it('商家发货表现只比较相近下单时段，不使用统一截单时间', () => {
+  it('商家发货表现只比较相近下单时段，不区分工作日和周末', () => {
     expect(isSameDispatchContext('2026-08-10 17:00:00', '2026-08-10 18:30:00')).toBe(true)
     expect(isSameDispatchContext('2026-08-10 09:00:00', '2026-08-10 18:30:00')).toBe(false)
-    expect(isSameDispatchContext('2026-08-09 18:00:00', '2026-08-10 18:30:00')).toBe(false)
+    expect(isSameDispatchContext('2026-08-09 18:00:00', '2026-08-10 18:30:00')).toBe(true)
+  })
+
+  it('按城市和两小时时段学习发货准备时间，不区分工作日周末', () => {
+    const config = {
+      ...loadTimelinessConfig(),
+      dispatchTimeBucketHours: 2,
+      minimumSamples: {
+        ...loadTimelinessConfig().minimumSamples,
+        cityDispatchTimeBucket: 3,
+        provinceDispatchTimeBucket: 5
+      }
+    }
+    expect(getDispatchTimeBucket('2026-08-10 13:30:00', config)).toEqual({
+      startHour: 12,
+      endHour: 14,
+      dayType: 'all'
+    })
+    const observations = [
+      { outcome: 'delivered', origin_province: '浙江', origin_city: '宁波', ordered_at: '2026-08-03 12:15:00', picked_up_at: '2026-08-03 14:15:00', dispatch_hours: 2 },
+      { outcome: 'delivered', origin_province: '浙江', origin_city: '宁波', ordered_at: '2026-08-04 13:00:00', picked_up_at: '2026-08-04 21:00:00', dispatch_hours: 8 },
+      { outcome: 'delivered', origin_province: '浙江', origin_city: '宁波', ordered_at: '2026-08-05 12:45:00', picked_up_at: '2026-08-06 18:45:00', dispatch_hours: 30 },
+      { outcome: 'delivered', origin_province: '浙江', origin_city: '宁波', ordered_at: '2026-08-08 12:30:00', picked_up_at: '2026-08-08 16:30:00', dispatch_hours: 4 }
+    ]
+    const performance = buildRegionalDispatchPerformance(
+      { province: '浙江', city: '宁波' },
+      observations,
+      config,
+      '2026-08-10 13:30:00'
+    )
+
+    expect(performance).toMatchObject({
+      basis: 'cityTimeBucket',
+      dayType: 'all',
+      startHour: 12,
+      endHour: 14,
+      sampleCount: 4,
+      sameDayCount: 3
+    })
+    expect(performance.sameDayRate).toBeCloseTo(3 / 4, 5)
+    expect(performance.dispatchP50Hours).toBe(6)
+    expect(performance.dispatchP80Hours).toBeCloseTo(16.8, 5)
+  })
+
+  it('城市时段样本不足时回退到同省同时间段', () => {
+    const baseConfig = loadTimelinessConfig()
+    const config = {
+      ...baseConfig,
+      minimumSamples: {
+        ...baseConfig.minimumSamples,
+        cityDispatchTimeBucket: 3,
+        provinceDispatchTimeBucket: 5
+      }
+    }
+    const observations = [
+      ['宁波', '2026-08-03 12:10:00', 6],
+      ['宁波', '2026-08-04 12:20:00', 8],
+      ['杭州', '2026-08-05 12:30:00', 10],
+      ['金华', '2026-08-06 12:40:00', 12],
+      ['台州', '2026-08-07 12:50:00', 14]
+    ].map(([city, ordered_at, dispatch_hours]) => ({
+      outcome: 'delivered',
+      origin_province: '浙江',
+      origin_city: city,
+      ordered_at,
+      dispatch_hours
+    }))
+    const performance = buildRegionalDispatchPerformance(
+      { province: '浙江', city: '宁波' },
+      observations,
+      config,
+      '2026-08-10 13:30:00'
+    )
+
+    expect(performance).toMatchObject({
+      basis: 'provinceTimeBucket',
+      province: '浙江',
+      city: '',
+      sampleCount: 5
+    })
+    expect(performance.dispatchP50Hours).toBe(10)
+  })
+
+  it('省份样本不足时回退到同大区同时间段且不区分工作日周末', () => {
+    const baseConfig = loadTimelinessConfig()
+    const config = {
+      ...baseConfig,
+      minimumSamples: {
+        ...baseConfig.minimumSamples,
+        cityDispatchTimeBucket: 3,
+        provinceDispatchTimeBucket: 5,
+        regionDispatchTimeBucket: 6
+      }
+    }
+    const observations = [
+      ['浙江', '宁波', '2026-08-03 12:10:00', 6],
+      ['江苏', '南京', '2026-08-04 12:20:00', 8],
+      ['安徽', '合肥', '2026-08-05 12:30:00', 10],
+      ['福建', '福州', '2026-08-06 12:40:00', 12],
+      ['江西', '南昌', '2026-08-08 12:50:00', 14],
+      ['山东', '济南', '2026-08-09 13:00:00', 16]
+    ].map(([origin_province, origin_city, ordered_at, dispatch_hours]) => ({
+      outcome: 'delivered', origin_province, origin_city, ordered_at, dispatch_hours
+    }))
+    const performance = buildRegionalDispatchPerformance(
+      { province: '浙江', city: '宁波' },
+      observations,
+      config,
+      '2026-08-10 13:30:00'
+    )
+
+    expect(performance).toMatchObject({
+      basis: 'regionTimeBucket',
+      confidence: 'low',
+      regionGroup: '华东',
+      province: '',
+      city: '',
+      dayType: 'all',
+      sampleCount: 6
+    })
+    expect(performance.dispatchP50Hours).toBe(11)
+  })
+
+  it('地区时段P80会替换默认24小时发货准备时间', () => {
+    const baseConfig = loadTimelinessConfig()
+    const config = {
+      ...baseConfig,
+      minimumSamples: {
+        ...baseConfig.minimumSamples,
+        cityDispatchTimeBucket: 5
+      }
+    }
+    const observations = [
+      ['2026-08-03 12:10:00', 4, 24],
+      ['2026-08-04 12:20:00', 6, 26],
+      ['2026-08-05 12:30:00', 8, 28],
+      ['2026-08-06 12:40:00', 10, 30],
+      ['2026-08-07 12:50:00', 12, 32]
+    ].map(([ordered_at, dispatch_hours, transit_hours]) => ({
+      outcome: 'delivered',
+      origin_province: '浙江', origin_city: '宁波',
+      destination_province: '江苏', destination_city: '宿迁',
+      ordered_at, dispatch_hours, transit_hours
+    }))
+    const result = recommendSources({
+      destination: '江苏省宿迁市沭阳县',
+      sources: [{ id: 'ningbo', ship_from: '浙江宁波' }],
+      observations,
+      config,
+      requestedAt: '2026-08-10 13:30:00'
+    }).results[0]
+
+    expect(result.estimate.dispatchBasis).toBe('cityTimeBucket')
+    expect(result.estimate.regionalDispatchPerformance.sampleCount).toBe(5)
+    expect(result.estimate.expectedHours).toBeCloseTo(result.estimate.routeP50Hours + 8, 5)
+    expect(result.estimate.scoreHours).toBeCloseTo(40.8, 5)
+    expect(result.estimate.scoreHours).toBeLessThan(result.estimate.routeP80Hours + 24)
+  })
+
+  it('同一货源有足够样本时优先于地区时段样本', () => {
+    const baseConfig = loadTimelinessConfig()
+    const config = {
+      ...baseConfig,
+      minimumSamples: {
+        ...baseConfig.minimumSamples,
+        cityDispatchTimeBucket: 5,
+        sourceDispatch: 5
+      }
+    }
+    const link = sourceUrl('浙江宁波').replace('id=10001', 'id=50001')
+    const sourceKey = getSourceKey(link)
+    const regionalRows = [4, 6, 8, 10, 12].map((dispatch_hours, index) => ({
+      outcome: 'delivered',
+      origin_province: '浙江', origin_city: '宁波',
+      destination_province: '江苏', destination_city: '宿迁',
+      ordered_at: `2026-08-0${index + 3} 12:30:00`,
+      dispatch_hours,
+      transit_hours: 28
+    }))
+    const sourceRows = [30, 32, 34, 36, 40].map((dispatch_hours, index) => ({
+      source_key: sourceKey,
+      outcome: 'delivered',
+      origin_province: '浙江', origin_city: '宁波',
+      ordered_at: `2026-08-0${index + 3} 13:00:00`,
+      dispatch_hours
+    }))
+    const result = recommendSources({
+      destination: '江苏省宿迁市沭阳县',
+      sources: [{ id: 'target', ship_from: '浙江宁波', purchase_link: link }],
+      observations: [...regionalRows, ...sourceRows],
+      config,
+      requestedAt: '2026-08-10 13:30:00'
+    }).results[0]
+
+    expect(result.estimate.dispatchBasis).toBe('source')
+    expect(result.estimate.sourcePerformance.dispatchP80Hours).toBeCloseTo(36.8, 5)
+    expect(result.estimate.regionalDispatchPerformance).not.toBeNull()
+    expect(result.estimate.expectedHours).toBeCloseTo(result.estimate.routeP50Hours + 34, 5)
+    expect(result.estimate.scoreHours).toBeCloseTo(result.estimate.routeP80Hours + 36.8, 5)
   })
 
   it('超过72小时仍未揽收会记录为货源发货风险', async () => {
@@ -203,6 +570,31 @@ describe('采购物流时效学习与推荐', () => {
     expect(savedSql).toContain('shipping_timeliness_observations')
     expect((savedSql.match(/\?/g) || []).length).toBe(savedParams.length)
     expect(savedParams.at(-1)).toBe('unshipped_overdue')
+  })
+
+  it('已有有效发往节点但缺少明确揽收时不会误判未发货', async () => {
+    let writes = 0
+    const pool = {
+      execute: async () => {
+        writes++
+        return [{ affectedRows: 1 }]
+      }
+    }
+    const result = await recordTimelinessObservation(pool, {
+      id: 100,
+      owner_id: 1,
+      platform: 'taobao',
+      platform_order_no: 'TB100',
+      source_url: sourceUrl('浙江金华'),
+      shipping_address: '江苏省宿迁市沭阳县',
+      created_at: new Date(Date.now() - 96 * 3600000),
+      status: 'pending'
+    }, [
+      { time: '2026-08-06 21:24', context: '【金华市】快件已发往义乌转运中心', status_tag: '运输中' }
+    ], { status: 'pending', verifiedByPlatformSync: true })
+
+    expect(result).toMatchObject({ recorded: false, reason: 'waiting_for_delivery' })
+    expect(writes).toBe(0)
   })
 
   it('旧货源无发货地且超时未揽收时仍可记录货源风险', async () => {
@@ -357,7 +749,7 @@ describe('采购物流时效学习与推荐', () => {
     expect(result.results.find(item => item.id === 'target').estimate.dispatchRisk).toBeUndefined()
   })
 
-  it('数据库推荐只读取相关路线和相关货源样本', async () => {
+  it('数据库推荐读取相关发货地区和相关货源样本', async () => {
     let querySql = ''
     let queryParams = []
     const link = sourceUrl('浙江金华').replace('id=10001', 'id=40001')
@@ -382,9 +774,11 @@ describe('采购物流时效学习与推荐', () => {
       requested_at: '2026-08-10T18:30:00+08:00'
     })
 
-    expect(querySql).toContain('destination_province=?')
+    const expectedOriginProvinces = ['浙江', ...loadTimelinessConfig().regionGroups['华东'].filter(item => item !== '浙江')]
+    expect(querySql).toContain(`outcome='delivered' AND origin_province IN (${expectedOriginProvinces.map(() => '?').join(',')}) AND HOUR(ordered_at)>=? AND HOUR(ordered_at)<?`)
     expect(querySql).toContain('source_key IN (?)')
-    expect(queryParams).toEqual(['江苏', '浙江', sourceKey])
+    expect(querySql).toContain('picked_up_at')
+    expect(queryParams).toEqual([...expectedOriginProvinces, 18, 20, sourceKey])
     expect(result.results[0].estimate).toMatchObject({ confidence: 'high', sampleCount: 3 })
   })
 })
