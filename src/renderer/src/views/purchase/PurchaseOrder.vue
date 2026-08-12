@@ -31,7 +31,7 @@
         </div>
         <el-button type="danger" size="small" @click="handleAccountManage">账号管理</el-button>
         <el-button type="primary" size="small" @click="handleAddAccount">新增账号</el-button>
-        <el-button size="small" @click="handleImportAccount">导入账号</el-button>
+        <el-button size="small" @click="handleCloudWarehouseConfig">云仓配置</el-button>
         <el-button type="primary" @click="handleSync" :loading="syncing">
           <el-icon><Refresh /></el-icon>
           同步采购订单
@@ -704,6 +704,75 @@
       </template>
     </el-dialog>
 
+    <!-- 云仓助手机器码配置 -->
+    <el-dialog
+      v-model="cloudConfigVisible"
+      title="云仓配置"
+      width="540px"
+      align-center
+      :close-on-click-modal="false"
+    >
+      <div v-loading="cloudConfigLoading" class="cloud-config-content">
+        <el-alert
+          title="机器码由云仓助手生成，供当前主账号体系内的主账号和已授权子账号共享；它仅用于任务路由，不是密码或登录凭据。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+
+        <div v-if="cloudBinding.bound" class="cloud-binding-status">
+          <div class="cloud-binding-code-row">
+            <span class="cloud-binding-label">当前绑定</span>
+            <span class="cloud-binding-code">{{ cloudBinding.machineCode }}</span>
+            <el-tag :type="cloudBinding.assistant?.online ? 'success' : 'info'" size="small">
+              {{ cloudBinding.assistant?.online ? '云仓助手在线' : '云仓助手离线' }}
+            </el-tag>
+          </div>
+          <div class="cloud-binding-meta">
+            <span>绑定版本：{{ cloudBinding.bindingVersion || 1 }}</span>
+            <span>更新时间：{{ formatTime(cloudBinding.updatedAt || cloudBinding.boundAt) }}</span>
+          </div>
+          <el-descriptions v-if="cloudBinding.assistant" :column="2" border size="small" class="cloud-capability-list">
+            <el-descriptions-item label="打印机">
+              {{ cloudBinding.assistant.printerAvailable ? '可用' : '不可用' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="登录环境">
+              {{ cloudBinding.assistant.loginEnvironmentAvailable ? '有效' : '无效' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="最后心跳" :span="2">
+              {{ formatTime(cloudBinding.assistant.lastHeartbeatAt) }}
+            </el-descriptions-item>
+          </el-descriptions>
+          <p v-else class="cloud-binding-hint">该机器码尚无云仓助手注册或心跳记录，当前不能执行订单任务。</p>
+        </div>
+
+        <p v-if="!cloudBinding.canManage" class="cloud-binding-hint">
+          你可以查看本主账号体系的云仓配置；绑定、解除和换绑需由主账号或管理员操作。
+        </p>
+
+        <el-form v-if="cloudBinding.canManage" label-position="top" class="cloud-machine-form">
+          <el-form-item :label="cloudBinding.bound ? '更换机器码' : '绑定机器码'">
+            <el-input
+              :model-value="cloudMachineCodeInput"
+              maxlength="12"
+              clearable
+              placeholder="例如：YC-7F3K-92MX"
+              @update:model-value="handleCloudMachineCodeInput"
+              @keyup.enter="handleSaveCloudMachine"
+            />
+            <div class="cloud-machine-format">格式：YC-XXXX-XXXX，不包含数字 0、1 和易混淆字母 I、O。</div>
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button v-if="cloudBinding.bound && cloudBinding.canManage" type="danger" plain :loading="cloudConfigSaving" @click="handleUnbindCloudMachine">解除绑定</el-button>
+        <el-button @click="cloudConfigVisible = false">关闭</el-button>
+        <el-button v-if="cloudBinding.canManage" type="primary" :loading="cloudConfigSaving" :disabled="!cloudMachineCodeValid" @click="handleSaveCloudMachine">
+          {{ cloudBinding.bound ? '确认换绑' : '确认绑定' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 编辑账号弹窗 -->
     <el-dialog
       v-model="editAccountVisible"
@@ -1000,6 +1069,7 @@ import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSing
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 import { searchInventory, createSkuBinding, quickCreateInventory, fetchWarehouses } from '@/api/warehouse'
 import { updateRemark } from '@/api/salesOrder'
+import { fetchCloudMachineBinding, bindCloudMachine, unbindCloudMachine } from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
 
@@ -1123,6 +1193,22 @@ const addAccountVisible = ref(false)
 const editAccountVisible = ref(false)
 const addAccountForm = reactive({ platform: '', account: '', password: '' })
 const editAccountForm = reactive({ id: '', platform: '', username: '', password: '' })
+
+const CLOUD_MACHINE_CODE_PATTERN = /^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/
+const cloudConfigVisible = ref(false)
+const cloudConfigLoading = ref(false)
+const cloudConfigSaving = ref(false)
+const cloudMachineCodeInput = ref('')
+const cloudBinding = reactive({
+  bound: false,
+  machineCode: '',
+  bindingVersion: 0,
+  boundAt: null,
+  updatedAt: null,
+  assistant: null,
+  canManage: false
+})
+const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
 
 const accountList = ref([])
 
@@ -1314,8 +1400,90 @@ async function handleDeleteAccount(row) {
   }
 }
 
-function handleImportAccount() {
-  ElMessage.info('导入账号功能开发中')
+function applyCloudBinding(data) {
+  cloudBinding.bound = data?.bound === true
+  cloudBinding.machineCode = data?.machineCode || ''
+  cloudBinding.bindingVersion = Number(data?.bindingVersion || 0)
+  cloudBinding.boundAt = data?.boundAt || null
+  cloudBinding.updatedAt = data?.updatedAt || null
+  cloudBinding.assistant = data?.assistant || null
+  cloudBinding.canManage = data?.canManage === true
+  cloudMachineCodeInput.value = cloudBinding.machineCode
+}
+
+async function loadCloudMachineBinding() {
+  cloudConfigLoading.value = true
+  try {
+    applyCloudBinding(await fetchCloudMachineBinding())
+  } catch (err) {
+    ElMessage.error('读取云仓配置失败: ' + (err.message || ''))
+  } finally {
+    cloudConfigLoading.value = false
+  }
+}
+
+async function handleCloudWarehouseConfig() {
+  cloudConfigVisible.value = true
+  await loadCloudMachineBinding()
+}
+
+function handleCloudMachineCodeInput(value) {
+  cloudMachineCodeInput.value = String(value || '').trim().toUpperCase()
+}
+
+async function handleSaveCloudMachine() {
+  if (!cloudBinding.canManage) {
+    ElMessage.warning('只有主账号或管理员可以修改云仓配置')
+    return
+  }
+  if (!cloudMachineCodeValid.value) {
+    ElMessage.warning('请输入有效的云仓助手机器码')
+    return
+  }
+  if (cloudBinding.bound && cloudBinding.machineCode === cloudMachineCodeInput.value) {
+    ElMessage.info('机器码未发生变化')
+    return
+  }
+
+  try {
+    if (cloudBinding.bound) {
+      await ElMessageBox.confirm(
+        `确定将云仓助手从 ${cloudBinding.machineCode} 更换为 ${cloudMachineCodeInput.value}？进行中的云仓流程不会自动切换机器。`,
+        '确认更换机器码',
+        { confirmButtonText: '确认换绑', cancelButtonText: '取消', type: 'warning' }
+      )
+    }
+    cloudConfigSaving.value = true
+    const wasBound = cloudBinding.bound
+    applyCloudBinding(await bindCloudMachine(cloudMachineCodeInput.value))
+    ElMessage.success(wasBound ? '云仓助手机器码已更换' : '云仓助手机器码已绑定')
+  } catch (err) {
+    if (err !== 'cancel') ElMessage.error('保存云仓配置失败: ' + (err.message || ''))
+  } finally {
+    cloudConfigSaving.value = false
+  }
+}
+
+async function handleUnbindCloudMachine() {
+  if (!cloudBinding.canManage) {
+    ElMessage.warning('只有主账号或管理员可以修改云仓配置')
+    return
+  }
+  if (!cloudBinding.bound) return
+  try {
+    await ElMessageBox.confirm(
+      `确定解除机器码 ${cloudBinding.machineCode}？解除后不能创建新的云仓助手任务。`,
+      '解除机器码绑定',
+      { confirmButtonText: '解除绑定', cancelButtonText: '取消', type: 'warning' }
+    )
+    cloudConfigSaving.value = true
+    applyCloudBinding(await unbindCloudMachine())
+    ElMessage.success('已解除云仓助手机器码绑定')
+  } catch (err) {
+    if (err !== 'cancel') ElMessage.error('解除绑定失败: ' + (err.message || ''))
+  } finally {
+    cloudConfigSaving.value = false
+  }
 }
 
 // 监听 Electron 主进程登录成功事件，自动刷新列表
@@ -3456,5 +3624,68 @@ function handleImportDialogClose() {
 
 .bind-create-section {
   margin-top: 4px;
+}
+
+/* ============ 云仓配置 ============ */
+.cloud-config-content {
+  min-height: 220px;
+}
+
+.cloud-binding-status {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fafcff;
+}
+
+.cloud-binding-code-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cloud-binding-label {
+  color: #606266;
+  font-size: 13px;
+}
+
+.cloud-binding-code {
+  color: #2b5aed;
+  font-family: Consolas, monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.cloud-binding-meta {
+  display: flex;
+  gap: 18px;
+  margin-top: 8px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.cloud-capability-list {
+  margin-top: 12px;
+}
+
+.cloud-binding-hint {
+  margin: 10px 0 0;
+  color: #e6a23c;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.cloud-machine-form {
+  margin-top: 18px;
+}
+
+.cloud-machine-format {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>

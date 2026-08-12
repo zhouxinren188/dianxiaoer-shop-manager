@@ -1,0 +1,189 @@
+import { describe, expect, it } from 'vitest'
+import protocol from '../server/services/cloud-warehouse-protocol.js'
+import taskService from '../server/services/cloud-warehouse-task-service.js'
+
+const {
+  MACHINE_CODE_PATTERN,
+  buildTaskEnvelope,
+  canManageMachineBinding,
+  getTenantOwnerId,
+  isValidMachineCode,
+  normalizeMachineCode,
+  validateSuccessfulWriteResponse
+} = protocol
+
+const { EXECUTOR_TRANSPORT_ENABLED, assertRouteReady } = taskService
+
+const baseTask = {
+  orderRefId: 'ord_018f56b6-a6ee-7df1-9b83-cf7bf4d0d001',
+  workflowId: 'wf_018f56b6-a6ee-7df1-9b83-cf7bf4d0d002',
+  requestedBy: {
+    actor_id: 'user-001',
+    actor_type: 'user',
+    display_name: '操作人'
+  },
+  machineCode: 'YC-7F3K-92MX',
+  now: new Date('2026-08-12T12:00:00.000Z')
+}
+
+describe('云仓助手机器码', () => {
+  it('接受正式机器码格式并规范化小写输入', () => {
+    expect(MACHINE_CODE_PATTERN.test('YC-7F3K-92MX')).toBe(true)
+    expect(normalizeMachineCode('  yc-7f3k-92mx ')).toBe('YC-7F3K-92MX')
+    expect(isValidMachineCode('yc-7f3k-92mx')).toBe(true)
+  })
+
+  it.each([
+    'YC-0F3K-92MX',
+    'YC-1F3K-92MX',
+    'YC-IF3K-92MX',
+    'YC-OF3K-92MX',
+    'YC-7F3K-92M',
+    'XX-7F3K-92MX'
+  ])('拒绝无效机器码 %s', machineCode => {
+    expect(isValidMachineCode(machineCode)).toBe(false)
+  })
+})
+
+describe('主账号体系机器码绑定权限', () => {
+  it('主账号和子账号都解析到同一个 owner_id', () => {
+    expect(getTenantOwnerId({ id: 18, user_type: 'master', parent_id: null })).toBe(18)
+    expect(getTenantOwnerId({ id: 27, user_type: 'sub', parent_id: 18 })).toBe(18)
+  })
+
+  it('只有主账号或管理员可以变更绑定', () => {
+    expect(canManageMachineBinding({ user_type: 'master', role: 'staff' })).toBe(true)
+    expect(canManageMachineBinding({ user_type: 'sub', role: 'admin' })).toBe(true)
+    expect(canManageMachineBinding({ user_type: 'sub', role: 'staff' })).toBe(false)
+  })
+})
+
+describe('中央路由安全门槛', () => {
+  const route = {
+    online: true,
+    capabilities: {
+      'exception.order.resolve': true,
+      'warehouse.order.print': true,
+      'warehouse.order.outbound': true
+    },
+    printerAvailable: false,
+    loginEnvironmentAvailable: true
+  }
+
+  it('控制面在双方确认前保持硬禁用', () => {
+    expect(EXECUTOR_TRANSPORT_ENABLED).toBe(false)
+  })
+
+  it.each(['warehouse.order.print', 'warehouse.order.outbound'])('%s 要求打印机可用', command => {
+    expect(() => assertRouteReady(route, command)).toThrow('打印机当前不可用')
+  })
+
+  it('异常处理不要求打印机可用', () => {
+    expect(() => assertRouteReady(route, 'exception.order.resolve')).not.toThrow()
+  })
+})
+
+describe('云仓助手任务信封', () => {
+  it('只读查询使用10分钟有效期且 target 只有 machine_code', () => {
+    const task = buildTaskEnvelope({
+      ...baseTask,
+      command: 'warehouse.order.check',
+      taskId: 'task-001',
+      idempotencyKey: 'idem-001'
+    })
+
+    expect(task).toMatchObject({
+      protocol_version: '1.0',
+      task_id: 'task-001',
+      trace_id: baseTask.workflowId,
+      order_id: baseTask.orderRefId,
+      command: 'warehouse.order.check',
+      created_at: '2026-08-12T12:00:00.000Z',
+      expires_at: '2026-08-12T12:10:00.000Z',
+      target: { machine_code: 'YC-7F3K-92MX' },
+      params: {}
+    })
+    expect(Object.keys(task).sort()).toEqual([
+      'command',
+      'created_at',
+      'expires_at',
+      'idempotency_key',
+      'order_id',
+      'params',
+      'protocol_version',
+      'requested_by',
+      'target',
+      'task_id',
+      'trace_id'
+    ].sort())
+    expect(Object.keys(task.target)).toEqual(['machine_code'])
+    expect(task).not.toHaveProperty('confirmation')
+    expect(JSON.stringify(task)).not.toContain('requester_device_id')
+    expect(JSON.stringify(task)).not.toContain('same_device_session_id')
+  })
+
+  it('写任务使用2分钟有效期并强制确认 action 与 command 相同', () => {
+    const task = buildTaskEnvelope({
+      ...baseTask,
+      command: 'warehouse.order.print',
+      taskId: 'task-002',
+      idempotencyKey: 'idem-002',
+      confirmation: {
+        confirmed: true,
+        confirmed_at: '2026-08-12T12:00:00.000Z',
+        actor_id: 'user-001',
+        action: 'warehouse.order.print'
+      }
+    })
+
+    expect(task.expires_at).toBe('2026-08-12T12:02:00.000Z')
+    expect(task.confirmation).toEqual({
+      confirmed: true,
+      confirmed_at: '2026-08-12T12:00:00.000Z',
+      actor_id: 'user-001',
+      action: 'warehouse.order.print'
+    })
+
+    expect(() => buildTaskEnvelope({
+      ...baseTask,
+      command: 'warehouse.order.print',
+      confirmation: {
+        confirmed: true,
+        actor_id: 'user-001',
+        action: 'warehouse.order.outbound'
+      }
+    })).toThrow('写命令需要与 command 完全一致的人工确认')
+  })
+
+  it('同一工作流的每轮查询生成新的 task_id 和 idempotency_key', () => {
+    const first = buildTaskEnvelope({ ...baseTask, command: 'warehouse.order.check' })
+    const second = buildTaskEnvelope({ ...baseTask, command: 'warehouse.order.check' })
+
+    expect(first.trace_id).toBe(second.trace_id)
+    expect(first.task_id).not.toBe(second.task_id)
+    expect(first.idempotency_key).not.toBe(second.idempotency_key)
+  })
+
+  it('拒绝固定白名单以外的命令', () => {
+    expect(() => buildTaskEnvelope({ ...baseTask, command: 'shell.execute' }))
+      .toThrow('命令不在云仓助手固定命令白名单中')
+  })
+})
+
+describe('写后状态复验', () => {
+  it('打印只有复验为 printed_unshipped 才是可信成功', () => {
+    expect(validateSuccessfulWriteResponse({
+      command: 'warehouse.order.print',
+      status: 'succeeded',
+      delivery: { business_confirmed: true },
+      verification: { confirmed: true, observed_status: 'printed_unshipped' }
+    })).toMatchObject({ valid: true, expectedStatus: 'printed_unshipped' })
+
+    expect(validateSuccessfulWriteResponse({
+      command: 'warehouse.order.print',
+      status: 'succeeded',
+      delivery: { business_confirmed: true },
+      verification: { confirmed: true, observed_status: 'shipped' }
+    })).toMatchObject({ valid: false, reason: 'business_state_unconfirmed' })
+  })
+})

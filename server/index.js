@@ -7420,6 +7420,12 @@ app.get('/api/auth/me', async (req, res) => {
 const warehouseRouter = require('./routes/warehouse')(pool)
 app.use('/api/warehouse', warehouseRouter)
 
+// ============ 云仓助手基础配置路由 ============
+// 机器码按主账号体系共享，只有主账号或管理员可变更。执行器注册、心跳、领取和回执
+// 在双方确认控制面认证契约前保持禁用。
+const cloudWarehouseRouter = require('./routes/cloud-warehouse')(pool)
+app.use('/api/cloud-warehouse', cloudWarehouseRouter)
+
 // ============ 健康检查 ============
 
 app.get('/health', async (req, res) => {

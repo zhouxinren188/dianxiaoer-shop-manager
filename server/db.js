@@ -676,6 +676,216 @@ async function initDB() {
       console.warn('[DB] 迁移 pending_after_sale 记录失败:', e.message)
     }
 
+    // ======== 云仓助手机器码绑定与中央任务基础设施 ========
+    // 机器码只是设备路由标识，不承担身份认证。绑定单位是主账号体系（租户），
+    // 主账号和已授权子账号共享；同一个机器码不能被无关主账号体系占用。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_machine_bindings (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        binding_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+        bound_by INT NOT NULL,
+        bound_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_binding_owner (owner_id),
+        UNIQUE KEY uk_cloud_binding_machine (machine_code),
+        CONSTRAINT fk_cloud_binding_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_machine_binding_audit (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        actor_user_id INT NOT NULL,
+        action VARCHAR(20) NOT NULL,
+        old_machine_code VARCHAR(12) DEFAULT '',
+        new_machine_code VARCHAR(12) DEFAULT '',
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_binding_audit_owner (owner_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 云仓助手运行状态。正式控制面认证协议确认前，不开放注册/心跳公网接口。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_executor_machines (
+        machine_code VARCHAR(12) PRIMARY KEY,
+        status VARCHAR(20) NOT NULL DEFAULT 'offline',
+        active_executor_instance_id VARCHAR(100) DEFAULT '',
+        protocol_version VARCHAR(20) DEFAULT '',
+        executor_version VARCHAR(50) DEFAULT '',
+        capabilities_json JSON DEFAULT NULL,
+        printer_available TINYINT NOT NULL DEFAULT 0,
+        login_environment_available TINYINT NOT NULL DEFAULT 0,
+        last_heartbeat_at DATETIME(3) DEFAULT NULL,
+        last_failure_reason VARCHAR(255) DEFAULT '',
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_machine_heartbeat (status, last_heartbeat_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_executor_instances (
+        executor_instance_id VARCHAR(100) PRIMARY KEY,
+        machine_code VARCHAR(12) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'offline',
+        protocol_version VARCHAR(20) DEFAULT '',
+        executor_version VARCHAR(50) DEFAULT '',
+        capabilities_json JSON DEFAULT NULL,
+        printer_available TINYINT NOT NULL DEFAULT 0,
+        login_environment_available TINYINT NOT NULL DEFAULT 0,
+        started_at DATETIME(3) DEFAULT NULL,
+        last_heartbeat_at DATETIME(3) DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_instance_machine (machine_code, status, last_heartbeat_at),
+        CONSTRAINT fk_cloud_instance_machine FOREIGN KEY (machine_code)
+          REFERENCES cloud_executor_machines(machine_code) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // order_ref_id 是中央服务生成的不透明订单引用。具体业务订单映射待接口确认后写入 aliases。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_refs (
+        order_ref_id VARCHAR(64) PRIMARY KEY,
+        owner_id INT NOT NULL,
+        created_by_user_id INT NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_order_ref_owner (owner_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_ref_aliases (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        order_ref_id VARCHAR(64) NOT NULL,
+        namespace VARCHAR(50) NOT NULL,
+        scope_json JSON DEFAULT NULL,
+        alias_value VARCHAR(255) NOT NULL,
+        alias_fingerprint CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        verified TINYINT NOT NULL DEFAULT 0,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_order_alias (namespace, alias_fingerprint),
+        KEY idx_cloud_alias_order_ref (order_ref_id),
+        CONSTRAINT fk_cloud_alias_order_ref FOREIGN KEY (order_ref_id)
+          REFERENCES cloud_order_refs(order_ref_id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_workflows (
+        workflow_id VARCHAR(64) PRIMARY KEY,
+        order_ref_id VARCHAR(64) NOT NULL,
+        owner_id INT NOT NULL,
+        created_by_user_id INT NOT NULL,
+        state VARCHAR(40) NOT NULL,
+        state_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+        poll_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        next_check_at DATETIME(3) DEFAULT NULL,
+        current_task_id VARCHAR(64) DEFAULT NULL,
+        target_machine_code VARCHAR(12) NOT NULL,
+        binding_version BIGINT UNSIGNED NOT NULL,
+        last_observed_status VARCHAR(80) DEFAULT '',
+        last_observed_at DATETIME(3) DEFAULT NULL,
+        last_reason VARCHAR(80) DEFAULT '',
+        last_message_redacted VARCHAR(500) DEFAULT '',
+        review_reason VARCHAR(80) DEFAULT '',
+        review_required_at DATETIME(3) DEFAULT NULL,
+        review_resolved_at DATETIME(3) DEFAULT NULL,
+        forwarded_applied_at DATETIME(3) DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        completed_at DATETIME(3) DEFAULT NULL,
+        KEY idx_cloud_workflow_order (order_ref_id),
+        KEY idx_cloud_workflow_schedule (state, next_check_at),
+        KEY idx_cloud_workflow_owner (owner_id, created_at),
+        CONSTRAINT fk_cloud_workflow_order_ref FOREIGN KEY (order_ref_id)
+          REFERENCES cloud_order_refs(order_ref_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_tasks (
+        task_id VARCHAR(64) PRIMARY KEY,
+        workflow_id VARCHAR(64) NOT NULL,
+        trace_id VARCHAR(64) NOT NULL,
+        order_ref_id VARCHAR(64) NOT NULL,
+        requested_by_user_id INT NOT NULL,
+        poll_sequence BIGINT UNSIGNED DEFAULT NULL,
+        protocol_version VARCHAR(20) NOT NULL,
+        command VARCHAR(50) NOT NULL,
+        idempotency_key VARCHAR(80) NOT NULL,
+        payload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        requested_by_json JSON NOT NULL,
+        target_machine_code VARCHAR(12) NOT NULL,
+        confirmation_json JSON DEFAULT NULL,
+        params_json JSON NOT NULL,
+        scheduled_for DATETIME(3) DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL,
+        expires_at DATETIME(3) NOT NULL,
+        transport_status VARCHAR(30) NOT NULL DEFAULT 'pending',
+        execution_status VARCHAR(30) DEFAULT NULL,
+        reason VARCHAR(80) DEFAULT '',
+        message_redacted VARCHAR(500) DEFAULT '',
+        lease_id VARCHAR(64) DEFAULT '',
+        lease_fencing_token BIGINT UNSIGNED DEFAULT NULL,
+        lease_expires_at DATETIME(3) DEFAULT NULL,
+        last_renewed_at DATETIME(3) DEFAULT NULL,
+        claimed_executor_instance_id VARCHAR(100) DEFAULT '',
+        received_at DATETIME(3) DEFAULT NULL,
+        started_at DATETIME(3) DEFAULT NULL,
+        completed_at DATETIME(3) DEFAULT NULL,
+        delivery_received TINYINT NOT NULL DEFAULT 0,
+        delivery_executed TINYINT NOT NULL DEFAULT 0,
+        delivery_replayed TINYINT NOT NULL DEFAULT 0,
+        business_confirmed TINYINT NOT NULL DEFAULT 0,
+        verification_confirmed TINYINT NOT NULL DEFAULT 0,
+        observed_status VARCHAR(80) DEFAULT '',
+        observed_at DATETIME(3) DEFAULT NULL,
+        executor_receipt_id VARCHAR(100) DEFAULT '',
+        result_redacted_json JSON DEFAULT NULL,
+        response_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_task_idempotency (idempotency_key),
+        KEY idx_cloud_task_workflow (workflow_id, created_at),
+        KEY idx_cloud_task_claim (target_machine_code, transport_status, scheduled_for, expires_at),
+        CONSTRAINT fk_cloud_task_workflow FOREIGN KEY (workflow_id)
+          REFERENCES cloud_order_workflows(workflow_id),
+        CONSTRAINT fk_cloud_task_order_ref FOREIGN KEY (order_ref_id)
+          REFERENCES cloud_order_refs(order_ref_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_write_locks (
+        order_ref_id VARCHAR(64) PRIMARY KEY,
+        workflow_id VARCHAR(64) NOT NULL,
+        task_id VARCHAR(64) NOT NULL,
+        fencing_token BIGINT UNSIGNED NOT NULL,
+        lease_expires_at DATETIME(3) NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_write_lock_expiry (lease_expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_task_events (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        workflow_id VARCHAR(64) NOT NULL,
+        task_id VARCHAR(64) DEFAULT NULL,
+        event_type VARCHAR(80) NOT NULL,
+        actor_type VARCHAR(30) DEFAULT '',
+        actor_id VARCHAR(100) DEFAULT '',
+        data_redacted_json JSON DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_event_workflow (workflow_id, created_at),
+        KEY idx_cloud_event_task (task_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // ======== 订阅系统相关表 ========
 
     // 订阅表（按 owner_id 唯一，一个主账号一条订阅）
