@@ -17,6 +17,8 @@ const {
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const TB_IMAGE_SEARCH_REFERER = 'https://h5.m.taobao.com/awp/core/detail.htm?id=620000000000000000'
+const TB_SEARCH_LOGIN_URL = 'https://login.taobao.com/member/login.jhtml?redirectURL=' +
+  encodeURIComponent(TB_IMAGE_SEARCH_REFERER)
 const TB_IMAGE_SEARCH_API = 'mtop.relationrecommend.wirelessRecommend.recommend'
 const TB_IMAGE_SEARCH_API_PATH = 'mtop.relationrecommend.wirelessrecommend.recommend'
 const TB_IMAGE_SEARCH_APP_KEY = '12574478'
@@ -33,6 +35,10 @@ const TAOBAO_SEARCH_RISK_COOLDOWN_MS = 30 * 60 * 1000
 const TAOBAO_IDENTITY_COOKIE_NAMES = new Set([
   'unb', 'cookie17', 'cookie2', 'tracknick', 'lgc'
 ])
+const TAOBAO_DEDICATED_SEARCH_PARTITION = 'persist:dianxiaoer-taobao-same-search-v1'
+// 已知成功工具的搜索窗口使用 webSecurity=false。该差异只作用于专用搜索
+// BrowserWindow；采购商品页、SKU、改地址和下单窗口不受影响。
+const TAOBAO_SEARCH_WEB_SECURITY = false
 
 const searchWindowStates = new Map()
 const searchQueues = new Map()
@@ -159,10 +165,10 @@ async function readTaobaoSessionIdentity(ses) {
   return buildTaobaoSessionIdentity(cookies, token)
 }
 
-function getTaobaoSamePartition(accountId) {
-  // 搜同款必须复用账号正常登录和采购使用的最终持久分区。
-  // 仅向另一个空分区复制 Cookie 会丢失完整站点存储及设备环境。
-  return getTaobaoPurchasePartition(accountId)
+function getTaobaoSamePartition() {
+  // 搜同款固定使用一个专用淘宝账号环境。它不读取、写入或清理任何采购账号分区，
+  // 商品页、SKU、改地址和下单仍由 getTaobaoPurchasePartition(accountId) 隔离。
+  return TAOBAO_DEDICATED_SEARCH_PARTITION
 }
 
 function getTaobaoPurchasePartition(accountId) {
@@ -427,8 +433,35 @@ function hideReadySearchWindow(state) {
   if (!state || !state.win || state.win.isDestroyed()) return
   const currentUrl = state.win.webContents.getURL()
   if (isTaobaoLoginPageUrl(currentUrl) || isTaobaoVerificationUrl(currentUrl)) return
+  state.loginPromptVisible = false
   state.win.setTitle('淘宝搜同款')
   if (state.win.isVisible()) state.win.hide()
+}
+
+async function openDedicatedTaobaoSearchLogin(state, reason = 'login_required') {
+  if (!state || !state.win || state.win.isDestroyed()) return
+  state.bootstrapComplete = false
+  state.firstSearchPrepared = false
+  state.verificationPending = false
+  state.loginPromptVisible = true
+  const currentUrl = state.win.webContents.getURL()
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '打开淘宝同款专用账号登录: requestAccountId=' + (state.requestAccountId || '') +
+      ', partition=' + state.partition +
+      ', reason=' + reason
+  )
+  if (!isTaobaoLoginPageUrl(currentUrl)) {
+    try {
+      await state.win.loadURL(TB_SEARCH_LOGIN_URL)
+    } catch (error) {
+      const finalUrl = state.win.isDestroyed() ? '' : state.win.webContents.getURL()
+      if (!finalUrl || !String(error.message || '').includes('ERR_ABORTED')) {
+        runtimeLog.writeLog('TaobaoSame', '打开淘宝同款专用账号登录页失败: ' + error.message)
+      }
+    }
+  }
+  showSearchWindow(state, '淘宝同款专用账号 - 请登录淘宝')
 }
 
 async function waitForTaobaoSearchPageStable(win, timeoutMs = 12000) {
@@ -546,7 +579,8 @@ function invalidateTaobaoSearchIdentity(state, cookie, cause, removed) {
   state.lastIdentityMutationAt = Date.now()
   runtimeLog.writeLog(
     'TaobaoSame',
-    '搜索身份环境已失效: accountId=' + state.accountId +
+    '搜索身份环境已失效: searchAccount=dedicated' +
+      ', requestAccountId=' + (state.requestAccountId || '') +
       ', generation=' + state.sessionGeneration +
       ', cookie=' + String(cookie.name || '') +
       ', cause=' + String(cause || 'unknown') +
@@ -556,18 +590,16 @@ function invalidateTaobaoSearchIdentity(state, cookie, cause, removed) {
 }
 
 async function getOrCreateTaobaoSearchWindow(accountId) {
-  // 搜同款窗口按账号长期复用，并与该账号正常登录/采购共用最终持久分区。
-  // 这样后续商品可以沿用完整站点存储、页面环境和已经稳定的MTOP Token。
-  const partition = getTaobaoSamePartition(accountId)
+  // 搜同款只使用一个长期复用的专用窗口和专用账号。绝不从采购账号分区复制
+  // Cookie 或站点存储，避免搜索风控、掉线或清理动作影响采购流程。
+  const partition = getTaobaoSamePartition()
   let state = searchWindowStates.get(partition)
-  if (state && state.win && !state.win.isDestroyed()) return state
+  if (state && state.win && !state.win.isDestroyed()) {
+    return state
+  }
 
   const ses = session.fromPartition(partition)
-  let cookies = await ses.cookies.get({})
-  if (!hasTaobaoLoginCookie(cookies)) {
-    await injectTaobaoCookiesFromAccount(ses, accountId)
-    cookies = await ses.cookies.get({})
-  }
+  const cookies = await ses.cookies.get({})
 
   const win = new BrowserWindow({
     width: 1000,
@@ -579,9 +611,7 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
       nodeIntegration: false,
       partition,
       backgroundThrottling: false,
-      // 必须保留 Chromium 正常的同源/CORS 语义，让页面XHR自然携带 Origin、
-      // Sec-Fetch-Site 等浏览器安全上下文；关闭后淘宝会把请求识别成异常环境。
-      webSecurity: true
+      webSecurity: TAOBAO_SEARCH_WEB_SECURITY
     }
   })
   const chromeVersion = process.versions.chrome || '134.0.6998.205'
@@ -591,13 +621,17 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
 
   state = {
     partition,
-    accountId,
+    accountId: 'dedicated-search',
+    requestAccountId: accountId,
+    webSecurity: TAOBAO_SEARCH_WEB_SECURITY,
     ses,
     win,
     initializing: null,
     bootstrapComplete: false,
     firstSearchPrepared: false,
     verificationPending: false,
+    loginPromptVisible: false,
+    loginCompletionCheck: null,
     sessionGeneration: 0,
     identityDirty: false,
     lastIdentityMutationAt: 0,
@@ -630,6 +664,30 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
       // “商品过期不存在”是正常承载页，不是安全验证失败页。
       win.setTitle(isTaobaoSearchCarrierUrl(url) ? '淘宝搜同款 - 会话恢复中' : '淘宝搜同款')
     }
+    if (state.loginPromptVisible && !isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url) && !state.loginCompletionCheck) {
+      state.loginCompletionCheck = (async () => {
+        if (!isTaobaoSearchCarrierUrl(state.win.webContents.getURL())) {
+          state.bootstrapComplete = false
+          await bootstrapSearchWindow(state)
+        }
+        const authState = await waitForTaobaoSearchAuthentication(
+          state,
+          8000,
+          TAOBAO_SEARCH_AUTH_STABLE_MS
+        )
+        if (!authState.ready) return
+        state.bootstrapComplete = true
+        hideReadySearchWindow(state)
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '淘宝同款专用账号登录完成，搜索窗口已转为后台复用: partition=' + partition
+        )
+      })().catch(error => {
+        runtimeLog.writeLog('TaobaoSame', '专用账号登录完成检查失败: ' + error.message)
+      }).finally(() => {
+        state.loginCompletionCheck = null
+      })
+    }
   })
   win.webContents.on('did-navigate-in-page', (_event, url) => {
     state.lastNavigationAt = Date.now()
@@ -637,34 +695,12 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
   })
 
   if (!hasTaobaoLoginCookie(cookies)) {
-    await bootstrapSearchWindow(state).catch(() => {})
-    showSearchWindow(state, '淘宝搜同款 - 请登录淘宝')
+    await openDedicatedTaobaoSearchLogin(state, 'first_use_or_session_expired')
     return state
   }
 
   await bootstrapSearchWindow(state)
   return state
-}
-
-async function restoreTaobaoSearchSession(accountId, oldState, reason) {
-  const currentCookies = await oldState.ses.cookies.get({})
-  if (hasTaobaoLoginCookie(currentCookies)) {
-    runtimeLog.writeLog(
-      'TaobaoSame',
-      '搜索会话Cookie兜底已跳过: accountId=' + accountId + ', reason=' + reason + ', loginCookie=YES'
-    )
-    return null
-  }
-  const restoredCount = await injectTaobaoCookiesFromAccount(oldState.ses, accountId)
-  const restoredCookies = await oldState.ses.cookies.get({})
-  if (restoredCount <= 0 || !hasTaobaoLoginCookie(restoredCookies)) return null
-  oldState.bootstrapComplete = false
-  await bootstrapSearchWindow(oldState)
-  runtimeLog.writeLog(
-    'TaobaoSame',
-    '搜索会话Cookie兜底恢复: accountId=' + accountId + ', reason=' + reason + ', count=' + restoredCount
-  )
-  return oldState
 }
 
 function normalizeRemoteImageUrl(imageUrl) {
@@ -918,25 +954,61 @@ async function waitForTaobaoSearchAuthentication(
   return { ...latest, reason: latest.needLogin ? 'login_cookie_missing' : 'auth_not_stable' }
 }
 
-async function readTaobaoPageBixiTokens(win) {
-  if (!win || win.isDestroyed()) return null
-  const script = "(function() {" +
-    "var entries = performance.getEntriesByType('resource') || [];" +
-    "for (var i = entries.length - 1; i >= 0; i--) {" +
-      "try {" +
-        "var url = new URL(entries[i].name);" +
-        "var bxUa = url.searchParams.get('bx-ua');" +
-        "var bxUmidToken = url.searchParams.get('bx-umidtoken');" +
-        "var bxEt = url.searchParams.get('bx_et');" +
-        "if (bxUa && bxUmidToken && bxEt) return { bxUa: bxUa, bxUmidToken: bxUmidToken, bxEt: bxEt };" +
-      "} catch (e) {}" +
-    "}" +
-    "return null;" +
-  "})()"
+async function readTaobaoPageBixiSnapshot(win) {
+  const emptySnapshot = { tokens: null, evidence: { resourceCount: 0, bixiResourceCount: 0 } }
+  if (!win || win.isDestroyed()) return emptySnapshot
+  const script = `(function () {
+    var entries = performance.getEntriesByType('resource') || [];
+    var tokens = null;
+    var counts = { bxUa: 0, bxUmidToken: 0, bxEt: 0 };
+    var candidates = [];
+    for (var i = 0; i < entries.length; i++) {
+      try {
+        var entry = entries[i];
+        var url = new URL(entry.name);
+        var bxUa = url.searchParams.get('bx-ua') || '';
+        var bxUmidToken = url.searchParams.get('bx-umidtoken') || '';
+        var bxEt = url.searchParams.get('bx_et') || '';
+        if (bxUa) counts.bxUa++;
+        if (bxUmidToken) counts.bxUmidToken++;
+        if (bxEt) counts.bxEt++;
+        if (bxUa || bxUmidToken || bxEt) {
+          candidates.push({
+            host: String(url.hostname || ''),
+            initiatorType: String(entry.initiatorType || ''),
+            bxUa: !!bxUa,
+            bxUmidToken: !!bxUmidToken,
+            bxEt: !!bxEt,
+            startTimeMs: Math.round(Number(entry.startTime || 0)),
+            durationMs: Math.round(Number(entry.duration || 0))
+          });
+        }
+        if (bxUa && bxUmidToken && bxEt) {
+          tokens = { bxUa: bxUa, bxUmidToken: bxUmidToken, bxEt: bxEt };
+        }
+      } catch (e) {}
+    }
+    return {
+      tokens: tokens,
+      evidence: {
+        resourceCount: entries.length,
+        bixiResourceCount: candidates.length,
+        completeResourceCount: candidates.filter(function (item) {
+          return item.bxUa && item.bxUmidToken && item.bxEt;
+        }).length,
+        paramResourceCounts: counts,
+        candidates: candidates.slice(-6)
+      }
+    };
+  })()`
   try {
-    return await win.webContents.executeJavaScript(script, true)
-  } catch (_) {
-    return null
+    const snapshot = await win.webContents.executeJavaScript(script, true)
+    return snapshot && typeof snapshot === 'object' ? snapshot : emptySnapshot
+  } catch (error) {
+    return {
+      tokens: null,
+      evidence: { ...emptySnapshot.evidence, readError: String(error.message || error).slice(0, 120) }
+    }
   }
 }
 
@@ -1231,14 +1303,26 @@ function shortFingerprint(value) {
   return crypto.createHash('sha256').update(text).digest('hex').slice(0, 12)
 }
 
-function summarizeBixiTokens(tokens) {
-  if (!tokens) return { coherent: false }
+function hasCoherentBixiTokens(tokens) {
+  return !!(tokens && tokens.bxUa && tokens.bxUmidToken && tokens.bxEt)
+}
+
+function summarizeBixiTokens(tokens, evidence = {}) {
+  const summary = {
+    coherent: hasCoherentBixiTokens(tokens),
+    evidence: evidence && typeof evidence === 'object' ? evidence : {}
+  }
+  if (!tokens) return summary
   return {
-    coherent: !!(tokens.bxUa && tokens.bxUmidToken && tokens.bxEt),
+    ...summary,
     bxUa: { length: String(tokens.bxUa || '').length, fp: shortFingerprint(tokens.bxUa) },
     bxUmidToken: { length: String(tokens.bxUmidToken || '').length, fp: shortFingerprint(tokens.bxUmidToken) },
     bxEt: { length: String(tokens.bxEt || '').length, fp: shortFingerprint(tokens.bxEt) }
   }
+}
+
+function shouldRetryTaobaoBusyResponse({ attempt = 0, riskRetryUsed = false } = {}) {
+  return !riskRetryUsed && attempt < 2
 }
 
 function sanitizeDiagnosticPageUrl(value) {
@@ -1250,7 +1334,7 @@ function sanitizeDiagnosticPageUrl(value) {
   }
 }
 
-async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
+async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens, bixiEvidence) {
   const win = state.win
   let page = {}
   try {
@@ -1265,7 +1349,11 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
         webdriver: navigator.webdriver === true,
         readyState: String(document.readyState || ''),
         visibilityState: String(document.visibilityState || ''),
-        resourceCount: (performance.getEntriesByType('resource') || []).length
+        resourceCount: (performance.getEntriesByType('resource') || []).length,
+        pageUptimeMs: Math.round(Number(performance.now() || 0)),
+        navigationType: String((performance.getEntriesByType('navigation')[0] || {}).type || ''),
+        domContentLoadedMs: Math.round(Number((performance.getEntriesByType('navigation')[0] || {}).domContentLoadedEventEnd || 0)),
+        loadEventMs: Math.round(Number((performance.getEntriesByType('navigation')[0] || {}).loadEventEnd || 0))
       };
     })()`, true)
   } catch (error) {
@@ -1278,7 +1366,8 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
   const criticalNames = ['unb', 'cookie17', 'cookie2', '_m_h5_tk', '_m_h5_tk_enc', 'sgcookie', 't', 'tracknick', 'cna']
   const identity = buildTaobaoSessionIdentity(cookies, token)
   return {
-    accountId: state.accountId,
+    searchAccount: 'dedicated',
+    requestAccountId: state.requestAccountId || null,
     partition: state.partition,
     session: {
       generation: Number(state.sessionGeneration || 0),
@@ -1292,6 +1381,7 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
     },
     chrome: process.versions.chrome || '',
     electron: process.versions.electron || '',
+    webSecurity: state.webSecurity === true,
     page: {
       url: sanitizeDiagnosticPageUrl(page.href),
       carrier: isTaobaoSearchCarrierUrl(page.href),
@@ -1304,6 +1394,10 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
       readyState: page.readyState || '',
       visibilityState: page.visibilityState || '',
       resourceCount: Number(page.resourceCount || 0),
+      pageUptimeMs: Number(page.pageUptimeMs || 0),
+      navigationType: page.navigationType || '',
+      domContentLoadedMs: Number(page.domContentLoadedMs || 0),
+      loadEventMs: Number(page.loadEventMs || 0),
       readError: page.readError || ''
     },
     cookies: {
@@ -1311,7 +1405,7 @@ async function readTaobaoSearchRequestEnvironment(state, token, bixiTokens) {
       critical: Object.fromEntries(criticalNames.map(name => [name, cookieNames.has(name)]))
     },
     token: { present: !!token, length: String(token || '').length, fp: shortFingerprint(token) },
-    bixi: summarizeBixiTokens(bixiTokens)
+    bixi: summarizeBixiTokens(bixiTokens, bixiEvidence)
   }
 }
 
@@ -2414,6 +2508,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
   const windowReadyAt = Date.now()
   const partition = state.partition
   return enqueueSearch(partition, async () => {
+    state.requestAccountId = accountId
     let win = state.win
     let ses = state.ses
     const searchStartedAt = Date.now()
@@ -2437,16 +2532,23 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     }
     runtimeLog.writeLog(
       'TaobaoSame',
-      '开始搜同款: accountId=' + accountId +
+      '收到搜同款请求: purchaseAccountId=' + accountId +
+      ', searchAccount=dedicated' +
       ', automatic=' + !!automatic +
-      ', partition=' + partition +
-      ', mode=' + (warmReuse ? 'WARM_REUSE' : 'COLD_PREPARE') +
-      ', windowMs=' + (windowReadyAt - requestStartedAt) +
-      ', queueMs=' + (searchStartedAt - windowReadyAt) +
-      ', warmAgeMs=' + (warmReuse ? Math.max(0, searchStartedAt - Number(state.lastSuccessfulSearchAt || searchStartedAt)) : 0)
+      ', partition=' + partition
     )
 
     const authStartedAt = Date.now()
+
+    const currentCookies = await ses.cookies.get({})
+    if (!hasTaobaoLoginCookie(currentCookies)) {
+      await openDedicatedTaobaoSearchLogin(state, 'login_cookie_missing_before_search')
+      return {
+        success: false,
+        needLogin: true,
+        message: '请先登录淘宝同款专用账号，登录后重新搜索'
+      }
+    }
 
     if (!state.bootstrapComplete) {
       await bootstrapSearchWindow(state)
@@ -2459,19 +2561,17 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       TAOBAO_SEARCH_AUTH_TIMEOUT,
       warmReuse ? TAOBAO_SEARCH_WARM_STABLE_MS : TAOBAO_SEARCH_AUTH_STABLE_MS
     )
-    if (authState.needLogin && authState.reason === 'login_cookie_missing') {
-      const restoredState = await restoreTaobaoSearchSession(accountId, state, authState.reason)
-      if (restoredState) {
-        state = restoredState
-        win = state.win
-        ses = state.ses
-        authState = await waitForTaobaoSearchAuthentication(state)
-      }
-    }
     if (authState.needLogin) {
-      runtimeLog.writeLog('TaobaoSame', '搜索会话需要登录: reason=' + authState.reason)
-      showSearchWindow(state, '淘宝搜同款 - 请登录淘宝')
-      return { success: false, needLogin: true, message: '请先登录淘宝，登录后重新搜索' }
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '淘宝同款专用账号需要登录: requestAccountId=' + accountId + ', reason=' + authState.reason
+      )
+      await openDedicatedTaobaoSearchLogin(state, authState.reason || 'authentication_required')
+      return {
+        success: false,
+        needLogin: true,
+        message: '请先登录淘宝同款专用账号，登录后重新搜索'
+      }
     }
     if (authState.needVerification) {
       showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
@@ -2528,6 +2628,17 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
 
     runtimeLog.writeLog(
       'TaobaoSame',
+      '开始搜同款: purchaseAccountId=' + accountId +
+      ', searchAccount=dedicated' +
+      ', automatic=' + !!automatic +
+      ', partition=' + partition +
+      ', mode=' + (warmReuse ? 'WARM_REUSE' : 'COLD_PREPARE') +
+      ', windowMs=' + (windowReadyAt - requestStartedAt) +
+      ', queueMs=' + (searchStartedAt - windowReadyAt) +
+      ', warmAgeMs=' + (warmReuse ? Math.max(0, searchStartedAt - Number(state.lastSuccessfulSearchAt || searchStartedAt)) : 0)
+    )
+    runtimeLog.writeLog(
+      'TaobaoSame',
       '搜索会话准备完成: mode=' + (warmReuse ? 'WARM_REUSE' : 'COLD_PREPARE') +
       ', authMs=' + (Date.now() - authStartedAt) +
       ', login=YES, token=YES'
@@ -2575,9 +2686,16 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         return { success: false, retryable: true, message: '淘宝搜索会话尚未准备完成，请稍后再试' }
       }
       // Bixi参数每次MTOP尝试都从当前页面重新读取，不跨搜索缓存旧值。
-      const bixiTokens = await readTaobaoPageBixiTokens(win)
+      // 诊断只保留参数存在性、资源域名与加载时序，不记录参数原值。
+      const bixiSnapshot = await readTaobaoPageBixiSnapshot(win)
+      const bixiTokens = bixiSnapshot.tokens
       const request = buildTaobaoImageSearchRequest({ token, imageBase64, bixiTokens })
-      const requestEnvironment = await readTaobaoSearchRequestEnvironment(state, token, bixiTokens)
+      const requestEnvironment = await readTaobaoSearchRequestEnvironment(
+        state,
+        token,
+        bixiTokens,
+        bixiSnapshot.evidence
+      )
       runtimeLog.writeLog(
         'TaobaoSameDiag',
         'request attempt=' + (attempt + 1) + ' ' + JSON.stringify(requestEnvironment)
@@ -2610,7 +2728,10 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             message: '淘宝返回：' + returnedMessage
           })
           state.firstSearchPrepared = false
-          if (!riskRetryUsed && attempt < 2) {
+          if (shouldRetryTaobaoBusyResponse({
+            attempt,
+            riskRetryUsed
+          })) {
             riskRetryUsed = true
             const resolution = await openTaobaoVerificationAndWait(state, verificationUrl)
             if (resolution.ready) {
@@ -2647,7 +2768,10 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
           }
         }
 
-        if (!riskRetryUsed && attempt < 2) {
+        if (shouldRetryTaobaoBusyResponse({
+          attempt,
+          riskRetryUsed
+        })) {
           riskRetryUsed = true
           await waitForTaobaoSearchPageStable(win, 3000)
           await sleep(500)
@@ -2747,7 +2871,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         runtimeLog.writeLog(
           'TaobaoSame',
           '检测到非法请求，已停止且未重建会话: attempt=' + (attempt + 1) +
-          ', token=' + (token ? 'YES' : 'NO') + ', bixi=' + (bixiTokens ? 'YES' : 'NO') +
+          ', token=' + (token ? 'YES' : 'NO') + ', bixi=' + (hasCoherentBixiTokens(bixiTokens) ? 'COHERENT' : 'INCOMPLETE') +
           ', pageHost=' + (pageHost || 'unknown')
         )
         break
@@ -2865,6 +2989,7 @@ module.exports = {
   buildTaobaoSameProductInjection,
   getTaobaoSamePartition,
   getTaobaoPurchasePartition,
+  TB_SEARCH_LOGIN_URL,
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
@@ -2880,10 +3005,14 @@ module.exports = {
   isTaobaoTokenRet,
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
+  hasCoherentBixiTokens,
+  summarizeBixiTokens,
+  shouldRetryTaobaoBusyResponse,
   classifyTaobaoAuthenticationSnapshot,
   readTaobaoSearchAuthenticationPageState,
   TAOBAO_SEARCH_AUTH_TIMEOUT,
   TAOBAO_SEARCH_AUTH_STABLE_MS,
   TAOBAO_SEARCH_WARM_STABLE_MS,
-  TAOBAO_SEARCH_RISK_COOLDOWN_MS
+  TAOBAO_SEARCH_RISK_COOLDOWN_MS,
+  TAOBAO_SEARCH_WEB_SECURITY
 }

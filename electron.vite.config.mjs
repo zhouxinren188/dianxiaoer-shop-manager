@@ -4,6 +4,7 @@ import vue from '@vitejs/plugin-vue'
 import { readFileSync } from 'fs'
 
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf-8'))
+const devPort = Number(process.env.DXE_DEV_PORT) || 5173
 
 export default defineConfig({
   main: {
@@ -16,7 +17,7 @@ export default defineConfig({
     server: {
       // localStorage 按 origin（含端口）隔离。开发端口漂移到 5174 会让
       // 已记住的账号看起来“丢失”，因此端口占用时应直接报错。
-      port: 5173,
+      port: devPort,
       strictPort: true
     },
     define: {

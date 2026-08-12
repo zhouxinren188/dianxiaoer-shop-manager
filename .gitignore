@@ -1,4 +1,5 @@
 node_modules/
+.dev-user-data*/
 dist/
 out/
 *.log

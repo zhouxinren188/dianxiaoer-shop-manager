@@ -33,6 +33,12 @@ const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 
+// 支持并行 worktree 使用独立的开发资料目录，避免两个 Electron 开发实例
+// 同时读写同一套 Chromium Cookie、LocalStorage 和搜索 partition。
+if (!app.isPackaged && process.env.DXE_DEV_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.DXE_DEV_USER_DATA_DIR))
+}
+
 // Packaged builds share the same electron-updater cache directory. Running two
 // packaged instances at once can make one updater delete the other updater's
 // temp installer immediately before it is renamed into place. Keep development
@@ -991,7 +997,8 @@ app.whenReady().then(async () => {
   }
 
   // 启动本地后端服务
-  startServer(3002)
+  const localServerPort = Number(process.env.DXE_DEV_LOCAL_SERVER_PORT) || 3002
+  startServer(localServerPort)
 
   // 允许 renderer 进程 fetch 访问自签名 HTTPS API
   session.defaultSession.setCertificateVerifyProc((request, callback) => {

@@ -14,6 +14,7 @@ const {
   buildTaobaoSameProductInjection,
   getTaobaoSamePartition,
   getTaobaoPurchasePartition,
+  TB_SEARCH_LOGIN_URL,
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
@@ -29,12 +30,16 @@ const {
   isTaobaoTokenRet,
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
+  hasCoherentBixiTokens,
+  summarizeBixiTokens,
+  shouldRetryTaobaoBusyResponse,
   classifyTaobaoAuthenticationSnapshot,
   readTaobaoSearchAuthenticationPageState,
   TAOBAO_SEARCH_AUTH_TIMEOUT,
   TAOBAO_SEARCH_AUTH_STABLE_MS,
   TAOBAO_SEARCH_WARM_STABLE_MS,
-  TAOBAO_SEARCH_RISK_COOLDOWN_MS
+  TAOBAO_SEARCH_RISK_COOLDOWN_MS,
+  TAOBAO_SEARCH_WEB_SECURITY
 } = taobaoSameSearch
 
 describe('淘宝货源商品页 SKU 恢复', () => {
@@ -163,15 +168,26 @@ describe('淘宝按图搜同款', () => {
     expect(params.pcGraphSearch).toBe(true)
   })
 
-  it('只接受淘宝登录Cookie和淘宝系域名', () => {
+  it('淘宝同款专用账号与采购账号分区严格隔离', () => {
     expect(hasTaobaoLoginCookie([{ name: 'cookie2' }, { name: 'unb' }])).toBe(true)
     expect(hasTaobaoLoginCookie([{ name: 'cookie2' }])).toBe(false)
     expect(isTaobaoCookieDomain('.taobao.com')).toBe(true)
     expect(isTaobaoCookieDomain('h5api.m.taobao.com')).toBe(true)
     expect(isTaobaoCookieDomain('.tmall.hk')).toBe(true)
     expect(isTaobaoCookieDomain('.pinduoduo.com')).toBe(false)
-    expect(getTaobaoSamePartition(7)).toBe('persist:purchase-7')
+    expect(getTaobaoSamePartition(7)).toBe('persist:dianxiaoer-taobao-same-search-v1')
+    expect(getTaobaoSamePartition(73)).toBe(getTaobaoSamePartition(7))
     expect(getTaobaoPurchasePartition(7)).toBe('persist:purchase-7')
+    expect(getTaobaoPurchasePartition(73)).toBe('persist:purchase-73')
+    expect(getTaobaoSamePartition(7)).not.toBe(getTaobaoPurchasePartition(7))
+  })
+
+  it('专用账号登录成功后跳回固定搜索承载页', () => {
+    const loginUrl = new URL(TB_SEARCH_LOGIN_URL)
+    expect(loginUrl.hostname).toBe('login.taobao.com')
+    expect(loginUrl.searchParams.get('redirectURL')).toBe(
+      'https://h5.m.taobao.com/awp/core/detail.htm?id=620000000000000000'
+    )
   })
 
   it('使用不可逆关键Cookie指纹识别搜索身份变化且不记录原值', () => {
@@ -205,6 +221,10 @@ describe('淘宝按图搜同款', () => {
     expect(TAOBAO_SEARCH_AUTH_STABLE_MS).toBeGreaterThanOrEqual(1200)
     expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeGreaterThan(0)
     expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeLessThan(TAOBAO_SEARCH_AUTH_STABLE_MS)
+  })
+
+  it('专用搜索窗口与已知成功环境保持相同的webSecurity设置', () => {
+    expect(TAOBAO_SEARCH_WEB_SECURITY).toBe(false)
   })
 
   it('把淘宝过期占位商品识别为正常搜同款承载页', () => {
@@ -250,6 +270,34 @@ describe('淘宝按图搜同款', () => {
     expect(shouldRetryWithRefreshedToken('TOKEN_EXPIRED', 'same', 'same')).toBe(false)
     expect(shouldRetryWithRefreshedToken('TOKEN_EXPIRED', 'old', '')).toBe(false)
     expect(shouldRetryWithRefreshedToken('RGV587_ERROR', 'old', 'new')).toBe(false)
+  })
+
+  it('Bixi诊断只记录不可逆摘要和资源时序，不泄露参数原值', () => {
+    const tokens = {
+      bxUa: 'secret-bx-ua',
+      bxUmidToken: 'secret-umid',
+      bxEt: 'secret-et'
+    }
+    const evidence = {
+      resourceCount: 12,
+      bixiResourceCount: 1,
+      candidates: [{ host: 'h5api.m.taobao.com', bxUa: true, bxUmidToken: true, bxEt: true }]
+    }
+    const summary = summarizeBixiTokens(tokens, evidence)
+
+    expect(hasCoherentBixiTokens(tokens)).toBe(true)
+    expect(summary.coherent).toBe(true)
+    expect(summary.evidence).toEqual(evidence)
+    expect(summary.bxUa.length).toBe(tokens.bxUa.length)
+    expect(JSON.stringify(summary)).not.toContain('secret-bx-ua')
+    expect(JSON.stringify(summary)).not.toContain('secret-umid')
+    expect(JSON.stringify(summary)).not.toContain('secret-et')
+  })
+
+  it('RGV587是否受控重试不依赖Bixi参数', () => {
+    expect(shouldRetryTaobaoBusyResponse({ attempt: 0 })).toBe(true)
+    expect(shouldRetryTaobaoBusyResponse({ attempt: 1, riskRetryUsed: true })).toBe(false)
+    expect(shouldRetryTaobaoBusyResponse({ attempt: 2 })).toBe(false)
   })
 
   it('识别淘宝首次自动登录倒计时且不误判普通商品页', () => {

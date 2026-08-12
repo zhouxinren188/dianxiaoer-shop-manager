@@ -4,6 +4,7 @@
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
+    "start": "set \"DXE_DEV_PORT=5174\" && set \"DXE_DEV_LOCAL_SERVER_PORT=3003\" && set \"DXE_DEV_USER_DATA_DIR=%CD%\\.dev-user-data-taobao-same-search\" && electron-vite dev",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
