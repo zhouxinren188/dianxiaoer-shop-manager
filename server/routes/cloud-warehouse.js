@@ -6,6 +6,11 @@ const {
   getTenantOwnerId,
   normalizeCapabilities
 } = require('../services/cloud-warehouse-protocol')
+const {
+  confirmManualOrderYear,
+  getOrderConfiguration,
+  prepareOrderRef
+} = require('../services/cloud-warehouse-order-service')
 
 function ok(data) {
   return { code: 0, data }
@@ -15,6 +20,14 @@ function fail(message, reason) {
   const response = { code: 1, message }
   if (reason) response.reason = reason
   return response
+}
+
+function statusForError(error) {
+  if (['purchase_order_not_found'].includes(error?.code)) return 404
+  if (['machine_binding_forbidden'].includes(error?.code)) return 403
+  if (['machine_code_in_use'].includes(error?.code)) return 409
+  if (error?.code) return 400
+  return 500
 }
 
 function parseJsonObject(value) {
@@ -205,13 +218,53 @@ module.exports = function createCloudWarehouseRouter(pool) {
     }
   })
 
+  router.get('/orders/:purchaseOrderId/configuration', async (req, res) => {
+    try {
+      res.json(ok(await getOrderConfiguration(pool, req.user, req.params.purchaseOrderId)))
+    } catch (error) {
+      console.error('[CloudWarehouse] 查询订单云仓配置失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '查询订单云仓配置失败', error.code))
+    }
+  })
+
+  router.put('/orders/:purchaseOrderId/order-year', async (req, res) => {
+    try {
+      const data = await confirmManualOrderYear(
+        pool,
+        req.user,
+        req.params.purchaseOrderId,
+        req.body?.order_year,
+        req.body?.confirmed
+      )
+      res.json(ok(data))
+    } catch (error) {
+      console.error('[CloudWarehouse] 保存采购订单年份失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '保存采购订单年份失败', error.code))
+    }
+  })
+
+  router.post('/orders/:purchaseOrderId/order-ref', async (req, res) => {
+    try {
+      res.json(ok(await prepareOrderRef(pool, req.user, req.params.purchaseOrderId)))
+    } catch (error) {
+      console.error('[CloudWarehouse] 准备订单引用失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '准备订单引用失败', error.code))
+    }
+  })
+
   router.get('/protocol', (_req, res) => {
     res.json(ok({
       protocolVersion: '1.0',
       machineCodePattern: '^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$',
       commands: COMMANDS,
       transportEnabled: false,
-      paramsSchemaConfirmed: false
+      paramsSchemas: {
+        'exception.order.check': { confirmed: true, fields: [] },
+        'exception.order.resolve': { confirmed: true, fields: ['exception_snapshot_ref'] },
+        'warehouse.order.check': { confirmed: false, fields: [] },
+        'warehouse.order.print': { confirmed: false, fields: [] },
+        'warehouse.order.outbound': { confirmed: false, fields: [] }
+      }
     }))
   })
 

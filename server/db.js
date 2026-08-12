@@ -595,6 +595,28 @@ async function initDB() {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN shipping_fee DECIMAL(12,2) DEFAULT 0 COMMENT '运费'")
     } catch(e) { /* 列已存在 */ }
 
+    // ======== 云仓订单可靠年份 ========
+    // order_year 只能来自平台实际下单时间或人工明确确认，不得用本地 created_at/当前年份推断。
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN platform_order_time DATETIME DEFAULT NULL COMMENT '采购平台实际下单时间'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN order_year SMALLINT UNSIGNED DEFAULT NULL COMMENT '经验证的平台订单年份'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN order_year_source VARCHAR(30) DEFAULT '' COMMENT 'platform_order_time/manual_confirmed'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN order_year_confirmed_by INT DEFAULT NULL COMMENT '人工确认年份的实际操作用户'")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN order_year_confirmed_at DATETIME(3) DEFAULT NULL")
+    } catch(e) { /* 列已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN cloud_locator_version BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '云仓订单定位版本'")
+    } catch(e) { /* 列已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_purchase_cloud_locator ON purchase_orders(owner_id, platform_order_no, order_year)') } catch(e) { /* 索引已存在 */ }
+
     // ======== 淘宝物流取件信息 ========
     try {
       await connection.execute("ALTER TABLE purchase_orders ADD COLUMN pickup_code VARCHAR(100) DEFAULT '' COMMENT '物流取件码'")
@@ -751,9 +773,30 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS cloud_order_refs (
         order_ref_id VARCHAR(64) PRIMARY KEY,
         owner_id INT NOT NULL,
+        purchase_order_id INT DEFAULT NULL,
         created_by_user_id INT NOT NULL,
         created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_order_ref_purchase (owner_id, purchase_order_id),
         KEY idx_cloud_order_ref_owner (owner_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    // 兼容已由上一版基础设施创建的表。
+    try { await connection.execute('ALTER TABLE cloud_order_refs ADD COLUMN purchase_order_id INT DEFAULT NULL AFTER owner_id') } catch(e) { /* 列已存在 */ }
+    try { await connection.execute('CREATE UNIQUE INDEX uk_cloud_order_ref_purchase ON cloud_order_refs(owner_id, purchase_order_id)') } catch(e) { /* 索引已存在 */ }
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_locator_audit (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        order_ref_id VARCHAR(64) DEFAULT NULL,
+        purchase_order_id INT NOT NULL,
+        owner_id INT NOT NULL,
+        actor_user_id INT NOT NULL,
+        old_order_year SMALLINT UNSIGNED DEFAULT NULL,
+        new_order_year SMALLINT UNSIGNED NOT NULL,
+        source VARCHAR(30) NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_locator_audit_order (owner_id, purchase_order_id, created_at),
+        KEY idx_cloud_locator_audit_ref (order_ref_id, created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
@@ -787,6 +830,7 @@ async function initDB() {
         current_task_id VARCHAR(64) DEFAULT NULL,
         target_machine_code VARCHAR(12) NOT NULL,
         binding_version BIGINT UNSIGNED NOT NULL,
+        locator_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
         last_observed_status VARCHAR(80) DEFAULT '',
         last_observed_at DATETIME(3) DEFAULT NULL,
         last_reason VARCHAR(80) DEFAULT '',
@@ -805,6 +849,7 @@ async function initDB() {
           REFERENCES cloud_order_refs(order_ref_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    try { await connection.execute('ALTER TABLE cloud_order_workflows ADD COLUMN locator_version BIGINT UNSIGNED NOT NULL DEFAULT 1 AFTER binding_version') } catch(e) { /* 列已存在 */ }
 
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_order_tasks (

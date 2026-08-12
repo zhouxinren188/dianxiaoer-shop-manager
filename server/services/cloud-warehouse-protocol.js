@@ -128,6 +128,39 @@ function normalizeConfirmation(command, confirmation, createdAt) {
   }
 }
 
+function normalizeOpaqueSnapshotRef(value) {
+  const snapshotRef = String(value || '').trim()
+  if (!snapshotRef.startsWith('exsnap-') || snapshotRef.length > 200 || /[\u0000-\u001f\u007f]/.test(snapshotRef)) {
+    const error = new Error('exception_snapshot_ref 格式无效')
+    error.code = 'adapter_params_invalid'
+    throw error
+  }
+  return snapshotRef
+}
+
+function normalizeTaskParams(command, params) {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
+    const error = new Error('params 必须是对象')
+    error.code = 'adapter_params_invalid'
+    throw error
+  }
+  const keys = Object.keys(params)
+  if (command === 'exception.order.resolve') {
+    if (keys.length !== 1 || keys[0] !== 'exception_snapshot_ref') {
+      const error = new Error('exception.order.resolve 的 params 只能包含 exception_snapshot_ref')
+      error.code = 'adapter_params_invalid'
+      throw error
+    }
+    return { exception_snapshot_ref: normalizeOpaqueSnapshotRef(params.exception_snapshot_ref) }
+  }
+  if (keys.length !== 0) {
+    const error = new Error(`${command} 的 params 当前必须为空对象`)
+    error.code = 'adapter_params_invalid'
+    throw error
+  }
+  return {}
+}
+
 function buildTaskEnvelope({
   command,
   orderRefId,
@@ -135,6 +168,7 @@ function buildTaskEnvelope({
   requestedBy,
   machineCode,
   confirmation,
+  params = {},
   now = new Date(),
   taskId = createOpaqueId('task'),
   idempotencyKey = createOpaqueId('idem')
@@ -169,7 +203,7 @@ function buildTaskEnvelope({
     target: {
       machine_code: assertMachineCode(machineCode)
     },
-    params: {}
+    params: normalizeTaskParams(normalizedCommand, params)
   }
 
   const normalizedConfirmation = normalizeConfirmation(normalizedCommand, confirmation, createdAtIso)
@@ -224,5 +258,6 @@ module.exports = {
   isValidMachineCode,
   normalizeCapabilities,
   normalizeMachineCode,
+  normalizeTaskParams,
   validateSuccessfulWriteResponse
 }

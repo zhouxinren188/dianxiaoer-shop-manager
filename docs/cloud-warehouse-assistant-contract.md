@@ -1,6 +1,6 @@
 # 店小二与云仓助手协作契约
 
-状态：机器码绑定接口已在店小二侧实现；执行器控制面仍为草案且保持禁用。正式服务地址、传输认证和双方基础字段确认前，不开放注册、心跳、领取、续租或回执端点，也不实现五个业务适配器。
+状态：机器码绑定和订单定位基础已在店小二侧实现；异常查询/处理参数已经双方确认。执行器控制面仍为草案且保持禁用，正式服务地址和传输认证确认前，不开放注册、心跳、领取、续租、映射或回执 HTTP 端点。
 
 ## 1. 固定边界
 
@@ -12,7 +12,7 @@
 - `warehouse.order.print`
 - `warehouse.order.outbound`
 
-禁止任意代码、脚本、Shell、模块路径、可执行文件或任意 URL 执行入口。实际业务接口未提供前，所有任务的 `params` 固定为空对象。
+禁止任意代码、脚本、Shell、模块路径、可执行文件或任意 URL 执行入口。`exception.order.check` 的 `params` 固定为空对象；`exception.order.resolve` 的 `params` 必须且只能包含 `exception_snapshot_ref`。其余三项业务接口未确认前，`params` 继续固定为空对象。
 
 机器码格式：
 
@@ -78,11 +78,76 @@
 
 `trace_id`在一个工作流中保持不变并等同于 `workflow_id`。每轮真实的30秒查询生成新的 `task_id`和 `idempotency_key`；同一个任务的网络重投复用原标识。
 
-## 4. 执行器控制面草案
+## 4. 异常订单定位与快照
+
+### 4.1 中央订单定位
+
+任务中的 `order_id` 继续使用中央服务生成的不透明 `order_ref_id`。中央服务内部映射为：
+
+```text
+order_ref_id -> purchase_order_id -> platform_order_no + order_year
+```
+
+- `platform_order_no`用于云仓助手真实异常接口的 `billexception.sellerBillNo`和`soExceptionCentre.spSoNo`查询。
+- `purchase_no`只保留在中央服务用于审计，不传云仓助手。
+- `order_year`只接受 `platform_order_time`（平台实际下单时间）或 `manual_confirmed`（用户依据平台页面人工确认）来源。
+- 禁止使用采购单 `created_at`、当前年份或订单号格式推断年份。
+- 平台订单号或年份变化会递增定位版本；已有未完成工作流必须进入 `review_required`。
+
+用户侧已实现：
+
+| 方法 | 相对路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/cloud-warehouse/orders/:purchaseOrderId/configuration` | 查询可见采购单的定位状态及最新脱敏异常结果 |
+| `PUT` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-year` | 人工确认可靠年份，正文为 `order_year`和`confirmed: true` |
+| `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-ref` | 定位字段就绪后生成或读取不透明订单引用 |
+
+主账号只能解析本体系订单；子账号还必须通过现有采购账号授权或该采购单创建归属校验。执行器侧映射实现为受信任内部服务，并额外校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
+
+### 4.2 两项命令参数
+
+异常查询：
+
+```json
+{}
+```
+
+异常处理：
+
+```json
+{
+  "exception_snapshot_ref": "exsnap-..."
+}
+```
+
+平台订单号和年份只通过受信任映射返回，不放入任务 `params`。异常处理不得附加内部异常 ID、平台订单号、年份或其他字段。
+
+### 4.3 查询结果的页面字段
+
+中央服务只接受并向页面投影以下脱敏结果字段：
+
+```json
+{
+  "exception_snapshot_ref": "exsnap-...",
+  "exception_count": 2,
+  "queried_at": "ISO时间",
+  "exceptions": [
+    {
+      "source": "billexception",
+      "exception_type_masked": "脱敏异常类型",
+      "reason_masked": "脱敏异常原因"
+    }
+  ]
+}
+```
+
+`source`只允许 `billexception`或`soExceptionCentre`。中央服务不会把执行器结果中的未知字段、内部异常 ID、URL 或凭据转发到页面。页面展示全部脱敏异常及数量，只有存在有效快照且用户确认后才能创建处理任务。
+
+## 5. 执行器控制面草案
 
 以下是双方仍需确认的基础数据契约。相对路径、正式服务地址和认证方式尚未生效。
 
-### 4.1 注册
+### 5.1 注册
 
 ```json
 {
@@ -112,7 +177,7 @@
 - 同一机器码出现多个活跃实例时，中央服务不得派发写任务，直至冲突解除。
 - 注册请求必须经过独立的控制面认证；机器码本身不能用于认证。
 
-### 4.2 心跳和能力上报
+### 5.2 心跳和能力上报
 
 ```json
 {
@@ -139,7 +204,7 @@
 
 中央服务暂按最近90秒内存在有效心跳判断在线。正式间隔和离线阈值仍需双方确认。
 
-### 4.3 任务领取
+### 5.3 任务领取
 
 领取请求只声明执行器自己的身份和可用槽位：
 
@@ -186,7 +251,7 @@
 
 无任务时返回 `task: null`。领取和续租必须校验 `machine_code`、`executor_instance_id`、`lease_id`及单调递增的 `fencing_token`。
 
-### 4.4 结果回传
+### 5.4 结果回传
 
 结果沿用执行端协议，并建议回显 `trace_id`和 `idempotency_key`以便审计：
 
@@ -228,11 +293,11 @@
 
 不确定结果、租约丢失、执行中断、状态矛盾或复验失败一律进入 `review_required`，不得自动重复写操作。
 
-## 5. 尚未确认且明确不实现
+## 6. 尚未确认且明确不实现
 
 - 控制面正式服务地址和传输认证方式
-- 实际异常查询、异常处理、到仓、打印和发货接口
-- 采购单、采购编号、平台订单、店铺和云仓订单的字段映射
-- 五个命令的 `params` Schema
+- 到仓、打印和发货的实际接口及三个命令的 `params` Schema
+- 控制面 HTTP 路径、执行器认证、租约和映射接口的网络传输细节
+- 平台实际下单时间在淘宝、拼多多和1688采购同步中的稳定提取字段
 - `requester_device_id`、`same_device_session_id`、`sameDeviceVerified`
 - Named Pipe挑战、DPAPI设备签名或其他同机证明

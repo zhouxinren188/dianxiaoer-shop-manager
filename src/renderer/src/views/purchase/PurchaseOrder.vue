@@ -392,7 +392,7 @@
     <el-dialog
       v-model="forwardDialogVisible"
       title="云仓打单发货"
-      width="540px"
+      width="640px"
       align-center
       :close-on-click-modal="false"
       class="forward-dialog"
@@ -439,10 +439,94 @@
           </div>
         </template>
         <div v-else-if="!forwardLoading" class="forward-empty">暂无关联销售订单信息</div>
+
+        <div v-if="cloudOrderConfig" class="forward-cloud-section">
+          <div class="forward-goods-title">云仓订单定位</div>
+          <el-descriptions :column="2" border size="small">
+            <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="平台订单号">{{ cloudOrderConfig.platformOrderNo || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="订单年份">
+              <template v-if="cloudOrderConfig.orderYear">
+                {{ cloudOrderConfig.orderYear }}
+                <el-tag size="small" type="success" class="cloud-year-tag">
+                  {{ cloudOrderConfig.orderYearSource === 'manual_confirmed' ? '人工确认' : '平台时间' }}
+                </el-tag>
+                <el-button link type="primary" size="small" @click="cloudOrderEditingYear = true">重新确认</el-button>
+              </template>
+              <span v-else>待确认</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="订单引用">{{ cloudOrderConfig.orderRefId ? '已生成' : '待生成' }}</el-descriptions-item>
+          </el-descriptions>
+
+          <el-alert
+            v-if="!cloudOrderConfig.platformOrderNo"
+            title="请先为采购单绑定准确的平台采购订单号。"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="cloud-order-alert"
+          />
+
+          <div v-if="cloudOrderConfig.platformOrderNo && (!cloudOrderConfig.orderYear || cloudOrderEditingYear)" class="cloud-year-confirm">
+            <el-alert
+              title="订单年份必须依据采购平台显示的实际下单时间确认，不能按本地创建时间、当前年份或订单号推断。"
+              type="warning"
+              :closable="false"
+              show-icon
+            />
+            <div class="cloud-year-input-row">
+              <el-input-number v-model="cloudOrderYearInput" :min="2000" :max="2100" :step="1" :precision="0" controls-position="right" />
+              <el-button type="primary" :loading="cloudOrderSaving" @click="handleConfirmCloudOrderYear">确认订单年份</el-button>
+            </div>
+          </div>
+
+          <template v-if="cloudOrderConfig.locatorReady">
+            <div v-if="cloudOrderConfig.exception" class="cloud-exception-panel">
+              <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid" class="cloud-exception-heading">
+                <span>异常查询结果</span>
+                <el-tag :type="cloudOrderConfig.exception.exceptionCount > 0 ? 'danger' : 'success'">
+                  {{ cloudOrderConfig.exception.exceptionCount }} 条
+                </el-tag>
+              </div>
+              <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptions?.length" class="cloud-exception-list">
+                <div v-for="(item, index) in cloudOrderConfig.exception.exceptions" :key="index" class="cloud-exception-item">
+                  <div class="cloud-exception-source">{{ cloudExceptionSourceLabel(item.source) }}</div>
+                  <div><span>异常类型：</span>{{ item.exceptionTypeMasked || '--' }}</div>
+                  <div><span>异常原因：</span>{{ item.reasonMasked || '--' }}</div>
+                </div>
+              </div>
+              <el-alert
+                v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptionCount > 0"
+                title="处理时将使用本次查询生成的一次性异常快照；异常集合发生变化时不会执行写操作。"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="cloud-order-alert"
+              />
+              <el-alert
+                v-if="cloudOrderConfig.exception.status !== 'succeeded' || !cloudOrderConfig.exception.resultShapeValid"
+                :title="cloudOrderConfig.exception.message || '异常查询结果不完整，需人工复核，不能确认当前订单无异常。'"
+                type="error"
+                :closable="false"
+                show-icon
+                class="cloud-order-alert"
+              />
+            </div>
+            <el-empty v-else description="尚无异常查询结果" :image-size="72" />
+            <el-alert
+              title="中央传输和真实联调尚未启用，当前仅完成订单定位、年份确认及脱敏结果展示基础。"
+              type="info"
+              :closable="false"
+              show-icon
+              class="cloud-order-alert"
+            />
+          </template>
+        </div>
       </div>
       <template #footer>
-        <el-button type="primary" @click="handleConfirmForward">我已转发</el-button>
-        <el-button @click="forwardDialogVisible = false">取消</el-button>
+        <el-button @click="forwardDialogVisible = false">关闭</el-button>
+        <el-button type="primary" disabled>查询异常</el-button>
+        <el-button v-if="cloudOrderConfig?.exception?.status === 'succeeded' && cloudOrderConfig?.exception?.resultShapeValid && cloudOrderConfig?.exception?.exceptionCount > 0" type="danger" disabled>处理异常</el-button>
       </template>
     </el-dialog>
 
@@ -1069,7 +1153,13 @@ import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSing
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 import { searchInventory, createSkuBinding, quickCreateInventory, fetchWarehouses } from '@/api/warehouse'
 import { updateRemark } from '@/api/salesOrder'
-import { fetchCloudMachineBinding, bindCloudMachine, unbindCloudMachine } from '@/api/cloudWarehouse'
+import {
+  fetchCloudMachineBinding,
+  bindCloudMachine,
+  unbindCloudMachine,
+  fetchCloudOrderConfiguration,
+  confirmCloudOrderYear
+} from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
 
@@ -1209,6 +1299,11 @@ const cloudBinding = reactive({
   canManage: false
 })
 const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
+const cloudOrderSaving = ref(false)
+const currentCloudOrder = ref(null)
+const cloudOrderConfig = ref(null)
+const cloudOrderYearInput = ref(null)
+const cloudOrderEditingYear = ref(false)
 
 const accountList = ref([])
 
@@ -1484,6 +1579,36 @@ async function handleUnbindCloudMachine() {
   } finally {
     cloudConfigSaving.value = false
   }
+}
+
+async function handleConfirmCloudOrderYear() {
+  if (!currentCloudOrder.value || !Number.isInteger(Number(cloudOrderYearInput.value))) {
+    ElMessage.warning('请选择准确的订单年份')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `请确认 ${cloudOrderYearInput.value} 年来自采购平台显示的实际下单时间。确认后将用于云仓异常订单定位。`,
+      '确认订单年份',
+      { confirmButtonText: '确认无误', cancelButtonText: '取消', type: 'warning' }
+    )
+    cloudOrderSaving.value = true
+    cloudOrderConfig.value = await confirmCloudOrderYear(currentCloudOrder.value.id, Number(cloudOrderYearInput.value))
+    cloudOrderEditingYear.value = false
+    ElMessage.success('订单年份已确认并生成安全订单引用')
+  } catch (err) {
+    if (err !== 'cancel') ElMessage.error('保存订单年份失败: ' + (err.message || ''))
+  } finally {
+    cloudOrderSaving.value = false
+  }
+}
+
+function cloudExceptionSourceLabel(source) {
+  const labels = {
+    billexception: '账单异常中心',
+    soExceptionCentre: '订单异常中心'
+  }
+  return labels[source] || '未知来源'
 }
 
 // 监听 Electron 主进程登录成功事件，自动刷新列表
@@ -1913,29 +2038,27 @@ async function handleForward() {
   // 加载关联销售订单信息
   forwardLoading.value = true
   forwardSalesData.value = null
+  currentCloudOrder.value = row
+  cloudOrderConfig.value = null
+  cloudOrderYearInput.value = null
+  cloudOrderEditingYear.value = false
   forwardDialogVisible.value = true
-  try {
-    const data = await fetchRelatedSales(row.id)
-    forwardSalesData.value = data
-  } catch (err) {
+  const [salesResult, cloudResult] = await Promise.allSettled([
+    fetchRelatedSales(row.id),
+    fetchCloudOrderConfiguration(row.id)
+  ])
+  if (salesResult.status === 'fulfilled') {
+    forwardSalesData.value = salesResult.value
+  } else {
     ElMessage.error('获取关联销售订单失败')
-  } finally {
-    forwardLoading.value = false
   }
-}
-
-// 点击"我已转发" — 更新采购类型为已转发
-async function handleConfirmForward() {
-  const row = currentReceiveRow.value
-  if (!row) return
-  try {
-    await updatePurchaseStatus(row.id, { status: 'forwarded' })
-    forwardDialogVisible.value = false
-    ElMessage.success('已标记为转发完成')
-    await loadData()
-  } catch (err) {
-    ElMessage.error('操作失败: ' + (err.message || ''))
+  if (cloudResult.status === 'fulfilled') {
+    cloudOrderConfig.value = cloudResult.value
+    cloudOrderYearInput.value = cloudResult.value?.orderYear || null
+  } else {
+    ElMessage.error('读取云仓订单配置失败: ' + (cloudResult.reason?.message || ''))
   }
+  forwardLoading.value = false
 }
 
 // 点击"入库"按钮 — 检查绑定状态
@@ -3687,5 +3810,67 @@ function handleImportDialogClose() {
   color: #909399;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.cloud-year-tag {
+  margin-left: 6px;
+}
+
+.cloud-order-alert {
+  margin-top: 14px;
+}
+
+.cloud-year-confirm {
+  margin-top: 14px;
+}
+
+.cloud-year-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cloud-exception-panel {
+  margin-top: 16px;
+}
+
+.cloud-exception-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.cloud-exception-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cloud-exception-item {
+  padding: 10px 12px;
+  border: 1px solid #f3d19e;
+  border-radius: 6px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.7;
+  background: #fdf6ec;
+}
+
+.cloud-exception-item span {
+  color: #909399;
+}
+
+.cloud-exception-source {
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+.forward-cloud-section {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #ebeef5;
 }
 </style>

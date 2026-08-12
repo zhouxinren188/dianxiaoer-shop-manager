@@ -4340,16 +4340,54 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
 })
 
 app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
+  let connection
   try {
     const ownerId = getOwnerId(req.user)
     const { platform_order_no } = req.body
     if (!platform_order_no) return res.json(fail('platform_order_no 不能为空'))
-    await pool.execute(
-      'UPDATE purchase_orders SET platform_order_no=?, status=? WHERE purchase_no=? AND owner_id=?',
-      [platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const [rows] = await connection.execute(
+      'SELECT id, platform_order_no FROM purchase_orders WHERE purchase_no=? AND owner_id=? FOR UPDATE',
+      [req.params.purchaseNo, ownerId]
     )
+    if (!rows.length) {
+      await connection.rollback()
+      return res.status(404).json(fail('采购订单不存在'))
+    }
+    const changed = String(rows[0].platform_order_no || '') !== String(platform_order_no)
+    await connection.execute(
+      `UPDATE purchase_orders
+          SET order_year = IF(? = 1, NULL, order_year),
+              order_year_source = IF(? = 1, '', order_year_source),
+              order_year_confirmed_by = IF(? = 1, NULL, order_year_confirmed_by),
+              order_year_confirmed_at = IF(? = 1, NULL, order_year_confirmed_at),
+              cloud_locator_version = cloud_locator_version + ?,
+              platform_order_no = ?, status = ?
+        WHERE purchase_no = ? AND owner_id = ?`,
+      [changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0,
+        platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
+    )
+    if (changed) {
+      await connection.execute(
+        `UPDATE cloud_order_workflows w
+         JOIN cloud_order_refs r ON r.order_ref_id = w.order_ref_id
+            SET w.state = 'review_required', w.review_reason = 'order_locator_changed',
+                w.review_required_at = NOW(3), w.next_check_at = NULL, w.updated_at = NOW(3)
+          WHERE r.owner_id = ? AND r.purchase_order_id = ? AND w.completed_at IS NULL`,
+        [ownerId, Number(rows[0].id)]
+      )
+    }
+    await connection.commit()
     res.json(ok(true))
-  } catch (err) { res.status(500).json(fail(err.message)) }
+  } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
+    res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
+  }
 })
 
 // 确认采购数量（采购单绑定后，用户确认实际采购数量）

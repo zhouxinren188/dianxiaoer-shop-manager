@@ -84,6 +84,7 @@ async function createRoutedTaskRecord(pool, {
   orderRefId,
   command,
   confirmation,
+  params = {},
   scheduledPoll = false,
   scheduledFor = null,
   now = new Date()
@@ -104,7 +105,7 @@ async function createRoutedTaskRecord(pool, {
 
     const [workflowRows] = await connection.execute(
       `SELECT workflow_id, order_ref_id, owner_id, state, state_version, poll_sequence,
-              current_task_id, target_machine_code, binding_version
+              current_task_id, target_machine_code, binding_version, locator_version
          FROM cloud_order_workflows
         WHERE workflow_id = ? AND order_ref_id = ?
         FOR UPDATE`,
@@ -119,6 +120,16 @@ async function createRoutedTaskRecord(pool, {
     const route = await readLockedMachineRoute(connection, ownerId)
     if (workflow.target_machine_code !== route.machineCode || Number(workflow.binding_version) !== route.bindingVersion) {
       throw serviceError('machine_binding_changed', '工作流创建后机器码绑定已变化，需要人工复核')
+    }
+    const [locatorRows] = await connection.execute(
+      `SELECT po.cloud_locator_version
+         FROM cloud_order_refs r
+         JOIN purchase_orders po ON po.id = r.purchase_order_id
+        WHERE r.order_ref_id = ? AND r.owner_id = ?`,
+      [orderRefId, ownerId]
+    )
+    if (!locatorRows.length || Number(workflow.locator_version) !== Number(locatorRows[0].cloud_locator_version)) {
+      throw serviceError('order_locator_changed', '订单定位信息已变化，需要人工复核')
     }
     assertRouteReady(route, normalizedCommand)
 
@@ -140,6 +151,7 @@ async function createRoutedTaskRecord(pool, {
       requestedBy,
       machineCode: route.machineCode,
       confirmation: serverConfirmation,
+      params,
       now
     })
     const pollSequence = scheduledPoll ? Number(workflow.poll_sequence || 0) + 1 : null
@@ -165,7 +177,7 @@ async function createRoutedTaskRecord(pool, {
         JSON.stringify(envelope.requested_by),
         route.machineCode,
         envelope.confirmation ? JSON.stringify(envelope.confirmation) : null,
-        JSON.stringify({}),
+        JSON.stringify(envelope.params),
         scheduledFor ? toMysqlDate(scheduledFor) : null,
         toMysqlDate(envelope.created_at),
         toMysqlDate(envelope.expires_at)

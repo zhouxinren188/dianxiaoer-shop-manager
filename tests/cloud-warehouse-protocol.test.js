@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import protocol from '../server/services/cloud-warehouse-protocol.js'
 import taskService from '../server/services/cloud-warehouse-task-service.js'
+import orderService from '../server/services/cloud-warehouse-order-service.js'
 
 const {
   MACHINE_CODE_PATTERN,
@@ -13,6 +14,12 @@ const {
 } = protocol
 
 const { EXECUTOR_TRANSPORT_ENABLED, assertRouteReady } = taskService
+const {
+  hasReliableOrderYear,
+  normalizeExceptionSummary,
+  normalizeOrderYear,
+  resolveTrustedOrderMapping
+} = orderService
 
 const baseTask = {
   orderRefId: 'ord_018f56b6-a6ee-7df1-9b83-cf7bf4d0d001',
@@ -84,6 +91,39 @@ describe('中央路由安全门槛', () => {
 })
 
 describe('云仓助手任务信封', () => {
+  it('异常查询 params 必须为空对象', () => {
+    expect(buildTaskEnvelope({ ...baseTask, command: 'exception.order.check', params: {} }).params).toEqual({})
+    expect(() => buildTaskEnvelope({
+      ...baseTask,
+      command: 'exception.order.check',
+      params: { platform_order_no: '123', order_year: 2026 }
+    })).toThrow('params 当前必须为空对象')
+  })
+
+  it('异常处理 params 只能包含不透明 exception_snapshot_ref', () => {
+    const task = buildTaskEnvelope({
+      ...baseTask,
+      command: 'exception.order.resolve',
+      params: { exception_snapshot_ref: 'exsnap-random-opaque-reference' },
+      confirmation: {
+        confirmed: true,
+        actor_id: 'user-001',
+        action: 'exception.order.resolve'
+      }
+    })
+    expect(task.params).toEqual({ exception_snapshot_ref: 'exsnap-random-opaque-reference' })
+    expect(() => buildTaskEnvelope({
+      ...baseTask,
+      command: 'exception.order.resolve',
+      params: { exception_snapshot_ref: 'exsnap-ok-value', internal_id: 'forbidden' },
+      confirmation: {
+        confirmed: true,
+        actor_id: 'user-001',
+        action: 'exception.order.resolve'
+      }
+    })).toThrow('params 只能包含 exception_snapshot_ref')
+  })
+
   it('只读查询使用10分钟有效期且 target 只有 machine_code', () => {
     const task = buildTaskEnvelope({
       ...baseTask,
@@ -167,6 +207,76 @@ describe('云仓助手任务信封', () => {
   it('拒绝固定白名单以外的命令', () => {
     expect(() => buildTaskEnvelope({ ...baseTask, command: 'shell.execute' }))
       .toThrow('命令不在云仓助手固定命令白名单中')
+  })
+})
+
+describe('订单定位与脱敏异常结果', () => {
+  it('只接受显式可靠来源的订单年份', () => {
+    expect(normalizeOrderYear(2026)).toBe(2026)
+    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'manual_confirmed' })).toBe(true)
+    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'platform_order_time' })).toBe(true)
+    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'created_at' })).toBe(false)
+    expect(() => normalizeOrderYear(1999)).toThrow('订单年份必须是')
+  })
+
+  it('页面结果只保留固定来源和脱敏字段', () => {
+    const summary = normalizeExceptionSummary({
+      task_id: 'task-check',
+      execution_status: 'succeeded',
+      result_redacted_json: {
+        exception_snapshot_ref: 'exsnap-safe',
+        exception_count: 1,
+        queried_at: '2026-08-13T01:00:00.000Z',
+        exceptions: [{
+          source: 'billexception',
+          exception_type_masked: '地址异常',
+          reason_masked: '收货信息***',
+          internal_exception_id: 'must-not-leak',
+          url: 'https://must-not-leak.example'
+        }]
+      }
+    })
+    expect(summary.exceptions).toEqual([{
+      source: 'billexception',
+      exceptionTypeMasked: '地址异常',
+      reasonMasked: '收货信息***'
+    }])
+    expect(summary.resultShapeValid).toBe(true)
+    expect(JSON.stringify(summary)).not.toContain('must-not-leak')
+  })
+
+  it('受信任映射仅向已领取任务的绑定执行器返回订单号和年份', async () => {
+    const pool = {
+      execute: async () => [[{
+        task_id: 'task-001',
+        order_ref_id: baseTask.orderRefId,
+        target_machine_code: baseTask.machineCode,
+        transport_status: 'leased',
+        claimed_executor_instance_id: 'executor-001',
+        expires_at: '2099-01-01T00:00:00.000Z',
+        lease_expires_at: '2099-01-01T00:00:00.000Z',
+        workflow_owner_id: 18,
+        ref_owner_id: 18,
+        order_owner_id: 18,
+        platform_order_no: '987654321',
+        order_year: 2026,
+        order_year_source: 'manual_confirmed',
+        cloud_locator_version: 2,
+        workflow_locator_version: 2,
+        bound_machine_code: baseTask.machineCode,
+        current_binding_version: 1,
+        workflow_binding_version: 1,
+        instance_machine_code: baseTask.machineCode,
+        instance_status: 'online',
+        instance_last_heartbeat_at: new Date().toISOString()
+      }]]
+    }
+    await expect(resolveTrustedOrderMapping(pool, {
+      taskId: 'task-001',
+      orderRefId: baseTask.orderRefId,
+      machineCode: baseTask.machineCode,
+      executorInstanceId: 'executor-001'
+    })).resolves.toEqual({ platform_order_no: '987654321', order_year: 2026 })
   })
 })
 
