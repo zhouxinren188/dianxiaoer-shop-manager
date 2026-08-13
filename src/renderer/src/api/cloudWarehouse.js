@@ -23,3 +23,14 @@ export function fetchCloudOrderConfiguration(purchaseOrderId) {
 export function prepareCloudOrderRef(purchaseOrderId) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/order-ref`, {})
 }
+
+export function startCloudExceptionCheck(purchaseOrderId) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/exception/check`, {})
+}
+
+export function startCloudExceptionResolve(purchaseOrderId, exceptionSnapshotRef) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/exception/resolve`, {
+    exception_snapshot_ref: exceptionSnapshotRef,
+    confirmed: true
+  })
+}

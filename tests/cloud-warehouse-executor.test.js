@@ -24,6 +24,7 @@ const {
   normalizeExecutorResponse,
   normalizeHeartbeatPayload,
   normalizeMappingPayload,
+  markExpiredReadTasksForReview,
   markExpiredWriteTasksForReview,
   recordHeartbeat,
   recordTaskResult,
@@ -322,6 +323,22 @@ describe('租约身份、订单解析与完整结果', () => {
     expect(calls.some(call => call.sql.includes('DELETE FROM cloud_order_write_locks'))).toBe(true)
   })
 
+  it('异常查询超过任务有效期后结束轮询并进入人工复核', async () => {
+    const calls = []
+    const connection = {
+      execute: vi.fn(async (sql, params) => {
+        calls.push({ sql, params })
+        if (sql.includes("command = 'exception.order.check'") && sql.includes('SELECT task_id')) {
+          return [[{ task_id: 'task-read-001', workflow_id: 'wf-read-001' }]]
+        }
+        return [{ affectedRows: 1 }]
+      })
+    }
+    await expect(markExpiredReadTasksForReview(connection, NOW)).resolves.toBe(1)
+    expect(calls.some(call => call.sql.includes("reason = 'task_expired'"))).toBe(true)
+    expect(calls.some(call => call.sql.includes("event_type") && call.sql.includes("'read_task_expired'"))).toBe(true)
+  })
+
   it('中央维护任务定期标记心跳超时并扫描过期写任务', async () => {
     const connection = {
       beginTransaction: vi.fn(async () => {}),
@@ -330,6 +347,7 @@ describe('租约身份、订单解析与完整结果', () => {
       release: vi.fn(),
       execute: vi.fn(async sql => {
         if (sql.includes('SELECT task_id, target_machine_code')) return [[]]
+        if (sql.includes("command = 'exception.order.check'") && sql.includes('SELECT task_id')) return [[]]
         if (sql.includes('UPDATE cloud_executor_instances')) return [{ affectedRows: 2 }]
         if (sql.includes('UPDATE cloud_executor_machines')) return [{ affectedRows: 1 }]
         return [{ affectedRows: 0 }]

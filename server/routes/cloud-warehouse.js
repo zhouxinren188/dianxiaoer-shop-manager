@@ -15,6 +15,10 @@ const {
   createEnrollment,
   revokeMachineAccess
 } = require('../services/cloud-warehouse-executor-auth-service')
+const {
+  startExceptionCheckTask,
+  startExceptionResolveTask
+} = require('../services/cloud-warehouse-task-service')
 
 function ok(data) {
   return { code: 0, data }
@@ -29,7 +33,9 @@ function fail(message, reason) {
 function statusForError(error) {
   if (['purchase_order_not_found'].includes(error?.code)) return 404
   if (['machine_binding_forbidden'].includes(error?.code)) return 403
-  if (['machine_code_in_use'].includes(error?.code)) return 409
+  if (['machine_code_in_use', 'workflow_task_active', 'precondition_not_met',
+    'machine_binding_changed', 'order_locator_changed'].includes(error?.code)) return 409
+  if (['machine_offline', 'capability_unavailable', 'login_environment_unavailable'].includes(error?.code)) return 503
   if (error?.code) return 400
   return 500
 }
@@ -261,6 +267,39 @@ module.exports = function createCloudWarehouseRouter(pool) {
     } catch (error) {
       console.error('[CloudWarehouse] 准备订单引用失败:', error.message)
       res.status(statusForError(error)).json(fail(error.message || '准备订单引用失败', error.code))
+    }
+  })
+
+  router.post('/orders/:purchaseOrderId/exception/check', async (req, res) => {
+    try {
+      assertExactKeys(req.body || {}, [], 'request', [])
+      res.json(ok(await startExceptionCheckTask(pool, {
+        user: req.user,
+        purchaseOrderId: req.params.purchaseOrderId
+      })))
+    } catch (error) {
+      console.error('[CloudWarehouse] 创建异常查询任务失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '创建异常查询任务失败', error.code))
+    }
+  })
+
+  router.post('/orders/:purchaseOrderId/exception/resolve', async (req, res) => {
+    try {
+      assertExactKeys(
+        req.body || {},
+        ['exception_snapshot_ref', 'confirmed'],
+        'request',
+        ['exception_snapshot_ref', 'confirmed']
+      )
+      res.json(ok(await startExceptionResolveTask(pool, {
+        user: req.user,
+        purchaseOrderId: req.params.purchaseOrderId,
+        exceptionSnapshotRef: req.body.exception_snapshot_ref,
+        confirmed: req.body.confirmed
+      })))
+    } catch (error) {
+      console.error('[CloudWarehouse] 创建异常处理任务失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '创建异常处理任务失败', error.code))
     }
   })
 

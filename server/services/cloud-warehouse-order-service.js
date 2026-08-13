@@ -142,12 +142,19 @@ async function ensureOrderRef(db, user, order) {
   const existing = await readOrderRef(db, ownerId, order.id)
   if (existing) return existing
   const orderRefId = createOrderRefId()
-  await db.execute(
-    `INSERT INTO cloud_order_refs
-       (order_ref_id, owner_id, purchase_order_id, created_by_user_id)
-     VALUES (?, ?, ?, ?)`,
-    [orderRefId, ownerId, Number(order.id), Number(user.id)]
-  )
+  try {
+    await db.execute(
+      `INSERT INTO cloud_order_refs
+         (order_ref_id, owner_id, purchase_order_id, created_by_user_id)
+       VALUES (?, ?, ?, ?)`,
+      [orderRefId, ownerId, Number(order.id), Number(user.id)]
+    )
+  } catch (error) {
+    if (error?.code !== 'ER_DUP_ENTRY') throw error
+    const concurrent = await readOrderRef(db, ownerId, order.id)
+    if (!concurrent) throw error
+    return concurrent
+  }
   return orderRefId
 }
 
@@ -176,9 +183,11 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
   }
 
   let exception = null
+  let exceptionResolution = null
+  let workflow = null
   if (orderRefId) {
     const [taskRows] = await pool.execute(
-      `SELECT t.task_id, t.execution_status, t.reason, t.message_redacted,
+      `SELECT t.task_id, t.transport_status, t.execution_status, t.reason, t.message_redacted,
               t.result_redacted_json, t.observed_status, t.completed_at
          FROM cloud_order_tasks t
          JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
@@ -189,6 +198,37 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
       [ownerId, orderRefId]
     )
     if (taskRows.length) exception = normalizeExceptionSummary(taskRows[0])
+
+    const [resolveRows] = await pool.execute(
+      `SELECT t.task_id, t.transport_status, t.execution_status, t.reason,
+              t.message_redacted, t.observed_status, t.completed_at
+         FROM cloud_order_tasks t
+         JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
+        WHERE w.owner_id = ? AND t.order_ref_id = ?
+          AND t.command = 'exception.order.resolve'
+        ORDER BY t.created_at DESC
+        LIMIT 1`,
+      [ownerId, orderRefId]
+    )
+    if (resolveRows.length) exceptionResolution = normalizeResolutionSummary(resolveRows[0])
+
+    const [workflowRows] = await pool.execute(
+      `SELECT w.workflow_id, w.state, w.current_task_id, w.last_observed_status,
+              w.last_observed_at, w.last_reason, w.last_message_redacted,
+              w.review_reason, w.review_required_at, w.created_at, w.updated_at,
+              t.command AS current_task_command,
+              t.transport_status AS current_transport_status,
+              t.execution_status AS current_execution_status,
+              t.created_at AS current_task_created_at,
+              t.expires_at AS current_task_expires_at
+         FROM cloud_order_workflows w
+         LEFT JOIN cloud_order_tasks t ON t.task_id = w.current_task_id
+        WHERE w.owner_id = ? AND w.order_ref_id = ?
+        ORDER BY w.created_at DESC
+        LIMIT 1`,
+      [ownerId, orderRefId]
+    )
+    if (workflowRows.length) workflow = normalizeWorkflowSummary(workflowRows[0])
   }
   return {
     purchaseOrderId: Number(order.id),
@@ -204,6 +244,8 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     machineBound: bindingRows.length > 0,
     orderRefId,
     exception,
+    exceptionResolution,
+    workflow,
     transportEnabled: true,
     wmsOrderEntered: false
   }
@@ -244,7 +286,8 @@ function normalizeExceptionSummary(task) {
   const resultShapeValid = sourcesValid && countValid && rawExceptions.length <= 100
   return {
     taskId: task.task_id,
-    status: task.execution_status || '',
+    transportStatus: task.transport_status || '',
+    status: task.execution_status || task.transport_status || '',
     reason: task.reason || '',
     message: task.message_redacted || '',
     exceptionSnapshotRef: String(result.exception_snapshot_ref || ''),
@@ -252,6 +295,41 @@ function normalizeExceptionSummary(task) {
     exceptionCount: countValid ? declaredCount : exceptions.length,
     queriedAt: result.queried_at || task.completed_at || null,
     exceptions
+  }
+}
+
+function normalizeResolutionSummary(task) {
+  return {
+    taskId: task.task_id,
+    transportStatus: task.transport_status || '',
+    status: task.execution_status || task.transport_status || '',
+    reason: task.reason || '',
+    message: task.message_redacted || '',
+    observedStatus: task.observed_status || '',
+    completedAt: task.completed_at || null
+  }
+}
+
+function normalizeWorkflowSummary(row) {
+  return {
+    workflowId: row.workflow_id,
+    state: row.state || '',
+    currentTask: row.current_task_id ? {
+      taskId: row.current_task_id,
+      command: row.current_task_command || '',
+      transportStatus: row.current_transport_status || '',
+      executionStatus: row.current_execution_status || '',
+      createdAt: row.current_task_created_at || null,
+      expiresAt: row.current_task_expires_at || null
+    } : null,
+    lastObservedStatus: row.last_observed_status || '',
+    lastObservedAt: row.last_observed_at || null,
+    lastReason: row.last_reason || '',
+    lastMessage: row.last_message_redacted || '',
+    reviewReason: row.review_reason || '',
+    reviewRequiredAt: row.review_required_at || null,
+    createdAt: row.created_at || null,
+    updatedAt: row.updated_at || null
   }
 }
 
@@ -345,6 +423,8 @@ module.exports = {
   assertOrderLocatorReady,
   getOrderConfiguration,
   normalizeExceptionSummary,
+  normalizeResolutionSummary,
+  normalizeWorkflowSummary,
   normalizeOrderYear,
   prepareOrderRef,
   readAccessiblePurchaseOrder,

@@ -13,10 +13,16 @@ const {
   validateSuccessfulWriteResponse
 } = protocol
 
-const { EXECUTOR_TRANSPORT_ENABLED, assertRouteReady } = taskService
+const {
+  EXECUTOR_TRANSPORT_ENABLED,
+  assertRouteReady,
+  findExceptionSnapshotWorkflow
+} = taskService
 const {
   normalizeExceptionSummary,
   normalizeOrderYear,
+  normalizeResolutionSummary,
+  normalizeWorkflowSummary,
   readRelatedSalesLocator,
   resolveTrustedOrderMapping
 } = orderService
@@ -268,6 +274,65 @@ describe('订单定位与脱敏异常结果', () => {
     }])
     expect(summary.resultShapeValid).toBe(true)
     expect(JSON.stringify(summary)).not.toContain('must-not-leak')
+  })
+
+  it('异常处理只能使用当前订单十分钟内的成功异常快照', async () => {
+    const now = new Date('2026-08-13T02:00:00.000Z')
+    const pool = {
+      execute: async () => [[{
+        workflow_id: 'wf-safe',
+        state: 'exception_found',
+        current_task_id: null,
+        task_id: 'task-check',
+        execution_status: 'succeeded',
+        completed_at: '2026-08-13T01:55:00.000Z',
+        result_redacted_json: {
+          exception_snapshot_ref: 'exsnap-safe-current-order',
+          exception_count: 2
+        }
+      }]]
+    }
+    await expect(findExceptionSnapshotWorkflow(
+      pool,
+      18,
+      baseTask.orderRefId,
+      'exsnap-safe-current-order',
+      now
+    )).resolves.toMatchObject({ workflow_id: 'wf-safe', task_id: 'task-check' })
+    await expect(findExceptionSnapshotWorkflow(
+      pool,
+      18,
+      baseTask.orderRefId,
+      'exsnap-other-order',
+      now
+    )).rejects.toMatchObject({ code: 'precondition_not_met' })
+  })
+
+  it('页面工作流摘要不暴露机器码、定位参数或执行器凭据', () => {
+    const workflow = normalizeWorkflowSummary({
+      workflow_id: 'wf-safe',
+      state: 'checking_exception',
+      current_task_id: 'task-safe',
+      current_task_command: 'exception.order.check',
+      current_transport_status: 'leased',
+      current_execution_status: 'executing',
+      target_machine_code: 'YC-7F3K-92MX',
+      lease_id: 'must-not-leak'
+    })
+    const resolution = normalizeResolutionSummary({
+      task_id: 'task-resolve',
+      transport_status: 'completed',
+      execution_status: 'succeeded',
+      observed_status: 'waiting_arrival'
+    })
+    expect(workflow.currentTask).toMatchObject({
+      taskId: 'task-safe',
+      command: 'exception.order.check',
+      executionStatus: 'executing'
+    })
+    expect(resolution.observedStatus).toBe('waiting_arrival')
+    expect(JSON.stringify({ workflow, resolution })).not.toContain('YC-7F3K-92MX')
+    expect(JSON.stringify({ workflow, resolution })).not.toContain('must-not-leak')
   })
 
   it('受信任映射仅向已领取任务的绑定执行器返回订单号和年份', async () => {

@@ -87,6 +87,42 @@ async function markExpiredWriteTasksForReview(connection, machineCode, now) {
   return expiredRows.length
 }
 
+async function markExpiredReadTasksForReview(connection, now) {
+  const [expiredRows] = await connection.execute(
+    `SELECT task_id, workflow_id
+       FROM cloud_order_tasks
+      WHERE command = 'exception.order.check'
+        AND transport_status IN ('pending', 'leased', 'executing')
+        AND expires_at <= ?
+      FOR UPDATE`,
+    [toMysqlDate(now)]
+  )
+  for (const task of expiredRows) {
+    await connection.execute(
+      `UPDATE cloud_order_tasks
+          SET transport_status = 'review_required', execution_status = 'review_required',
+              reason = 'task_expired', completed_at = COALESCE(completed_at, ?)
+        WHERE task_id = ?`,
+      [toMysqlDate(now), task.task_id]
+    )
+    await connection.execute(
+      `UPDATE cloud_order_workflows
+          SET state = 'review_required', state_version = state_version + 1,
+              current_task_id = NULL, review_reason = 'task_expired',
+              review_required_at = ?, updated_at = ?
+        WHERE workflow_id = ? AND current_task_id = ?`,
+      [toMysqlDate(now), toMysqlDate(now), task.workflow_id, task.task_id]
+    )
+    await connection.execute(
+      `INSERT INTO cloud_task_events
+         (workflow_id, task_id, event_type, actor_type, actor_id, data_redacted_json)
+       VALUES (?, ?, 'read_task_expired', 'system', 'central-service', ?)`,
+      [task.workflow_id, task.task_id, JSON.stringify({ reason: 'task_expired' })]
+    )
+  }
+  return expiredRows.length
+}
+
 async function runExecutorMaintenance(pool, now = new Date()) {
   const staleBefore = new Date(now.getTime() - OFFLINE_AFTER_SECONDS * 1000)
   let connection
@@ -106,6 +142,7 @@ async function runExecutorMaintenance(pool, now = new Date()) {
     for (const machineCode of new Set(machineRows.map(row => row.machine_code))) {
       reviewedTaskCount += await markExpiredWriteTasksForReview(connection, machineCode, now)
     }
+    reviewedTaskCount += await markExpiredReadTasksForReview(connection, now)
     const [instanceResult] = await connection.execute(
       `UPDATE cloud_executor_instances
           SET status = 'offline'
@@ -994,6 +1031,7 @@ module.exports = {
   normalizeHeartbeatPayload,
   normalizeMappingPayload,
   markExpiredWriteTasksForReview,
+  markExpiredReadTasksForReview,
   recordHeartbeat,
   recordTaskResult,
   redactMessage,

@@ -2,11 +2,15 @@ const {
   WRITE_COMMANDS,
   assertCommand,
   buildTaskEnvelope,
+  createWorkflowId,
   fingerprintTaskEnvelope,
   getTenantOwnerId,
   normalizeCapabilities
 } = require('./cloud-warehouse-protocol')
-const { assertOrderLocatorReady } = require('./cloud-warehouse-order-service')
+const {
+  assertOrderLocatorReady,
+  prepareOrderRef
+} = require('./cloud-warehouse-order-service')
 
 const ENABLED_TASK_COMMANDS = new Set([
   'exception.order.check',
@@ -97,7 +101,8 @@ async function createRoutedTaskRecord(pool, {
   params = {},
   scheduledPoll = false,
   scheduledFor = null,
-  now = new Date()
+  now = new Date(),
+  connection: providedConnection = null
 }) {
   if (!EXECUTOR_TRANSPORT_ENABLED) {
     throw serviceError('transport_disabled', '云仓助手中央传输尚未启用')
@@ -108,10 +113,13 @@ async function createRoutedTaskRecord(pool, {
     throw serviceError('scheduled_poll_command_invalid', '30秒可恢复调度只允许创建到仓查询任务')
   }
 
-  let connection
+  const ownsTransaction = !providedConnection
+  let connection = providedConnection
   try {
-    connection = await pool.getConnection()
-    await connection.beginTransaction()
+    if (ownsTransaction) {
+      connection = await pool.getConnection()
+      await connection.beginTransaction()
+    }
 
     const [workflowRows] = await connection.execute(
       `SELECT workflow_id, order_ref_id, owner_id, state, state_version, poll_sequence,
@@ -227,8 +235,212 @@ async function createRoutedTaskRecord(pool, {
       })]
     )
 
-    await connection.commit()
+    if (ownsTransaction) await connection.commit()
     return envelope
+  } catch (error) {
+    if (connection && ownsTransaction) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
+    throw error
+  } finally {
+    if (connection && ownsTransaction) connection.release()
+  }
+}
+
+async function createExceptionWorkflow(pool, {
+  user,
+  orderRefId,
+  now = new Date()
+}) {
+  const ownerId = getTenantOwnerId(user)
+  const workflowId = createWorkflowId()
+  let connection
+  try {
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const [locatorRows] = await connection.execute(
+      `SELECT po.cloud_locator_version, so.order_id AS platform_order_no,
+              YEAR(so.order_time) AS order_year
+         FROM cloud_order_refs r
+         JOIN purchase_orders po ON po.id = r.purchase_order_id
+         JOIN sales_orders so ON (
+                (COALESCE(po.sales_order_id, 0) > 0 AND so.id = po.sales_order_id)
+             OR (COALESCE(po.sales_order_id, 0) = 0 AND so.order_id = po.sales_order_no)
+         )
+         JOIN stores s ON s.id = so.store_id AND s.owner_id = po.owner_id
+        WHERE r.order_ref_id = ? AND r.owner_id = ?
+        FOR UPDATE`,
+      [orderRefId, ownerId]
+    )
+    if (locatorRows.length !== 1) throw serviceError('order_locator_changed', '订单定位信息已变化，需要人工复核')
+    assertOrderLocatorReady(locatorRows[0])
+
+    const [activeRows] = await connection.execute(
+      `SELECT w.workflow_id, w.state, w.current_task_id, t.command AS current_task_command
+         FROM cloud_order_workflows w
+         LEFT JOIN cloud_order_tasks t ON t.task_id = w.current_task_id
+        WHERE w.owner_id = ? AND w.order_ref_id = ?
+        ORDER BY w.created_at DESC
+        LIMIT 1
+        FOR UPDATE`,
+      [ownerId, orderRefId]
+    )
+    const active = activeRows[0]
+    if (active?.current_task_id) {
+      if (active.current_task_command !== 'exception.order.check') {
+        throw serviceError('workflow_task_active', '当前订单已有云仓任务正在执行')
+      }
+      await connection.commit()
+      return {
+        workflowId: active.workflow_id,
+        task: { task_id: active.current_task_id },
+        state: active.state,
+        reused: true
+      }
+    }
+
+    const route = await readLockedMachineRoute(connection, ownerId)
+    assertRouteReady(route, 'exception.order.check')
+    await connection.execute(
+      `INSERT INTO cloud_order_workflows
+         (workflow_id, order_ref_id, owner_id, created_by_user_id, state,
+          target_machine_code, binding_version, locator_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'checking_exception', ?, ?, ?, ?, ?)`,
+      [
+        workflowId,
+        orderRefId,
+        ownerId,
+        Number(user.id),
+        route.machineCode,
+        route.bindingVersion,
+        Number(locatorRows[0].cloud_locator_version || 1),
+        toMysqlDate(now),
+        toMysqlDate(now)
+      ]
+    )
+    const task = await createRoutedTaskRecord(pool, {
+      user,
+      workflowId,
+      orderRefId,
+      command: 'exception.order.check',
+      params: {},
+      now,
+      connection
+    })
+    await connection.commit()
+    return { workflowId, task, state: 'checking_exception', reused: false }
+  } catch (error) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
+    throw error
+  } finally {
+    if (connection) connection.release()
+  }
+}
+
+async function startExceptionCheckTask(pool, {
+  user,
+  purchaseOrderId,
+  now = new Date()
+}) {
+  const configuration = await prepareOrderRef(pool, user, purchaseOrderId)
+  const created = await createExceptionWorkflow(pool, {
+    user,
+    orderRefId: configuration.orderRefId,
+    now
+  })
+  return {
+    workflowId: created.workflowId,
+    taskId: created.task.task_id,
+    state: created.state,
+    reused: created.reused
+  }
+}
+
+function readSnapshotRef(result) {
+  const parsed = parseJsonObject(result)
+  return String(parsed.exception_snapshot_ref || '').trim()
+}
+
+async function findExceptionSnapshotWorkflow(db, ownerId, orderRefId, snapshotRef, now, { forUpdate = false } = {}) {
+  const lock = forUpdate ? ' FOR UPDATE' : ''
+  const [rows] = await db.execute(
+    `SELECT w.workflow_id, w.state, w.current_task_id,
+            t.task_id, t.execution_status, t.completed_at, t.result_redacted_json
+       FROM cloud_order_workflows w
+       JOIN cloud_order_tasks t ON t.workflow_id = w.workflow_id
+      WHERE w.owner_id = ? AND w.order_ref_id = ?
+        AND t.command = 'exception.order.check'
+      ORDER BY t.created_at DESC
+      LIMIT 1${lock}`,
+    [ownerId, orderRefId]
+  )
+  const matched = rows[0]
+  if (!matched || readSnapshotRef(matched.result_redacted_json) !== snapshotRef ||
+      matched.execution_status !== 'succeeded') {
+    throw serviceError('precondition_not_met', '异常快照不是当前订单的最新成功查询结果')
+  }
+  if (matched.state !== 'exception_found') {
+    throw serviceError('precondition_not_met', '当前工作流不处于可处理异常状态')
+  }
+  if (matched.current_task_id) throw serviceError('workflow_task_active', '当前订单已有云仓任务正在执行')
+  const result = parseJsonObject(matched.result_redacted_json)
+  if (!Number.isInteger(Number(result.exception_count)) || Number(result.exception_count) <= 0) {
+    throw serviceError('precondition_not_met', '该异常快照没有可处理的异常记录')
+  }
+  const completedAt = new Date(matched.completed_at).getTime()
+  if (!Number.isFinite(completedAt) || now.getTime() - completedAt > 10 * 60 * 1000) {
+    throw serviceError('precondition_not_met', '异常快照已超过10分钟，请重新查询')
+  }
+  return matched
+}
+
+async function startExceptionResolveTask(pool, {
+  user,
+  purchaseOrderId,
+  exceptionSnapshotRef,
+  confirmed,
+  now = new Date()
+}) {
+  if (confirmed !== true) throw serviceError('confirmation_required', '处理异常前需要人工确认')
+  const snapshotRef = String(exceptionSnapshotRef || '').trim()
+  if (!snapshotRef) throw serviceError('adapter_params_invalid', 'exception_snapshot_ref 不能为空')
+  const configuration = await prepareOrderRef(pool, user, purchaseOrderId)
+  const ownerId = getTenantOwnerId(user)
+  let connection
+  try {
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    await connection.execute(
+      'SELECT order_ref_id FROM cloud_order_refs WHERE owner_id = ? AND order_ref_id = ? FOR UPDATE',
+      [ownerId, configuration.orderRefId]
+    )
+    const workflow = await findExceptionSnapshotWorkflow(
+      connection,
+      ownerId,
+      configuration.orderRefId,
+      snapshotRef,
+      now,
+      { forUpdate: true }
+    )
+    const task = await createRoutedTaskRecord(pool, {
+      user,
+      workflowId: workflow.workflow_id,
+      orderRefId: configuration.orderRefId,
+      command: 'exception.order.resolve',
+      confirmation: { confirmed: true },
+      params: { exception_snapshot_ref: snapshotRef },
+      now,
+      connection
+    })
+    await connection.commit()
+    return {
+      workflowId: workflow.workflow_id,
+      taskId: task.task_id,
+      state: workflow.state,
+      reused: false
+    }
   } catch (error) {
     if (connection) {
       try { await connection.rollback() } catch { /* ignore rollback failure */ }
@@ -244,6 +456,9 @@ module.exports = {
   EXECUTOR_TRANSPORT_ENABLED,
   assertRouteReady,
   createRoutedTaskRecord,
+  findExceptionSnapshotWorkflow,
   readLockedMachineRoute,
+  startExceptionCheckTask,
+  startExceptionResolveTask,
   toMysqlDate
 }
