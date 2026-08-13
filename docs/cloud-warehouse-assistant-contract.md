@@ -101,7 +101,6 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 |---|---|---|
 | `GET` | `/api/cloud-warehouse/orders/:purchaseOrderId/configuration` | 查询可见采购单的定位状态及最新脱敏异常结果 |
 | `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-ref` | 定位字段就绪后生成或读取不透明订单引用 |
-| `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/manual-forward` | 仅未绑定云仓助手的主账号体系可在人工完成发货后手工标记 `forwarded`；服务端会再次校验绑定状态 |
 
 主账号只能解析本体系订单；子账号还必须通过现有采购账号授权或该采购单创建归属校验。执行器侧映射实现为受信任内部服务，并额外校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
 
@@ -439,6 +438,8 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 - `exception.order.resolve` → `waiting_arrival`
 - `warehouse.order.print` → `printed_unshipped`
 - `warehouse.order.outbound` → `shipped`
+
+`warehouse.order.outbound`只有在云仓助手回传 `status: succeeded`、`delivery.business_confirmed: true`、`verification.confirmed: true`且`verification.observed_status: shipped`全部成立后，中央服务才在同一事务中把对应采购单状态更新为 `forwarded`。其他任何响应均不得修改采购单状态，并进入 `review_required`。原有“我已转发”按钮是独立的人工兜底入口，不依赖云仓助手绑定或传输接口。
 
 ### 5.7 错误与重试
 

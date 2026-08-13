@@ -510,7 +510,6 @@
       </div>
       <template #footer>
         <el-button
-          v-if="cloudOrderConfig?.manualForwardAllowed"
           type="primary"
           :loading="manualForwardSaving"
           @click="handleManualForward"
@@ -1148,8 +1147,7 @@ import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
-  fetchCloudOrderConfiguration,
-  markCloudOrderManuallyForwarded
+  fetchCloudOrderConfiguration
 } from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
@@ -2023,10 +2021,10 @@ async function handleForward() {
   forwardLoading.value = false
 }
 
-// 未绑定云仓助手的用户在线下完成发货后，可手工标记采购单已转发。
+// 原有手工兜底流程独立于云仓助手：用户在线下完成发货后标记采购单已转发。
 async function handleManualForward() {
   const row = currentReceiveRow.value
-  if (!row || !cloudOrderConfig.value?.manualForwardAllowed) return
+  if (!row) return
   try {
     await ElMessageBox.confirm(
       '请确认该订单已经通过其他方式完成发货。此操作只标记店小二中的采购单状态，不会调用云仓助手或平台发货接口。',
@@ -2034,7 +2032,7 @@ async function handleManualForward() {
       { confirmButtonText: '确认已转发', cancelButtonText: '取消', type: 'warning' }
     )
     manualForwardSaving.value = true
-    await markCloudOrderManuallyForwarded(row.id)
+    await updatePurchaseStatus(row.id, { status: 'forwarded' })
     forwardDialogVisible.value = false
     ElMessage.success('已手工标记为转发完成')
     await loadData()
