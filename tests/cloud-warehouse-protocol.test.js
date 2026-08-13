@@ -286,6 +286,7 @@ describe('订单定位与脱敏异常结果', () => {
         task_id: 'task-check',
         execution_status: 'succeeded',
         completed_at: '2026-08-13T01:55:00.000Z',
+        result_recorded_at: '2026-08-13T01:55:00.000Z',
         result_redacted_json: {
           exception_snapshot_ref: 'exsnap-safe-current-order',
           exception_count: 2
@@ -305,6 +306,31 @@ describe('订单定位与脱敏异常结果', () => {
       baseTask.orderRefId,
       'exsnap-other-order',
       now
+    )).rejects.toMatchObject({ code: 'precondition_not_met' })
+  })
+
+  it('异常快照有效期按中央服务收件时间计算，不信任执行器完成时间', async () => {
+    const pool = {
+      execute: async () => [[{
+        workflow_id: 'wf-expired',
+        state: 'exception_found',
+        current_task_id: null,
+        task_id: 'task-check-expired',
+        execution_status: 'succeeded',
+        completed_at: '2026-08-13T02:04:00.000Z',
+        result_recorded_at: '2026-08-13T01:49:59.000Z',
+        result_redacted_json: {
+          exception_snapshot_ref: 'exsnap-expired-by-server-time',
+          exception_count: 1
+        }
+      }]]
+    }
+    await expect(findExceptionSnapshotWorkflow(
+      pool,
+      18,
+      baseTask.orderRefId,
+      'exsnap-expired-by-server-time',
+      new Date('2026-08-13T02:00:00.000Z')
     )).rejects.toMatchObject({ code: 'precondition_not_met' })
   })
 

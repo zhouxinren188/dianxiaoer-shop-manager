@@ -367,7 +367,8 @@ async function findExceptionSnapshotWorkflow(db, ownerId, orderRefId, snapshotRe
   const lock = forUpdate ? ' FOR UPDATE' : ''
   const [rows] = await db.execute(
     `SELECT w.workflow_id, w.state, w.current_task_id,
-            t.task_id, t.execution_status, t.completed_at, t.result_redacted_json
+            t.task_id, t.execution_status, t.completed_at, t.result_recorded_at,
+            t.result_redacted_json
        FROM cloud_order_workflows w
        JOIN cloud_order_tasks t ON t.workflow_id = w.workflow_id
       WHERE w.owner_id = ? AND w.order_ref_id = ?
@@ -389,8 +390,9 @@ async function findExceptionSnapshotWorkflow(db, ownerId, orderRefId, snapshotRe
   if (!Number.isInteger(Number(result.exception_count)) || Number(result.exception_count) <= 0) {
     throw serviceError('precondition_not_met', '该异常快照没有可处理的异常记录')
   }
-  const completedAt = new Date(matched.completed_at).getTime()
-  if (!Number.isFinite(completedAt) || now.getTime() - completedAt > 10 * 60 * 1000) {
+  // 快照有效期以中央服务收到回执的时间为准，不能信任执行器可存在时钟偏差的 completed_at。
+  const recordedAt = new Date(matched.result_recorded_at).getTime()
+  if (!Number.isFinite(recordedAt) || recordedAt > now.getTime() || now.getTime() - recordedAt > 10 * 60 * 1000) {
     throw serviceError('precondition_not_met', '异常快照已超过10分钟，请重新查询')
   }
   return matched
