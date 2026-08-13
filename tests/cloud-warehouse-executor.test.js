@@ -13,7 +13,8 @@ const {
   enrollExecutor,
   hashOpaqueSecret,
   issueExecutorToken,
-  safeHashEqual
+  safeHashEqual,
+  toMysqlDate
 } = authService
 
 const {
@@ -134,6 +135,11 @@ describe('执行器独立认证', () => {
     expect(safeHashEqual('abc', 'abd')).toBe(false)
     expect(() => assertExactKeys({ allowed: true, cookie: 'forbidden' }, ['allowed'], 'request'))
       .toThrow('包含未知字段')
+  })
+
+  it('serializes MySQL DATETIME in server local time so enrollment codes stay valid', () => {
+    const date = new Date(2026, 7, 13, 9, 10, 11, 123)
+    expect(toMysqlDate(date)).toBe('2026-08-13 09:10:11.123')
   })
 })
 

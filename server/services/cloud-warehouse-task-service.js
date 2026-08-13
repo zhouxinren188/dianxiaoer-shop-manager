@@ -34,7 +34,10 @@ function parseJsonObject(value) {
 function toMysqlDate(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) throw serviceError('task_time_invalid', '任务时间无效')
-  return date.toISOString().replace('T', ' ').replace('Z', '')
+  const pad = number => String(number).padStart(2, '0')
+  const milliseconds = String(date.getMilliseconds()).padStart(3, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${milliseconds}`
 }
 
 async function readLockedMachineRoute(connection, ownerId) {

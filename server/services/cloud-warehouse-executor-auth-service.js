@@ -55,7 +55,10 @@ function parseIsoTime(value, field) {
 function toMysqlDate(value) {
   const date = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(date.getTime())) throw serviceError('invalid_request', '时间无效')
-  return date.toISOString().replace('T', ' ').replace('Z', '')
+  const pad = number => String(number).padStart(2, '0')
+  const milliseconds = String(date.getMilliseconds()).padStart(3, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${milliseconds}`
 }
 
 function toIsoTime(value) {
