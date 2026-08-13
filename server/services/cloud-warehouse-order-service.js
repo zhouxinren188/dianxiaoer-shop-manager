@@ -50,7 +50,7 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
     ;[rows] = await db.execute(
       `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
               po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
-              po.cloud_locator_version
+              po.purchase_type, po.status, po.cloud_locator_version
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?${lock}`,
       [id, ownerId]
@@ -59,7 +59,7 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
     ;[rows] = await db.execute(
       `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
               po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
-              po.cloud_locator_version
+              po.purchase_type, po.status, po.cloud_locator_version
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?
           AND (EXISTS (
@@ -162,6 +162,10 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
   const order = await readAccessiblePurchaseOrder(pool, user, purchaseOrderId)
   const ownerId = getTenantOwnerId(user)
   const orderRefId = await readOrderRef(pool, ownerId, order.id)
+  const [bindingRows] = await pool.execute(
+    'SELECT 1 FROM cloud_machine_bindings WHERE owner_id = ? LIMIT 1',
+    [ownerId]
+  )
   let locator = null
   let locatorError = null
   try {
@@ -197,9 +201,49 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     locatorReady: !!locator,
     locatorReason: locatorError?.code || '',
     locatorMessage: locatorError?.message || '',
+    machineBound: bindingRows.length > 0,
+    manualForwardAllowed: bindingRows.length === 0 && order.purchase_type === 'warehouse',
     orderRefId,
     exception,
     transportEnabled: false
+  }
+}
+
+async function markManualForwarded(pool, user, purchaseOrderId) {
+  let connection
+  try {
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const order = await readAccessiblePurchaseOrder(connection, user, purchaseOrderId, { forUpdate: true })
+    if (order.purchase_type !== 'warehouse') {
+      throw serviceError('manual_forward_not_applicable', '只有仓库转发采购单可以手工标记已转发')
+    }
+    const [bindingRows] = await connection.execute(
+      'SELECT machine_code FROM cloud_machine_bindings WHERE owner_id = ? FOR UPDATE',
+      [getTenantOwnerId(user)]
+    )
+    if (bindingRows.length > 0) {
+      throw serviceError('manual_forward_requires_cloud_workflow', '当前主账号体系已绑定云仓助手，请通过云仓状态复验流程完成发货')
+    }
+    if (order.status !== 'forwarded') {
+      await connection.execute(
+        "UPDATE purchase_orders SET status = 'forwarded', updated_at = NOW() WHERE id = ? AND owner_id = ?",
+        [Number(order.id), getTenantOwnerId(user)]
+      )
+    }
+    await connection.commit()
+    return {
+      purchaseOrderId: Number(order.id),
+      status: 'forwarded',
+      manual: true
+    }
+  } catch (error) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
+    throw error
+  } finally {
+    if (connection) connection.release()
   }
 }
 
@@ -327,6 +371,7 @@ async function resolveTrustedOrderMapping(pool, {
 module.exports = {
   assertOrderLocatorReady,
   getOrderConfiguration,
+  markManualForwarded,
   normalizeExceptionSummary,
   normalizeOrderYear,
   prepareOrderRef,

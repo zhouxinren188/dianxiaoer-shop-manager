@@ -15,6 +15,7 @@ const {
 
 const { EXECUTOR_TRANSPORT_ENABLED, assertRouteReady } = taskService
 const {
+  markManualForwarded,
   normalizeExceptionSummary,
   normalizeOrderYear,
   readRelatedSalesLocator,
@@ -308,6 +309,59 @@ describe('订单定位与脱敏异常结果', () => {
     })
     expect(mapping).toEqual({ platform_order_no: '987654321', order_year: 2026 })
     expect(Object.keys(mapping).sort()).toEqual(['order_year', 'platform_order_no'])
+  })
+})
+
+describe('未绑定云仓助手时的手工转发兜底', () => {
+  function createManualForwardPool(bindingRows = []) {
+    const updates = []
+    const connection = {
+      beginTransaction: async () => {},
+      commit: async () => {},
+      rollback: async () => {},
+      release: () => {},
+      execute: async (sql, params) => {
+        if (sql.includes('FROM purchase_orders po')) {
+          return [[{
+            id: 66,
+            owner_id: 18,
+            purchase_no: 'A66',
+            platform: 'taobao',
+            account_id: null,
+            created_by: 18,
+            sales_order_id: 321,
+            sales_order_no: '3588401003348721',
+            purchase_type: 'warehouse',
+            status: 'ordered',
+            cloud_locator_version: 1
+          }]]
+        }
+        if (sql.includes('FROM cloud_machine_bindings')) return [bindingRows]
+        if (sql.includes("SET status = 'forwarded'")) {
+          updates.push(params)
+          return [{ affectedRows: 1 }]
+        }
+        throw new Error(`unexpected sql: ${sql}`)
+      }
+    }
+    return { pool: { getConnection: async () => connection }, updates }
+  }
+
+  it('未绑定机器码时允许用户确认后手工标记已转发', async () => {
+    const { pool, updates } = createManualForwardPool()
+    await expect(markManualForwarded(pool, { id: 18, user_type: 'master' }, 66)).resolves.toEqual({
+      purchaseOrderId: 66,
+      status: 'forwarded',
+      manual: true
+    })
+    expect(updates).toEqual([[66, 18]])
+  })
+
+  it('已绑定云仓助手时拒绝绕过云仓复验流程', async () => {
+    const { pool, updates } = createManualForwardPool([{ machine_code: 'YC-7F3K-92MX' }])
+    await expect(markManualForwarded(pool, { id: 18, user_type: 'master' }, 66))
+      .rejects.toMatchObject({ code: 'manual_forward_requires_cloud_workflow' })
+    expect(updates).toHaveLength(0)
   })
 })
 

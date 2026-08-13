@@ -19,3 +19,7 @@ export function fetchCloudOrderConfiguration(purchaseOrderId) {
 export function prepareCloudOrderRef(purchaseOrderId) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/order-ref`, {})
 }
+
+export function markCloudOrderManuallyForwarded(purchaseOrderId) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/manual-forward`, {})
+}

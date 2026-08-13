@@ -101,6 +101,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 |---|---|---|
 | `GET` | `/api/cloud-warehouse/orders/:purchaseOrderId/configuration` | 查询可见采购单的定位状态及最新脱敏异常结果 |
 | `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-ref` | 定位字段就绪后生成或读取不透明订单引用 |
+| `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/manual-forward` | 仅未绑定云仓助手的主账号体系可在人工完成发货后手工标记 `forwarded`；服务端会再次校验绑定状态 |
 
 主账号只能解析本体系订单；子账号还必须通过现有采购账号授权或该采购单创建归属校验。执行器侧映射实现为受信任内部服务，并额外校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
 

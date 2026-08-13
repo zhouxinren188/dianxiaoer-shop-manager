@@ -509,9 +509,15 @@
         </div>
       </div>
       <template #footer>
+        <el-button
+          v-if="cloudOrderConfig?.manualForwardAllowed"
+          type="primary"
+          :loading="manualForwardSaving"
+          @click="handleManualForward"
+        >我已转发</el-button>
         <el-button @click="forwardDialogVisible = false">关闭</el-button>
-        <el-button type="primary" disabled>查询异常</el-button>
-        <el-button v-if="cloudOrderConfig?.exception?.status === 'succeeded' && cloudOrderConfig?.exception?.resultShapeValid && cloudOrderConfig?.exception?.exceptionCount > 0" type="danger" disabled>处理异常</el-button>
+        <el-button v-if="cloudOrderConfig?.machineBound" type="primary" disabled>查询异常</el-button>
+        <el-button v-if="cloudOrderConfig?.machineBound && cloudOrderConfig?.exception?.status === 'succeeded' && cloudOrderConfig?.exception?.resultShapeValid && cloudOrderConfig?.exception?.exceptionCount > 0" type="danger" disabled>处理异常</el-button>
       </template>
     </el-dialog>
 
@@ -1142,7 +1148,8 @@ import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
-  fetchCloudOrderConfiguration
+  fetchCloudOrderConfiguration,
+  markCloudOrderManuallyForwarded
 } from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
@@ -1904,6 +1911,7 @@ async function submitAftersale() {
 const forwardDialogVisible = ref(false)
 const forwardSalesData = ref(null)
 const forwardLoading = ref(false)
+const manualForwardSaving = ref(false)
 
 const stockInDialogVisible = ref(false)
 const stockInForm = reactive({
@@ -2013,6 +2021,28 @@ async function handleForward() {
     ElMessage.error('读取云仓订单配置失败: ' + (cloudResult.reason?.message || ''))
   }
   forwardLoading.value = false
+}
+
+// 未绑定云仓助手的用户在线下完成发货后，可手工标记采购单已转发。
+async function handleManualForward() {
+  const row = currentReceiveRow.value
+  if (!row || !cloudOrderConfig.value?.manualForwardAllowed) return
+  try {
+    await ElMessageBox.confirm(
+      '请确认该订单已经通过其他方式完成发货。此操作只标记店小二中的采购单状态，不会调用云仓助手或平台发货接口。',
+      '确认已转发',
+      { confirmButtonText: '确认已转发', cancelButtonText: '取消', type: 'warning' }
+    )
+    manualForwardSaving.value = true
+    await markCloudOrderManuallyForwarded(row.id)
+    forwardDialogVisible.value = false
+    ElMessage.success('已手工标记为转发完成')
+    await loadData()
+  } catch (err) {
+    if (err !== 'cancel') ElMessage.error('操作失败: ' + (err.message || ''))
+  } finally {
+    manualForwardSaving.value = false
+  }
 }
 
 // 点击"入库"按钮 — 检查绑定状态

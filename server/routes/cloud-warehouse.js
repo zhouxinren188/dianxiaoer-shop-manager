@@ -8,6 +8,7 @@ const {
 } = require('../services/cloud-warehouse-protocol')
 const {
   getOrderConfiguration,
+  markManualForwarded,
   prepareOrderRef
 } = require('../services/cloud-warehouse-order-service')
 
@@ -25,6 +26,7 @@ function statusForError(error) {
   if (['purchase_order_not_found'].includes(error?.code)) return 404
   if (['machine_binding_forbidden'].includes(error?.code)) return 403
   if (['machine_code_in_use'].includes(error?.code)) return 409
+  if (['manual_forward_requires_cloud_workflow'].includes(error?.code)) return 409
   if (error?.code) return 400
   return 500
 }
@@ -232,6 +234,15 @@ module.exports = function createCloudWarehouseRouter(pool) {
     } catch (error) {
       console.error('[CloudWarehouse] 准备订单引用失败:', error.message)
       res.status(statusForError(error)).json(fail(error.message || '准备订单引用失败', error.code))
+    }
+  })
+
+  router.post('/orders/:purchaseOrderId/manual-forward', async (req, res) => {
+    try {
+      res.json(ok(await markManualForwarded(pool, req.user, req.params.purchaseOrderId)))
+    } catch (error) {
+      console.error('[CloudWarehouse] 手工标记已转发失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '手工标记已转发失败', error.code))
     }
   })
 
