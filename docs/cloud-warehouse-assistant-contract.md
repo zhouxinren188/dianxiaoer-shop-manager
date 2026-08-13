@@ -1,4 +1,4 @@
-# 店小二与云仓助手协作契约
+# 店小二与云仓助手指令及回执协议
 
 状态：机器码绑定、关联销售订单定位和异常查询/处理参数已在店小二侧确定。执行器认证与中央任务传输 v1 路径及字段已形成供双方本地联调的固定契约；端点尚未实现并保持禁用，不开放注册、心跳、领取、续租、映射或回执网络访问。
 
@@ -14,7 +14,7 @@
 
 禁止任意代码、脚本、Shell、模块路径、可执行文件或任意 URL 执行入口。`exception.order.check` 的 `params` 固定为空对象；`exception.order.resolve` 的 `params` 必须且只能包含 `exception_snapshot_ref`。其余三项业务接口未确认前，`params` 继续固定为空对象。
 
-业务流程只有以下几步：店小二发送异常查询指令，云仓助手在执行前取得该销售订单的订单号和年份并返回查询结果；店小二取得人工确认后再发送异常处理指令；处理完成后，再按需发送到仓查询、打印和出库指令。云仓助手只负责按固定指令执行并回传结果，是否进入下一步由店小二决定。
+本协议只定义双方通信边界。每个业务命令都是一次独立交互：店小二下发固定命令，云仓助手自行完成对应操作并按固定响应结构回传结果，店小二完整记录该回执。云仓助手具体调用什么内部接口、如何实现查询、处理、打印或出库，不属于本协议；店小二收到回执后的页面展示、状态处理及是否继续下发其他命令，也不属于本协议。
 
 机器码格式：
 
@@ -60,7 +60,7 @@
 
 `target.machine_code`只能由中央服务根据实际发起人所属的“主账号体系/租户 → machine_code”绑定填充。主账号、已授权子账号共用该路由；业务调用方不得传入任务级目标机器码，`target`中也不增加主账号、子账号或租户字段。
 
-`trace_id`在一个工作流中保持不变并等同于 `workflow_id`。每轮真实的30秒查询生成新的 `task_id`和 `idempotency_key`；同一个任务的网络重投复用原标识。
+`trace_id`用于关联同一组订单操作并等同于 `workflow_id`。每一次要求云仓助手重新执行的查询都生成新的 `task_id`和 `idempotency_key`；同一个任务仅因网络原因重投时复用原标识。
 
 ## 4. 异常订单定位与快照
 
@@ -69,15 +69,14 @@
 任务中的 `order_id` 继续使用中央服务生成的不透明 `order_ref_id`。中央服务内部映射为：
 
 ```text
-order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order_id + YEAR(sales_orders.order_time)
+order_ref_id -> 关联 sales_order -> sales_orders.order_id + YEAR(sales_orders.order_time)
 ```
 
 - 返回云仓助手的 `platform_order_no`固定取关联 `sales_orders.order_id`，用于真实异常接口的 `billexception.sellerBillNo`和`soExceptionCentre.spSoNo`查询。
 - 返回云仓助手的 `order_year`固定取 `YEAR(sales_orders.order_time)`。
-- `purchase_no`只保留在中央服务用于审计，不传云仓助手。
 - 采购平台的 `purchase_orders.platform_order_no`不参与云仓异常查询。
 - 禁止使用采购单 `created_at`、当前年份、采购平台下单时间或订单号格式推断年份，也不要求用户人工确认年份。
-- 采购单关联的销售订单发生变化会递增定位版本；已有未完成工作流必须进入 `review_required`。
+- 关联销售订单发生变化时，后续解析必须返回 `order_locator_changed`，不得继续使用旧定位结果。
 
 中央服务必须校验订单所属主账号体系。执行器侧映射还要校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
 
@@ -118,7 +117,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 }
 ```
 
-`source`只允许 `billexception`或`soExceptionCentre`。未知字段、内部异常 ID、URL 或凭据必须拒绝或丢弃；只有存在有效快照且取得人工确认后，中央服务才能创建异常处理任务。
+`source`只允许 `billexception`或`soExceptionCentre`。未知字段、内部异常 ID、URL 或凭据必须拒绝或丢弃。异常处理命令只能引用云仓助手此前返回的有效 `exception_snapshot_ref`。
 
 ## 5. 执行器认证与中央任务传输 v1
 
@@ -358,7 +357,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 }
 ```
 
-服务端校验任务、租约、机器码、实例、租户归属、采购单与销售单关系及定位版本。`platform_order_no`固定来自 `sales_orders.order_id`，`order_year`固定来自 `YEAR(sales_orders.order_time)`。
+服务端校验任务、租约、机器码、实例、订单归属及定位版本。`platform_order_no`固定来自关联销售订单的 `sales_orders.order_id`，`order_year`固定来自 `YEAR(sales_orders.order_time)`。
 
 ### 5.6 结果回传
 
@@ -403,14 +402,12 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 {
   "accepted": true,
   "task_id": "task_...",
-  "workflow_id": "wf_...",
-  "workflow_state": "当前中央工作流状态",
   "recorded_at": "ISO时间",
   "replayed": false
 }
 ```
 
-中央服务复核任务、租约、幂等键、机器码、实例和状态组合。重复上传同一完整结果返回原回执并设置 `replayed: true`；同一任务上传不同结果返回 `idempotency_key_collision`并进入人工复核。写命令可信成功状态严格限定为：
+中央服务复核任务、租约、幂等键、机器码、实例和状态组合。重复上传同一完整结果返回原回执并设置 `replayed: true`；同一任务上传不同结果返回 `result_conflict`。写命令回执中可被协议识别为业务确认成功的状态严格限定为：
 
 - `exception.order.resolve` → `waiting_arrival`
 - `warehouse.order.print` → `printed_unshipped`
@@ -436,7 +433,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 - `401`时允许刷新访问令牌后重放同一个传输请求一次。
 - `429`、`502`、`503`、`504`按服务端 `Retry-After`或1、2、4、8、15秒退避并加入随机抖动。
 - 同一任务的网络重投复用原 `task_id`、`idempotency_key`、`lease_id`和 fencing token。
-- 只读任务允许在租约有效且业务结果确定未产生前进行传输重试；中央30秒调度的下一轮真实查询必须生成新 `task_id`和新 `idempotency_key`。
+- 只读任务允许在租约有效且业务结果尚未产生前进行传输重试；任何要求云仓助手重新查询业务状态的新指令都必须生成新 `task_id`和新 `idempotency_key`。
 - 三个写命令不得自动业务重试。超时、断线、租约丢失、执行中断、结果未知或复验失败一律 `review_required`。
 
 ## 6. 尚未确认且明确不实现
