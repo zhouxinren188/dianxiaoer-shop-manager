@@ -15,9 +15,9 @@ const {
 
 const { EXECUTOR_TRANSPORT_ENABLED, assertRouteReady } = taskService
 const {
-  hasReliableOrderYear,
   normalizeExceptionSummary,
   normalizeOrderYear,
+  readRelatedSalesLocator,
   resolveTrustedOrderMapping
 } = orderService
 
@@ -211,12 +211,37 @@ describe('云仓助手任务信封', () => {
 })
 
 describe('订单定位与脱敏异常结果', () => {
-  it('只接受显式可靠来源的订单年份', () => {
+  it('只从关联销售订单号和销售下单时间生成可信定位', async () => {
     expect(normalizeOrderYear(2026)).toBe(2026)
-    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'manual_confirmed' })).toBe(true)
-    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'platform_order_time' })).toBe(true)
-    expect(hasReliableOrderYear({ order_year: 2026, order_year_source: 'created_at' })).toBe(false)
-    expect(() => normalizeOrderYear(1999)).toThrow('订单年份必须是')
+    expect(() => normalizeOrderYear(0)).toThrow('关联销售订单的下单时间无效')
+
+    let locatorSql = ''
+    const db = {
+      execute: async sql => {
+        locatorSql = sql
+        return [[{
+        sales_order_id: 321,
+        platform_order_no: '3588401003348721',
+        sales_order_time: '2026-08-12 13:07:12',
+        order_year: 2026,
+        store_owner_id: 18
+        }]]
+      }
+    }
+    await expect(readRelatedSalesLocator(db, {
+      owner_id: 18,
+      sales_order_id: 321,
+      sales_order_no: '3588401003348721',
+      cloud_locator_version: 1
+    })).resolves.toEqual({
+      salesOrderId: 321,
+      platformOrderNo: '3588401003348721',
+      salesOrderTime: '2026-08-12 13:07:12',
+      orderYear: 2026,
+      locatorVersion: 1
+    })
+    expect(locatorSql).toContain('YEAR(so.order_time)')
+    expect(locatorSql).not.toContain('created_at')
   })
 
   it('页面结果只保留固定来源和脱敏字段', () => {
@@ -258,9 +283,13 @@ describe('订单定位与脱敏异常结果', () => {
         workflow_owner_id: 18,
         ref_owner_id: 18,
         order_owner_id: 18,
+        store_owner_id: 18,
+        linked_sales_order_id: 321,
+        linked_sales_order_no: '987654321',
+        resolved_sales_order_id: 321,
         platform_order_no: '987654321',
+        sales_order_time: '2026-08-12 13:07:12',
         order_year: 2026,
-        order_year_source: 'manual_confirmed',
         cloud_locator_version: 2,
         workflow_locator_version: 2,
         bound_machine_code: baseTask.machineCode,
@@ -271,12 +300,14 @@ describe('订单定位与脱敏异常结果', () => {
         instance_last_heartbeat_at: new Date().toISOString()
       }]]
     }
-    await expect(resolveTrustedOrderMapping(pool, {
+    const mapping = await resolveTrustedOrderMapping(pool, {
       taskId: 'task-001',
       orderRefId: baseTask.orderRefId,
       machineCode: baseTask.machineCode,
       executorInstanceId: 'executor-001'
-    })).resolves.toEqual({ platform_order_no: '987654321', order_year: 2026 })
+    })
+    expect(mapping).toEqual({ platform_order_no: '987654321', order_year: 2026 })
+    expect(Object.keys(mapping).sort()).toEqual(['order_year', 'platform_order_no'])
   })
 })
 

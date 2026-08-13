@@ -6,6 +6,7 @@ const {
   getTenantOwnerId,
   normalizeCapabilities
 } = require('./cloud-warehouse-protocol')
+const { assertOrderLocatorReady } = require('./cloud-warehouse-order-service')
 
 // 双方基础字段、服务地址和控制面认证确认前保持硬禁用，不能通过环境变量提前开启。
 const EXECUTOR_TRANSPORT_ENABLED = false
@@ -122,15 +123,22 @@ async function createRoutedTaskRecord(pool, {
       throw serviceError('machine_binding_changed', '工作流创建后机器码绑定已变化，需要人工复核')
     }
     const [locatorRows] = await connection.execute(
-      `SELECT po.cloud_locator_version
+      `SELECT po.cloud_locator_version, so.order_id AS platform_order_no,
+              YEAR(so.order_time) AS order_year
          FROM cloud_order_refs r
          JOIN purchase_orders po ON po.id = r.purchase_order_id
+         JOIN sales_orders so ON (
+                (COALESCE(po.sales_order_id, 0) > 0 AND so.id = po.sales_order_id)
+             OR (COALESCE(po.sales_order_id, 0) = 0 AND so.order_id = po.sales_order_no)
+         )
+         JOIN stores s ON s.id = so.store_id AND s.owner_id = po.owner_id
         WHERE r.order_ref_id = ? AND r.owner_id = ?`,
       [orderRefId, ownerId]
     )
-    if (!locatorRows.length || Number(workflow.locator_version) !== Number(locatorRows[0].cloud_locator_version)) {
+    if (locatorRows.length !== 1 || Number(workflow.locator_version) !== Number(locatorRows[0].cloud_locator_version)) {
       throw serviceError('order_locator_changed', '订单定位信息已变化，需要人工复核')
     }
+    assertOrderLocatorReady(locatorRows[0])
     assertRouteReady(route, normalizedCommand)
 
     const requestedBy = {

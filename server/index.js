@@ -4186,6 +4186,10 @@ app.post('/api/purchase-orders', async (req, res) => {
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
        ON DUPLICATE KEY UPDATE
          owner_id=VALUES(owner_id),
+         cloud_locator_version=cloud_locator_version + IF(
+           NOT (sales_order_id <=> VALUES(sales_order_id)) OR NOT (sales_order_no <=> VALUES(sales_order_no)),
+           1, 0
+         ),
          sales_order_id=VALUES(sales_order_id), sales_order_no=VALUES(sales_order_no),
          goods_name=VALUES(goods_name), goods_image=VALUES(goods_image), sku=VALUES(sku), inventory_id=VALUES(inventory_id), quantity=VALUES(quantity),
          source_url=VALUES(source_url), platform=VALUES(platform),
@@ -4314,6 +4318,10 @@ app.post('/api/purchase-orders/batch-import', async (req, res) => {
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)
            ON DUPLICATE KEY UPDATE
              owner_id=VALUES(owner_id),
+             cloud_locator_version=cloud_locator_version + IF(
+               NOT (sales_order_id <=> VALUES(sales_order_id)) OR NOT (sales_order_no <=> VALUES(sales_order_no)),
+               1, 0
+             ),
              sales_order_no=VALUES(sales_order_no), sales_order_id=VALUES(sales_order_id),
              platform_order_no=VALUES(platform_order_no),
              goods_name=VALUES(goods_name), sku=VALUES(sku), quantity=VALUES(quantity),
@@ -4348,36 +4356,19 @@ app.put('/api/purchase-orders/:purchaseNo/bind', async (req, res) => {
     connection = await pool.getConnection()
     await connection.beginTransaction()
     const [rows] = await connection.execute(
-      'SELECT id, platform_order_no FROM purchase_orders WHERE purchase_no=? AND owner_id=? FOR UPDATE',
+      'SELECT id FROM purchase_orders WHERE purchase_no=? AND owner_id=? FOR UPDATE',
       [req.params.purchaseNo, ownerId]
     )
     if (!rows.length) {
       await connection.rollback()
       return res.status(404).json(fail('采购订单不存在'))
     }
-    const changed = String(rows[0].platform_order_no || '') !== String(platform_order_no)
     await connection.execute(
       `UPDATE purchase_orders
-          SET order_year = IF(? = 1, NULL, order_year),
-              order_year_source = IF(? = 1, '', order_year_source),
-              order_year_confirmed_by = IF(? = 1, NULL, order_year_confirmed_by),
-              order_year_confirmed_at = IF(? = 1, NULL, order_year_confirmed_at),
-              cloud_locator_version = cloud_locator_version + ?,
-              platform_order_no = ?, status = ?
+          SET platform_order_no = ?, status = ?
         WHERE purchase_no = ? AND owner_id = ?`,
-      [changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0, changed ? 1 : 0,
-        platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
+      [platform_order_no, 'ordered', req.params.purchaseNo, ownerId]
     )
-    if (changed) {
-      await connection.execute(
-        `UPDATE cloud_order_workflows w
-         JOIN cloud_order_refs r ON r.order_ref_id = w.order_ref_id
-            SET w.state = 'review_required', w.review_reason = 'order_locator_changed',
-                w.review_required_at = NOW(3), w.next_check_at = NULL, w.updated_at = NOW(3)
-          WHERE r.owner_id = ? AND r.purchase_order_id = ? AND w.completed_at IS NULL`,
-        [ownerId, Number(rows[0].id)]
-      )
-    }
     await connection.commit()
     res.json(ok(true))
   } catch (err) {
@@ -4719,33 +4710,39 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
     let soRows = []
     if (sales_order_id) {
       const [rows] = await pool.execute(
-        `SELECT so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
+        `SELECT so.id, so.order_id, so.order_time, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
                 so.store_id, s.name AS store_name, s.platform AS store_platform, s.store_type, so.warehouse_name
          FROM sales_orders so
-         LEFT JOIN stores s ON so.store_id = s.id
-         WHERE so.id = ?`,
-        [sales_order_id]
+         JOIN stores s ON so.store_id = s.id
+         WHERE so.id = ? AND s.owner_id = ?`,
+        [sales_order_id, ownerId]
       )
       soRows = rows
     }
     // sales_order_id 未匹配时，用 sales_order_no 匹配 sales_orders.order_id
     if (!soRows.length && sales_order_no) {
       const [rows] = await pool.execute(
-        `SELECT so.id, so.order_id, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
+        `SELECT so.id, so.order_id, so.order_time, so.status_text, so.product_name, so.product_image, so.unit_price, so.quantity, so.all_items,
                 so.store_id, s.name AS store_name, s.platform AS store_platform, s.store_type, so.warehouse_name
          FROM sales_orders so
-         LEFT JOIN stores s ON so.store_id = s.id
-         WHERE so.order_id = ?`,
-        [String(sales_order_no)]
+         JOIN stores s ON so.store_id = s.id
+         WHERE so.order_id = ? AND s.owner_id = ?
+         ORDER BY so.id
+         LIMIT 2`,
+        [String(sales_order_no), ownerId]
       )
       soRows = rows
     }
+    if (soRows.length > 1) return res.status(409).json(fail('关联销售订单不唯一，请人工核对'))
     if (!soRows.length) return res.json(ok(null))
 
     const row = soRows[0]
     // 如果原来没有 sales_order_id，回填
     if (!sales_order_id && row.id) {
-      pool.execute('UPDATE purchase_orders SET sales_order_id=? WHERE id=?', [row.id, req.params.id]).catch(() => {})
+      pool.execute(
+        'UPDATE purchase_orders SET sales_order_id=?, cloud_locator_version=cloud_locator_version+1 WHERE id=? AND owner_id=? AND COALESCE(sales_order_id, 0)=0',
+        [row.id, req.params.id, ownerId]
+      ).catch(() => {})
     }
 
     // 解析 all_items JSON（可能含多个商品）
@@ -4779,6 +4776,7 @@ app.get('/api/purchase-orders/:id/related-sales', async (req, res) => {
       storePlatform: row.store_platform || '',
       storeType: row.store_type || '',
       orderId: row.order_id || '',
+      orderTime: row.order_time || '',
       statusText: row.status_text || '',
       warehouseName: row.warehouse_name || '',
       items
@@ -4928,7 +4926,12 @@ app.put('/api/purchase-orders/:id', async (req, res) => {
     const fields = []
     const values = []
 
-    if (sales_order_no !== undefined) { fields.push('sales_order_no=?'); values.push(sales_order_no) }
+    if (sales_order_no !== undefined) {
+      fields.push('cloud_locator_version=cloud_locator_version + IF(NOT (sales_order_no <=> ?), 1, 0)')
+      values.push(sales_order_no)
+      fields.push('sales_order_no=?')
+      values.push(sales_order_no)
+    }
     if (goods_name !== undefined) { fields.push('goods_name=?'); values.push(goods_name) }
     if (sku !== undefined) { fields.push('sku=?'); values.push(sku) }
     if (quantity !== undefined) { fields.push('quantity=?'); values.push(quantity) }

@@ -7,7 +7,6 @@ const {
   normalizeCapabilities
 } = require('../services/cloud-warehouse-protocol')
 const {
-  confirmManualOrderYear,
   getOrderConfiguration,
   prepareOrderRef
 } = require('../services/cloud-warehouse-order-service')
@@ -224,22 +223,6 @@ module.exports = function createCloudWarehouseRouter(pool) {
     } catch (error) {
       console.error('[CloudWarehouse] 查询订单云仓配置失败:', error.message)
       res.status(statusForError(error)).json(fail(error.message || '查询订单云仓配置失败', error.code))
-    }
-  })
-
-  router.put('/orders/:purchaseOrderId/order-year', async (req, res) => {
-    try {
-      const data = await confirmManualOrderYear(
-        pool,
-        req.user,
-        req.params.purchaseOrderId,
-        req.body?.order_year,
-        req.body?.confirmed
-      )
-      res.json(ok(data))
-    } catch (error) {
-      console.error('[CloudWarehouse] 保存采购订单年份失败:', error.message)
-      res.status(statusForError(error)).json(fail(error.message || '保存采购订单年份失败', error.code))
     }
   })
 

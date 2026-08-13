@@ -444,41 +444,26 @@
           <div class="forward-goods-title">云仓订单定位</div>
           <el-descriptions :column="2" border size="small">
             <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
-            <el-descriptions-item label="平台订单号">{{ cloudOrderConfig.platformOrderNo || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="异常查询订单号">{{ cloudOrderConfig.platformOrderNo || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="销售下单时间">{{ cloudOrderConfig.salesOrderTime || '--' }}</el-descriptions-item>
             <el-descriptions-item label="订单年份">
               <template v-if="cloudOrderConfig.orderYear">
                 {{ cloudOrderConfig.orderYear }}
-                <el-tag size="small" type="success" class="cloud-year-tag">
-                  {{ cloudOrderConfig.orderYearSource === 'manual_confirmed' ? '人工确认' : '平台时间' }}
-                </el-tag>
-                <el-button link type="primary" size="small" @click="cloudOrderEditingYear = true">重新确认</el-button>
+                <el-tag size="small" type="success" class="cloud-year-tag">销售订单时间</el-tag>
               </template>
-              <span v-else>待确认</span>
+              <span v-else>--</span>
             </el-descriptions-item>
             <el-descriptions-item label="订单引用">{{ cloudOrderConfig.orderRefId ? '已生成' : '待生成' }}</el-descriptions-item>
           </el-descriptions>
 
           <el-alert
-            v-if="!cloudOrderConfig.platformOrderNo"
-            title="请先为采购单绑定准确的平台采购订单号。"
+            v-if="!cloudOrderConfig.locatorReady"
+            :title="cloudOrderConfig.locatorMessage || '请先关联具有有效订单号和下单时间的销售订单。'"
             type="warning"
             :closable="false"
             show-icon
             class="cloud-order-alert"
           />
-
-          <div v-if="cloudOrderConfig.platformOrderNo && (!cloudOrderConfig.orderYear || cloudOrderEditingYear)" class="cloud-year-confirm">
-            <el-alert
-              title="订单年份必须依据采购平台显示的实际下单时间确认，不能按本地创建时间、当前年份或订单号推断。"
-              type="warning"
-              :closable="false"
-              show-icon
-            />
-            <div class="cloud-year-input-row">
-              <el-input-number v-model="cloudOrderYearInput" :min="2000" :max="2100" :step="1" :precision="0" controls-position="right" />
-              <el-button type="primary" :loading="cloudOrderSaving" @click="handleConfirmCloudOrderYear">确认订单年份</el-button>
-            </div>
-          </div>
 
           <template v-if="cloudOrderConfig.locatorReady">
             <div v-if="cloudOrderConfig.exception" class="cloud-exception-panel">
@@ -514,7 +499,7 @@
             </div>
             <el-empty v-else description="尚无异常查询结果" :image-size="72" />
             <el-alert
-              title="中央传输和真实联调尚未启用，当前仅完成订单定位、年份确认及脱敏结果展示基础。"
+              title="中央传输和真实联调尚未启用，当前仅完成销售订单定位及脱敏结果展示基础。"
               type="info"
               :closable="false"
               show-icon
@@ -1157,8 +1142,7 @@ import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
-  fetchCloudOrderConfiguration,
-  confirmCloudOrderYear
+  fetchCloudOrderConfiguration
 } from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
@@ -1299,11 +1283,7 @@ const cloudBinding = reactive({
   canManage: false
 })
 const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
-const cloudOrderSaving = ref(false)
-const currentCloudOrder = ref(null)
 const cloudOrderConfig = ref(null)
-const cloudOrderYearInput = ref(null)
-const cloudOrderEditingYear = ref(false)
 
 const accountList = ref([])
 
@@ -1578,28 +1558,6 @@ async function handleUnbindCloudMachine() {
     if (err !== 'cancel') ElMessage.error('解除绑定失败: ' + (err.message || ''))
   } finally {
     cloudConfigSaving.value = false
-  }
-}
-
-async function handleConfirmCloudOrderYear() {
-  if (!currentCloudOrder.value || !Number.isInteger(Number(cloudOrderYearInput.value))) {
-    ElMessage.warning('请选择准确的订单年份')
-    return
-  }
-  try {
-    await ElMessageBox.confirm(
-      `请确认 ${cloudOrderYearInput.value} 年来自采购平台显示的实际下单时间。确认后将用于云仓异常订单定位。`,
-      '确认订单年份',
-      { confirmButtonText: '确认无误', cancelButtonText: '取消', type: 'warning' }
-    )
-    cloudOrderSaving.value = true
-    cloudOrderConfig.value = await confirmCloudOrderYear(currentCloudOrder.value.id, Number(cloudOrderYearInput.value))
-    cloudOrderEditingYear.value = false
-    ElMessage.success('订单年份已确认并生成安全订单引用')
-  } catch (err) {
-    if (err !== 'cancel') ElMessage.error('保存订单年份失败: ' + (err.message || ''))
-  } finally {
-    cloudOrderSaving.value = false
   }
 }
 
@@ -2038,10 +1996,7 @@ async function handleForward() {
   // 加载关联销售订单信息
   forwardLoading.value = true
   forwardSalesData.value = null
-  currentCloudOrder.value = row
   cloudOrderConfig.value = null
-  cloudOrderYearInput.value = null
-  cloudOrderEditingYear.value = false
   forwardDialogVisible.value = true
   const [salesResult, cloudResult] = await Promise.allSettled([
     fetchRelatedSales(row.id),
@@ -2054,7 +2009,6 @@ async function handleForward() {
   }
   if (cloudResult.status === 'fulfilled') {
     cloudOrderConfig.value = cloudResult.value
-    cloudOrderYearInput.value = cloudResult.value?.orderYear || null
   } else {
     ElMessage.error('读取云仓订单配置失败: ' + (cloudResult.reason?.message || ''))
   }
@@ -3817,17 +3771,6 @@ function handleImportDialogClose() {
 }
 
 .cloud-order-alert {
-  margin-top: 14px;
-}
-
-.cloud-year-confirm {
-  margin-top: 14px;
-}
-
-.cloud-year-input-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
   margin-top: 14px;
 }
 

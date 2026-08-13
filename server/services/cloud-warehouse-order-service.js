@@ -4,8 +4,16 @@ const {
   getTenantOwnerId
 } = require('./cloud-warehouse-protocol')
 
-const RELIABLE_YEAR_SOURCES = new Set(['platform_order_time', 'manual_confirmed'])
 const EXCEPTION_SOURCES = new Set(['billexception', 'soExceptionCentre'])
+const LOCATOR_ERRORS = new Set([
+  'sales_order_not_linked',
+  'sales_order_not_found',
+  'sales_order_relation_ambiguous',
+  'sales_order_relation_conflict',
+  'platform_order_no_missing',
+  'sales_order_time_missing',
+  'sales_order_time_invalid'
+])
 
 function serviceError(code, message) {
   const error = new Error(message)
@@ -27,13 +35,9 @@ function parseJsonObject(value) {
 function normalizeOrderYear(value) {
   const year = Number(value)
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
-    throw serviceError('order_year_invalid', '订单年份必须是 2000 至 2100 之间的四位年份')
+    throw serviceError('sales_order_time_invalid', '关联销售订单的下单时间无效，无法可靠确定订单年份')
   }
   return year
-}
-
-function hasReliableOrderYear(order) {
-  return Number.isInteger(Number(order?.order_year)) && RELIABLE_YEAR_SOURCES.has(order?.order_year_source)
 }
 
 async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdate = false } = {}) {
@@ -44,9 +48,8 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
   let rows
   if (user.user_type === 'master') {
     ;[rows] = await db.execute(
-      `SELECT po.id, po.owner_id, po.purchase_no, po.platform_order_no, po.platform,
-              po.account_id, po.created_by, po.platform_order_time, po.order_year,
-              po.order_year_source, po.order_year_confirmed_by, po.order_year_confirmed_at,
+      `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
+              po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
               po.cloud_locator_version
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?${lock}`,
@@ -54,9 +57,8 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
     )
   } else {
     ;[rows] = await db.execute(
-      `SELECT po.id, po.owner_id, po.purchase_no, po.platform_order_no, po.platform,
-              po.account_id, po.created_by, po.platform_order_time, po.order_year,
-              po.order_year_source, po.order_year_confirmed_by, po.order_year_confirmed_at,
+      `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
+              po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
               po.cloud_locator_version
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?
@@ -70,6 +72,61 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
   }
   if (!rows.length) throw serviceError('purchase_order_not_found', '采购订单不存在或当前账号无权访问')
   return rows[0]
+}
+
+async function readRelatedSalesLocator(db, order, { forUpdate = false } = {}) {
+  const salesOrderId = Number(order?.sales_order_id)
+  const salesOrderNo = String(order?.sales_order_no || '').trim()
+  if ((!Number.isInteger(salesOrderId) || salesOrderId <= 0) && !salesOrderNo) {
+    throw serviceError('sales_order_not_linked', '采购单尚未关联销售订单')
+  }
+
+  const lock = forUpdate ? ' FOR UPDATE' : ''
+  let rows
+  if (Number.isInteger(salesOrderId) && salesOrderId > 0) {
+    ;[rows] = await db.execute(
+      `SELECT so.id AS sales_order_id, so.order_id AS platform_order_no,
+              so.order_time AS sales_order_time, YEAR(so.order_time) AS order_year,
+              s.owner_id AS store_owner_id
+         FROM sales_orders so
+         JOIN stores s ON s.id = so.store_id
+        WHERE so.id = ? AND s.owner_id = ?${lock}`,
+      [salesOrderId, Number(order.owner_id)]
+    )
+  } else {
+    ;[rows] = await db.execute(
+      `SELECT so.id AS sales_order_id, so.order_id AS platform_order_no,
+              so.order_time AS sales_order_time, YEAR(so.order_time) AS order_year,
+              s.owner_id AS store_owner_id
+         FROM sales_orders so
+         JOIN stores s ON s.id = so.store_id
+        WHERE so.order_id = ? AND s.owner_id = ?
+        ORDER BY so.id
+        LIMIT 2${lock}`,
+      [salesOrderNo, Number(order.owner_id)]
+    )
+  }
+
+  if (!rows.length) throw serviceError('sales_order_not_found', '未找到当前主账号体系内的关联销售订单')
+  if (rows.length !== 1) throw serviceError('sales_order_relation_ambiguous', '关联销售订单不唯一，需要人工核对')
+
+  const row = rows[0]
+  const platformOrderNo = String(row.platform_order_no || '').trim()
+  if (!platformOrderNo) throw serviceError('platform_order_no_missing', '关联销售订单缺少订单号')
+  if (salesOrderNo && salesOrderNo !== platformOrderNo) {
+    throw serviceError('sales_order_relation_conflict', '采购单记录的销售订单号与关联销售订单不一致')
+  }
+  if (!String(row.sales_order_time || '').trim()) {
+    throw serviceError('sales_order_time_missing', '关联销售订单缺少平台实际下单时间')
+  }
+
+  return {
+    salesOrderId: Number(row.sales_order_id),
+    platformOrderNo,
+    salesOrderTime: row.sales_order_time,
+    orderYear: normalizeOrderYear(row.order_year),
+    locatorVersion: Number(order.cloud_locator_version || 1)
+  }
 }
 
 async function readOrderRef(db, ownerId, purchaseOrderId) {
@@ -94,19 +151,26 @@ async function ensureOrderRef(db, user, order) {
   return orderRefId
 }
 
-function assertOrderLocatorReady(order) {
-  if (!String(order.platform_order_no || '').trim()) {
-    throw serviceError('platform_order_no_missing', '采购订单尚未绑定准确的平台订单号')
+function assertOrderLocatorReady(locator) {
+  if (!String(locator?.platformOrderNo || locator?.platform_order_no || '').trim()) {
+    throw serviceError('platform_order_no_missing', '关联销售订单缺少订单号')
   }
-  if (!hasReliableOrderYear(order)) {
-    throw serviceError('order_year_unconfirmed', '请先根据平台实际下单时间确认订单年份')
-  }
+  return normalizeOrderYear(locator?.orderYear ?? locator?.order_year)
 }
 
 async function getOrderConfiguration(pool, user, purchaseOrderId) {
   const order = await readAccessiblePurchaseOrder(pool, user, purchaseOrderId)
   const ownerId = getTenantOwnerId(user)
   const orderRefId = await readOrderRef(pool, ownerId, order.id)
+  let locator = null
+  let locatorError = null
+  try {
+    locator = await readRelatedSalesLocator(pool, order)
+  } catch (error) {
+    if (!LOCATOR_ERRORS.has(error?.code)) throw error
+    locatorError = error
+  }
+
   let exception = null
   if (orderRefId) {
     const [taskRows] = await pool.execute(
@@ -125,67 +189,17 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
   return {
     purchaseOrderId: Number(order.id),
     purchaseNo: order.purchase_no || '',
-    platformOrderNo: order.platform_order_no || '',
+    platformOrderNo: locator?.platformOrderNo || '',
+    salesOrderTime: locator?.salesOrderTime || null,
     platform: order.platform || '',
-    orderYear: order.order_year ? Number(order.order_year) : null,
-    orderYearSource: order.order_year_source || '',
-    orderYearConfirmedAt: order.order_year_confirmed_at || null,
-    locatorReady: !!String(order.platform_order_no || '').trim() && hasReliableOrderYear(order),
+    orderYear: locator?.orderYear || null,
+    orderYearSource: locator ? 'sales_order_time' : '',
+    locatorReady: !!locator,
+    locatorReason: locatorError?.code || '',
+    locatorMessage: locatorError?.message || '',
     orderRefId,
     exception,
     transportEnabled: false
-  }
-}
-
-async function confirmManualOrderYear(pool, user, purchaseOrderId, orderYear, confirmed) {
-  if (confirmed !== true) throw serviceError('order_year_confirmation_required', '保存订单年份前需要人工确认')
-  const normalizedYear = normalizeOrderYear(orderYear)
-  let connection
-  try {
-    connection = await pool.getConnection()
-    await connection.beginTransaction()
-    const order = await readAccessiblePurchaseOrder(connection, user, purchaseOrderId, { forUpdate: true })
-    if (!String(order.platform_order_no || '').trim()) {
-      throw serviceError('platform_order_no_missing', '请先绑定准确的平台采购订单号')
-    }
-    const orderRefId = await ensureOrderRef(connection, user, order)
-    const locatorChanged = Number(order.order_year) !== normalizedYear || order.order_year_source !== 'manual_confirmed'
-    await connection.execute(
-      `UPDATE purchase_orders
-          SET order_year = ?, order_year_source = 'manual_confirmed',
-              order_year_confirmed_by = ?, order_year_confirmed_at = NOW(3),
-              cloud_locator_version = cloud_locator_version + ?, updated_at = NOW()
-        WHERE id = ? AND owner_id = ?`,
-      [normalizedYear, Number(user.id), locatorChanged ? 1 : 0, Number(order.id), getTenantOwnerId(user)]
-    )
-    if (locatorChanged && order.order_year) {
-      await connection.execute(
-        `UPDATE cloud_order_workflows w
-         JOIN cloud_order_refs r ON r.order_ref_id = w.order_ref_id
-            SET w.state = 'review_required', w.review_reason = 'order_locator_changed',
-                w.review_required_at = NOW(3), w.next_check_at = NULL, w.updated_at = NOW(3)
-          WHERE r.owner_id = ? AND r.purchase_order_id = ?
-            AND w.completed_at IS NULL`,
-        [getTenantOwnerId(user), Number(order.id)]
-      )
-    }
-    await connection.execute(
-      `INSERT INTO cloud_order_locator_audit
-         (order_ref_id, purchase_order_id, owner_id, actor_user_id,
-          old_order_year, new_order_year, source)
-       VALUES (?, ?, ?, ?, ?, ?, 'manual_confirmed')`,
-      [orderRefId, Number(order.id), getTenantOwnerId(user), Number(user.id),
-        order.order_year ? Number(order.order_year) : null, normalizedYear]
-    )
-    await connection.commit()
-    return await getOrderConfiguration(pool, user, purchaseOrderId)
-  } catch (error) {
-    if (connection) {
-      try { await connection.rollback() } catch { /* ignore rollback failure */ }
-    }
-    throw error
-  } finally {
-    if (connection) connection.release()
   }
 }
 
@@ -195,7 +209,8 @@ async function prepareOrderRef(pool, user, purchaseOrderId) {
     connection = await pool.getConnection()
     await connection.beginTransaction()
     const order = await readAccessiblePurchaseOrder(connection, user, purchaseOrderId, { forUpdate: true })
-    assertOrderLocatorReady(order)
+    const locator = await readRelatedSalesLocator(connection, order, { forUpdate: true })
+    assertOrderLocatorReady(locator)
     await ensureOrderRef(connection, user, order)
     await connection.commit()
     return await getOrderConfiguration(pool, user, purchaseOrderId)
@@ -235,8 +250,8 @@ function normalizeExceptionSummary(task) {
 }
 
 /**
- * 执行器控制面完成认证和任务领取后调用。不得直接暴露为无认证 HTTP 路由。
- * 映射只返回平台订单号和可靠年份，不返回采购单、租户或用户信息。
+ * 执行器控制面完成认证和任务领取后调用，不得直接暴露为无认证 HTTP 路由。
+ * 映射只返回关联销售订单号和由销售订单下单时间确定的年份。
  */
 async function resolveTrustedOrderMapping(pool, {
   taskId,
@@ -250,8 +265,11 @@ async function resolveTrustedOrderMapping(pool, {
             t.claimed_executor_instance_id, t.expires_at, t.lease_expires_at,
             w.owner_id AS workflow_owner_id,
             r.owner_id AS ref_owner_id, r.purchase_order_id,
-            po.owner_id AS order_owner_id, po.platform_order_no, po.order_year,
-            po.order_year_source, po.cloud_locator_version,
+            po.owner_id AS order_owner_id, po.sales_order_id AS linked_sales_order_id,
+            po.sales_order_no AS linked_sales_order_no, po.cloud_locator_version,
+            so.id AS resolved_sales_order_id, so.order_id AS platform_order_no,
+            so.order_time AS sales_order_time, YEAR(so.order_time) AS order_year,
+            s.owner_id AS store_owner_id,
             w.locator_version AS workflow_locator_version,
             b.machine_code AS bound_machine_code, b.binding_version AS current_binding_version,
             w.binding_version AS workflow_binding_version,
@@ -261,47 +279,58 @@ async function resolveTrustedOrderMapping(pool, {
        JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
        JOIN cloud_order_refs r ON r.order_ref_id = t.order_ref_id
        JOIN purchase_orders po ON po.id = r.purchase_order_id
+       JOIN sales_orders so ON (
+              (COALESCE(po.sales_order_id, 0) > 0 AND so.id = po.sales_order_id)
+           OR (COALESCE(po.sales_order_id, 0) = 0 AND so.order_id = po.sales_order_no)
+       )
+       JOIN stores s ON s.id = so.store_id AND s.owner_id = po.owner_id
        JOIN cloud_machine_bindings b ON b.owner_id = w.owner_id
        JOIN cloud_executor_instances i ON i.executor_instance_id = ?
       WHERE t.task_id = ? AND t.order_ref_id = ?`,
     [String(executorInstanceId || ''), String(taskId || ''), String(orderRefId || '')]
   )
-  if (!rows.length) throw serviceError('order_mapping_forbidden', '订单映射不存在或执行器无权解析')
+  if (rows.length !== 1) throw serviceError('order_mapping_forbidden', '订单映射不存在、不唯一或执行器无权解析')
   const row = rows[0]
   const ownerConsistent = Number(row.workflow_owner_id) === Number(row.ref_owner_id) &&
-    Number(row.ref_owner_id) === Number(row.order_owner_id)
+    Number(row.ref_owner_id) === Number(row.order_owner_id) &&
+    Number(row.order_owner_id) === Number(row.store_owner_id)
   const machineConsistent = row.target_machine_code === normalizedMachineCode &&
     row.bound_machine_code === normalizedMachineCode &&
     row.instance_machine_code === normalizedMachineCode &&
     row.claimed_executor_instance_id === String(executorInstanceId || '') &&
     Number(row.workflow_binding_version) === Number(row.current_binding_version)
+  const linkedSalesOrderId = Number(row.linked_sales_order_id)
+  const platformOrderNo = String(row.platform_order_no || '').trim()
+  const relationshipConsistent = linkedSalesOrderId > 0
+    ? linkedSalesOrderId === Number(row.resolved_sales_order_id) &&
+      (!String(row.linked_sales_order_no || '').trim() || String(row.linked_sales_order_no).trim() === platformOrderNo)
+    : String(row.linked_sales_order_no || '').trim() === platformOrderNo
   const locatorConsistent = Number(row.workflow_locator_version) === Number(row.cloud_locator_version)
   const heartbeatAt = new Date(row.instance_last_heartbeat_at).getTime()
   const heartbeatFresh = Number.isFinite(heartbeatAt) && Date.now() - heartbeatAt <= 90 * 1000
-  if (!ownerConsistent || !machineConsistent || !locatorConsistent || row.instance_status !== 'online' || !heartbeatFresh) {
-    throw serviceError('order_mapping_forbidden', '订单归属或目标执行器校验失败')
+  if (!ownerConsistent || !machineConsistent || !relationshipConsistent || !locatorConsistent ||
+      row.instance_status !== 'online' || !heartbeatFresh) {
+    throw serviceError('order_mapping_forbidden', '订单归属、销售订单关系或目标执行器校验失败')
   }
   if (!['leased', 'executing'].includes(row.transport_status) ||
       new Date(row.expires_at).getTime() <= Date.now() ||
       new Date(row.lease_expires_at).getTime() <= Date.now()) {
     throw serviceError('task_expired', '任务未处于有效领取状态')
   }
-  assertOrderLocatorReady(row)
+  assertOrderLocatorReady({ platform_order_no: platformOrderNo, order_year: row.order_year })
   return {
-    platform_order_no: String(row.platform_order_no),
-    order_year: Number(row.order_year)
+    platform_order_no: platformOrderNo,
+    order_year: normalizeOrderYear(row.order_year)
   }
 }
 
 module.exports = {
-  RELIABLE_YEAR_SOURCES,
   assertOrderLocatorReady,
-  confirmManualOrderYear,
   getOrderConfiguration,
-  hasReliableOrderYear,
   normalizeExceptionSummary,
   normalizeOrderYear,
   prepareOrderRef,
   readAccessiblePurchaseOrder,
+  readRelatedSalesLocator,
   resolveTrustedOrderMapping
 }

@@ -1,6 +1,6 @@
 # 店小二与云仓助手协作契约
 
-状态：机器码绑定和订单定位基础已在店小二侧实现；异常查询/处理参数已经双方确认。执行器控制面仍为草案且保持禁用，正式服务地址和传输认证确认前，不开放注册、心跳、领取、续租、映射或回执 HTTP 端点。
+状态：机器码绑定、关联销售订单定位和异常查询/处理参数已在店小二侧确定。执行器认证与中央任务传输 v1 路径及字段已形成供双方本地联调的固定契约；端点尚未实现并保持禁用，不开放注册、心跳、领取、续租、映射或回执网络访问。
 
 ## 1. 固定边界
 
@@ -85,21 +85,21 @@
 任务中的 `order_id` 继续使用中央服务生成的不透明 `order_ref_id`。中央服务内部映射为：
 
 ```text
-order_ref_id -> purchase_order_id -> platform_order_no + order_year
+order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order_id + YEAR(sales_orders.order_time)
 ```
 
-- `platform_order_no`用于云仓助手真实异常接口的 `billexception.sellerBillNo`和`soExceptionCentre.spSoNo`查询。
+- 返回云仓助手的 `platform_order_no`固定取关联 `sales_orders.order_id`，用于真实异常接口的 `billexception.sellerBillNo`和`soExceptionCentre.spSoNo`查询。
+- 返回云仓助手的 `order_year`固定取 `YEAR(sales_orders.order_time)`。
 - `purchase_no`只保留在中央服务用于审计，不传云仓助手。
-- `order_year`只接受 `platform_order_time`（平台实际下单时间）或 `manual_confirmed`（用户依据平台页面人工确认）来源。
-- 禁止使用采购单 `created_at`、当前年份或订单号格式推断年份。
-- 平台订单号或年份变化会递增定位版本；已有未完成工作流必须进入 `review_required`。
+- 采购平台的 `purchase_orders.platform_order_no`不参与云仓异常查询。
+- 禁止使用采购单 `created_at`、当前年份、采购平台下单时间或订单号格式推断年份，也不要求用户人工确认年份。
+- 采购单关联的销售订单发生变化会递增定位版本；已有未完成工作流必须进入 `review_required`。
 
 用户侧已实现：
 
 | 方法 | 相对路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/cloud-warehouse/orders/:purchaseOrderId/configuration` | 查询可见采购单的定位状态及最新脱敏异常结果 |
-| `PUT` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-year` | 人工确认可靠年份，正文为 `order_year`和`confirmed: true` |
 | `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-ref` | 定位字段就绪后生成或读取不透明订单引用 |
 
 主账号只能解析本体系订单；子账号还必须通过现有采购账号授权或该采购单创建归属校验。执行器侧映射实现为受信任内部服务，并额外校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
@@ -143,41 +143,81 @@ order_ref_id -> purchase_order_id -> platform_order_no + order_year
 
 `source`只允许 `billexception`或`soExceptionCentre`。中央服务不会把执行器结果中的未知字段、内部异常 ID、URL 或凭据转发到页面。页面展示全部脱敏异常及数量，只有存在有效快照且用户确认后才能创建处理任务。
 
-## 5. 执行器控制面草案
+## 5. 执行器认证与中央任务传输 v1
 
-以下是双方仍需确认的基础数据契约。相对路径、正式服务地址和认证方式尚未生效。
+以下路径作为双方本地联调的固定契约，统一前缀为 `/api/cloud-warehouse/executor/v1`。当前代码仍保持传输硬禁用，不挂载这些网络端点；双方确认并完成实现后才启用。
 
-### 5.1 注册
+### 5.1 认证与首次登记
+
+机器码只用于路由，不是密码。主账号或管理员在已登录的店小二页面为已绑定机器码签发一次性登记码：
+
+`POST /api/cloud-warehouse/machine-binding/enrollment`
+
+请求正文为空对象，成功响应为：
+
+```json
+{
+  "machine_code": "YC-7F3K-92MX",
+  "enrollment_code": "一次性登记码",
+  "expires_at": "ISO时间"
+}
+```
+
+登记码使用256位随机数，服务端只保存哈希，10分钟过期且只能使用一次。云仓助手提交：
+
+`POST /api/cloud-warehouse/executor/v1/enroll`
 
 ```json
 {
   "protocol_version": "1.0",
   "machine_code": "YC-7F3K-92MX",
-  "executor_instance_id": "每次云仓助手启动生成的实例标识",
+  "enrollment_code": "一次性登记码",
+  "executor_instance_id": "本次进程实例标识",
   "executor_version": "版本号",
-  "started_at": "ISO时间",
-  "capabilities": {
-    "exception.order.check": false,
-    "exception.order.resolve": false,
-    "warehouse.order.check": false,
-    "warehouse.order.print": false,
-    "warehouse.order.outbound": false
-  },
-  "readiness": {
-    "printer_available": false,
-    "login_environment_available": false
-  }
+  "started_at": "ISO时间"
 }
 ```
 
-要求：
+成功返回一次且仅一次的独立执行器凭据：
 
-- `executor_instance_id`只用于心跳、租约和审计，不进入业务任务 `target`，也不由用户输入。
-- 未知能力一律按 `false`处理。
-- 同一机器码出现多个活跃实例时，中央服务不得派发写任务，直至冲突解除。
-- 注册请求必须经过独立的控制面认证；机器码本身不能用于认证。
+```json
+{
+  "credential_id": "execred_...",
+  "client_id": "exec_...",
+  "client_secret": "256位随机密钥",
+  "machine_code": "YC-7F3K-92MX",
+  "issued_at": "ISO时间"
+}
+```
 
-### 5.2 心跳和能力上报
+云仓助手应把 `client_secret`保存在本机加密安全存储。机器码换绑、解除绑定或凭据吊销后，旧凭据和未完成租约立即失效。
+
+云仓助手使用客户端凭据换取短期访问令牌：
+
+`POST /api/cloud-warehouse/executor/v1/token`
+
+```json
+{
+  "grant_type": "client_credentials",
+  "client_id": "exec_...",
+  "client_secret": "独立执行器密钥"
+}
+```
+
+```json
+{
+  "access_token": "不透明随机令牌",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "machine_code": "YC-7F3K-92MX"
+}
+```
+
+除 `enroll`和`token`外的所有控制面请求必须通过 HTTPS，并携带 `Authorization: Bearer <access_token>`。访问令牌绑定 `credential_id + machine_code`，服务端仍逐次校验正文中的机器码和实例标识。Cookie、云仓账号、平台 Token、密码、Authorization 或 API Key 不得作为业务数据上传或写入日志。
+
+### 5.2 心跳与能力上报
+
+`POST /api/cloud-warehouse/executor/v1/heartbeat`
 
 ```json
 {
@@ -186,6 +226,7 @@ order_ref_id -> purchase_order_id -> platform_order_no + order_year
   "executor_instance_id": "实例标识",
   "reported_at": "ISO时间",
   "status": "online",
+  "executor_version": "版本号",
   "capabilities": {
     "exception.order.check": false,
     "exception.order.resolve": false,
@@ -202,36 +243,46 @@ order_ref_id -> purchase_order_id -> platform_order_no + order_year
 }
 ```
 
-中央服务暂按最近90秒内存在有效心跳判断在线。正式间隔和离线阈值仍需双方确认。
+```json
+{
+  "accepted": true,
+  "server_time": "ISO时间",
+  "heartbeat_interval_seconds": 30,
+  "offline_after_seconds": 90
+}
+```
 
-### 5.3 任务领取
+未知能力按 `false`处理。同一机器码存在多个活跃实例时停止派发写任务并返回 `executor_instance_conflict`。
 
-领取请求只声明执行器自己的身份和可用槽位：
+### 5.3 定向任务领取
+
+`POST /api/cloud-warehouse/executor/v1/tasks/claim`
 
 ```json
 {
   "protocol_version": "1.0",
   "machine_code": "YC-7F3K-92MX",
   "executor_instance_id": "实例标识",
-  "available_slots": 1
+  "available_slots": 1,
+  "wait_seconds": 25
 }
 ```
 
-中央服务只能返回 `target.machine_code`完全相同的任务。建议领取响应使用外层租约，不修改业务任务允许的顶层字段：
+中央服务只返回 `target.machine_code`与访问令牌及请求机器码完全一致的任务。租约放在任务信封外层，不改变任务允许的顶层字段：
 
 ```json
 {
-  "protocol_version": "1.0",
   "lease": {
     "lease_id": "lease_...",
     "fencing_token": 1,
-    "expires_at": "ISO时间"
+    "expires_at": "ISO时间",
+    "renew_after_seconds": 20
   },
   "task": {
     "protocol_version": "1.0",
     "task_id": "task_...",
     "trace_id": "wf_...",
-    "command": "warehouse.order.check",
+    "command": "exception.order.check",
     "order_id": "ord_...",
     "idempotency_key": "idem_...",
     "created_at": "ISO时间",
@@ -249,55 +300,171 @@ order_ref_id -> purchase_order_id -> platform_order_no + order_year
 }
 ```
 
-无任务时返回 `task: null`。领取和续租必须校验 `machine_code`、`executor_instance_id`、`lease_id`及单调递增的 `fencing_token`。
+无任务时返回 `200 {"lease":null,"task":null,"retry_after_seconds":3}`。初始租约为60秒，不能超过任务 `expires_at`。
 
-### 5.4 结果回传
+### 5.4 执行状态与租约续期
 
-结果沿用执行端协议，并建议回显 `trace_id`和 `idempotency_key`以便审计：
+`POST /api/cloud-warehouse/executor/v1/tasks/:taskId/status`
 
 ```json
 {
   "protocol_version": "1.0",
-  "task_id": "task_...",
-  "trace_id": "wf_...",
-  "idempotency_key": "idem_...",
-  "command": "warehouse.order.print",
-  "order_id": "ord_...",
-  "status": "succeeded",
-  "reason": "business_state_confirmed",
-  "message": "",
-  "delivery": {
-    "received": true,
-    "executed": true,
-    "replayed": false,
-    "business_confirmed": true
-  },
-  "result": {},
-  "verification": {
-    "confirmed": true,
-    "observed_status": "printed_unshipped"
-  },
-  "executor": {
-    "machine_code": "YC-7F3K-92MX",
-    "executor_instance_id": "实例标识"
-  },
-  "completed_at": "ISO时间"
+  "machine_code": "YC-7F3K-92MX",
+  "executor_instance_id": "实例标识",
+  "lease_id": "lease_...",
+  "fencing_token": 1,
+  "status": "executing",
+  "reported_at": "ISO时间"
 }
 ```
 
-中央服务必须复核任务、租约、幂等键、机器码、实例和状态组合。写命令可信成功状态严格限定为：
+成功响应：
+
+```json
+{
+  "accepted": true,
+  "task_id": "task_...",
+  "status": "executing",
+  "recorded_at": "ISO时间"
+}
+```
+
+`POST /api/cloud-warehouse/executor/v1/tasks/:taskId/lease/renew`
+
+```json
+{
+  "protocol_version": "1.0",
+  "machine_code": "YC-7F3K-92MX",
+  "executor_instance_id": "实例标识",
+  "lease_id": "lease_...",
+  "fencing_token": 1,
+  "requested_extension_seconds": 60
+}
+```
+
+续租成功响应：
+
+```json
+{
+  "lease_id": "lease_...",
+  "fencing_token": 1,
+  "expires_at": "ISO时间",
+  "renew_after_seconds": 20
+}
+```
+
+`fencing_token`保持当前租约值。租约重新分配时 fencing token 必须单调递增；旧 token 的状态、解析和结果请求全部拒绝。
+
+### 5.5 受信任订单解析
+
+只有已经领取且仍持有有效租约的执行器才能调用：
+
+`POST /api/cloud-warehouse/executor/v1/tasks/:taskId/order-mapping`
+
+```json
+{
+  "protocol_version": "1.0",
+  "machine_code": "YC-7F3K-92MX",
+  "executor_instance_id": "实例标识",
+  "lease_id": "lease_...",
+  "fencing_token": 1,
+  "order_id": "ord_..."
+}
+```
+
+成功响应正文严格只有：
+
+```json
+{
+  "platform_order_no": "3588401003348721",
+  "order_year": 2026
+}
+```
+
+服务端校验任务、租约、机器码、实例、租户归属、采购单与销售单关系及定位版本。`platform_order_no`固定来自 `sales_orders.order_id`，`order_year`固定来自 `YEAR(sales_orders.order_time)`。
+
+### 5.6 结果回传
+
+`POST /api/cloud-warehouse/executor/v1/tasks/:taskId/result`
+
+请求外层携带租约，`response`内部保持云仓助手 v1.0 响应结构，不新增业务响应顶层字段：
+
+```json
+{
+  "lease_id": "lease_...",
+  "fencing_token": 1,
+  "response": {
+    "protocol_version": "1.0",
+    "task_id": "task_...",
+    "command": "exception.order.check",
+    "order_id": "ord_...",
+    "status": "succeeded",
+    "reason": "business_state_confirmed",
+    "message": "",
+    "delivery": {
+      "received": true,
+      "executed": true,
+      "business_confirmed": true
+    },
+    "result": {},
+    "verification": {
+      "confirmed": true,
+      "observed_status": ""
+    },
+    "executor": {
+      "device_id": "",
+      "executor_instance_id": "实例标识"
+    },
+    "completed_at": "ISO时间"
+  }
+}
+```
+
+成功回执：
+
+```json
+{
+  "accepted": true,
+  "task_id": "task_...",
+  "workflow_id": "wf_...",
+  "workflow_state": "当前中央工作流状态",
+  "recorded_at": "ISO时间",
+  "replayed": false
+}
+```
+
+中央服务复核任务、租约、幂等键、机器码、实例和状态组合。重复上传同一完整结果返回原回执并设置 `replayed: true`；同一任务上传不同结果返回 `idempotency_key_collision`并进入人工复核。写命令可信成功状态严格限定为：
 
 - `exception.order.resolve` → `waiting_arrival`
 - `warehouse.order.print` → `printed_unshipped`
 - `warehouse.order.outbound` → `shipped`
 
-不确定结果、租约丢失、执行中断、状态矛盾或复验失败一律进入 `review_required`，不得自动重复写操作。
+### 5.7 错误与重试
+
+错误响应统一为：
+
+```json
+{
+  "error": {
+    "code": "lease_expired",
+    "message": "脱敏说明",
+    "retryable": false,
+    "review_required": true
+  }
+}
+```
+
+固定控制面错误码包括：`invalid_request`、`invalid_protocol_version`、`unauthorized_executor`、`credential_revoked`、`machine_binding_missing`、`machine_binding_changed`、`machine_code_mismatch`、`executor_instance_conflict`、`capability_unavailable`、`task_not_found`、`task_expired`、`lease_mismatch`、`lease_expired`、`fencing_token_stale`、`order_mapping_forbidden`、`order_locator_changed`、`result_conflict`和`rate_limited`。
+
+- `401`时允许刷新访问令牌后重放同一个传输请求一次。
+- `429`、`502`、`503`、`504`按服务端 `Retry-After`或1、2、4、8、15秒退避并加入随机抖动。
+- 同一任务的网络重投复用原 `task_id`、`idempotency_key`、`lease_id`和 fencing token。
+- 只读任务允许在租约有效且业务结果确定未产生前进行传输重试；中央30秒调度的下一轮真实查询必须生成新 `task_id`和新 `idempotency_key`。
+- 三个写命令不得自动业务重试。超时、断线、租约丢失、执行中断、结果未知或复验失败一律 `review_required`。
 
 ## 6. 尚未确认且明确不实现
 
-- 控制面正式服务地址和传输认证方式
 - 到仓、打印和发货的实际接口及三个命令的 `params` Schema
-- 控制面 HTTP 路径、执行器认证、租约和映射接口的网络传输细节
-- 平台实际下单时间在淘宝、拼多多和1688采购同步中的稳定提取字段
+- 执行器控制面网络端点在双方完成字段复核前保持禁用
 - `requester_device_id`、`same_device_session_id`、`sameDeviceVerified`
 - Named Pipe挑战、DPAPI设备签名或其他同机证明
