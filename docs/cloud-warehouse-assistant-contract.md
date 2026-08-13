@@ -14,6 +14,8 @@
 
 禁止任意代码、脚本、Shell、模块路径、可执行文件或任意 URL 执行入口。`exception.order.check` 的 `params` 固定为空对象；`exception.order.resolve` 的 `params` 必须且只能包含 `exception_snapshot_ref`。其余三项业务接口未确认前，`params` 继续固定为空对象。
 
+业务流程只有以下几步：店小二发送异常查询指令，云仓助手在执行前取得该销售订单的订单号和年份并返回查询结果；店小二取得人工确认后再发送异常处理指令；处理完成后，再按需发送到仓查询、打印和出库指令。云仓助手只负责按固定指令执行并回传结果，是否进入下一步由店小二决定。
+
 机器码格式：
 
 ```text
@@ -26,25 +28,7 @@
 
 ## 2. 主账号体系绑定
 
-绑定单位是店小二主账号体系（租户），由一个主账号及其已授权子账号组成。主账号和子账号查询到同一份绑定；只有主账号或具备管理权限的管理员可以绑定、解除和换绑。
-
-已实现的登录用户接口：
-
-| 方法 | 相对路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/cloud-warehouse/machine-binding` | 查询所属主账号体系的绑定、管理权限和云仓助手可用状态 |
-| `PUT` | `/api/cloud-warehouse/machine-binding` | 主账号或管理员首次绑定/换绑，正文仅需 `machine_code` |
-| `DELETE` | `/api/cloud-warehouse/machine-binding` | 主账号或管理员解除所属体系的绑定，重复解除按成功处理 |
-
-绑定请求：
-
-```json
-{
-  "machine_code": "YC-7F3K-92MX"
-}
-```
-
-服务端只使用登录令牌确定实际操作人及其所属 `owner_id`，不允许页面提交或覆盖用户、主账号或租户标识。一个主账号体系只能有一个有效绑定；一个 `machine_code` 默认只能被一个主账号体系占用，数据库同时对 `owner_id` 和 `machine_code` 设置唯一约束。绑定审计分别记录所属主账号体系和实际操作用户。
+绑定单位是店小二主账号体系（租户），由一个主账号及其已授权子账号组成。一个主账号体系只能有一个有效绑定，一个 `machine_code`默认只能被一个主账号体系占用。中央服务负责绑定、解除、换绑、权限校验和审计；云仓助手只需使用本机机器码登记，并只领取 `target.machine_code`与本机完全一致的任务。
 
 ## 3. 业务任务信封 v1.0
 
@@ -72,9 +56,9 @@
 }
 ```
 
-写命令必须附加 `confirmation`，且 `action`与 `command`完全一致。`requested_by.actor_id`记录实际发起任务的登录用户；`confirmation.actor_id`记录实际确认人，二者均由中央服务根据认证会话写入，不能由页面冒充。只读任务最长10分钟，写任务最长2分钟。
+写命令必须附加 `confirmation`，且 `action`与 `command`完全一致。`requested_by.actor_id`记录实际发起人；`confirmation.actor_id`记录实际确认人，二者均由中央服务根据认证会话生成。只读任务最长10分钟，写任务最长2分钟。
 
-`target.machine_code`只能由中央服务根据实际发起人所属的“主账号体系/租户 → machine_code”绑定填充。主账号、已授权子账号共用该路由；renderer 和其他调用方不得传入任务级目标机器码，`target`中也不增加主账号、子账号或租户字段。
+`target.machine_code`只能由中央服务根据实际发起人所属的“主账号体系/租户 → machine_code”绑定填充。主账号、已授权子账号共用该路由；业务调用方不得传入任务级目标机器码，`target`中也不增加主账号、子账号或租户字段。
 
 `trace_id`在一个工作流中保持不变并等同于 `workflow_id`。每轮真实的30秒查询生成新的 `task_id`和 `idempotency_key`；同一个任务的网络重投复用原标识。
 
@@ -95,14 +79,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 - 禁止使用采购单 `created_at`、当前年份、采购平台下单时间或订单号格式推断年份，也不要求用户人工确认年份。
 - 采购单关联的销售订单发生变化会递增定位版本；已有未完成工作流必须进入 `review_required`。
 
-用户侧已实现：
-
-| 方法 | 相对路径 | 说明 |
-|---|---|---|
-| `GET` | `/api/cloud-warehouse/orders/:purchaseOrderId/configuration` | 查询可见采购单的定位状态及最新脱敏异常结果 |
-| `POST` | `/api/cloud-warehouse/orders/:purchaseOrderId/order-ref` | 定位字段就绪后生成或读取不透明订单引用 |
-
-主账号只能解析本体系订单；子账号还必须通过现有采购账号授权或该采购单创建归属校验。执行器侧映射实现为受信任内部服务，并额外校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
+中央服务必须校验订单所属主账号体系。执行器侧映射还要校验有效任务、租约状态、目标机器码、执行器实例、租户归属和定位版本。控制面认证未定稿前不挂载公网 HTTP 路由。
 
 ### 4.2 两项命令参数
 
@@ -122,9 +99,9 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 
 平台订单号和年份只通过受信任映射返回，不放入任务 `params`。异常处理不得附加内部异常 ID、平台订单号、年份或其他字段。
 
-### 4.3 查询结果的页面字段
+### 4.3 异常查询结果字段
 
-中央服务只接受并向页面投影以下脱敏结果字段：
+中央服务只接受以下脱敏结果字段：
 
 ```json
 {
@@ -141,7 +118,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 }
 ```
 
-`source`只允许 `billexception`或`soExceptionCentre`。中央服务不会把执行器结果中的未知字段、内部异常 ID、URL 或凭据转发到页面。页面展示全部脱敏异常及数量，只有存在有效快照且用户确认后才能创建处理任务。
+`source`只允许 `billexception`或`soExceptionCentre`。未知字段、内部异常 ID、URL 或凭据必须拒绝或丢弃；只有存在有效快照且取得人工确认后，中央服务才能创建异常处理任务。
 
 ## 5. 执行器认证与中央任务传输 v1
 
@@ -149,7 +126,7 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 
 ### 5.1 认证与首次登记
 
-机器码只用于路由，不是密码。主账号或管理员在已登录的店小二页面为已绑定机器码签发一次性登记码：
+机器码只用于路由，不是密码。中央服务通过已认证的管理操作为已绑定机器码签发一次性登记码：
 
 `POST /api/cloud-warehouse/machine-binding/enrollment`
 
@@ -438,8 +415,6 @@ order_ref_id -> purchase_order_id -> 关联 sales_order_id -> sales_orders.order
 - `exception.order.resolve` → `waiting_arrival`
 - `warehouse.order.print` → `printed_unshipped`
 - `warehouse.order.outbound` → `shipped`
-
-`warehouse.order.outbound`只有在云仓助手回传 `status: succeeded`、`delivery.business_confirmed: true`、`verification.confirmed: true`且`verification.observed_status: shipped`全部成立后，中央服务才在同一事务中把对应采购单状态更新为 `forwarded`。其他任何响应均不得修改采购单状态，并进入 `review_required`。原有“我已转发”按钮是独立的人工兜底入口，不依赖云仓助手绑定或传输接口。
 
 ### 5.7 错误与重试
 
