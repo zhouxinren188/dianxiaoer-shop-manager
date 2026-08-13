@@ -412,6 +412,25 @@
               </span>
             </div>
             <div class="forward-summary-row">
+              <span class="forward-label">云仓订单状态</span>
+              <span class="forward-value cloud-order-status-value">
+                <el-tag size="small" :type="cloudOrderStatus.tagType">{{ cloudOrderStatus.label }}</el-tag>
+                <el-button
+                  v-if="cloudOrderStatus.key === 'exception'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  @click="handleCloudExceptionAction"
+                >处理异常</el-button>
+              </span>
+            </div>
+            <div class="forward-summary-row">
+              <span class="forward-label">WMS仓库状态</span>
+              <span class="forward-value">
+                <el-tag size="small" :type="wmsWarehouseStatus.tagType">{{ wmsWarehouseStatus.label }}</el-tag>
+              </span>
+            </div>
+            <div class="forward-summary-row">
               <span class="forward-label">归属仓库</span>
               <span class="forward-value forward-warehouse">{{ forwardSalesData.warehouseName || '未知仓库' }}</span>
             </div>
@@ -516,7 +535,6 @@
         >我已转发</el-button>
         <el-button @click="forwardDialogVisible = false">关闭</el-button>
         <el-button v-if="cloudOrderConfig?.machineBound" type="primary" disabled>查询异常</el-button>
-        <el-button v-if="cloudOrderConfig?.machineBound && cloudOrderConfig?.exception?.status === 'succeeded' && cloudOrderConfig?.exception?.resultShapeValid && cloudOrderConfig?.exception?.exceptionCount > 0" type="danger" disabled>处理异常</el-button>
       </template>
     </el-dialog>
 
@@ -818,6 +836,28 @@
             </el-descriptions-item>
           </el-descriptions>
           <p v-else class="cloud-binding-hint">该机器码尚无云仓助手注册或心跳记录，当前不能执行订单任务。</p>
+          <div v-if="cloudBinding.canManage" class="cloud-enrollment-section">
+            <el-button
+              type="primary"
+              plain
+              size="small"
+              :loading="cloudEnrollmentLoading"
+              @click="handleCreateCloudEnrollment"
+            >生成执行器登记码</el-button>
+            <span class="cloud-enrollment-help">登记码10分钟有效且只能使用一次，请复制到绑定机器上的云仓助手。</span>
+          </div>
+          <el-alert
+            v-if="cloudEnrollment"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="cloud-enrollment-result"
+          >
+            <template #title>
+              <div class="cloud-enrollment-code">{{ cloudEnrollment.enrollmentCode }}</div>
+              <div class="cloud-enrollment-expiry">有效期至：{{ formatTime(cloudEnrollment.expiresAt) }}</div>
+            </template>
+          </el-alert>
         </div>
 
         <p v-if="!cloudBinding.canManage" class="cloud-binding-hint">
@@ -1147,6 +1187,7 @@ import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
+  createCloudExecutorEnrollment,
   fetchCloudOrderConfiguration
 } from '@/api/cloudWarehouse'
 
@@ -1277,6 +1318,8 @@ const CLOUD_MACHINE_CODE_PATTERN = /^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[2
 const cloudConfigVisible = ref(false)
 const cloudConfigLoading = ref(false)
 const cloudConfigSaving = ref(false)
+const cloudEnrollmentLoading = ref(false)
+const cloudEnrollment = ref(null)
 const cloudMachineCodeInput = ref('')
 const cloudBinding = reactive({
   bound: false,
@@ -1289,6 +1332,22 @@ const cloudBinding = reactive({
 })
 const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
 const cloudOrderConfig = ref(null)
+const cloudOrderStatus = computed(() => {
+  const exception = cloudOrderConfig.value?.exception
+  if (exception?.status !== 'succeeded' || !exception?.resultShapeValid) {
+    return { key: 'unknown', label: '未知', tagType: 'info' }
+  }
+  if (Number(exception.exceptionCount) > 0) {
+    return { key: 'exception', label: '异常', tagType: 'danger' }
+  }
+  return { key: 'normal', label: '正常', tagType: 'success' }
+})
+const wmsWarehouseStatus = computed(() => {
+  if (cloudOrderConfig.value?.wmsOrderEntered === true) {
+    return { key: 'entered', label: '已进入仓库', tagType: 'success' }
+  }
+  return { key: 'not_found', label: '暂无该订单', tagType: 'info' }
+})
 
 const accountList = ref([])
 
@@ -1503,6 +1562,7 @@ async function loadCloudMachineBinding() {
 }
 
 async function handleCloudWarehouseConfig() {
+  cloudEnrollment.value = null
   cloudConfigVisible.value = true
   await loadCloudMachineBinding()
 }
@@ -1536,6 +1596,7 @@ async function handleSaveCloudMachine() {
     cloudConfigSaving.value = true
     const wasBound = cloudBinding.bound
     applyCloudBinding(await bindCloudMachine(cloudMachineCodeInput.value))
+    cloudEnrollment.value = null
     ElMessage.success(wasBound ? '云仓助手机器码已更换' : '云仓助手机器码已绑定')
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('保存云仓配置失败: ' + (err.message || ''))
@@ -1558,11 +1619,29 @@ async function handleUnbindCloudMachine() {
     )
     cloudConfigSaving.value = true
     applyCloudBinding(await unbindCloudMachine())
+    cloudEnrollment.value = null
     ElMessage.success('已解除云仓助手机器码绑定')
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('解除绑定失败: ' + (err.message || ''))
   } finally {
     cloudConfigSaving.value = false
+  }
+}
+
+async function handleCreateCloudEnrollment() {
+  if (!cloudBinding.bound || !cloudBinding.canManage) return
+  try {
+    cloudEnrollmentLoading.value = true
+    const result = await createCloudExecutorEnrollment()
+    cloudEnrollment.value = {
+      enrollmentCode: result?.enrollment_code || '',
+      expiresAt: result?.expires_at || null
+    }
+    ElMessage.success('执行器登记码已生成，请在10分钟内使用')
+  } catch (error) {
+    ElMessage.error('生成登记码失败: ' + (error.message || ''))
+  } finally {
+    cloudEnrollmentLoading.value = false
   }
 }
 
@@ -1572,6 +1651,10 @@ function cloudExceptionSourceLabel(source) {
     soExceptionCentre: '订单异常中心'
   }
   return labels[source] || '未知来源'
+}
+
+function handleCloudExceptionAction() {
+  ElMessage.info('处理异常指令通道尚未启用')
 }
 
 // 监听 Electron 主进程登录成功事件，自动刷新列表
@@ -3597,6 +3680,15 @@ function handleImportDialogClose() {
   color: #e6a23c;
   font-weight: 500;
 }
+.cloud-order-status-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.cloud-exception-action {
+  height: auto;
+  padding: 0;
+}
 .forward-goods-title {
   font-size: 13px;
   color: #606266;
@@ -3774,6 +3866,33 @@ function handleImportDialogClose() {
 
 .cloud-capability-list {
   margin-top: 12px;
+}
+
+.cloud-enrollment-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.cloud-enrollment-help,
+.cloud-enrollment-expiry {
+  color: #909399;
+  font-size: 12px;
+}
+
+.cloud-enrollment-result {
+  margin-top: 12px;
+}
+
+.cloud-enrollment-code {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.cloud-enrollment-expiry {
+  margin-top: 4px;
 }
 
 .cloud-binding-hint {

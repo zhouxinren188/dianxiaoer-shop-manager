@@ -715,7 +715,7 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
-    // 云仓助手运行状态。正式控制面认证协议确认前，不开放注册/心跳公网接口。
+    // 云仓助手运行状态。机器码只负责路由，执行器使用独立凭据认证。
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_executor_machines (
         machine_code VARCHAR(12) PRIMARY KEY,
@@ -751,6 +751,57 @@ async function initDB() {
         KEY idx_cloud_instance_machine (machine_code, status, last_heartbeat_at),
         CONSTRAINT fk_cloud_instance_machine FOREIGN KEY (machine_code)
           REFERENCES cloud_executor_machines(machine_code) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_executor_enrollments (
+        enrollment_id VARCHAR(64) PRIMARY KEY,
+        owner_id INT NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        code_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        expires_at DATETIME(3) NOT NULL,
+        used_at DATETIME(3) DEFAULT NULL,
+        issued_by_user_id INT NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_enrollment_code_hash (code_hash),
+        KEY idx_cloud_enrollment_machine (machine_code, expires_at),
+        KEY idx_cloud_enrollment_owner (owner_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_executor_credentials (
+        credential_id VARCHAR(64) PRIMARY KEY,
+        client_id VARCHAR(64) NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        secret_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'active',
+        issued_at DATETIME(3) NOT NULL,
+        last_used_at DATETIME(3) DEFAULT NULL,
+        revoked_at DATETIME(3) DEFAULT NULL,
+        revoke_reason VARCHAR(80) DEFAULT '',
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        UNIQUE KEY uk_cloud_executor_client (client_id),
+        KEY idx_cloud_credential_machine (machine_code, status),
+        CONSTRAINT fk_cloud_credential_machine FOREIGN KEY (machine_code)
+          REFERENCES cloud_executor_machines(machine_code) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_executor_access_tokens (
+        token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+        credential_id VARCHAR(64) NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        expires_at DATETIME(3) NOT NULL,
+        last_used_at DATETIME(3) DEFAULT NULL,
+        revoked_at DATETIME(3) DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_token_credential (credential_id, expires_at),
+        KEY idx_cloud_token_machine (machine_code, expires_at),
+        CONSTRAINT fk_cloud_token_credential FOREIGN KEY (credential_id)
+          REFERENCES cloud_executor_credentials(credential_id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
@@ -861,7 +912,9 @@ async function initDB() {
         observed_at DATETIME(3) DEFAULT NULL,
         executor_receipt_id VARCHAR(100) DEFAULT '',
         result_redacted_json JSON DEFAULT NULL,
+        response_redacted_json JSON DEFAULT NULL,
         response_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+        result_recorded_at DATETIME(3) DEFAULT NULL,
         updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
         UNIQUE KEY uk_cloud_task_idempotency (idempotency_key),
         KEY idx_cloud_task_workflow (workflow_id, created_at),
@@ -872,6 +925,8 @@ async function initDB() {
           REFERENCES cloud_order_refs(order_ref_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    try { await connection.execute('ALTER TABLE cloud_order_tasks ADD COLUMN response_redacted_json JSON DEFAULT NULL AFTER result_redacted_json') } catch(e) { /* 列已存在 */ }
+    try { await connection.execute('ALTER TABLE cloud_order_tasks ADD COLUMN result_recorded_at DATETIME(3) DEFAULT NULL AFTER response_hash') } catch(e) { /* 列已存在 */ }
 
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_order_write_locks (

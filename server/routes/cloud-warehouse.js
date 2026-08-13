@@ -10,6 +10,11 @@ const {
   getOrderConfiguration,
   prepareOrderRef
 } = require('../services/cloud-warehouse-order-service')
+const {
+  assertExactKeys,
+  createEnrollment,
+  revokeMachineAccess
+} = require('../services/cloud-warehouse-executor-auth-service')
 
 function ok(data) {
   return { code: 0, data }
@@ -94,6 +99,28 @@ module.exports = function createCloudWarehouseRouter(pool) {
     }
   })
 
+  router.post('/machine-binding/enrollment', async (req, res) => {
+    if (!canManageMachineBinding(req.user)) {
+      return res.status(403).json(fail('只有主账号或管理员才能生成执行器登记码', 'machine_binding_forbidden'))
+    }
+    try {
+      assertExactKeys(req.body || {}, [], 'request', [])
+      const ownerId = getTenantOwnerId(req.user)
+      const binding = await readBinding(pool, ownerId, true)
+      if (!binding.bound) {
+        return res.status(400).json(fail('当前主账号体系尚未绑定云仓助手机器码', 'machine_binding_missing'))
+      }
+      res.json(ok(await createEnrollment(pool, {
+        ownerId,
+        actorUserId: Number(req.user.id),
+        machineCode: binding.machineCode
+      })))
+    } catch (error) {
+      console.error('[CloudWarehouse] 生成执行器登记码失败:', error.message)
+      res.status(statusForError(error)).json(fail(error.message || '生成执行器登记码失败', error.code))
+    }
+  })
+
   router.put('/machine-binding', async (req, res) => {
     if (!canManageMachineBinding(req.user)) {
       return res.status(403).json(fail('只有主账号或管理员才能绑定和更换机器码', 'machine_binding_forbidden'))
@@ -143,6 +170,7 @@ module.exports = function createCloudWarehouseRouter(pool) {
             WHERE owner_id = ?`,
           [machineCode, actorUserId, ownerId]
         )
+        await revokeMachineAccess(connection, oldMachineCode, 'machine_binding_changed')
       } else {
         await connection.execute(
           `INSERT INTO cloud_machine_bindings
@@ -198,6 +226,7 @@ module.exports = function createCloudWarehouseRouter(pool) {
       }
       const machineCode = rows[0].machine_code
       await connection.execute('DELETE FROM cloud_machine_bindings WHERE owner_id = ?', [ownerId])
+      await revokeMachineAccess(connection, machineCode, 'machine_binding_changed')
       await connection.execute(
         `INSERT INTO cloud_machine_binding_audit
            (owner_id, actor_user_id, action, old_machine_code, new_machine_code)
@@ -240,7 +269,8 @@ module.exports = function createCloudWarehouseRouter(pool) {
       protocolVersion: '1.0',
       machineCodePattern: '^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$',
       commands: COMMANDS,
-      transportEnabled: false,
+      transportEnabled: true,
+      enabledCommands: ['exception.order.check', 'exception.order.resolve'],
       paramsSchemas: {
         'exception.order.check': { confirmed: true, fields: [] },
         'exception.order.resolve': { confirmed: true, fields: ['exception_snapshot_ref'] },

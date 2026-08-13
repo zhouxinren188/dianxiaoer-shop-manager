@@ -8,8 +8,11 @@ const {
 } = require('./cloud-warehouse-protocol')
 const { assertOrderLocatorReady } = require('./cloud-warehouse-order-service')
 
-// 双方基础字段、服务地址和控制面认证确认前保持硬禁用，不能通过环境变量提前开启。
-const EXECUTOR_TRANSPORT_ENABLED = false
+const ENABLED_TASK_COMMANDS = new Set([
+  'exception.order.check',
+  'exception.order.resolve'
+])
+const EXECUTOR_TRANSPORT_ENABLED = true
 
 function serviceError(code, message) {
   const error = new Error(message)
@@ -61,6 +64,9 @@ async function readLockedMachineRoute(connection, ownerId) {
 }
 
 function assertRouteReady(route, command) {
+  if (!ENABLED_TASK_COMMANDS.has(command)) {
+    throw serviceError('capability_unavailable', '该命令尚未在中央服务启用')
+  }
   if (!route.online) throw serviceError('machine_offline', '绑定的云仓助手当前离线')
   if (route.capabilities[command] !== true) {
     throw serviceError('capability_unavailable', '绑定的云仓助手尚未启用该命令能力')
@@ -77,7 +83,7 @@ function assertRouteReady(route, command) {
  * 为已有工作流创建一条定向任务。
  *
  * 这是中央服务内部能力，不暴露给 renderer。machine_code 必须从发起人所属主账号体系的绑定表读取，
- * 调用方无法传入 target。正式执行器控制面启用前 transportEnabled 必须保持 false。
+ * 调用方无法传入 target。第一轮只允许创建异常查询和异常处理任务。
  */
 async function createRoutedTaskRecord(pool, {
   user,
@@ -231,6 +237,7 @@ async function createRoutedTaskRecord(pool, {
 }
 
 module.exports = {
+  ENABLED_TASK_COMMANDS,
   EXECUTOR_TRANSPORT_ENABLED,
   assertRouteReady,
   createRoutedTaskRecord,

@@ -12,6 +12,10 @@ export function unbindCloudMachine() {
   return del('/api/cloud-warehouse/machine-binding')
 }
 
+export function createCloudExecutorEnrollment() {
+  return post('/api/cloud-warehouse/machine-binding/enrollment', {})
+}
+
 export function fetchCloudOrderConfiguration(purchaseOrderId) {
   return get(`/api/cloud-warehouse/orders/${purchaseOrderId}/configuration`)
 }

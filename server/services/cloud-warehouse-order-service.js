@@ -204,7 +204,8 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     machineBound: bindingRows.length > 0,
     orderRefId,
     exception,
-    transportEnabled: false
+    transportEnabled: true,
+    wmsOrderEntered: false
   }
 }
 
@@ -262,12 +263,15 @@ async function resolveTrustedOrderMapping(pool, {
   taskId,
   orderRefId,
   machineCode,
-  executorInstanceId
+  executorInstanceId,
+  leaseId,
+  fencingToken
 }) {
   const normalizedMachineCode = assertMachineCode(machineCode)
   const [rows] = await pool.execute(
     `SELECT t.task_id, t.order_ref_id, t.target_machine_code, t.transport_status,
-            t.claimed_executor_instance_id, t.expires_at, t.lease_expires_at,
+            t.claimed_executor_instance_id, t.lease_id, t.lease_fencing_token,
+            t.expires_at, t.lease_expires_at,
             w.owner_id AS workflow_owner_id,
             r.owner_id AS ref_owner_id, r.purchase_order_id,
             po.owner_id AS order_owner_id, po.sales_order_id AS linked_sales_order_id,
@@ -279,7 +283,9 @@ async function resolveTrustedOrderMapping(pool, {
             b.machine_code AS bound_machine_code, b.binding_version AS current_binding_version,
             w.binding_version AS workflow_binding_version,
             i.machine_code AS instance_machine_code, i.status AS instance_status,
-            i.last_heartbeat_at AS instance_last_heartbeat_at
+            i.last_heartbeat_at AS instance_last_heartbeat_at,
+            m.status AS machine_status,
+            m.active_executor_instance_id
        FROM cloud_order_tasks t
        JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
        JOIN cloud_order_refs r ON r.order_ref_id = t.order_ref_id
@@ -291,6 +297,7 @@ async function resolveTrustedOrderMapping(pool, {
        JOIN stores s ON s.id = so.store_id AND s.owner_id = po.owner_id
        JOIN cloud_machine_bindings b ON b.owner_id = w.owner_id
        JOIN cloud_executor_instances i ON i.executor_instance_id = ?
+       JOIN cloud_executor_machines m ON m.machine_code = t.target_machine_code
       WHERE t.task_id = ? AND t.order_ref_id = ?`,
     [String(executorInstanceId || ''), String(taskId || ''), String(orderRefId || '')]
   )
@@ -303,6 +310,8 @@ async function resolveTrustedOrderMapping(pool, {
     row.bound_machine_code === normalizedMachineCode &&
     row.instance_machine_code === normalizedMachineCode &&
     row.claimed_executor_instance_id === String(executorInstanceId || '') &&
+    row.machine_status === 'online' &&
+    row.active_executor_instance_id === String(executorInstanceId || '') &&
     Number(row.workflow_binding_version) === Number(row.current_binding_version)
   const linkedSalesOrderId = Number(row.linked_sales_order_id)
   const platformOrderNo = String(row.platform_order_no || '').trim()
@@ -313,15 +322,18 @@ async function resolveTrustedOrderMapping(pool, {
   const locatorConsistent = Number(row.workflow_locator_version) === Number(row.cloud_locator_version)
   const heartbeatAt = new Date(row.instance_last_heartbeat_at).getTime()
   const heartbeatFresh = Number.isFinite(heartbeatAt) && Date.now() - heartbeatAt <= 90 * 1000
-  if (!ownerConsistent || !machineConsistent || !relationshipConsistent || !locatorConsistent ||
+  if (!ownerConsistent || !machineConsistent || !relationshipConsistent ||
       row.instance_status !== 'online' || !heartbeatFresh) {
     throw serviceError('order_mapping_forbidden', '订单归属、销售订单关系或目标执行器校验失败')
   }
-  if (!['leased', 'executing'].includes(row.transport_status) ||
-      new Date(row.expires_at).getTime() <= Date.now() ||
-      new Date(row.lease_expires_at).getTime() <= Date.now()) {
-    throw serviceError('task_expired', '任务未处于有效领取状态')
+  if (row.lease_id !== String(leaseId || '')) throw serviceError('lease_mismatch', '订单解析租约不匹配')
+  if (Number(row.lease_fencing_token) !== Number(fencingToken)) {
+    throw serviceError('fencing_token_stale', '订单解析 fencing token 已失效')
   }
+  if (!locatorConsistent) throw serviceError('order_locator_changed', '订单定位信息已经变化')
+  if (!['leased', 'executing'].includes(row.transport_status)) throw serviceError('lease_mismatch', '任务未处于有效领取状态')
+  if (new Date(row.expires_at).getTime() <= Date.now()) throw serviceError('task_expired', '任务已经过期')
+  if (new Date(row.lease_expires_at).getTime() <= Date.now()) throw serviceError('lease_expired', '任务租约已经过期')
   assertOrderLocatorReady({ platform_order_no: platformOrderNo, order_year: row.order_year })
   return {
     platform_order_no: platformOrderNo,

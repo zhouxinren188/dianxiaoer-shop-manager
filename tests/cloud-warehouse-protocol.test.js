@@ -77,12 +77,12 @@ describe('中央路由安全门槛', () => {
     loginEnvironmentAvailable: true
   }
 
-  it('控制面在双方确认前保持硬禁用', () => {
-    expect(EXECUTOR_TRANSPORT_ENABLED).toBe(false)
+  it('控制面已启用', () => {
+    expect(EXECUTOR_TRANSPORT_ENABLED).toBe(true)
   })
 
-  it.each(['warehouse.order.print', 'warehouse.order.outbound'])('%s 要求打印机可用', command => {
-    expect(() => assertRouteReady(route, command)).toThrow('打印机当前不可用')
+  it.each(['warehouse.order.check', 'warehouse.order.print', 'warehouse.order.outbound'])('%s 第一轮保持禁用', command => {
+    expect(() => assertRouteReady(route, command)).toThrow('该命令尚未在中央服务启用')
   })
 
   it('异常处理不要求打印机可用', () => {
@@ -278,6 +278,8 @@ describe('订单定位与脱敏异常结果', () => {
         target_machine_code: baseTask.machineCode,
         transport_status: 'leased',
         claimed_executor_instance_id: 'executor-001',
+        lease_id: 'lease-001',
+        lease_fencing_token: 1,
         expires_at: '2099-01-01T00:00:00.000Z',
         lease_expires_at: '2099-01-01T00:00:00.000Z',
         workflow_owner_id: 18,
@@ -297,14 +299,18 @@ describe('订单定位与脱敏异常结果', () => {
         workflow_binding_version: 1,
         instance_machine_code: baseTask.machineCode,
         instance_status: 'online',
-        instance_last_heartbeat_at: new Date().toISOString()
+        instance_last_heartbeat_at: new Date().toISOString(),
+        machine_status: 'online',
+        active_executor_instance_id: 'executor-001'
       }]]
     }
     const mapping = await resolveTrustedOrderMapping(pool, {
       taskId: 'task-001',
       orderRefId: baseTask.orderRefId,
       machineCode: baseTask.machineCode,
-      executorInstanceId: 'executor-001'
+      executorInstanceId: 'executor-001',
+      leaseId: 'lease-001',
+      fencingToken: 1
     })
     expect(mapping).toEqual({ platform_order_no: '987654321', order_year: 2026 })
     expect(Object.keys(mapping).sort()).toEqual(['order_year', 'platform_order_no'])

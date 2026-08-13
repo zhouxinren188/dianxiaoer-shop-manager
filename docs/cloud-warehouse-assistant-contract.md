@@ -1,6 +1,6 @@
 # 店小二与云仓助手指令及回执协议
 
-状态：机器码绑定、关联销售订单定位和异常查询/处理参数已在店小二侧确定。执行器认证与中央任务传输 v1 路径及字段已形成供双方本地联调的固定契约；端点尚未实现并保持禁用，不开放注册、心跳、领取、续租、映射或回执网络访问。
+状态：机器码绑定、关联销售订单定位和异常查询/处理参数已确定。执行器认证与中央任务传输 v1 已在店小二专项分支实现，等待部署到测试 HTTPS 地址后联调。第一轮只启用 `exception.order.check` 和 `exception.order.resolve`；到仓查询、打印和出库继续禁用。
 
 ## 1. 固定边界
 
@@ -24,7 +24,7 @@
 
 机器码仅是设备路由标识，不是密码或身份认证凭据。
 
-异常查询、异常处理和到仓查询由中央服务路由到绑定机器码；打印和发货还必须确认该云仓助手在线、打印机可用且登录环境有效。中央传输在双方确认正式服务地址、认证方式和基础字段前保持硬禁用。
+所有任务由中央服务路由到绑定机器码。第一轮仅允许异常查询和异常处理，且要求云仓助手在线、登录环境有效并上报对应能力；到仓查询、打印和出库不会被领取，即使执行器将对应能力上报为 `true` 也会被中央服务强制按禁用处理。
 
 ## 2. 主账号体系绑定
 
@@ -121,7 +121,9 @@ order_ref_id -> 关联 sales_order -> sales_orders.order_id + YEAR(sales_orders.
 
 ## 5. 执行器认证与中央任务传输 v1
 
-以下路径作为双方本地联调的固定契约，统一前缀为 `/api/cloud-warehouse/executor/v1`。当前代码仍保持传输硬禁用，不挂载这些网络端点；双方确认并完成实现后才启用。
+以下路径作为双方本地联调的固定契约，统一前缀为 `/api/cloud-warehouse/executor/v1`。这些端点已经实现，但在专项分支未部署，不存在可访问的公网入口。
+
+准备部署的测试入口为 `https://150.158.54.108:3443/api/cloud-warehouse/executor/v1`（HTTPS 端口 `3443`）。当前尚未部署，云仓助手不得在收到部署确认前尝试连接。
 
 ### 5.1 认证与首次登记
 
@@ -129,13 +131,16 @@ order_ref_id -> 关联 sales_order -> sales_orders.order_id + YEAR(sales_orders.
 
 `POST /api/cloud-warehouse/machine-binding/enrollment`
 
-请求正文为空对象，成功响应为：
+请求正文为空对象。该接口属于店小二登录态管理接口，成功响应使用店小二标准外层：
 
 ```json
 {
-  "machine_code": "YC-7F3K-92MX",
-  "enrollment_code": "一次性登记码",
-  "expires_at": "ISO时间"
+  "code": 0,
+  "data": {
+    "machine_code": "YC-7F3K-92MX",
+    "enrollment_code": "一次性登记码",
+    "expires_at": "ISO时间"
+  }
 }
 ```
 
@@ -436,9 +441,9 @@ order_ref_id -> 关联 sales_order -> sales_orders.order_id + YEAR(sales_orders.
 - 只读任务允许在租约有效且业务结果尚未产生前进行传输重试；任何要求云仓助手重新查询业务状态的新指令都必须生成新 `task_id`和新 `idempotency_key`。
 - 三个写命令不得自动业务重试。超时、断线、租约丢失、执行中断、结果未知或复验失败一律 `review_required`。
 
-## 6. 尚未确认且明确不实现
+## 6. 当前禁用范围
 
 - 到仓、打印和发货的实际接口及三个命令的 `params` Schema
-- 执行器控制面网络端点在双方完成字段复核前保持禁用
+- `warehouse.order.check`、`warehouse.order.print`、`warehouse.order.outbound` 的中央任务领取与执行
 - `requester_device_id`、`same_device_session_id`、`sameDeviceVerified`
 - Named Pipe挑战、DPAPI设备签名或其他同机证明

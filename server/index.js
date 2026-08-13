@@ -26,6 +26,7 @@ const {
   normalizeSourceType,
   parseCookieData
 } = require('./services/store-cookie-policy')
+const { runExecutorMaintenance } = require('./services/cloud-warehouse-executor-service')
 const {
   recordTimelinessObservation,
   backfillRecentObservations,
@@ -113,7 +114,7 @@ function fail(message) {
 
 // 不需要认证的路径（支持前缀匹配，如 /api/sync-lock/123）
 const publicPaths = ['/health', '/api/auth/login']
-const publicPathPrefixes = ['/api/sync-lock']
+const publicPathPrefixes = ['/api/sync-lock', '/api/cloud-warehouse/executor/v1']
 
 app.use(async (req, res, next) => {
   // 公开接口跳过认证
@@ -7461,9 +7462,12 @@ app.get('/api/auth/me', async (req, res) => {
 const warehouseRouter = require('./routes/warehouse')(pool)
 app.use('/api/warehouse', warehouseRouter)
 
-// ============ 云仓助手基础配置路由 ============
-// 机器码按主账号体系共享，只有主账号或管理员可变更。执行器注册、心跳、领取和回执
-// 在双方确认控制面认证契约前保持禁用。
+// ============ 云仓助手执行器与基础配置路由 ============
+// 执行器控制面不使用店小二用户 Token，由路由内部校验独立执行器 Bearer Token。
+const cloudWarehouseExecutorRouter = require('./routes/cloud-warehouse-executor')(pool)
+app.use('/api/cloud-warehouse/executor/v1', cloudWarehouseExecutorRouter)
+
+// 机器码按主账号体系共享，只有主账号或管理员可变更。
 const cloudWarehouseRouter = require('./routes/cloud-warehouse')(pool)
 app.use('/api/cloud-warehouse', cloudWarehouseRouter)
 
@@ -7517,6 +7521,26 @@ function startShippingTimelinessLearning() {
   setInterval(learn, 6 * 60 * 60 * 1000)
 }
 
+function startCloudWarehouseExecutorMaintenance() {
+  let running = false
+  const maintain = async () => {
+    if (running) return
+    running = true
+    try {
+      const result = await runExecutorMaintenance(pool)
+      if (result.reviewedTaskCount || result.offlineInstanceCount || result.offlineMachineCount) {
+        console.log(`[CloudWarehouse] 执行器维护完成: 待复核写任务 ${result.reviewedTaskCount}，离线实例 ${result.offlineInstanceCount}，离线机器 ${result.offlineMachineCount}`)
+      }
+    } catch (error) {
+      console.warn('[CloudWarehouse] 执行器维护失败:', error.message)
+    } finally {
+      running = false
+    }
+  }
+  maintain()
+  setInterval(maintain, 30 * 1000)
+}
+
 // ============ 启动 ============
 
 const PORT = process.env.PORT || 3002
@@ -7527,6 +7551,7 @@ initDB().then(() => {
   initPurchaseNoCache()
   startExpiredStoreCheck()
   startShippingTimelinessLearning()
+  startCloudWarehouseExecutorMaintenance()
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Server] 后端服务已启动: http://0.0.0.0:${PORT}`)
   })
