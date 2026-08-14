@@ -3960,8 +3960,20 @@ app.get('/api/purchase-accounts', async (req, res) => {
     let rows
     if (req.user.user_type === 'sub') {
       const [r] = await pool.execute(
-        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at,
-                CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END AS cookie_valid
+        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online,
+                pa.cookie_status, pa.cookie_status_reason, pa.cookie_checked_at,
+                pa.taobao_user_id, pa.taobao_nick, pa.created_at, pa.updated_at,
+                CASE
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status = 'valid' THEN 1
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status IN ('invalid','mismatch') THEN 0
+                  ELSE CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END
+                END AS cookie_valid,
+                CASE
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_checked_at IS NOT NULL
+                    THEN pa.cookie_status
+                  WHEN pc.id IS NOT NULL THEN 'stored'
+                  ELSE 'missing'
+                END AS effective_cookie_status
          FROM purchase_accounts pa
          INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
          LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
@@ -3972,8 +3984,20 @@ app.get('/api/purchase-accounts', async (req, res) => {
     } else {
       const ownerId = getOwnerId(req.user)
       const [r] = await pool.execute(
-        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online, pa.created_at, pa.updated_at,
-                CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END AS cookie_valid
+        `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online,
+                pa.cookie_status, pa.cookie_status_reason, pa.cookie_checked_at,
+                pa.taobao_user_id, pa.taobao_nick, pa.created_at, pa.updated_at,
+                CASE
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status = 'valid' THEN 1
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status IN ('invalid','mismatch') THEN 0
+                  ELSE CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END
+                END AS cookie_valid,
+                CASE
+                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_checked_at IS NOT NULL
+                    THEN pa.cookie_status
+                  WHEN pc.id IS NOT NULL THEN 'stored'
+                  ELSE 'missing'
+                END AS effective_cookie_status
          FROM purchase_accounts pa
          LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
          WHERE pa.owner_id=?
@@ -4117,7 +4141,10 @@ app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
       )
     }
 
-    await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
+    // 淘宝账号必须通过轻量 MTOP 接口校验后才能标记在线；仅保存 Cookie 不代表会话有效。
+    if (platform !== 'taobao' && platform !== 'tmall') {
+      await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
+    }
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -4129,6 +4156,58 @@ app.get('/api/purchase-accounts/:id/cookies', async (req, res) => {
     if (!check.length) return res.status(403).json(fail('无权操作此账号'))
     const [rows] = await pool.execute('SELECT * FROM purchase_cookies WHERE account_id=?', [req.params.id])
     res.json(ok(rows.length ? rows[0] : null))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+app.put('/api/purchase-accounts/:id/cookie-validation', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const accountId = req.params.id
+    const requestedStatus = String(req.body?.status || 'unknown').toLowerCase()
+    const allowedStatuses = new Set(['valid', 'invalid', 'risk', 'unknown', 'mismatch'])
+    const status = allowedStatuses.has(requestedStatus) ? requestedStatus : 'unknown'
+    const reason = String(req.body?.reason || '').slice(0, 100)
+    const taobaoUserId = String(req.body?.taobao_user_id || '').trim().slice(0, 100)
+    const taobaoNick = String(req.body?.taobao_nick || '').trim().slice(0, 200)
+
+    const [rows] = await pool.execute(
+      `SELECT id, platform, online, taobao_user_id, taobao_nick
+       FROM purchase_accounts WHERE id=? AND owner_id=?`,
+      [accountId, ownerId]
+    )
+    if (!rows.length) return res.status(403).json(fail('无权操作此账号'))
+    const account = rows[0]
+    if (account.platform !== 'taobao' && account.platform !== 'tmall') {
+      return res.status(400).json(fail('该账号不是淘宝/天猫采购账号'))
+    }
+
+    const existingUserId = String(account.taobao_user_id || '').trim()
+    const identityMismatch = status === 'valid' && !!existingUserId && !!taobaoUserId && existingUserId !== taobaoUserId
+    const finalStatus = identityMismatch ? 'mismatch' : status
+    const finalReason = identityMismatch ? 'account_identity_mismatch' : reason
+    const fields = ['cookie_status=?', 'cookie_status_reason=?', 'cookie_checked_at=NOW()']
+    const values = [finalStatus, finalReason]
+
+    if (finalStatus === 'valid') {
+      fields.push('online=1')
+      if (taobaoUserId) { fields.push('taobao_user_id=?'); values.push(taobaoUserId) }
+      if (taobaoNick) { fields.push('taobao_nick=?'); values.push(taobaoNick) }
+    } else if (finalStatus === 'invalid' || finalStatus === 'mismatch') {
+      fields.push('online=0')
+    }
+    values.push(accountId, ownerId)
+    await pool.execute(
+      `UPDATE purchase_accounts SET ${fields.join(', ')} WHERE id=? AND owner_id=?`,
+      values
+    )
+
+    res.json(ok({
+      status: finalStatus,
+      reason: finalReason,
+      identityMismatch,
+      taobao_user_id: identityMismatch ? existingUserId : (taobaoUserId || existingUserId),
+      taobao_nick: identityMismatch ? String(account.taobao_nick || '') : (taobaoNick || String(account.taobao_nick || ''))
+    }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 

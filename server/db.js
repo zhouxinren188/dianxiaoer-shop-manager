@@ -583,6 +583,12 @@ async function initDB() {
     try { await connection.execute('CREATE INDEX idx_owner_status_platform ON purchase_orders(owner_id, status, platform)') } catch(e) { /* 索引已存在 */ }
     // purchase_accounts 表缺少的索引
     try { await connection.execute('CREATE INDEX idx_pa_owner_id ON purchase_accounts(owner_id)') } catch(e) { /* 索引已存在 */ }
+    // 淘宝采购账号真实登录态校验：保存最近一次轻量 MTOP 校验结果和稳定用户身份。
+    try { await connection.execute("ALTER TABLE purchase_accounts ADD COLUMN cookie_status VARCHAR(20) DEFAULT 'unknown' COMMENT 'Cookie真实校验状态' AFTER online") } catch(e) { /* 列已存在 */ }
+    try { await connection.execute("ALTER TABLE purchase_accounts ADD COLUMN cookie_status_reason VARCHAR(100) DEFAULT '' COMMENT 'Cookie校验原因' AFTER cookie_status") } catch(e) { /* 列已存在 */ }
+    try { await connection.execute("ALTER TABLE purchase_accounts ADD COLUMN cookie_checked_at DATETIME DEFAULT NULL COMMENT 'Cookie最近校验时间' AFTER cookie_status_reason") } catch(e) { /* 列已存在 */ }
+    try { await connection.execute("ALTER TABLE purchase_accounts ADD COLUMN taobao_user_id VARCHAR(100) DEFAULT '' COMMENT '淘宝稳定用户ID' AFTER cookie_checked_at") } catch(e) { /* 列已存在 */ }
+    try { await connection.execute("ALTER TABLE purchase_accounts ADD COLUMN taobao_nick VARCHAR(200) DEFAULT '' COMMENT '淘宝已验证昵称' AFTER taobao_user_id") } catch(e) { /* 列已存在 */ }
     // user_purchase_accounts 表缺少的索引（子账号权限查询核心）
     try { await connection.execute('CREATE INDEX idx_upa_user_id ON user_purchase_accounts(user_id)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_upa_account_id ON user_purchase_accounts(account_id)') } catch(e) { /* 索引已存在 */ }

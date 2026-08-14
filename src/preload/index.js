@@ -28,6 +28,7 @@ const validInvokeChannels = [
   'open-purchase-order-window',
   'close-purchase-order-window',
   'refresh-purchase-cookies',
+  'validate-taobao-purchase-account',
   'sync-purchase-order-browser',
   'sync-purchase-orders-browser',
   'fetch-buyer-sensitive-info',

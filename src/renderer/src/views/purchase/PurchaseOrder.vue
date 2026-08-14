@@ -781,12 +781,19 @@
     <el-dialog
       v-model="accountManageVisible"
       title="采购账号管理"
-      width="720px"
+      width="900px"
       align-center
       destroy-on-close
     >
       <el-table :data="accountList" stripe border size="small" :header-cell-style="{ background: '#f5f7fa', fontWeight: 600 }">
-        <el-table-column prop="username" label="账号" width="160" />
+        <el-table-column prop="username" label="账号" min-width="190">
+          <template #default="{ row }">
+            <div>{{ row.username || '未命名' }}</div>
+            <div v-if="row.taobao_nick" style="margin-top: 2px; color: #909399; font-size: 12px">
+              淘宝昵称：{{ row.taobao_nick }}
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column prop="password" label="密码" width="140">
           <template #default="{ row }">
             <span v-if="row.showPwd">{{ row.password }}</span>
@@ -801,17 +808,27 @@
             <el-tag :type="platformTagType(row.platform)" size="small">{{ platformLabel(row.platform) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="90" align="center">
+        <el-table-column prop="status" label="Cookie状态" width="120" align="center">
           <template #default="{ row }">
-            <el-tag :type="row.status === 'online' ? 'success' : 'info'" size="small" effect="light">
-              {{ row.status === 'online' ? '在线' : '离线' }}
-            </el-tag>
+            <el-tooltip :content="purchaseAccountCookieStatusReason(row)" placement="top">
+              <el-tag :type="purchaseAccountCookieStatusType(row)" size="small" effect="light">
+                {{ purchaseAccountCookieStatusLabel(row) }}
+              </el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" align="center">
+        <el-table-column label="操作" width="330" align="center">
           <template #default="{ row }">
             <el-button link type="primary" size="small" @click="handleLoginAccount(row)">登录</el-button>
             <el-button link type="success" size="small" @click="handleReloginAccount(row)">重登</el-button>
+            <el-button
+              v-if="row.platform === 'taobao' || row.platform === 'tmall'"
+              link
+              type="primary"
+              size="small"
+              :loading="row.validatingCookie"
+              @click="handleValidateTaobaoAccount(row)"
+            >检测</el-button>
             <el-button link type="info" size="small" @click="handleExportCookies(row)">导出Cookie</el-button>
             <el-button link type="info" size="small" @click="handleImportCookies(row)">导入Cookie</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
@@ -1387,6 +1404,7 @@ async function loadAccounts() {
       ...a,
       username: a.account || a.username || '',
       status: a.online ? 'online' : 'offline',
+      validatingCookie: false,
       showPwd: false
     }))
     // 默认选中"全部账号"
@@ -1483,6 +1501,77 @@ function handleReloginAccount(row) {
     }).catch(() => {})
   } else {
     ElMessage.warning('请在 Electron 环境中使用此功能')
+  }
+}
+
+function purchaseAccountCookieStatusLabel(row) {
+  if (row.platform !== 'taobao' && row.platform !== 'tmall') {
+    return row.status === 'online' ? '在线' : '离线'
+  }
+  const status = row.effective_cookie_status || row.cookie_status || (row.cookie_valid ? 'stored' : 'missing')
+  return {
+    valid: '已验证',
+    invalid: '已失效',
+    mismatch: '账号不符',
+    risk: '需安全验证',
+    unknown: '待确认',
+    stored: '待检测',
+    missing: '未登录'
+  }[status] || '待确认'
+}
+
+function purchaseAccountCookieStatusType(row) {
+  const status = row.effective_cookie_status || row.cookie_status
+  if (status === 'valid') return 'success'
+  if (status === 'invalid' || status === 'mismatch' || status === 'missing') return 'danger'
+  if (status === 'risk') return 'warning'
+  return 'info'
+}
+
+function purchaseAccountCookieStatusReason(row) {
+  const reason = row.cookie_status_reason || ''
+  const reasonMap = {
+    api_success: '淘宝轻量接口验证成功',
+    missing_login_cookie: '缺少有效的淘宝登录 Cookie',
+    session_expired: '淘宝明确返回登录会话已过期',
+    account_identity_mismatch: '当前分区登录账号与该采购账号原绑定身份不一致',
+    security_verification: '淘宝要求完成安全验证，暂不判定失效',
+    taobao_busy: '淘宝接口繁忙，暂不判定失效',
+    token_refresh_failed: '淘宝 Token 初始化未完成，暂不判定失效',
+    network_error: '网络请求失败，暂不判定失效',
+    timeout: '检测超时，暂不判定失效',
+    success_without_identity: '接口成功但未返回可核验身份，暂不判定有效'
+  }
+  return reasonMap[reason] || (reason ? `检测结果：${reason}` : '尚未执行淘宝轻量登录检测')
+}
+
+async function handleValidateTaobaoAccount(row) {
+  if (!window.electronAPI) {
+    ElMessage.warning('请在 Electron 环境中使用此功能')
+    return
+  }
+  row.validatingCookie = true
+  try {
+    const result = await window.electronAPI.invoke('validate-taobao-purchase-account', {
+      accountId: String(row.id),
+      force: true
+    })
+    if (result.status === 'valid') {
+      ElMessage.success(`淘宝账号验证成功${result.nick ? `：${result.nick}` : ''}`)
+    } else if (result.status === 'invalid') {
+      ElMessage.error('淘宝账号登录已失效，请重新登录')
+    } else if (result.status === 'mismatch') {
+      ElMessage.error('当前分区登录的淘宝账号与已绑定账号不一致，请重新登录正确账号')
+    } else if (result.status === 'risk') {
+      ElMessage.warning('淘宝要求完成安全验证，账号暂未判定失效')
+    } else {
+      ElMessage.warning('本次未能确认登录状态，未将账号判定为失效，请稍后重试')
+    }
+    await loadAccounts()
+  } catch (err) {
+    ElMessage.error('淘宝账号检测失败：' + err.message)
+  } finally {
+    row.validatingCookie = false
   }
 }
 

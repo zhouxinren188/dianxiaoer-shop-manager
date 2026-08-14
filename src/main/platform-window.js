@@ -7,6 +7,10 @@ const { getAuthToken } = require('./auth-store')
 const { getDeviceId } = require('./device-identity')
 const runtimeLog = require('./runtime-logger')
 const {
+  invalidateTaobaoAccountValidation,
+  validateTaobaoPurchaseAccount
+} = require('./taobao-account-validation')
+const {
   reportStoreDeviceStatus,
   uploadCookiesToServer
 } = require('./cookie-heartbeat')
@@ -1225,13 +1229,22 @@ function registerPurchaseAccountIpc(mainWindow) {
         let cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
           cookies = normalizePddCookieDomain(cookies)
-          const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+          let hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
           await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
           })
           console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
+
+          if (platform === 'taobao') {
+            const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+            console.log(`[PurchaseWindow] 淘宝账号轻量校验: status=${validation.status}, reason=${validation.reason}`)
+            if (validation.cookieChanged) {
+              cookies = await ses.cookies.get({})
+              hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+            }
+          }
 
           // 验证关键 cookie 是否齐全
           const criticalNames = PLATFORM_CRITICAL_COOKIES[platform] || []
@@ -1395,6 +1408,13 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: cookieData, platform })
           })
           console.log('[PurchaseWindow] Cookie 已保存，共', cookies.length, '条')
+
+          if (platform === 'taobao') {
+            const validationSession = session.fromPartition(partitionName)
+            const validation = await validateTaobaoPurchaseAccount({ accountId, ses: validationSession })
+            console.log(`[PurchaseWindow] 关闭前淘宝账号轻量校验: status=${validation.status}, reason=${validation.reason}`)
+            if (validation.cookieChanged) cookies = await validationSession.cookies.get({})
+          }
         } catch (e) {
           console.error('[PurchaseWindow] 保存 Cookie 失败:', e.message)
         }
@@ -1462,6 +1482,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       const partitionName = `persist:purchase-${accountId}`
       const ses = session.fromPartition(partitionName)
       await ses.clearStorageData({ storages: ['cookies'] })
+      invalidateTaobaoAccountValidation(accountId)
       console.log(`[PurchaseWindow] 已清除账号 ${accountId} 的 cookies`)
       return { success: true }
     } catch (err) {
@@ -1483,14 +1504,33 @@ function registerPurchaseAccountIpc(mainWindow) {
           body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
         })
         // 检查是否有 _m_h5_tk（淘宝 H5 API 签名所需）
-        const hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+        let hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
         console.log(`[PurchaseWindow] 刷新 cookies 到服务器: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
-        return { success: true, count: cookies.length, hasH5Tk }
+        let validation = null
+        if (platform === 'taobao') {
+          validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
+          if (validation.cookieChanged) {
+            cookies = await ses.cookies.get({})
+            hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
+          }
+        }
+        return { success: true, count: cookies.length, hasH5Tk, validation }
       }
       return { success: true, count: 0, hasH5Tk: false }
     } catch (err) {
       console.error('[PurchaseWindow] 刷新 cookies 失败:', err.message)
       return { success: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('validate-taobao-purchase-account', async (event, { accountId, force = true }) => {
+    try {
+      const partitionName = `persist:purchase-${accountId}`
+      const ses = session.fromPartition(partitionName)
+      return await validateTaobaoPurchaseAccount({ accountId, ses, force })
+    } catch (error) {
+      runtimeLog.writeLog('TaobaoAccountCheck', `accountId=${accountId}, status=unknown, reason=ipc_error, error=${String(error.message || error).slice(0, 160)}`)
+      return { status: 'unknown', reason: 'ipc_error', message: error.message }
     }
   })
 
@@ -1691,6 +1731,10 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: JSON.stringify(allCookies), platform })
           })
           console.log(`[PurchaseWindow] Cookie已同步到服务器: ${allCookies.length}条`)
+          if (platform === 'taobao') {
+            const validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
+            console.log(`[PurchaseWindow] 导入后淘宝账号轻量校验: status=${validation.status}, reason=${validation.reason}`)
+          }
         }
       } catch (e) {
         console.warn('[PurchaseWindow] Cookie同步到服务器失败:', e.message)

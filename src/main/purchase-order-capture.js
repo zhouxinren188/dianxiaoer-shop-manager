@@ -6,6 +6,7 @@ const vm = require('vm')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
+const { validateTaobaoPurchaseAccount } = require('./taobao-account-validation')
 const {
   buildTaobaoAddressManagerScript,
   TAOBAO_TERMINAL_FAILURE_RESULTS,
@@ -4917,6 +4918,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           console.warn('[PurchaseCapture] Cookie restore to session failed:', e.message)
           logOpenTiming('server_cookies_restore_failed', `error=${String(e.message || '').slice(0, 120)}`)
         }
+      }
+    }
+
+    if (platform === 'taobao' || platform === 'tmall') {
+      const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+      logOpenTiming(
+        'taobao_account_validated',
+        `status=${validation.status}, reason=${validation.reason || ''}, cached=${validation.cached === true}`
+      )
+      if (validation.status === 'invalid') {
+        throw new Error('淘宝采购账号登录已失效，请先重新登录该账号')
+      }
+      if (validation.status === 'mismatch') {
+        throw new Error('淘宝采购账号分区与已绑定账号不一致，请重新登录正确账号')
       }
     }
 

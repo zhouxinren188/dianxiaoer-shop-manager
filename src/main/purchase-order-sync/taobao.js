@@ -12,6 +12,7 @@ const {
   looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
 const { extractTaobaoPickupInfo } = require('./taobao-logistics')
+const { validateTaobaoPurchaseAccount } = require('../taobao-account-validation')
 
 // ============ 平台配置 ============
 
@@ -347,6 +348,14 @@ function syncSingle(accountId, platformOrderNo) {
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
+    }
+
+    const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+    if (validation.status === 'invalid') {
+      return resolve({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
+    }
+    if (validation.status === 'mismatch') {
+      return resolve({ success: false, message: '采购账号分区与已绑定淘宝账号不一致，请重新登录正确账号', needsRelogin: true })
     }
 
     let cdpCapture = null
@@ -1522,6 +1531,14 @@ function syncAll(accountId) {
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
+    }
+
+    const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+    if (validation.status === 'invalid') {
+      return resolve({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
+    }
+    if (validation.status === 'mismatch') {
+      return resolve({ success: false, message: '采购账号分区与已绑定淘宝账号不一致，请重新登录正确账号', needsRelogin: true })
     }
 
     let overallTimer = null
