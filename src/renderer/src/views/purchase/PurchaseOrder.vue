@@ -412,27 +412,6 @@
               </span>
             </div>
             <div class="forward-summary-row">
-              <span class="forward-label">云仓订单状态</span>
-              <span class="forward-value cloud-order-status-value">
-                <el-tag size="small" :type="cloudOrderStatus.tagType">{{ cloudOrderStatus.label }}</el-tag>
-                <el-button
-                  v-if="cloudOrderStatus.key === 'exception'"
-                  type="primary"
-                  link
-                  class="cloud-exception-action"
-                  :loading="cloudTaskActionLoading && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.resolve'"
-                  :disabled="cloudTaskActive || cloudTaskActionLoading"
-                  @click="handleCloudExceptionAction"
-                >处理异常</el-button>
-              </span>
-            </div>
-            <div class="forward-summary-row">
-              <span class="forward-label">WMS仓库状态</span>
-              <span class="forward-value">
-                <el-tag size="small" :type="wmsWarehouseStatus.tagType">{{ wmsWarehouseStatus.label }}</el-tag>
-              </span>
-            </div>
-            <div class="forward-summary-row">
               <span class="forward-label">归属仓库</span>
               <span class="forward-value forward-warehouse">{{ forwardSalesData.warehouseName || '未知仓库' }}</span>
             </div>
@@ -462,88 +441,119 @@
         <div v-else-if="!forwardLoading" class="forward-empty">暂无关联销售订单信息</div>
 
         <div v-if="cloudOrderConfig" class="forward-cloud-section">
-          <div class="forward-goods-title">云仓订单定位</div>
-          <el-descriptions :column="2" border size="small">
-            <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
-            <el-descriptions-item label="异常查询订单号">{{ cloudOrderConfig.platformOrderNo || '--' }}</el-descriptions-item>
-            <el-descriptions-item label="销售下单时间">{{ cloudOrderConfig.salesOrderTime || '--' }}</el-descriptions-item>
-            <el-descriptions-item label="订单年份">
-              <template v-if="cloudOrderConfig.orderYear">
-                {{ cloudOrderConfig.orderYear }}
-                <el-tag size="small" type="success" class="cloud-year-tag">销售订单时间</el-tag>
-              </template>
-              <span v-else>--</span>
+          <div class="forward-goods-title">云仓信息</div>
+          <el-descriptions :column="2" border size="small" class="cloud-info-summary">
+            <el-descriptions-item label="订单编号">
+              <span class="forward-order-no">{{ cloudOrderConfig.platformOrderNo || forwardSalesData?.orderId || '--' }}</span>
             </el-descriptions-item>
-            <el-descriptions-item label="订单引用">{{ cloudOrderConfig.orderRefId ? '已生成' : '待生成' }}</el-descriptions-item>
+            <el-descriptions-item label="订单状态">
+              <span class="cloud-order-status-value">
+                <el-tag size="small" :type="cloudOrderStatus.tagType">{{ cloudOrderStatus.label }}</el-tag>
+                <el-button
+                  v-if="cloudOrderStatus.key === 'unknown'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudTaskActionLoading || (cloudTaskActive && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.check')"
+                  :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudExceptionCheck"
+                >查询</el-button>
+                <el-button
+                  v-else-if="cloudOrderStatus.key === 'exception'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudTaskActionLoading && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.resolve'"
+                  :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudExceptionAction"
+                >处理异常</el-button>
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="订单年份">{{ cloudOrderConfig.orderYear || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="打印状态">
+              <el-tag size="small" :type="cloudPrintStatus.tagType">{{ cloudPrintStatus.label }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="出库状态">
+              <el-tag size="small" :type="cloudOutboundStatus.tagType">{{ cloudOutboundStatus.label }}</el-tag>
+            </el-descriptions-item>
           </el-descriptions>
 
-          <el-alert
-            v-if="!cloudOrderConfig.locatorReady"
-            :title="cloudOrderConfig.locatorMessage || '请先关联具有有效订单号和下单时间的销售订单。'"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="cloud-order-alert"
-          />
+          <div class="cloud-conversation-section">
+            <div class="cloud-conversation-title">接口对话记录</div>
+            <el-alert
+              v-if="!cloudOrderConfig.locatorReady"
+              :title="cloudOrderConfig.locatorMessage || '当前订单缺少有效的订单编号或订单年份。'"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="cloud-order-alert"
+            />
 
-          <template v-if="cloudOrderConfig.locatorReady">
-            <el-alert
-              v-if="cloudOrderConfig.workflow?.currentTask"
-              :title="cloudOrderConfig.workflow.currentTask.command === 'exception.order.resolve' ? '云仓助手正在处理异常，请稍候…' : '云仓助手正在查询订单异常，请稍候…'"
-              type="info"
-              :closable="false"
-              show-icon
-              class="cloud-order-alert"
-            />
-            <el-alert
-              v-else-if="cloudOrderConfig.workflow?.state === 'review_required'"
-              :title="`待人工复核：${cloudOrderConfig.workflow.lastMessage || cloudOrderConfig.workflow.reviewReason || '云仓助手返回结果不确定'}`"
-              type="error"
-              :closable="false"
-              show-icon
-              class="cloud-order-alert"
-            />
-            <div v-if="cloudOrderConfig.exception" class="cloud-exception-panel">
-              <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid" class="cloud-exception-heading">
-                <span>异常查询结果</span>
-                <el-tag :type="cloudOrderConfig.exception.exceptionCount > 0 ? 'danger' : 'success'">
-                  {{ cloudOrderConfig.exception.exceptionCount }} 条
-                </el-tag>
-              </div>
-              <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptions?.length" class="cloud-exception-list">
-                <div v-for="(item, index) in cloudOrderConfig.exception.exceptions" :key="index" class="cloud-exception-item">
-                  <div class="cloud-exception-source">{{ cloudExceptionSourceLabel(item.source) }}</div>
-                  <div><span>异常类型：</span>{{ item.exceptionTypeMasked || '--' }}</div>
-                  <div><span>异常原因：</span>{{ item.reasonMasked || '--' }}</div>
-                </div>
-              </div>
+            <template v-if="cloudOrderConfig.locatorReady">
               <el-alert
-                v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptionCount > 0"
-                title="处理时将使用本次查询生成的一次性异常快照；异常集合发生变化时不会执行写操作。"
-                type="warning"
+                v-if="cloudOrderConfig.workflow?.currentTask"
+                :title="cloudOrderConfig.workflow.currentTask.command === 'exception.order.resolve' ? '云仓助手正在处理异常，请稍候…' : '云仓助手正在查询订单异常，请稍候…'"
+                type="info"
                 :closable="false"
                 show-icon
                 class="cloud-order-alert"
               />
               <el-alert
-                v-if="cloudOrderConfig.exception.status !== 'succeeded' || !cloudOrderConfig.exception.resultShapeValid"
-                :title="cloudOrderConfig.exception.message || '异常查询结果不完整，需人工复核，不能确认当前订单无异常。'"
+                v-else-if="cloudOrderConfig.workflow?.state === 'review_required'"
+                :title="`待人工复核：${cloudOrderConfig.workflow.lastMessage || cloudOrderConfig.workflow.reviewReason || '云仓助手返回结果不确定'}`"
                 type="error"
                 :closable="false"
                 show-icon
                 class="cloud-order-alert"
               />
-            </div>
-            <el-empty v-else description="尚无异常查询结果" :image-size="72" />
-            <el-alert
-              v-if="cloudOrderConfig.exceptionResolution?.status === 'succeeded' && cloudOrderConfig.exceptionResolution?.observedStatus === 'waiting_arrival'"
-              title="异常已处理并完成写后复验，当前进入等待到仓状态。"
-              type="success"
-              :closable="false"
-              show-icon
-              class="cloud-order-alert"
-            />
-          </template>
+              <div v-if="cloudOrderConfig.exception" class="cloud-exception-panel">
+                <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid" class="cloud-exception-heading">
+                  <span>异常查询结果</span>
+                  <el-tag :type="cloudOrderConfig.exception.exceptionCount > 0 ? 'danger' : 'success'">
+                    {{ cloudOrderConfig.exception.exceptionCount }} 条
+                  </el-tag>
+                </div>
+                <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptions?.length" class="cloud-exception-list">
+                  <div v-for="(item, index) in cloudOrderConfig.exception.exceptions" :key="index" class="cloud-exception-item">
+                    <div class="cloud-exception-source">{{ cloudExceptionSourceLabel(item.source) }}</div>
+                    <div><span>异常类型：</span>{{ item.exceptionTypeMasked || '--' }}</div>
+                    <div><span>异常原因：</span>{{ item.reasonMasked || '--' }}</div>
+                    <div v-if="item.solutionMasked"><span>处理方案：</span>{{ item.solutionMasked }}</div>
+                  </div>
+                </div>
+                <el-alert
+                  v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptionCount > 0"
+                  title="点击处理异常后，云仓助手服务器会自动关联最近一次异常查询结果。"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="cloud-order-alert"
+                />
+                <el-alert
+                  v-if="cloudOrderConfig.exception.status !== 'succeeded' || !cloudOrderConfig.exception.resultShapeValid"
+                  :title="cloudOrderConfig.exception.message || '异常查询结果不完整，需人工复核，不能确认当前订单无异常。'"
+                  type="error"
+                  :closable="false"
+                  show-icon
+                  class="cloud-order-alert"
+                />
+              </div>
+              <el-alert
+                v-if="cloudOrderConfig.exceptionResolution?.status === 'succeeded' && cloudOrderConfig.exceptionResolution?.observedStatus === 'waiting_arrival'"
+                title="异常已处理并完成写后复验，当前进入等待到仓状态。"
+                type="success"
+                :closable="false"
+                show-icon
+                class="cloud-order-alert"
+              />
+              <el-empty
+                v-if="!cloudOrderConfig.workflow?.currentTask && !cloudOrderConfig.exception && !cloudOrderConfig.exceptionResolution && cloudOrderConfig.workflow?.state !== 'review_required'"
+                description="暂无接口对话记录"
+                :image-size="72"
+              />
+            </template>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -553,13 +563,6 @@
           @click="handleManualForward"
         >我已转发</el-button>
         <el-button @click="forwardDialogVisible = false">关闭</el-button>
-        <el-button
-          v-if="cloudOrderConfig?.machineBound"
-          type="primary"
-          :loading="cloudTaskActionLoading || (cloudTaskActive && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.check')"
-          :disabled="!cloudOrderConfig?.locatorReady || cloudTaskActive"
-          @click="handleCloudExceptionCheck"
-        >{{ cloudOrderConfig?.exception ? '重新查询异常' : '查询异常' }}</el-button>
       </template>
     </el-dialog>
 
@@ -841,48 +844,20 @@
           <div class="cloud-binding-code-row">
             <span class="cloud-binding-label">当前绑定</span>
             <span class="cloud-binding-code">{{ cloudBinding.machineCode }}</span>
-            <el-tag :type="cloudBinding.assistant?.online ? 'success' : 'info'" size="small">
-              {{ cloudBinding.assistant?.online ? '云仓助手在线' : '云仓助手离线' }}
+            <el-tag :type="cloudConfigLoading ? 'warning' : (cloudBinding.assistant?.online ? 'success' : 'info')" size="small">
+              {{ cloudConfigLoading
+                ? '正在检测设备状态'
+                : (cloudBinding.assistant?.online
+                  ? (cloudBinding.assistant.busy ? '云仓助手忙碌' : '云仓助手在线')
+                  : (cloudBinding.assistant?.status === 'unavailable' ? '在线状态查询失败' : '云仓助手离线')) }}
             </el-tag>
           </div>
           <div class="cloud-binding-meta">
             <span>绑定版本：{{ cloudBinding.bindingVersion || 1 }}</span>
             <span>更新时间：{{ formatTime(cloudBinding.updatedAt || cloudBinding.boundAt) }}</span>
+            <span v-if="cloudBinding.assistant?.checkedAt">检测时间：{{ formatTime(cloudBinding.assistant.checkedAt) }}</span>
           </div>
-          <el-descriptions v-if="cloudBinding.assistant" :column="2" border size="small" class="cloud-capability-list">
-            <el-descriptions-item label="打印机">
-              {{ cloudBinding.assistant.printerAvailable ? '可用' : '不可用' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="登录环境">
-              {{ cloudBinding.assistant.loginEnvironmentAvailable ? '有效' : '无效' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="最后心跳" :span="2">
-              {{ formatTime(cloudBinding.assistant.lastHeartbeatAt) }}
-            </el-descriptions-item>
-          </el-descriptions>
-          <p v-else class="cloud-binding-hint">该机器码尚无云仓助手注册或心跳记录，当前不能执行订单任务。</p>
-          <div v-if="cloudBinding.canManage" class="cloud-enrollment-section">
-            <el-button
-              type="primary"
-              plain
-              size="small"
-              :loading="cloudEnrollmentLoading"
-              @click="handleCreateCloudEnrollment"
-            >生成执行器登记码</el-button>
-            <span class="cloud-enrollment-help">登记码10分钟有效且只能使用一次，请复制到绑定机器上的云仓助手。</span>
-          </div>
-          <el-alert
-            v-if="cloudEnrollment"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="cloud-enrollment-result"
-          >
-            <template #title>
-              <div class="cloud-enrollment-code">{{ cloudEnrollment.enrollmentCode }}</div>
-              <div class="cloud-enrollment-expiry">有效期至：{{ formatTime(cloudEnrollment.expiresAt) }}</div>
-            </template>
-          </el-alert>
+          <p class="cloud-binding-hint">设备在线状态将由店小二服务端向云仓助手第三方服务查询。</p>
         </div>
 
         <p v-if="!cloudBinding.canManage" class="cloud-binding-hint">
@@ -1212,7 +1187,6 @@ import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
-  createCloudExecutorEnrollment,
   fetchCloudOrderConfiguration,
   startCloudExceptionCheck,
   startCloudExceptionResolve
@@ -1345,8 +1319,6 @@ const CLOUD_MACHINE_CODE_PATTERN = /^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[2
 const cloudConfigVisible = ref(false)
 const cloudConfigLoading = ref(false)
 const cloudConfigSaving = ref(false)
-const cloudEnrollmentLoading = ref(false)
-const cloudEnrollment = ref(null)
 const cloudMachineCodeInput = ref('')
 const cloudBinding = reactive({
   bound: false,
@@ -1363,13 +1335,14 @@ const cloudTaskActionLoading = ref(false)
 let cloudOrderPollTimer = null
 let cloudLastNotifiedState = ''
 const cloudTaskActive = computed(() => !!cloudOrderConfig.value?.workflow?.currentTask)
+const cloudThirdPartyReady = computed(() => cloudOrderConfig.value?.transportMode === 'third_party')
 const cloudOrderStatus = computed(() => {
   const workflowState = cloudOrderConfig.value?.workflow?.state
   if (cloudTaskActive.value || workflowState === 'review_required') {
     return { key: 'unknown', label: '未知', tagType: 'info' }
   }
   if (workflowState === 'waiting_arrival' || workflowState === 'exception_clear') {
-    return { key: 'normal', label: '正常', tagType: 'success' }
+    return { key: 'normal', label: '暂无异常', tagType: 'success' }
   }
   if (workflowState === 'exception_found') {
     return { key: 'exception', label: '异常', tagType: 'danger' }
@@ -1381,13 +1354,26 @@ const cloudOrderStatus = computed(() => {
   if (Number(exception.exceptionCount) > 0) {
     return { key: 'exception', label: '异常', tagType: 'danger' }
   }
-  return { key: 'normal', label: '正常', tagType: 'success' }
+  return { key: 'normal', label: '暂无异常', tagType: 'success' }
 })
-const wmsWarehouseStatus = computed(() => {
-  if (cloudOrderConfig.value?.wmsOrderEntered === true) {
-    return { key: 'entered', label: '已进入仓库', tagType: 'success' }
+const cloudPrintStatus = computed(() => {
+  const observedStatus = cloudOrderConfig.value?.workflow?.lastObservedStatus ||
+    cloudOrderConfig.value?.exceptionResolution?.observedStatus || ''
+  if (['printed_unshipped', 'shipped'].includes(observedStatus)) {
+    return { key: 'printed', label: '已打印', tagType: 'success' }
   }
-  return { key: 'not_found', label: '暂无该订单', tagType: 'info' }
+  if (cloudOrderConfig.value?.wmsOrderEntered === true) {
+    return { key: 'unprinted', label: '未打印', tagType: 'warning' }
+  }
+  return { key: 'no_order', label: '无订单', tagType: 'info' }
+})
+const cloudOutboundStatus = computed(() => {
+  const observedStatus = cloudOrderConfig.value?.workflow?.lastObservedStatus ||
+    cloudOrderConfig.value?.exceptionResolution?.observedStatus || ''
+  if (observedStatus === 'shipped') {
+    return { key: 'outbound', label: '已出库', tagType: 'success' }
+  }
+  return { key: 'not_outbound', label: '未出库', tagType: 'info' }
 })
 
 const accountList = ref([])
@@ -1603,7 +1589,6 @@ async function loadCloudMachineBinding() {
 }
 
 async function handleCloudWarehouseConfig() {
-  cloudEnrollment.value = null
   cloudConfigVisible.value = true
   await loadCloudMachineBinding()
 }
@@ -1637,7 +1622,6 @@ async function handleSaveCloudMachine() {
     cloudConfigSaving.value = true
     const wasBound = cloudBinding.bound
     applyCloudBinding(await bindCloudMachine(cloudMachineCodeInput.value))
-    cloudEnrollment.value = null
     ElMessage.success(wasBound ? '云仓助手机器码已更换' : '云仓助手机器码已绑定')
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('保存云仓配置失败: ' + (err.message || ''))
@@ -1660,29 +1644,11 @@ async function handleUnbindCloudMachine() {
     )
     cloudConfigSaving.value = true
     applyCloudBinding(await unbindCloudMachine())
-    cloudEnrollment.value = null
     ElMessage.success('已解除云仓助手机器码绑定')
   } catch (err) {
     if (err !== 'cancel') ElMessage.error('解除绑定失败: ' + (err.message || ''))
   } finally {
     cloudConfigSaving.value = false
-  }
-}
-
-async function handleCreateCloudEnrollment() {
-  if (!cloudBinding.bound || !cloudBinding.canManage) return
-  try {
-    cloudEnrollmentLoading.value = true
-    const result = await createCloudExecutorEnrollment()
-    cloudEnrollment.value = {
-      enrollmentCode: result?.enrollment_code || '',
-      expiresAt: result?.expires_at || null
-    }
-    ElMessage.success('执行器登记码已生成，请在10分钟内使用')
-  } catch (error) {
-    ElMessage.error('生成登记码失败: ' + (error.message || ''))
-  } finally {
-    cloudEnrollmentLoading.value = false
   }
 }
 
@@ -1741,16 +1707,19 @@ function scheduleCloudOrderPolling() {
   }, 2000)
 }
 
-async function handleCloudExceptionCheck(options = {}) {
-  const automatic = options?.automatic === true
+async function handleCloudExceptionCheck() {
   const row = currentReceiveRow.value
   if (!row || cloudTaskActive.value || cloudTaskActionLoading.value) return
+  if (!cloudThirdPartyReady.value) {
+    ElMessage.warning('云仓助手第三方接口尚未在店小二服务端启用')
+    return
+  }
   if (!cloudOrderConfig.value?.machineBound) {
-    if (!automatic) ElMessage.warning('请先在云仓配置中绑定云仓助手机器码')
+    ElMessage.warning('请先在云仓配置中绑定云仓助手机器码')
     return
   }
   if (!cloudOrderConfig.value?.locatorReady) {
-    if (!automatic) ElMessage.warning(cloudOrderConfig.value?.locatorMessage || '当前订单定位信息不完整')
+    ElMessage.warning(cloudOrderConfig.value?.locatorMessage || '当前订单定位信息不完整')
     return
   }
   cloudTaskActionLoading.value = true
@@ -1759,7 +1728,7 @@ async function handleCloudExceptionCheck(options = {}) {
     cloudLastNotifiedState = ''
     await refreshCloudOrderConfiguration()
     scheduleCloudOrderPolling()
-    if (!automatic) ElMessage.success(task.reused ? '异常查询任务正在执行' : '已发送异常查询指令')
+    ElMessage.success(task.reused ? '异常查询任务正在执行' : '已发送异常查询指令')
   } catch (error) {
     ElMessage.error('发送异常查询指令失败: ' + (error.message || ''))
   } finally {
@@ -1771,18 +1740,22 @@ async function handleCloudExceptionAction() {
   const row = currentReceiveRow.value
   const exception = cloudOrderConfig.value?.exception
   if (!row || cloudTaskActive.value || cloudTaskActionLoading.value) return
-  if (!exception?.resultShapeValid || !exception?.exceptionSnapshotRef || Number(exception.exceptionCount) <= 0) {
-    ElMessage.warning('当前没有可安全处理的异常快照，请重新查询')
+  if (!cloudThirdPartyReady.value) {
+    ElMessage.warning('云仓助手第三方接口尚未在店小二服务端启用')
+    return
+  }
+  if (!exception?.resultShapeValid || Number(exception.exceptionCount) <= 0) {
+    ElMessage.warning('当前没有可处理的异常查询结果，请重新查询')
     return
   }
   try {
     await ElMessageBox.confirm(
-      `确认让云仓助手处理本次查询到的 ${exception.exceptionCount} 条异常吗？处理前会重新核对异常集合，发生变化时不会执行。`,
+      `确认让云仓助手处理本次查询到的 ${exception.exceptionCount} 条异常吗？`,
       '确认处理云仓异常',
       { confirmButtonText: '确认处理', cancelButtonText: '取消', type: 'warning' }
     )
     cloudTaskActionLoading.value = true
-    await startCloudExceptionResolve(row.id, exception.exceptionSnapshotRef)
+    await startCloudExceptionResolve(row.id)
     cloudLastNotifiedState = ''
     await refreshCloudOrderConfiguration()
     scheduleCloudOrderPolling()
@@ -2246,15 +2219,7 @@ async function handleForward() {
     ElMessage.error('读取云仓订单配置失败: ' + (cloudResult.reason?.message || ''))
   }
   forwardLoading.value = false
-  if (cloudOrderConfig.value?.workflow?.currentTask) {
-    scheduleCloudOrderPolling()
-  } else if (
-    cloudOrderConfig.value?.machineBound &&
-    cloudOrderConfig.value?.locatorReady &&
-    !['waiting_arrival', 'review_required'].includes(cloudOrderConfig.value?.workflow?.state)
-  ) {
-    void handleCloudExceptionCheck({ automatic: true })
-  }
+  if (cloudOrderConfig.value?.workflow?.currentTask) scheduleCloudOrderPolling()
 }
 
 // 原有手工兜底流程独立于云仓助手：用户在线下完成发货后标记采购单已转发。
@@ -4018,37 +3983,6 @@ function handleImportDialogClose() {
   font-size: 12px;
 }
 
-.cloud-capability-list {
-  margin-top: 12px;
-}
-
-.cloud-enrollment-section {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-}
-
-.cloud-enrollment-help,
-.cloud-enrollment-expiry {
-  color: #909399;
-  font-size: 12px;
-}
-
-.cloud-enrollment-result {
-  margin-top: 12px;
-}
-
-.cloud-enrollment-code {
-  font-family: Consolas, monospace;
-  font-size: 13px;
-  word-break: break-all;
-}
-
-.cloud-enrollment-expiry {
-  margin-top: 4px;
-}
-
 .cloud-binding-hint {
   margin: 10px 0 0;
   color: #e6a23c;
@@ -4067,8 +4001,23 @@ function handleImportDialogClose() {
   line-height: 1.5;
 }
 
-.cloud-year-tag {
-  margin-left: 6px;
+.cloud-info-summary :deep(.el-descriptions__label) {
+  width: 92px;
+  color: #606266;
+}
+
+.cloud-conversation-section {
+  margin-top: 16px;
+  padding: 12px;
+  min-height: 128px;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.cloud-conversation-title {
+  color: #606266;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .cloud-order-alert {

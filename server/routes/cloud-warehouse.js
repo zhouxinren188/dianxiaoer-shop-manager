@@ -1,24 +1,19 @@
 const express = require('express')
 const {
-  COMMANDS,
   assertMachineCode,
   canManageMachineBinding,
-  getTenantOwnerId,
-  normalizeCapabilities
+  getTenantOwnerId
 } = require('../services/cloud-warehouse-protocol')
 const {
-  getOrderConfiguration,
-  prepareOrderRef
+  getOrderConfiguration
 } = require('../services/cloud-warehouse-order-service')
+const { createCloudWarehouseApiClient } = require('../services/cloud-warehouse-api-client')
 const {
-  assertExactKeys,
-  createEnrollment,
-  revokeMachineAccess
-} = require('../services/cloud-warehouse-executor-auth-service')
-const {
-  startExceptionCheckTask,
-  startExceptionResolveTask
-} = require('../services/cloud-warehouse-task-service')
+  attachExternalCommands,
+  queryMachineStatus,
+  refreshCommandResult,
+  submitOrderCommand
+} = require('../services/cloud-warehouse-third-party-service')
 
 function ok(data) {
   return { code: 0, data }
@@ -34,27 +29,17 @@ function statusForError(error) {
   if (['purchase_order_not_found'].includes(error?.code)) return 404
   if (['machine_binding_forbidden'].includes(error?.code)) return 403
   if (['machine_code_in_use', 'workflow_task_active', 'precondition_not_met',
-    'machine_binding_changed', 'order_locator_changed'].includes(error?.code)) return 409
-  if (['machine_offline', 'capability_unavailable', 'login_environment_unavailable'].includes(error?.code)) return 503
+    'machine_binding_changed', 'order_locator_changed', 'machine_busy'].includes(error?.code)) return 409
+  if (['machine_offline', 'capability_unavailable', 'login_environment_unavailable',
+    'cloud_api_not_configured', 'cloud_api_unavailable', 'cloud_api_timeout'].includes(error?.code)) return 503
+  if (['cloud_api_request_failed', 'cloud_api_invalid_response',
+    'cloud_api_response_too_large'].includes(error?.code)) return 502
   if (error?.code) return 400
   return 500
 }
 
-function parseJsonObject(value) {
-  if (!value) return {}
-  if (typeof value === 'object' && !Array.isArray(value)) return value
-  try {
-    const parsed = JSON.parse(value)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
 function formatBindingRow(row, canManage) {
   if (!row) return { bound: false, machineCode: '', assistant: null, canManage }
-  const online = Number(row.assistant_online || 0) === 1
-  const hasAssistantRecord = !!row.assistant_status
   return {
     bound: true,
     machineCode: row.machine_code,
@@ -62,68 +47,57 @@ function formatBindingRow(row, canManage) {
     boundAt: row.bound_at,
     updatedAt: row.updated_at,
     canManage,
-    assistant: hasAssistantRecord ? {
-      online,
-      status: online ? 'online' : (row.assistant_status || 'offline'),
-      protocolVersion: row.protocol_version || '',
-      executorVersion: row.executor_version || '',
-      capabilities: normalizeCapabilities(parseJsonObject(row.capabilities_json)),
-      printerAvailable: Number(row.printer_available || 0) === 1,
-      loginEnvironmentAvailable: Number(row.login_environment_available || 0) === 1,
-      lastHeartbeatAt: row.last_heartbeat_at || null,
-      lastFailureReason: row.last_failure_reason || ''
-    } : null
+    // 在线状态改由云仓助手第三方服务查询；响应契约确认前不读取旧执行器心跳表。
+    assistant: null
   }
 }
 
 async function readBinding(pool, ownerId, canManage) {
   const [rows] = await pool.execute(
-    `SELECT b.machine_code, b.binding_version, b.bound_at, b.updated_at,
-            m.status AS assistant_status, m.protocol_version, m.executor_version,
-            m.capabilities_json, m.printer_available, m.login_environment_available,
-            m.last_heartbeat_at, m.last_failure_reason,
-            CASE WHEN m.status = 'online'
-                   AND m.last_heartbeat_at >= DATE_SUB(NOW(3), INTERVAL 90 SECOND)
-                 THEN 1 ELSE 0 END AS assistant_online
-       FROM cloud_machine_bindings b
-       LEFT JOIN cloud_executor_machines m ON m.machine_code = b.machine_code
-      WHERE b.owner_id = ?`,
+    `SELECT machine_code, binding_version, bound_at, updated_at
+       FROM cloud_machine_bindings
+      WHERE owner_id = ?`,
     [ownerId]
   )
   return formatBindingRow(rows[0], canManage)
 }
 
-module.exports = function createCloudWarehouseRouter(pool) {
+function assertEmptyBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
+    throw Object.assign(new Error('请求体必须为空对象'), { code: 'invalid_request' })
+  }
+}
+
+module.exports = function createCloudWarehouseRouter(pool, options = {}) {
   const router = express.Router()
+  const getApiClient = options.getApiClient || (() => createCloudWarehouseApiClient())
 
   router.get('/machine-binding', async (req, res) => {
     try {
-      res.json(ok(await readBinding(pool, getTenantOwnerId(req.user), canManageMachineBinding(req.user))))
+      const binding = await readBinding(pool, getTenantOwnerId(req.user), canManageMachineBinding(req.user))
+      if (binding.bound) {
+        try {
+          binding.assistant = await queryMachineStatus(pool, getApiClient(), req.user)
+        } catch (error) {
+          console.warn('[CloudWarehouse] 在线状态查询失败', {
+            code: error.code || 'cloud_api_unavailable',
+            httpStatus: Number(error.httpStatus || 0) || undefined
+          })
+          binding.assistant = {
+            online: false,
+            busy: false,
+            status: 'unavailable',
+            capabilities: {},
+            checkedAt: new Date().toISOString(),
+            lastFailureReason: error.code || 'cloud_api_unavailable',
+            lastFailureHttpStatus: Number(error.httpStatus || 0) || null
+          }
+        }
+      }
+      res.json(ok(binding))
     } catch (error) {
       console.error('[CloudWarehouse] 查询机器码绑定失败:', error.message)
       res.status(500).json(fail('查询机器码绑定失败'))
-    }
-  })
-
-  router.post('/machine-binding/enrollment', async (req, res) => {
-    if (!canManageMachineBinding(req.user)) {
-      return res.status(403).json(fail('只有主账号或管理员才能生成执行器登记码', 'machine_binding_forbidden'))
-    }
-    try {
-      assertExactKeys(req.body || {}, [], 'request', [])
-      const ownerId = getTenantOwnerId(req.user)
-      const binding = await readBinding(pool, ownerId, true)
-      if (!binding.bound) {
-        return res.status(400).json(fail('当前主账号体系尚未绑定云仓助手机器码', 'machine_binding_missing'))
-      }
-      res.json(ok(await createEnrollment(pool, {
-        ownerId,
-        actorUserId: Number(req.user.id),
-        machineCode: binding.machineCode
-      })))
-    } catch (error) {
-      console.error('[CloudWarehouse] 生成执行器登记码失败:', error.message)
-      res.status(statusForError(error)).json(fail(error.message || '生成执行器登记码失败', error.code))
     }
   })
 
@@ -176,7 +150,6 @@ module.exports = function createCloudWarehouseRouter(pool) {
             WHERE owner_id = ?`,
           [machineCode, actorUserId, ownerId]
         )
-        await revokeMachineAccess(connection, oldMachineCode, 'machine_binding_changed')
       } else {
         await connection.execute(
           `INSERT INTO cloud_machine_bindings
@@ -232,7 +205,6 @@ module.exports = function createCloudWarehouseRouter(pool) {
       }
       const machineCode = rows[0].machine_code
       await connection.execute('DELETE FROM cloud_machine_bindings WHERE owner_id = ?', [ownerId])
-      await revokeMachineAccess(connection, machineCode, 'machine_binding_changed')
       await connection.execute(
         `INSERT INTO cloud_machine_binding_audit
            (owner_id, actor_user_id, action, old_machine_code, new_machine_code)
@@ -254,70 +226,59 @@ module.exports = function createCloudWarehouseRouter(pool) {
 
   router.get('/orders/:purchaseOrderId/configuration', async (req, res) => {
     try {
-      res.json(ok(await getOrderConfiguration(pool, req.user, req.params.purchaseOrderId)))
+      let config = await attachExternalCommands(
+        pool,
+        req.user,
+        req.params.purchaseOrderId,
+        await getOrderConfiguration(pool, req.user, req.params.purchaseOrderId)
+      )
+      const activeRequestId = config.workflow?.currentTask?.taskId
+      if (activeRequestId) {
+        try {
+          await refreshCommandResult(pool, getApiClient(), req.user, activeRequestId)
+          config = await attachExternalCommands(
+            pool,
+            req.user,
+            req.params.purchaseOrderId,
+            await getOrderConfiguration(pool, req.user, req.params.purchaseOrderId)
+          )
+        } catch (error) {
+          if (!['cloud_api_timeout', 'cloud_api_unavailable'].includes(error?.code)) throw error
+        }
+      }
+      res.json(ok(config))
     } catch (error) {
       console.error('[CloudWarehouse] 查询订单云仓配置失败:', error.message)
       res.status(statusForError(error)).json(fail(error.message || '查询订单云仓配置失败', error.code))
     }
   })
 
-  router.post('/orders/:purchaseOrderId/order-ref', async (req, res) => {
-    try {
-      res.json(ok(await prepareOrderRef(pool, req.user, req.params.purchaseOrderId)))
-    } catch (error) {
-      console.error('[CloudWarehouse] 准备订单引用失败:', error.message)
-      res.status(statusForError(error)).json(fail(error.message || '准备订单引用失败', error.code))
-    }
-  })
-
   router.post('/orders/:purchaseOrderId/exception/check', async (req, res) => {
     try {
-      assertExactKeys(req.body || {}, [], 'request', [])
-      res.json(ok(await startExceptionCheckTask(pool, {
+      assertEmptyBody(req.body || {})
+      res.json(ok(await submitOrderCommand(pool, getApiClient(), {
         user: req.user,
-        purchaseOrderId: req.params.purchaseOrderId
+        purchaseOrderId: req.params.purchaseOrderId,
+        command: 'exception.order.check'
       })))
     } catch (error) {
-      console.error('[CloudWarehouse] 创建异常查询任务失败:', error.message)
-      res.status(statusForError(error)).json(fail(error.message || '创建异常查询任务失败', error.code))
+      console.error('[CloudWarehouse] 发送异常查询指令失败:', error.code || error.message)
+      res.status(statusForError(error)).json(fail(error.message || '发送异常查询指令失败', error.code))
     }
   })
 
   router.post('/orders/:purchaseOrderId/exception/resolve', async (req, res) => {
     try {
-      assertExactKeys(
-        req.body || {},
-        ['exception_snapshot_ref', 'confirmed'],
-        'request',
-        ['exception_snapshot_ref', 'confirmed']
-      )
-      res.json(ok(await startExceptionResolveTask(pool, {
+      assertEmptyBody(req.body || {})
+      res.json(ok(await submitOrderCommand(pool, getApiClient(), {
         user: req.user,
         purchaseOrderId: req.params.purchaseOrderId,
-        exceptionSnapshotRef: req.body.exception_snapshot_ref,
-        confirmed: req.body.confirmed
+        command: 'exception.order.resolve'
       })))
     } catch (error) {
-      console.error('[CloudWarehouse] 创建异常处理任务失败:', error.message)
-      res.status(statusForError(error)).json(fail(error.message || '创建异常处理任务失败', error.code))
+      console.error('[CloudWarehouse] 发送异常处理指令失败:', error.code || error.message)
+      res.status(statusForError(error)).json(fail(error.message || '发送异常处理指令失败', error.code))
     }
-  })
-
-  router.get('/protocol', (_req, res) => {
-    res.json(ok({
-      protocolVersion: '1.0',
-      machineCodePattern: '^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$',
-      commands: COMMANDS,
-      transportEnabled: true,
-      enabledCommands: ['exception.order.check', 'exception.order.resolve'],
-      paramsSchemas: {
-        'exception.order.check': { confirmed: true, fields: [] },
-        'exception.order.resolve': { confirmed: true, fields: ['exception_snapshot_ref'] },
-        'warehouse.order.check': { confirmed: false, fields: [] },
-        'warehouse.order.print': { confirmed: false, fields: [] },
-        'warehouse.order.outbound': { confirmed: false, fields: [] }
-      }
-    }))
   })
 
   return router

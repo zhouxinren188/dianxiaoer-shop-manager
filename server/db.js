@@ -715,6 +715,32 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 店小二调用云仓助手第三方服务时的最小指令记录。
+    // 不保存 API Key、Cookie、Token 或云仓账号凭据；request_id 用于网络重试和结果轮询。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_external_commands (
+        request_id VARCHAR(64) PRIMARY KEY,
+        owner_id INT NOT NULL,
+        purchase_order_id INT NOT NULL,
+        requested_by_user_id INT NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        command VARCHAR(50) NOT NULL,
+        order_no VARCHAR(100) NOT NULL,
+        order_year SMALLINT UNSIGNED NOT NULL,
+        transport_status VARCHAR(30) NOT NULL DEFAULT 'submitting',
+        http_status SMALLINT UNSIGNED DEFAULT NULL,
+        reason VARCHAR(100) DEFAULT '',
+        message_redacted VARCHAR(500) DEFAULT '',
+        response_json JSON DEFAULT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        completed_at DATETIME(3) DEFAULT NULL,
+        KEY idx_cloud_external_order (owner_id, purchase_order_id, created_at),
+        KEY idx_cloud_external_active (owner_id, transport_status, updated_at),
+        CONSTRAINT fk_cloud_external_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 云仓助手运行状态。机器码只负责路由，执行器使用独立凭据认证。
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_executor_machines (

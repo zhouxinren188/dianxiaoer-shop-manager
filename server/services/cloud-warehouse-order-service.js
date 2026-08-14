@@ -168,7 +168,6 @@ function assertOrderLocatorReady(locator) {
 async function getOrderConfiguration(pool, user, purchaseOrderId) {
   const order = await readAccessiblePurchaseOrder(pool, user, purchaseOrderId)
   const ownerId = getTenantOwnerId(user)
-  const orderRefId = await readOrderRef(pool, ownerId, order.id)
   const [bindingRows] = await pool.execute(
     'SELECT 1 FROM cloud_machine_bindings WHERE owner_id = ? LIMIT 1',
     [ownerId]
@@ -182,54 +181,6 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     locatorError = error
   }
 
-  let exception = null
-  let exceptionResolution = null
-  let workflow = null
-  if (orderRefId) {
-    const [taskRows] = await pool.execute(
-      `SELECT t.task_id, t.transport_status, t.execution_status, t.reason, t.message_redacted,
-              t.result_redacted_json, t.observed_status, t.completed_at
-         FROM cloud_order_tasks t
-         JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
-        WHERE w.owner_id = ? AND t.order_ref_id = ?
-          AND t.command = 'exception.order.check'
-        ORDER BY t.created_at DESC
-        LIMIT 1`,
-      [ownerId, orderRefId]
-    )
-    if (taskRows.length) exception = normalizeExceptionSummary(taskRows[0])
-
-    const [resolveRows] = await pool.execute(
-      `SELECT t.task_id, t.transport_status, t.execution_status, t.reason,
-              t.message_redacted, t.observed_status, t.completed_at
-         FROM cloud_order_tasks t
-         JOIN cloud_order_workflows w ON w.workflow_id = t.workflow_id
-        WHERE w.owner_id = ? AND t.order_ref_id = ?
-          AND t.command = 'exception.order.resolve'
-        ORDER BY t.created_at DESC
-        LIMIT 1`,
-      [ownerId, orderRefId]
-    )
-    if (resolveRows.length) exceptionResolution = normalizeResolutionSummary(resolveRows[0])
-
-    const [workflowRows] = await pool.execute(
-      `SELECT w.workflow_id, w.state, w.current_task_id, w.last_observed_status,
-              w.last_observed_at, w.last_reason, w.last_message_redacted,
-              w.review_reason, w.review_required_at, w.created_at, w.updated_at,
-              t.command AS current_task_command,
-              t.transport_status AS current_transport_status,
-              t.execution_status AS current_execution_status,
-              t.created_at AS current_task_created_at,
-              t.expires_at AS current_task_expires_at
-         FROM cloud_order_workflows w
-         LEFT JOIN cloud_order_tasks t ON t.task_id = w.current_task_id
-        WHERE w.owner_id = ? AND w.order_ref_id = ?
-        ORDER BY w.created_at DESC
-        LIMIT 1`,
-      [ownerId, orderRefId]
-    )
-    if (workflowRows.length) workflow = normalizeWorkflowSummary(workflowRows[0])
-  }
   return {
     purchaseOrderId: Number(order.id),
     purchaseNo: order.purchase_no || '',
@@ -242,11 +193,11 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     locatorReason: locatorError?.code || '',
     locatorMessage: locatorError?.message || '',
     machineBound: bindingRows.length > 0,
-    orderRefId,
-    exception,
-    exceptionResolution,
-    workflow,
-    transportEnabled: true,
+    orderRefId: '',
+    exception: null,
+    exceptionResolution: null,
+    workflow: null,
+    transportEnabled: false,
     wmsOrderEntered: false
   }
 }
