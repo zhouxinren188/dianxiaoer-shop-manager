@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import service from '../server/services/cloud-warehouse-third-party-service.js'
 
 const {
+  attachExternalCommands,
   buildCommandPayload,
   exceptionFromCommand,
   normalizeCommandResponse,
   normalizeMachineStatus,
-  queryMachineStatus
+  queryMachineStatus,
+  recordAutomaticRemarkLog
 } = service
 
 describe('云仓助手在线状态', () => {
@@ -206,6 +208,101 @@ describe('异常查询简化协议', () => {
       requestId: 'request-003',
       status: 'accepted',
       final: false
+    })
+  })
+})
+
+describe('异常处理后的复查结果', () => {
+  it('最新复查结果优先于较早的处理回执决定页面状态', async () => {
+    const rows = [{
+      request_id: 'check-after-resolve',
+      command: 'exception.order.check',
+      transport_status: 'completed',
+      http_status: 200,
+      reason: 'query_completed',
+      message_redacted: '仍有异常',
+      response_json: {
+        status: 'completed',
+        response: {
+          status: 'succeeded',
+          reason: 'query_completed',
+          result: {
+            state: 'exception_found',
+            exception_count: 1,
+            exceptions: [{ source: 'billexception', exception_type_masked: '异常' }]
+          }
+        }
+      },
+      created_at: '2026-08-15 16:20:00',
+      updated_at: '2026-08-15 16:20:01',
+      completed_at: '2026-08-15 16:20:01'
+    }, {
+      request_id: 'resolve-before-check',
+      command: 'exception.order.resolve',
+      transport_status: 'completed',
+      http_status: 200,
+      reason: 'business_state_confirmed',
+      message_redacted: '处理完成',
+      response_json: {
+        status: 'completed',
+        response: {
+          status: 'succeeded',
+          reason: 'business_state_confirmed',
+          result: { state: 'waiting_arrival' }
+        }
+      },
+      created_at: '2026-08-15 16:19:00',
+      updated_at: '2026-08-15 16:19:01',
+      completed_at: '2026-08-15 16:19:01'
+    }]
+    const pool = {
+      execute: vi.fn()
+        .mockResolvedValueOnce([rows])
+        .mockResolvedValueOnce([[]])
+    }
+
+    const config = await attachExternalCommands(
+      pool,
+      { id: 18, user_type: 'master' },
+      99,
+      { purchaseOrderId: 99 }
+    )
+
+    expect(config.workflow.state).toBe('exception_found')
+    expect(config.exception.resultRecordedAt).toBe('2026-08-15 16:20:01')
+    expect(config.exceptionResolution.resultRecordedAt).toBe('2026-08-15 16:19:01')
+  })
+
+  it('自动备注结果按主账号体系和实际操作人持久化为脱敏日志', async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce([[{
+        id: 99,
+        owner_id: 18,
+        purchase_no: 'A8277',
+        sales_order_id: 321,
+        sales_order_no: '3590461014281824'
+      }]])
+      .mockResolvedValueOnce([{ insertId: 456 }])
+
+    const log = await recordAutomaticRemarkLog(
+      { execute },
+      { id: 27, user_type: 'sub', parent_id: 18 },
+      99,
+      { success: false, message: 'Cookie=secret-value 京东返回失败' }
+    )
+
+    expect(execute.mock.calls[1][1]).toEqual([
+      18,
+      99,
+      27,
+      'failed',
+      'Cookie=[已脱敏] 京东返回失败'
+    ])
+    expect(log).toMatchObject({
+      id: 'local:456',
+      action: 'auto_remark',
+      status: 'failed',
+      message: 'Cookie=[已脱敏] 京东返回失败'
     })
   })
 })

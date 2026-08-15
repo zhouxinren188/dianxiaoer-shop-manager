@@ -11,6 +11,7 @@ const { createCloudWarehouseApiClient } = require('../services/cloud-warehouse-a
 const {
   attachExternalCommands,
   queryMachineStatus,
+  recordAutomaticRemarkLog,
   refreshCommandResult,
   submitOrderCommand
 } = require('../services/cloud-warehouse-third-party-service')
@@ -36,6 +37,19 @@ function statusForError(error) {
     'cloud_api_response_too_large'].includes(error?.code)) return 502
   if (error?.code) return 400
   return 500
+}
+
+function isCloudApiError(error) {
+  return String(error?.code || '').startsWith('cloud_api_')
+}
+
+function cloudRefreshFailure(error) {
+  return {
+    reason: String(error?.code || 'cloud_api_unavailable').slice(0, 100),
+    message: String(error?.message || '云仓助手状态查询暂时失败').slice(0, 500),
+    httpStatus: Number(error?.httpStatus || 0) || null,
+    occurredAt: new Date().toISOString()
+  }
 }
 
 function formatBindingRow(row, canManage) {
@@ -65,6 +79,19 @@ async function readBinding(pool, ownerId, canManage) {
 function assertEmptyBody(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 0) {
     throw Object.assign(new Error('请求体必须为空对象'), { code: 'invalid_request' })
+  }
+}
+
+function assertAutomaticRemarkLogBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw Object.assign(new Error('请求体格式错误'), { code: 'invalid_request' })
+  }
+  const keys = Object.keys(body)
+  if (keys.some(key => !['success', 'message'].includes(key)) || typeof body.success !== 'boolean') {
+    throw Object.assign(new Error('自动备注日志字段不合法'), { code: 'invalid_request' })
+  }
+  if (body.message !== undefined && typeof body.message !== 'string') {
+    throw Object.assign(new Error('自动备注日志消息格式不合法'), { code: 'invalid_request' })
   }
 }
 
@@ -243,7 +270,18 @@ module.exports = function createCloudWarehouseRouter(pool, options = {}) {
             await getOrderConfiguration(pool, req.user, req.params.purchaseOrderId)
           )
         } catch (error) {
-          if (!['cloud_api_timeout', 'cloud_api_unavailable'].includes(error?.code)) throw error
+          if (!isCloudApiError(error)) throw error
+          console.warn('[CloudWarehouse] 刷新云仓指令状态失败，保留已有配置', {
+            code: error.code || 'cloud_api_unavailable',
+            httpStatus: Number(error.httpStatus || 0) || undefined,
+            requestId: activeRequestId
+          })
+          if (config.workflow) {
+            config.workflow = {
+              ...config.workflow,
+              refreshFailure: cloudRefreshFailure(error)
+            }
+          }
         }
       }
       res.json(ok(config))
@@ -278,6 +316,16 @@ module.exports = function createCloudWarehouseRouter(pool, options = {}) {
     } catch (error) {
       console.error('[CloudWarehouse] 发送异常处理指令失败:', error.code || error.message)
       res.status(statusForError(error)).json(fail(error.message || '发送异常处理指令失败', error.code))
+    }
+  })
+
+  router.post('/orders/:purchaseOrderId/process-logs/auto-remark', async (req, res) => {
+    try {
+      assertAutomaticRemarkLogBody(req.body || {})
+      res.json(ok(await recordAutomaticRemarkLog(pool, req.user, req.params.purchaseOrderId, req.body)))
+    } catch (error) {
+      console.error('[CloudWarehouse] 记录京东自动备注结果失败:', error.code || error.message)
+      res.status(statusForError(error)).json(fail(error.message || '记录京东自动备注结果失败', error.code))
     }
   })
 
