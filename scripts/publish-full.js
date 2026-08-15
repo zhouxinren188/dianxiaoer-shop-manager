@@ -105,6 +105,9 @@ function getBusinessServerFiles() {
   return [
     { local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` },
     { local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` },
+    { local: path.join(ROOT, 'server', 'routes', 'cloud-warehouse.js'), remote: `${BUSINESS_REMOTE_DIR}/routes/cloud-warehouse.js` },
+    { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-api-client.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-api-client.js` },
+    { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-third-party-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-third-party-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'store-cookie-policy.js'), remote: `${BUSINESS_REMOTE_DIR}/services/store-cookie-policy.js` },
@@ -151,6 +154,12 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
   const [[stats]] = await pool.execute(
     "SELECT COUNT(*) AS total, SUM(outcome='delivered') AS delivered, SUM(outcome='dispatch_risk') AS dispatch_risk FROM shipping_timeliness_observations"
   );
+  const [cloudTables] = await pool.execute("SHOW TABLES LIKE 'cloud_order_process_logs'");
+  if (!cloudTables.length) throw new Error('cloud_order_process_logs table missing');
+  const [cloudColumns] = await pool.execute('SHOW COLUMNS FROM cloud_order_process_logs');
+  const [cloudIndexes] = await pool.execute('SHOW INDEX FROM cloud_order_process_logs');
+  const [[cloudStats]] = await pool.execute('SELECT COUNT(*) AS total FROM cloud_order_process_logs');
+  const [[commandStats]] = await pool.execute('SELECT COUNT(*) AS total FROM cloud_external_commands');
   console.log('SHIPPING_VERIFY=' + JSON.stringify({
     table: true,
     columns: columns.map(row => row.Field),
@@ -158,9 +167,16 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
     backfill,
     stats
   }));
+  console.log('CLOUD_VERIFY=' + JSON.stringify({
+    table: true,
+    columns: cloudColumns.map(row => row.Field),
+    indexes: [...new Set(cloudIndexes.map(row => row.Key_name))],
+    processLogs: cloudStats,
+    externalCommands: commandStats
+  }));
   await pool.end();
 })().catch(async error => {
-  console.error('SHIPPING_VERIFY_ERROR=' + error.message);
+  console.error('BUSINESS_VERIFY_ERROR=' + error.message);
   try { await pool.end(); } catch (_) {}
   process.exit(1);
 });`
@@ -169,8 +185,8 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
       conn,
       `cd /d "${BUSINESS_REMOTE_DIR}" && node -e "eval(Buffer.from('${verifyEncoded}','base64').toString('utf8'))"`
     )
-    if (verify.code !== 0 || !verify.stdout.includes('SHIPPING_VERIFY=')) {
-      throw new Error('时效数据表或回填验证失败: ' + (verify.stderr || verify.stdout))
+    if (verify.code !== 0 || !verify.stdout.includes('SHIPPING_VERIFY=') || !verify.stdout.includes('CLOUD_VERIFY=')) {
+      throw new Error('业务数据表或回填验证失败: ' + (verify.stderr || verify.stdout))
     }
     console.log('[Server]', verify.stdout.trim())
   } finally {
