@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it, vi } from 'vitest'
 import {
+  TAOBAO_SAME_HISTORY_READ_TIMEOUT_MS,
   TAOBAO_SAME_HISTORY_MAX_ENTRIES,
   TAOBAO_SAME_HISTORY_STORAGE_KEY,
   TAOBAO_SAME_HISTORY_TTL_MS,
@@ -12,12 +16,71 @@ import {
   withTaobaoSameSearchTimeout
 } from '../src/renderer/src/utils/taobaoSameHistory.js'
 
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+
 function createStorage() {
   const values = new Map()
   return {
     getItem: key => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, String(value)),
     removeItem: key => values.delete(key)
+  }
+}
+
+function createAsyncRequest(result, { pending = false } = {}) {
+  const request = {
+    error: null,
+    result,
+    onerror: null,
+    onsuccess: null
+  }
+  if (!pending) {
+    setTimeout(() => request.onsuccess?.({ target: request }), 0)
+  }
+  return request
+}
+
+function createIndexedDbReadHarness() {
+  const calls = { count: 0, get: [] }
+  let pendingKey = ''
+  const database = {
+    close: vi.fn(),
+    onversionchange: null,
+    transaction: (_storeName, mode) => {
+      const transaction = {
+        error: null,
+        onabort: null,
+        oncomplete: null,
+        onerror: null,
+        objectStore: () => store
+      }
+      const store = {
+        count: () => {
+          calls.count += 1
+          const request = createAsyncRequest(0)
+          if (mode === 'readwrite') {
+            setTimeout(() => transaction.oncomplete?.(), 5)
+          }
+          return request
+        },
+        get: key => {
+          calls.get.push(key)
+          return createAsyncRequest(undefined, { pending: key === pendingKey })
+        },
+        index: () => ({
+          openCursor: () => createAsyncRequest(undefined)
+        })
+      }
+      return transaction
+    }
+  }
+  return {
+    calls,
+    database,
+    indexedDB: {
+      open: vi.fn(() => createAsyncRequest(database))
+    },
+    setPendingKey: key => { pendingKey = key }
   }
 }
 
@@ -92,5 +155,45 @@ describe('淘宝同款历史记录与货源标识', () => {
     await expect(withTaobaoSameSearchTimeout(Promise.resolve('ok'), 20)).resolves.toBe('ok')
     await expect(withTaobaoSameSearchTimeout(new Promise(() => {}), 5))
       .rejects.toThrow('淘宝同款搜索等待超时')
+  })
+
+  it('IndexedDB的count数字、get空结果和永久pending请求都能安全结算', async () => {
+    const harness = createIndexedDbReadHarness()
+    vi.stubGlobal('indexedDB', harness.indexedDB)
+    vi.stubGlobal('IDBKeyRange', undefined)
+    try {
+      const outcome = await Promise.race([
+        readTaobaoSameHistory(createStorage(), 'missing', Date.now(), 500)
+          .then(value => ({ state: 'settled', value })),
+        new Promise(resolve => setTimeout(() => resolve({ state: 'hung' }), 80))
+      ])
+
+      expect(outcome).toEqual({ state: 'settled', value: null })
+      expect(harness.calls.count).toBe(1)
+      expect(harness.calls.get).toEqual(['missing'])
+      expect(harness.database.onversionchange).toBeTypeOf('function')
+      harness.database.onversionchange()
+      expect(harness.database.close).toHaveBeenCalledOnce()
+
+      harness.setPendingKey('pending')
+      expect(TAOBAO_SAME_HISTORY_READ_TIMEOUT_MS).toBe(1500)
+      await expect(readTaobaoSameHistory(createStorage(), 'pending', Date.now(), 10))
+        .resolves.toBeNull()
+      expect(harness.calls.get).toEqual(['missing', 'pending'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('界面在等待历史缓存前先进入加载状态', () => {
+    const source = fs.readFileSync(
+      path.join(root, 'src/renderer/src/views/sales/OrderList.vue'),
+      'utf8'
+    )
+    const start = source.indexOf('async function handleSearchTaobaoSame')
+    const end = source.indexOf('\nasync function handleOpenTaobaoSameProduct', start)
+    const handler = source.slice(start, end)
+    expect(handler.indexOf('taobaoSameSearchLoading.value = true'))
+      .toBeLessThan(handler.indexOf('await readTaobaoSameHistory'))
   })
 })

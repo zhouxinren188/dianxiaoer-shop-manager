@@ -3149,6 +3149,9 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
   taobaoSameDialogVisible.value = true
   taobaoSameSearchError.value = ''
   taobaoSameHistoryKey.value = currentTaobaoSameHistoryKey(account.id)
+  taobaoSameSearchLoading.value = true
+  taobaoSameFromHistory.value = false
+  taobaoSameResults.value = []
 
   if (forceRefresh !== true) {
     const history = await readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
@@ -3165,9 +3168,6 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
     }
   }
 
-  taobaoSameSearchLoading.value = true
-  taobaoSameFromHistory.value = false
-  taobaoSameResults.value = []
   try {
     const result = await withTaobaoSameSearchTimeout(
       window.electronAPI.invoke('search-taobao-same-product', {

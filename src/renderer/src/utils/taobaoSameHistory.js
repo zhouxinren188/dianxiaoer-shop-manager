@@ -2,6 +2,7 @@ export const TAOBAO_SAME_HISTORY_STORAGE_KEY = 'dianxiaoer:taobao-same-history:v
 export const TAOBAO_SAME_HISTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const TAOBAO_SAME_HISTORY_MAX_ENTRIES = 10000
 export const TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS = 60 * 1000
+export const TAOBAO_SAME_HISTORY_READ_TIMEOUT_MS = 1500
 const TAOBAO_SAME_HISTORY_DB_NAME = 'dianxiaoer-taobao-same-history'
 const TAOBAO_SAME_HISTORY_DB_VERSION = 1
 const TAOBAO_SAME_HISTORY_STORE_NAME = 'entries'
@@ -124,11 +125,7 @@ function freshHistoryEntries(storage, now = Date.now()) {
 
 function requestResult(request) {
   return new Promise((resolve, reject) => {
-    request.onsuccess = () => {
-      const database = request.result
-      database.onversionchange = () => database.close()
-      resolve(database)
-    }
+    request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error || new Error('淘宝同款历史数据库操作失败'))
   })
 }
@@ -165,7 +162,11 @@ function openTaobaoSameHistoryDatabase() {
         store.createIndex(TAOBAO_SAME_HISTORY_CACHED_AT_INDEX, 'cachedAt')
       }
     }
-    request.onsuccess = () => resolve(request.result)
+    request.onsuccess = () => {
+      const database = request.result
+      database.onversionchange = () => database.close()
+      resolve(database)
+    }
     request.onerror = () => reject(request.error || new Error('无法打开淘宝同款历史数据库'))
     request.onblocked = () => reject(new Error('淘宝同款历史数据库升级被阻塞'))
   }).catch(() => {
@@ -259,9 +260,7 @@ function validProducts(products) {
     }))
 }
 
-export async function readTaobaoSameHistory(storage, key, now = Date.now()) {
-  const cacheKey = cleanText(key)
-  if (!cacheKey) return null
+async function readTaobaoSameHistoryWithoutTimeout(storage, cacheKey, now) {
   const database = await openTaobaoSameHistoryDatabase()
   if (database) {
     try {
@@ -285,6 +284,25 @@ export async function readTaobaoSameHistory(storage, key, now = Date.now()) {
   return products.length > 0
     ? { products, cachedAt: Number(record.cachedAt) }
     : null
+}
+
+export function readTaobaoSameHistory(
+  storage,
+  key,
+  now = Date.now(),
+  timeoutMs = TAOBAO_SAME_HISTORY_READ_TIMEOUT_MS
+) {
+  const cacheKey = cleanText(key)
+  if (!cacheKey) return Promise.resolve(null)
+
+  let timeoutId
+  const timeout = new Promise(resolve => {
+    timeoutId = setTimeout(() => resolve(null), timeoutMs)
+  })
+  const read = readTaobaoSameHistoryWithoutTimeout(storage, cacheKey, now)
+    .catch(() => null)
+  return Promise.race([read, timeout])
+    .finally(() => clearTimeout(timeoutId))
 }
 
 export async function saveTaobaoSameHistory(storage, key, products, now = Date.now()) {

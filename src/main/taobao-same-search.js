@@ -1953,8 +1953,10 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   if (!isCurrentProductDocument()) {
     var staleOverlay = document.getElementById('__dxe_sales_product_overlay__');
     var staleControl = document.getElementById('__dxe_same_source_row__');
+    var staleRefresh = document.getElementById('__dxe_product_refresh_row__');
     if (staleOverlay) staleOverlay.remove();
     if (staleControl) staleControl.remove();
+    if (staleRefresh) staleRefresh.remove();
     if (window.__dxeSameSourceObserver) window.__dxeSameSourceObserver.disconnect();
     return '[DXE_SAME_PRODUCT] skipped-non-product';
   }
@@ -2300,6 +2302,39 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     return row;
   }
 
+  function createRefreshRow() {
+    var row = document.createElement('div');
+    row.id = '__dxe_product_refresh_row__';
+    row.setAttribute('data-name', 'dianxiaoer-refresh');
+    var button = document.createElement('button');
+    button.id = '__dxe_product_refresh_control__';
+    button.type = 'button';
+    button.title = '\u4ef7\u683c\u672a\u663e\u793a\u65f6\u624b\u52a8\u5237\u65b0\u9875\u9762';
+    button.setAttribute('aria-label', '\u5237\u65b0\u9875\u9762');
+    var icon = appendText(button, 'span', '\u21bb');
+    icon.setAttribute('data-dxe-refresh-icon', '1');
+    var label = appendText(button, 'span', '\u5237\u65b0\u9875\u9762');
+    label.setAttribute('data-dxe-refresh-label', '1');
+    button.addEventListener('mouseenter', function() {
+      if (!button.disabled) button.style.background = 'rgba(64,158,255,.10)';
+    });
+    button.addEventListener('mouseleave', function() {
+      button.style.background = '#fff';
+    });
+    button.addEventListener('click', function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (button.disabled) return;
+      button.disabled = true;
+      button.style.cursor = 'default';
+      label.textContent = '\u5237\u65b0\u4e2d...';
+      diagnosticLog('manual-refresh-click', {});
+      window.location.reload();
+    });
+    row.appendChild(button);
+    return row;
+  }
+
   function findTaobaoToolkitList() {
     return document.querySelector('#J_Toolkit .tb-toolkit-list-new') ||
       document.querySelector('#J_Toolkit .tb-toolkit-list') ||
@@ -2344,6 +2379,28 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     }
   }
 
+  function placeRefreshRow(sourceRow) {
+    if (!document.body || !sourceRow || !sourceRow.isConnected) return;
+    var refreshRow = document.getElementById('__dxe_product_refresh_row__');
+    if (!refreshRow || !refreshRow.isConnected) refreshRow = createRefreshRow();
+    if (refreshRow.parentElement !== document.body) document.body.appendChild(refreshRow);
+    var placement = sourceRow.getAttribute('data-dxe-placement') || 'fallback';
+    var floating = placement === 'floating-toolkit';
+    var refreshWidth = floating ? 104 : 100;
+    var refreshHeight = floating ? 40 : 34;
+    var button = refreshRow.querySelector('#__dxe_product_refresh_control__');
+    var icon = refreshRow.querySelector('[data-dxe-refresh-icon="1"]');
+    var label = refreshRow.querySelector('[data-dxe-refresh-label="1"]');
+    refreshRow.setAttribute('data-dxe-placement', placement);
+    refreshRow.style.cssText = 'position:fixed;z-index:2147483001;display:flex;align-items:center;justify-content:center;width:' + refreshWidth + 'px;height:' + refreshHeight + 'px;margin:0;padding:0;box-sizing:border-box;';
+    if (button) button.style.cssText = 'appearance:none;display:flex;align-items:center;justify-content:center;width:' + (refreshWidth - 2) + 'px;height:' + (refreshHeight - 2) + 'px;margin:0;padding:0 10px;border:1px solid #b3d8ff;border-radius:8px;background:#fff;color:#409eff;font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:20px;white-space:nowrap;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.08);';
+    if (icon) icon.style.cssText = 'display:inline-block;margin-right:5px;font-size:18px;line-height:18px;';
+    if (label) label.style.cssText = 'display:inline-block;font-weight:500;';
+    var sourceRect = sourceRow.getBoundingClientRect();
+    refreshRow.style.left = Math.max(8, Math.round(sourceRect.left - refreshWidth - 8)) + 'px';
+    refreshRow.style.top = Math.max(8, Math.round(sourceRect.top)) + 'px';
+  }
+
   function placeSelectRow() {
     var existing = document.getElementById('__dxe_same_source_row__');
     if (!document.body) return false;
@@ -2370,6 +2427,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
         row.style.left = left + 'px';
         row.style.right = 'auto';
         row.style.top = top + 'px';
+        placeRefreshRow(row);
         return true;
       }
     }
@@ -2379,6 +2437,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
     row.style.left = Math.max(8, window.innerWidth - fallbackRect.width - 530) + 'px';
     row.style.right = 'auto';
     row.style.top = Math.max(8, Math.min(window.innerHeight - fallbackRect.height - 8, 656)) + 'px';
+    placeRefreshRow(row);
     return false;
   }
 
@@ -2623,14 +2682,21 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   )
   const readControlState = () => productWindow.webContents.executeJavaScript(`(function () {
     var row = document.getElementById('__dxe_same_source_row__');
-    if (!row || !row.isConnected) return { exists: false, visible: false, placement: '' };
+    var refresh = document.getElementById('__dxe_product_refresh_row__');
+    if (!row || !row.isConnected) return { exists: false, visible: false, refreshExists: !!refresh, refreshVisible: false, placement: '' };
     var rect = row.getBoundingClientRect();
     var style = getComputedStyle(row);
+    var refreshRect = refresh && refresh.isConnected ? refresh.getBoundingClientRect() : null;
+    var refreshStyle = refresh && refresh.isConnected ? getComputedStyle(refresh) : null;
     return {
       exists: true,
       visible: rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.bottom > 0 &&
         rect.left < window.innerWidth && rect.top < window.innerHeight &&
         style.display !== 'none' && style.visibility !== 'hidden',
+      refreshExists: !!(refresh && refresh.isConnected),
+      refreshVisible: !!(refreshRect && refreshStyle && refreshRect.width > 0 && refreshRect.height > 0 &&
+        refreshRect.right > 0 && refreshRect.bottom > 0 && refreshRect.left < window.innerWidth &&
+        refreshRect.top < window.innerHeight && refreshStyle.display !== 'none' && refreshStyle.visibility !== 'hidden'),
       placement: String(row.getAttribute('data-dxe-placement') || ''),
       left: Math.round(rect.left),
       top: Math.round(rect.top)
@@ -2644,8 +2710,10 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
         await productWindow.webContents.executeJavaScript(`(function () {
           var overlay = document.getElementById('__dxe_sales_product_overlay__');
           var control = document.getElementById('__dxe_same_source_row__');
+          var refresh = document.getElementById('__dxe_product_refresh_row__');
           if (overlay) overlay.remove();
           if (control) control.remove();
+          if (refresh) refresh.remove();
           if (window.__dxeSameSourceObserver) window.__dxeSameSourceObserver.disconnect();
           return '[DXE_SAME_PRODUCT] cleaned-non-product';
         })()`, true).catch(() => null)
@@ -2653,7 +2721,7 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
         return
       }
       const before = force ? null : await readControlState()
-      if (before && before.exists && before.visible) return
+      if (before && before.exists && before.visible && before.refreshExists && before.refreshVisible) return
       const result = await productWindow.webContents.executeJavaScript(injectionScript, true)
       const after = await readControlState().catch(() => null)
       runtimeLog.writeLog(
