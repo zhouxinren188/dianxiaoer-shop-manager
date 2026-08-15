@@ -3,18 +3,21 @@ import {
   TAOBAO_SAME_HISTORY_MAX_ENTRIES,
   TAOBAO_SAME_HISTORY_STORAGE_KEY,
   TAOBAO_SAME_HISTORY_TTL_MS,
+  TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS,
   buildTaobaoSameHistoryKey,
   collectTaobaoSourceItemIds,
   extractTaobaoItemId,
   readTaobaoSameHistory,
-  saveTaobaoSameHistory
+  saveTaobaoSameHistory,
+  withTaobaoSameSearchTimeout
 } from '../src/renderer/src/utils/taobaoSameHistory.js'
 
 function createStorage() {
   const values = new Map()
   return {
     getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value))
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: key => values.delete(key)
   }
 }
 
@@ -42,7 +45,7 @@ describe('淘宝同款历史记录与货源标识', () => {
     expect(otherAccount).not.toBe(first)
   })
 
-  it('保存并读取最多20条结果，超过有效期后不再命中', () => {
+  it('保存并读取最多20条结果，超过有效期后不再命中且会物理清理', async () => {
     const storage = createStorage()
     const products = Array.from({ length: 25 }, (_, index) => ({
       itemId: String(index + 1),
@@ -50,19 +53,44 @@ describe('淘宝同款历史记录与货源标识', () => {
       title: `商品${index + 1}`,
       price: index + 0.5
     }))
-    expect(saveTaobaoSameHistory(storage, 'cache-key', products, 1000)).toBe(true)
-    expect(readTaobaoSameHistory(storage, 'cache-key', 1001)?.products).toHaveLength(20)
-    expect(readTaobaoSameHistory(storage, 'cache-key', 1000 + TAOBAO_SAME_HISTORY_TTL_MS + 1)).toBeNull()
+    expect(await saveTaobaoSameHistory(storage, 'cache-key', products, 1000)).toBe(true)
+    expect((await readTaobaoSameHistory(storage, 'cache-key', 1001))?.products).toHaveLength(20)
+    expect(await readTaobaoSameHistory(storage, 'cache-key', 1000 + TAOBAO_SAME_HISTORY_TTL_MS + 1)).toBeNull()
+    expect(JSON.parse(storage.getItem(TAOBAO_SAME_HISTORY_STORAGE_KEY)).entries).toHaveLength(0)
   })
 
-  it('按最近写入顺序限制历史记录数量', () => {
+  it('最多保存10000条并在新记录写入时滚动删除最早数据', async () => {
     const storage = createStorage()
-    for (let index = 0; index < TAOBAO_SAME_HISTORY_MAX_ENTRIES + 3; index += 1) {
-      saveTaobaoSameHistory(storage, `key-${index}`, [{ link: `https://item.taobao.com/item.htm?id=${index + 1}` }], index + 1)
-    }
+    expect(TAOBAO_SAME_HISTORY_MAX_ENTRIES).toBe(10000)
+    const seededEntries = Array.from({ length: TAOBAO_SAME_HISTORY_MAX_ENTRIES }, (_, offset) => {
+      const index = TAOBAO_SAME_HISTORY_MAX_ENTRIES - offset - 1
+      return {
+        key: `key-${index}`,
+        cachedAt: index + 1,
+        products: [{ link: `https://item.taobao.com/item.htm?id=${index + 1}` }]
+      }
+    })
+    storage.setItem(
+      TAOBAO_SAME_HISTORY_STORAGE_KEY,
+      JSON.stringify({ version: 1, entries: seededEntries })
+    )
+    await saveTaobaoSameHistory(
+      storage,
+      `key-${TAOBAO_SAME_HISTORY_MAX_ENTRIES}`,
+      [{ link: `https://item.taobao.com/item.htm?id=${TAOBAO_SAME_HISTORY_MAX_ENTRIES + 1}` }],
+      TAOBAO_SAME_HISTORY_MAX_ENTRIES + 1
+    )
     const payload = JSON.parse(storage.getItem(TAOBAO_SAME_HISTORY_STORAGE_KEY))
     expect(payload.entries).toHaveLength(TAOBAO_SAME_HISTORY_MAX_ENTRIES)
-    expect(payload.entries[0].key).toBe(`key-${TAOBAO_SAME_HISTORY_MAX_ENTRIES + 2}`)
-    expect(payload.entries.at(-1).key).toBe('key-3')
+    expect(payload.entries[0].key).toBe(`key-${TAOBAO_SAME_HISTORY_MAX_ENTRIES}`)
+    expect(payload.entries.at(-1).key).toBe('key-1')
+    expect(payload.entries.some(entry => entry.key === 'key-0')).toBe(false)
+  })
+
+  it('IPC无响应时会按上限解除淘宝同款加载状态', async () => {
+    expect(TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS).toBe(60000)
+    await expect(withTaobaoSameSearchTimeout(Promise.resolve('ok'), 20)).resolves.toBe('ok')
+    await expect(withTaobaoSameSearchTimeout(new Promise(() => {}), 5))
+      .rejects.toThrow('淘宝同款搜索等待超时')
   })
 })
