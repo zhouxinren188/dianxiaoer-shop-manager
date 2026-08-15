@@ -1267,7 +1267,13 @@ import { createPurchaseOrder, bindPlatformOrderNo, fetchNextPurchaseNo, recommen
 import { fetchSkuPurchaseConfigList, saveSkuPurchaseConfig, deleteSkuPurchaseConfig, detectPlatformFromUrl } from '@/api/skuPurchaseConfig'
 import { fetchPurchaseAccounts } from '@/api/purchaseAccount'
 import { fetchWarehouses, searchInventory, createSkuBinding, quickCreateInventory, batchQuerySkuBindings, fetchInventoryById, updateInventory, updatePackageNum } from '@/api/warehouse'
-import { buildTaobaoSameHistoryKey, extractTaobaoItemId, readTaobaoSameHistory, saveTaobaoSameHistory } from '@/utils/taobaoSameHistory'
+import {
+  buildTaobaoSameHistoryKey,
+  extractTaobaoItemId,
+  readTaobaoSameHistory,
+  saveTaobaoSameHistory,
+  withTaobaoSameSearchTimeout
+} from '@/utils/taobaoSameHistory'
 
 // ==================== 筛选项配置 ====================
 
@@ -3145,7 +3151,7 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
   taobaoSameHistoryKey.value = currentTaobaoSameHistoryKey(account.id)
 
   if (forceRefresh !== true) {
-    const history = readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
+    const history = await readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
     if (history) {
       taobaoSameResults.value = history.products
       taobaoSameFromHistory.value = true
@@ -3163,18 +3169,20 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
   taobaoSameFromHistory.value = false
   taobaoSameResults.value = []
   try {
-    const result = await window.electronAPI.invoke('search-taobao-same-product', {
-      imgUrl: purchaseInfo.image,
-      accountId: account.id,
-      automatic: false,
-      limit: 20
-    })
+    const result = await withTaobaoSameSearchTimeout(
+      window.electronAPI.invoke('search-taobao-same-product', {
+        imgUrl: purchaseInfo.image,
+        accountId: account.id,
+        automatic: false,
+        limit: 20
+      })
+    )
     if (result && result.success) {
       taobaoSameResults.value = result.products || result.items || []
       if (taobaoSameResults.value.length === 0) {
         taobaoSameSearchError.value = '淘宝接口调用成功，但未返回同款商品'
       } else {
-        saveTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value, taobaoSameResults.value)
+        await saveTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value, taobaoSameResults.value)
       }
       return
     }

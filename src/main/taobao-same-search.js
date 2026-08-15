@@ -30,15 +30,26 @@ const SEARCH_REQUEST_TIMEOUT = 25000
 // 超时必须覆盖倒计时结束后的页面跳转与Token稳定时间。
 const TAOBAO_SEARCH_AUTH_TIMEOUT = 20000
 const TAOBAO_SEARCH_AUTH_STABLE_MS = 1200
+const TAOBAO_SEARCH_LOGIN_STABLE_MS = 2000
+const TAOBAO_SEARCH_LOGIN_TIMEOUT = 5 * 60 * 1000
 const TAOBAO_SEARCH_WARM_STABLE_MS = 250
 const TAOBAO_SEARCH_RISK_COOLDOWN_MS = 30 * 60 * 1000
+const TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS = 5
+const TAOBAO_SEARCH_EMPTY_RETRY_DELAY_MS = 200
+const TAOBAO_SEARCH_WINDOW_LOAD_TIMEOUT_MS = 8000
+const TAOBAO_AUTH_PAGE_READ_TIMEOUT_MS = 1500
+const TAOBAO_AUTH_FRAME_READ_TIMEOUT_MS = 750
+const TAOBAO_SESSION_READ_TIMEOUT_MS = 3000
 const TAOBAO_IDENTITY_COOKIE_NAMES = new Set([
   'unb', 'cookie17', 'cookie2', 'tracknick', 'lgc'
 ])
-const TAOBAO_DEDICATED_SEARCH_PARTITION = 'persist:dianxiaoer-taobao-same-search-v1'
-// 已知成功工具的搜索窗口使用 webSecurity=false。该差异只作用于专用搜索
-// BrowserWindow；采购商品页、SKU、改地址和下单窗口不受影响。
-const TAOBAO_SEARCH_WEB_SECURITY = false
+const TAOBAO_REQUEST_CRITICAL_COOKIE_NAMES = [
+  '_m_h5_tk', '_m_h5_tk_enc', 'cookie2', 'unb', 'cookie17'
+]
+const TAOBAO_DEDICATED_SEARCH_PARTITION = 'persist:dianxiaoer-taobao-same-search-v2'
+// Electron 41 实测关闭 webSecurity 会让真实出站 Origin 变为空，因此专用搜索
+// 窗口保留正常 Chromium 安全上下文。采购商品页窗口不受此常量影响。
+const TAOBAO_SEARCH_WEB_SECURITY = true
 
 const searchWindowStates = new Map()
 const searchQueues = new Map()
@@ -51,6 +62,47 @@ let productWindowSequence = 0
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function settleTaobaoPromiseWithTimeout(promise, timeoutMs) {
+  return new Promise(resolve => {
+    let completed = false
+    const finish = result => {
+      if (completed) return
+      completed = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      finish({ settled: false, value: undefined, error: null })
+    }, Math.max(0, Number(timeoutMs) || 0))
+    Promise.resolve(promise).then(
+      value => finish({ settled: true, value, error: null }),
+      error => finish({ settled: true, value: undefined, error })
+    )
+  })
+}
+
+async function loadTaobaoWindowWithTimeout(
+  win,
+  url,
+  timeoutMs = TAOBAO_SEARCH_WINDOW_LOAD_TIMEOUT_MS,
+  context = 'window'
+) {
+  const loadResult = win.loadURL(url)
+    .then(() => ({ loaded: true, timedOut: false, error: null }))
+    .catch(error => ({ loaded: false, timedOut: false, error }))
+  const result = await Promise.race([
+    loadResult,
+    sleep(timeoutMs).then(() => ({ loaded: false, timedOut: true, error: null }))
+  ])
+  if (result.timedOut) {
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '淘宝窗口页面加载等待超时，转入状态检查: context=' + context + ', timeoutMs=' + timeoutMs
+    )
+  }
+  return result
 }
 
 function attachTaobaoProductPriceDiagnostics(productWindow, diagnosticId) {
@@ -281,7 +333,10 @@ function classifyTaobaoAuthenticationSnapshot(snapshot = {}) {
   }
 }
 
-async function readTaobaoSearchAuthenticationPageState(win) {
+async function readTaobaoSearchAuthenticationPageState(
+  win,
+  timeoutMs = TAOBAO_AUTH_PAGE_READ_TIMEOUT_MS
+) {
   if (!win || win.isDestroyed()) {
     return {
       automaticLoginPending: false,
@@ -297,6 +352,10 @@ async function readTaobaoSearchAuthenticationPageState(win) {
     : []
   let inspected = 0
   let mainReadyState = ''
+  let inspectionTimedOut = false
+
+  // 先检查全部 frame URL。页面脚本可能在损坏或仍在导航的 frame 上长期不返回，
+  // 不能因此阻塞后续登录/验证 iframe 的识别。
   for (const frame of frames) {
     const frameUrl = String(frame?.url || '')
     if (isTaobaoLoginPageUrl(frameUrl)) {
@@ -323,15 +382,33 @@ async function readTaobaoSearchAuthenticationPageState(win) {
         mainReadyState
       }
     }
+  }
+
+  const inspectionStartedAt = Date.now()
+  for (const frame of frames) {
+    const remainingMs = Math.max(0, Number(timeoutMs) - (Date.now() - inspectionStartedAt))
+    if (remainingMs <= 0) {
+      inspectionTimedOut = true
+      break
+    }
     try {
-      const snapshot = await frame.executeJavaScript(`(function () {
+      const snapshotResult = await settleTaobaoPromiseWithTimeout(
+        frame.executeJavaScript(`(function () {
         var bodyText = document.body ? String(document.body.innerText || '') : '';
         return {
           title: String(document.title || '').slice(0, 200),
           text: bodyText.replace(/\\s+/g, ' ').trim().slice(0, 3000),
           readyState: String(document.readyState || '')
         };
-      })()`)
+      })()`),
+        Math.min(TAOBAO_AUTH_FRAME_READ_TIMEOUT_MS, remainingMs)
+      )
+      if (!snapshotResult.settled) {
+        inspectionTimedOut = true
+        continue
+      }
+      if (snapshotResult.error) throw snapshotResult.error
+      const snapshot = snapshotResult.value || {}
       inspected++
       if (frame === mainFrame) mainReadyState = snapshot.readyState || ''
       const classified = classifyTaobaoAuthenticationSnapshot(snapshot)
@@ -357,7 +434,8 @@ async function readTaobaoSearchAuthenticationPageState(win) {
     needLogin: false,
     needVerification: false,
     frameCount: inspected,
-    mainReadyState
+    mainReadyState,
+    inspectionTimedOut
   }
 }
 
@@ -422,46 +500,323 @@ function shouldRetryWithRefreshedToken(retText, previousToken, refreshedToken) {
     String(refreshedToken) !== String(previousToken || '')
 }
 
-function showSearchWindow(state, title) {
-  if (!state || !state.win || state.win.isDestroyed()) return
-  state.win.setTitle(title || '淘宝搜同款')
-  state.win.show()
-  state.win.focus()
-}
-
 function hideReadySearchWindow(state) {
   if (!state || !state.win || state.win.isDestroyed()) return
   const currentUrl = state.win.webContents.getURL()
   if (isTaobaoLoginPageUrl(currentUrl) || isTaobaoVerificationUrl(currentUrl)) return
-  state.loginPromptVisible = false
   state.win.setTitle('淘宝搜同款')
   if (state.win.isVisible()) state.win.hide()
 }
 
-async function openDedicatedTaobaoSearchLogin(state, reason = 'login_required') {
-  if (!state || !state.win || state.win.isDestroyed()) return
+function shouldRetryEmptyTaobaoSearch(attempt, productCount) {
+  return Number(productCount || 0) === 0 &&
+    Number(attempt || 0) + 1 < TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS
+}
+
+function shouldHideDedicatedLoginWindow(url, authenticationPage = {}) {
+  return !!String(url || '') &&
+    !isTaobaoLoginPageUrl(url) &&
+    !isTaobaoVerificationUrl(url) &&
+    !authenticationPage.needLogin &&
+    !authenticationPage.needVerification &&
+    !authenticationPage.automaticLoginPending
+}
+
+function shouldClearTaobaoRiskCooldownAfterLogin({ verificationWasPending, authReady, carrierReady }) {
+  return verificationWasPending === true && authReady === true && carrierReady === true
+}
+
+function showDedicatedLoginWindow(state, title) {
+  if (!state || !state.loginWin || state.loginWin.isDestroyed()) return
+  state.loginWin.setTitle(title || '淘宝同款专用账号 - 请登录淘宝')
+  state.loginWin.show()
+  state.loginWin.focus()
+}
+
+function closeDedicatedLoginWindow(state) {
+  if (!state || !state.loginWin) return
+  const loginWin = state.loginWin
+  state.loginWin = null
+  state.loginPromptVisible = false
+  state.loginCallbackHidden = false
+  if (!loginWin.isDestroyed()) loginWin.destroy()
+}
+
+function setTaobaoWindowUserAgent(win) {
+  const chromeVersion = process.versions.chrome || '134.0.6998.205'
+  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
+  win.webContents.setUserAgent(userAgent)
+}
+
+function createTaobaoSearchBrowserWindow(state) {
+  if (state.win && !state.win.isDestroyed()) return state.win
+  const win = new BrowserWindow({
+    width: 1000,
+    height: 720,
+    show: false,
+    title: '淘宝搜同款 - 会话准备中',
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: false,
+      partition: state.partition,
+      backgroundThrottling: false,
+      webSecurity: TAOBAO_SEARCH_WEB_SECURITY
+    }
+  })
+  setTaobaoWindowUserAgent(win)
+  state.win = win
+  state.bootstrapComplete = false
+  state.carrierLoadStarted = false
+  state.lastNavigationAt = Date.now()
+  state.lastNavigationUrl = ''
+  win.webContents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame === false) return
+    state.lastNavigationAt = Date.now()
+    state.lastNavigationUrl = String(url || '')
+    state.bootstrapComplete = false
+  })
+  win.webContents.on('did-navigate', (_event, url) => {
+    state.lastNavigationAt = Date.now()
+    state.lastNavigationUrl = String(url || '')
+    state.bootstrapComplete = false
+  })
+  win.webContents.on('did-navigate-in-page', (_event, url) => {
+    state.lastNavigationAt = Date.now()
+    state.lastNavigationUrl = String(url || '')
+    state.bootstrapComplete = false
+  })
+  win.on('closed', () => {
+    if (state.win === win) state.win = null
+    state.bootstrapComplete = false
+    state.carrierLoadStarted = false
+  })
+  return win
+}
+
+function createDedicatedTaobaoLoginWindow(state) {
+  if (state.loginWin && !state.loginWin.isDestroyed()) return { win: state.loginWin, created: false }
+  const loginWin = new BrowserWindow({
+    width: 1000,
+    height: 720,
+    show: false,
+    title: '淘宝同款专用账号 - 请登录淘宝',
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: false,
+      partition: state.partition,
+      backgroundThrottling: false,
+      webSecurity: TAOBAO_SEARCH_WEB_SECURITY
+    }
+  })
+  setTaobaoWindowUserAgent(loginWin)
+  state.loginWin = loginWin
+  state.loginCallbackHidden = false
+  state.lastLoginNavigationAt = Date.now()
+  state.lastLoginNavigationUrl = ''
+  // 登录窗口的导航事件只记录状态，绝不在事件中调用 loadURL 打断淘宝回跳链。
+  loginWin.webContents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
+    if (isMainFrame === false) return
+    state.lastLoginNavigationAt = Date.now()
+    state.lastLoginNavigationUrl = String(url || '')
+  })
+  loginWin.webContents.on('did-navigate', (_event, url) => {
+    state.lastLoginNavigationAt = Date.now()
+    state.lastLoginNavigationUrl = String(url || '')
+  })
+  loginWin.webContents.on('did-navigate-in-page', (_event, url) => {
+    state.lastLoginNavigationAt = Date.now()
+    state.lastLoginNavigationUrl = String(url || '')
+  })
+  loginWin.on('closed', () => {
+    if (state.loginWin === loginWin) state.loginWin = null
+    state.loginPromptVisible = false
+    state.loginCallbackHidden = false
+  })
+  return { win: loginWin, created: true }
+}
+
+async function waitForDedicatedTaobaoLoginStable(
+  state,
+  timeoutMs = TAOBAO_SEARCH_LOGIN_TIMEOUT,
+  stableMs = TAOBAO_SEARCH_LOGIN_STABLE_MS
+) {
+  const startedAt = Date.now()
+  let stableSignature = ''
+  let stableSince = 0
+  let latest = { ready: false, url: '', reason: 'login_pending' }
+  while (Date.now() - startedAt < timeoutMs) {
+    const win = state?.loginWin
+    if (!win || win.isDestroyed()) return { ...latest, reason: 'login_window_closed' }
+    const url = win.webContents.getURL()
+    const authenticationPage = await readTaobaoSearchAuthenticationPageState(win)
+    latest = { ...latest, url }
+    const loginOrVerificationPending = isTaobaoLoginPageUrl(url) ||
+      isTaobaoVerificationUrl(url) ||
+      authenticationPage.needLogin ||
+      authenticationPage.needVerification ||
+      authenticationPage.automaticLoginPending
+    if (loginOrVerificationPending) {
+      if (!win.isVisible()) {
+        showDedicatedLoginWindow(
+          state,
+          authenticationPage.needVerification || isTaobaoVerificationUrl(url)
+            ? '淘宝同款专用账号 - 请完成安全验证'
+            : '淘宝同款专用账号 - 请登录淘宝'
+        )
+      }
+      state.loginCallbackHidden = false
+      stableSignature = ''
+      stableSince = 0
+      await sleep(200)
+      continue
+    }
+
+    if (shouldHideDedicatedLoginWindow(url, authenticationPage) && win.isVisible()) {
+      win.setTitle('淘宝同款专用账号 - 登录成功，正在准备搜索环境')
+      win.hide()
+      state.loginPromptVisible = false
+      state.loginCallbackHidden = true
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '淘宝登录回跳已离开登录/验证页，窗口转入后台等待环境稳定'
+      )
+    }
+
+    const cookies = await state.ses.cookies.get({})
+    const token = await getTaobaoMtopToken(state.ses)
+    const identity = buildTaobaoSessionIdentity(cookies, token)
+    const pageReady = authenticationPage.mainReadyState === 'complete'
+    const loading = win.webContents.isLoading()
+    latest = {
+      ready: false,
+      url,
+      token,
+      identityFingerprint: identity.fingerprint,
+      tokenFingerprint: identity.tokenFingerprint,
+      sessionGeneration: Number(state.sessionGeneration || 0),
+      pageReady,
+      reason: 'login_environment_not_stable'
+    }
+    if (hasTaobaoLoginCookie(cookies) && token && pageReady && !loading) {
+      const signature = [
+        url,
+        identity.fingerprint,
+        identity.tokenFingerprint,
+        Number(state.sessionGeneration || 0)
+      ].join('|')
+      if (signature !== stableSignature) {
+        stableSignature = signature
+        stableSince = Date.now()
+      }
+      const navigationStable = Date.now() - Number(state.lastLoginNavigationAt || 0) >= stableMs
+      const identityMutationStable = Date.now() - Number(state.lastIdentityMutationAt || 0) >= stableMs
+      if (navigationStable && identityMutationStable && Date.now() - stableSince >= stableMs) {
+        state.identityDirty = false
+        state.lastAuthenticatedIdentityFingerprint = identity.fingerprint
+        state.lastAuthenticatedGeneration = Number(state.sessionGeneration || 0)
+        return { ...latest, ready: true, reason: 'login_environment_stable' }
+      }
+    } else {
+      stableSignature = ''
+      stableSince = 0
+    }
+    await sleep(100)
+  }
+  return { ...latest, reason: 'login_environment_timeout' }
+}
+
+async function completeDedicatedTaobaoLogin(state) {
+  const verificationWasPending = state.verificationPending === true
+  const authState = await waitForDedicatedTaobaoLoginStable(state)
+  if (!authState.ready) return authState
+  closeDedicatedLoginWindow(state)
+  // 如果旧搜索窗口曾被淘宝重定向到登录/验证页，它不是可复用的承载窗口。
+  // 销毁它只重建 BrowserWindow，固定 partition 的原生 BrowserSession 会继续复用。
+  if (state.win && !state.win.isDestroyed() &&
+    !isTaobaoSearchCarrierUrl(state.win.webContents.getURL())) {
+    state.win.destroy()
+    state.win = null
+    state.carrierLoadStarted = false
+    state.bootstrapComplete = false
+  }
+  createTaobaoSearchBrowserWindow(state)
+  const bootstrapReady = await bootstrapSearchWindow(state)
+  if (!bootstrapReady) return { ...authState, ready: false, reason: 'carrier_not_ready' }
+  state.verificationPending = false
+  if (shouldClearTaobaoRiskCooldownAfterLogin({
+    verificationWasPending,
+    authReady: authState.ready,
+    carrierReady: bootstrapReady
+  }) && searchRiskCooldowns.delete(state.partition)) {
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '淘宝安全验证环境已稳定，解除搜索冷却: partition=' + state.partition
+    )
+  }
+  hideReadySearchWindow(state)
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '淘宝同款专用账号登录环境稳定，已创建独立搜索承载窗口: partition=' + state.partition +
+      ', stableMs=' + TAOBAO_SEARCH_LOGIN_STABLE_MS
+  )
+  return { ...authState, ready: true, carrierPage: true, reason: 'ready' }
+}
+
+function scheduleDedicatedTaobaoLoginCompletion(state) {
+  if (state.loginCompletionCheck) return state.loginCompletionCheck
+  const completion = completeDedicatedTaobaoLogin(state)
+    .catch(error => {
+      runtimeLog.writeLog('TaobaoSame', '专用账号登录完成检查失败: ' + error.message)
+      return { ready: false, reason: 'login_completion_exception' }
+    })
+    .finally(() => {
+      if (state.loginCompletionCheck === completion) state.loginCompletionCheck = null
+    })
+  state.loginCompletionCheck = completion
+  return completion
+}
+
+async function openDedicatedTaobaoSearchLogin(
+  state,
+  reason = 'login_required',
+  targetUrl = TB_SEARCH_LOGIN_URL,
+  forceNavigate = false
+) {
+  if (!state) return null
   state.bootstrapComplete = false
   state.firstSearchPrepared = false
-  state.verificationPending = false
+  state.verificationPending = isTaobaoVerificationUrl(targetUrl) || reason === 'verification_required'
   state.loginPromptVisible = true
-  const currentUrl = state.win.webContents.getURL()
+  state.loginCallbackHidden = false
+  const { win, created } = createDedicatedTaobaoLoginWindow(state)
+  const currentUrl = win.webContents.getURL()
   runtimeLog.writeLog(
     'TaobaoSame',
     '打开淘宝同款专用账号登录: requestAccountId=' + (state.requestAccountId || '') +
       ', partition=' + state.partition +
       ', reason=' + reason
   )
-  if (!isTaobaoLoginPageUrl(currentUrl)) {
+  // 已存在的登录窗口可能正处在淘宝多段回跳中；普通登录请求不得再次导航。
+  if (created || forceNavigate || !currentUrl) {
     try {
-      await state.win.loadURL(TB_SEARCH_LOGIN_URL)
+      const loadResult = await loadTaobaoWindowWithTimeout(
+        win,
+        targetUrl,
+        TAOBAO_SEARCH_WINDOW_LOAD_TIMEOUT_MS,
+        'login_or_verification'
+      )
+      if (loadResult.error) throw loadResult.error
     } catch (error) {
-      const finalUrl = state.win.isDestroyed() ? '' : state.win.webContents.getURL()
+      const finalUrl = win.isDestroyed() ? '' : win.webContents.getURL()
       if (!finalUrl || !String(error.message || '').includes('ERR_ABORTED')) {
         runtimeLog.writeLog('TaobaoSame', '打开淘宝同款专用账号登录页失败: ' + error.message)
       }
     }
   }
-  showSearchWindow(state, '淘宝同款专用账号 - 请登录淘宝')
+  showDedicatedLoginWindow(state, '淘宝同款专用账号 - 请登录淘宝')
+  scheduleDedicatedTaobaoLoginCompletion(state)
+  return { completion: state.loginCompletionCheck }
 }
 
 async function waitForTaobaoSearchPageStable(win, timeoutMs = 12000) {
@@ -481,78 +836,101 @@ async function waitForTaobaoSearchPageStable(win, timeoutMs = 12000) {
   return win.webContents.getURL()
 }
 
-async function waitForTaobaoVerificationResolution(state, timeoutMs = TAOBAO_SEARCH_AUTH_TIMEOUT) {
-  const startedAt = Date.now()
-  let latest = { ready: false, url: '', reason: 'verification_pending' }
-
-  while (Date.now() - startedAt < timeoutMs) {
-    if (!state?.win || state.win.isDestroyed()) return { ...latest, reason: 'window_destroyed' }
-    const url = state.win.webContents.getURL()
-    latest.url = url
-
-    // 登录/验证地址可能在8秒自动确认后自行跳回承载页，不能看到一次登录页就立即判失败。
-    if (!isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url)) {
-      const remainingMs = Math.max(600, timeoutMs - (Date.now() - startedAt))
-      const authState = await waitForTaobaoSearchAuthentication(
-        state,
-        Math.min(remainingMs, 3000),
-        TAOBAO_SEARCH_AUTH_STABLE_MS
-      )
-      latest = { ...authState, url: authState.url || url }
-      if (authState.ready) {
-        return {
-          ...latest,
-          ready: true,
-          carrierPage: isTaobaoSearchCarrierUrl(authState.url || url),
-          waitMs: Date.now() - startedAt
-        }
-      }
-    }
-    await sleep(200)
-  }
-
-  return { ...latest, waitMs: Date.now() - startedAt }
-}
-
 async function openTaobaoVerificationAndWait(state, verificationUrl) {
-  const win = state.win
-  state.bootstrapComplete = false
   state.verificationPending = true
-  showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
-  try {
-    await win.loadURL(verificationUrl)
-  } catch (error) {
-    const currentUrl = win.isDestroyed() ? '' : win.webContents.getURL()
-    if (!currentUrl || !String(error.message || '').includes('ERR_ABORTED')) {
-      runtimeLog.writeLog('TaobaoSame', '打开淘宝验证地址失败: ' + error.message)
-    }
-  }
-
-  const resolution = await waitForTaobaoVerificationResolution(state)
+  const loginResult = await openDedicatedTaobaoSearchLogin(
+    state,
+    'verification_required',
+    verificationUrl,
+    true
+  )
+  const resolution = loginResult?.completion
+    ? await loginResult.completion
+    : { ready: false, reason: 'verification_window_missing' }
   if (resolution.ready) {
     state.verificationPending = false
-    state.bootstrapComplete = true
-    hideReadySearchWindow(state)
   }
   return resolution
 }
 
+async function waitForTaobaoSearchCarrierReady(
+  state,
+  timeoutMs = 12000,
+  stableMs = TAOBAO_SEARCH_LOGIN_STABLE_MS
+) {
+  const startedAt = Date.now()
+  let stableSignature = ''
+  let stableSince = 0
+  let latest = { ready: false, reason: 'carrier_not_ready', url: '' }
+  while (Date.now() - startedAt < timeoutMs) {
+    const win = state?.win
+    if (!win || win.isDestroyed()) return { ...latest, reason: 'window_destroyed' }
+    const url = win.webContents.getURL()
+    const authenticationPage = await readTaobaoSearchAuthenticationPageState(win)
+    const token = await getTaobaoMtopToken(state.ses)
+    const carrier = isTaobaoSearchCarrierUrl(url)
+    const pageReady = authenticationPage.mainReadyState === 'complete'
+    const loading = win.webContents.isLoading()
+    latest = { ready: false, reason: 'carrier_not_ready', url, token, carrier, pageReady }
+    if (carrier && pageReady && !loading && token &&
+      !authenticationPage.needLogin && !authenticationPage.needVerification &&
+      !authenticationPage.automaticLoginPending) {
+      const tokenFingerprint = shortFingerprint(token)
+      const signature = [url, tokenFingerprint, Number(state.sessionGeneration || 0)].join('|')
+      if (signature !== stableSignature) {
+        stableSignature = signature
+        stableSince = Date.now()
+      }
+      const navigationStable = Date.now() - Number(state.lastNavigationAt || 0) >= stableMs
+      const identityMutationStable = Date.now() - Number(state.lastIdentityMutationAt || 0) >= stableMs
+      if (navigationStable && identityMutationStable && Date.now() - stableSince >= stableMs) {
+        return { ...latest, ready: true, reason: 'carrier_stable', tokenFingerprint }
+      }
+    } else {
+      stableSignature = ''
+      stableSince = 0
+    }
+    await sleep(100)
+  }
+  return latest
+}
+
 async function bootstrapSearchWindow(state) {
-  if (state.bootstrapComplete && state.win && !state.win.isDestroyed()) return
+  if (state.bootstrapComplete && state.win && !state.win.isDestroyed() &&
+    isTaobaoSearchCarrierUrl(state.win.webContents.getURL())) return true
   if (state.initializing) return state.initializing
 
   state.initializing = (async () => {
-    const win = state.win
-    try {
-      await win.loadURL(TB_IMAGE_SEARCH_REFERER)
-    } catch (error) {
-      const currentUrl = win.isDestroyed() ? '' : win.webContents.getURL()
-      if (!currentUrl || (!error.message.includes('ERR_ABORTED') && !isTaobaoLoginPageUrl(currentUrl) && !isTaobaoVerificationUrl(currentUrl))) {
-        throw error
+    const win = createTaobaoSearchBrowserWindow(state)
+    const currentUrl = win.webContents.getURL()
+    if (!state.carrierLoadStarted && !currentUrl) {
+      state.carrierLoadStarted = true
+      try {
+        const loadResult = await loadTaobaoWindowWithTimeout(
+          win,
+          TB_IMAGE_SEARCH_REFERER,
+          TAOBAO_SEARCH_WINDOW_LOAD_TIMEOUT_MS,
+          'search_carrier'
+        )
+        if (loadResult.error) throw loadResult.error
+      } catch (error) {
+        const finalUrl = win.isDestroyed() ? '' : win.webContents.getURL()
+        if (!finalUrl || (!String(error.message || '').includes('ERR_ABORTED') && !isTaobaoSearchCarrierUrl(finalUrl))) {
+          throw error
+        }
       }
     }
-    const finalUrl = await waitForTaobaoSearchPageStable(win)
-    state.bootstrapComplete = !isTaobaoLoginPageUrl(finalUrl) && !isTaobaoVerificationUrl(finalUrl)
+    const carrierState = await waitForTaobaoSearchCarrierReady(state)
+    state.bootstrapComplete = carrierState.ready === true && isTaobaoSearchCarrierUrl(carrierState.url)
+    if (!state.bootstrapComplete) {
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '搜索承载页未达到严格稳定条件: reason=' + carrierState.reason +
+          ', carrier=' + !!carrierState.carrier +
+          ', pageReady=' + !!carrierState.pageReady
+      )
+    }
+    return state.bootstrapComplete
   })().finally(() => {
     state.initializing = null
   })
@@ -594,112 +972,77 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
   // Cookie 或站点存储，避免搜索风控、掉线或清理动作影响采购流程。
   const partition = getTaobaoSamePartition()
   let state = searchWindowStates.get(partition)
-  if (state && state.win && !state.win.isDestroyed()) {
-    return state
-  }
-
   const ses = session.fromPartition(partition)
-  const cookies = await ses.cookies.get({})
-
-  const win = new BrowserWindow({
-    width: 1000,
-    height: 720,
-    show: false,
-    title: '淘宝搜同款 - 会话准备中',
-    webPreferences: {
-      contextIsolation: false,
-      nodeIntegration: false,
+  runtimeLog.writeLog('TaobaoSame', '搜索窗口初始化开始: partition=' + partition)
+  const cookieResult = await settleTaobaoPromiseWithTimeout(
+    ses.cookies.get({}),
+    TAOBAO_SESSION_READ_TIMEOUT_MS
+  )
+  if (!cookieResult.settled) {
+    runtimeLog.writeLog('TaobaoSame', '读取淘宝专用搜索会话 Cookie 超时')
+    throw new Error('读取淘宝专用搜索会话超时，请重新搜索')
+  }
+  if (cookieResult.error) throw cookieResult.error
+  const cookies = cookieResult.value || []
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '搜索会话 Cookie 读取完成: count=' + cookies.length +
+      ', loginReady=' + hasTaobaoLoginCookie(cookies)
+  )
+  if (!state) {
+    state = {
       partition,
-      backgroundThrottling: false,
-      webSecurity: TAOBAO_SEARCH_WEB_SECURITY
+      accountId: 'dedicated-search',
+      requestAccountId: accountId,
+      webSecurity: TAOBAO_SEARCH_WEB_SECURITY,
+      ses,
+      win: null,
+      loginWin: null,
+      initializing: null,
+      bootstrapComplete: false,
+      carrierLoadStarted: false,
+      firstSearchPrepared: false,
+      verificationPending: false,
+      loginPromptVisible: false,
+      loginCallbackHidden: false,
+      loginCompletionCheck: null,
+      sessionGeneration: 0,
+      identityDirty: false,
+      lastIdentityMutationAt: 0,
+      lastAuthenticatedIdentityFingerprint: '',
+      lastAuthenticatedGeneration: -1,
+      lastSuccessfulIdentityFingerprint: '',
+      lastSuccessfulGeneration: -1,
+      identityCookieFingerprints: createTaobaoIdentityCookieMap(cookies),
+      lastNavigationAt: 0,
+      lastNavigationUrl: '',
+      lastLoginNavigationAt: 0,
+      lastLoginNavigationUrl: ''
     }
-  })
-  const chromeVersion = process.versions.chrome || '134.0.6998.205'
-  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
-  win.webContents.setUserAgent(userAgent)
+    state.cookieChangeListener = (_event, cookie, cause, removed) => {
+      invalidateTaobaoSearchIdentity(state, cookie, cause, removed)
+    }
+    ses.cookies.on('changed', state.cookieChangeListener)
+    searchWindowStates.set(partition, state)
+  } else {
+    state.requestAccountId = accountId
+  }
 
-  state = {
-    partition,
-    accountId: 'dedicated-search',
-    requestAccountId: accountId,
-    webSecurity: TAOBAO_SEARCH_WEB_SECURITY,
-    ses,
-    win,
-    initializing: null,
-    bootstrapComplete: false,
-    firstSearchPrepared: false,
-    verificationPending: false,
-    loginPromptVisible: false,
-    loginCompletionCheck: null,
-    sessionGeneration: 0,
-    identityDirty: false,
-    lastIdentityMutationAt: 0,
-    lastAuthenticatedIdentityFingerprint: '',
-    lastAuthenticatedGeneration: -1,
-    lastSuccessfulIdentityFingerprint: '',
-    lastSuccessfulGeneration: -1,
-    identityCookieFingerprints: createTaobaoIdentityCookieMap(cookies),
-    lastNavigationAt: Date.now(),
-    lastNavigationUrl: ''
-  }
-  state.cookieChangeListener = (_event, cookie, cause, removed) => {
-    invalidateTaobaoSearchIdentity(state, cookie, cause, removed)
-  }
-  ses.cookies.on('changed', state.cookieChangeListener)
-  searchWindowStates.set(partition, state)
-  win.on('closed', () => {
-    if (state.cookieChangeListener) {
-      try { ses.cookies.removeListener('changed', state.cookieChangeListener) } catch (_) {}
-      state.cookieChangeListener = null
-    }
-    if (searchWindowStates.get(partition) === state) searchWindowStates.delete(partition)
-  })
-  win.webContents.on('did-navigate', (_event, url) => {
-    state.lastNavigationAt = Date.now()
-    state.lastNavigationUrl = String(url || '')
-    if (isTaobaoLoginPageUrl(url)) showSearchWindow(state, '淘宝搜同款 - 请登录淘宝')
-    if (isTaobaoVerificationUrl(url)) showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
-    if (state.verificationPending && !isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url)) {
-      // “商品过期不存在”是正常承载页，不是安全验证失败页。
-      win.setTitle(isTaobaoSearchCarrierUrl(url) ? '淘宝搜同款 - 会话恢复中' : '淘宝搜同款')
-    }
-    if (state.loginPromptVisible && !isTaobaoLoginPageUrl(url) && !isTaobaoVerificationUrl(url) && !state.loginCompletionCheck) {
-      state.loginCompletionCheck = (async () => {
-        if (!isTaobaoSearchCarrierUrl(state.win.webContents.getURL())) {
-          state.bootstrapComplete = false
-          await bootstrapSearchWindow(state)
-        }
-        const authState = await waitForTaobaoSearchAuthentication(
-          state,
-          8000,
-          TAOBAO_SEARCH_AUTH_STABLE_MS
-        )
-        if (!authState.ready) return
-        state.bootstrapComplete = true
-        hideReadySearchWindow(state)
-        runtimeLog.writeLog(
-          'TaobaoSame',
-          '淘宝同款专用账号登录完成，搜索窗口已转为后台复用: partition=' + partition
-        )
-      })().catch(error => {
-        runtimeLog.writeLog('TaobaoSame', '专用账号登录完成检查失败: ' + error.message)
-      }).finally(() => {
-        state.loginCompletionCheck = null
-      })
-    }
-  })
-  win.webContents.on('did-navigate-in-page', (_event, url) => {
-    state.lastNavigationAt = Date.now()
-    state.lastNavigationUrl = String(url || '')
-  })
+  if (state.loginWin && !state.loginWin.isDestroyed()) return state
+  if (state.win && !state.win.isDestroyed()) return state
 
   if (!hasTaobaoLoginCookie(cookies)) {
     await openDedicatedTaobaoSearchLogin(state, 'first_use_or_session_expired')
     return state
   }
 
+  createTaobaoSearchBrowserWindow(state)
+  runtimeLog.writeLog('TaobaoSame', '搜索承载窗口已创建，开始检查承载页')
   await bootstrapSearchWindow(state)
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '搜索承载页初始化结束: ready=' + state.bootstrapComplete
+  )
   return state
 }
 
@@ -912,6 +1255,7 @@ async function waitForTaobaoSearchAuthentication(
     const identity = buildTaobaoSessionIdentity(cookies, token)
     const loading = state.win.webContents.isLoading()
     const pageReady = authenticationPage.mainReadyState === 'complete'
+    const carrierPage = isTaobaoSearchCarrierUrl(url)
     latest = {
       ready: false,
       needLogin: !loginCookieReady,
@@ -922,10 +1266,11 @@ async function waitForTaobaoSearchAuthentication(
       identityFingerprint: identity.fingerprint,
       tokenFingerprint: identity.tokenFingerprint,
       sessionGeneration: Number(state.sessionGeneration || 0),
-      pageReady
+      pageReady,
+      carrierPage
     }
 
-    if (loginCookieReady && token && !loading && pageReady) {
+    if (loginCookieReady && token && !loading && pageReady && carrierPage) {
       const signature = [
         url,
         identity.fingerprint,
@@ -1059,6 +1404,75 @@ async function ensureNetworkDebugger(win) {
   return debug
 }
 
+function parseCookieHeaderNames(cookieHeader) {
+  return [...new Set(String(cookieHeader || '')
+    .split(';')
+    .map(part => part.trim().split('=', 1)[0].trim())
+    .filter(name => /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)))]
+    .sort((left, right) => left.localeCompare(right))
+}
+
+function summarizeAssociatedCookies(associatedCookies = []) {
+  const sentNames = []
+  const blocked = []
+  for (const item of associatedCookies || []) {
+    const name = String(item?.cookie?.name || '')
+    if (!name) continue
+    const reasons = (item.blockedReasons || []).map(reason => String(reason || '')).filter(Boolean)
+    if (reasons.length === 0) sentNames.push(name)
+    else blocked.push({ name, reasons: [...new Set(reasons)].sort() })
+  }
+  const uniqueSentNames = [...new Set(sentNames)].sort((left, right) => left.localeCompare(right))
+  blocked.sort((left, right) => left.name.localeCompare(right.name))
+  return {
+    sentNames: uniqueSentNames,
+    criticalSent: Object.fromEntries(
+      TAOBAO_REQUEST_CRITICAL_COOKIE_NAMES.map(name => [name, uniqueSentNames.includes(name)])
+    ),
+    blocked
+  }
+}
+
+function mergeSafeRequestDiagnostics(current = {}, headers = {}, associatedCookies) {
+  const entries = Object.entries(headers || {})
+  const headerMap = new Map(entries.map(([key, value]) => [String(key).toLowerCase(), String(value || '')]))
+  const read = name => headerMap.get(String(name).toLowerCase())
+  const headerNames = [...new Set([
+    ...(current.headerNames || []),
+    ...entries.map(([key]) => String(key).toLowerCase())
+  ])].sort()
+  const cookieNames = [...new Set([
+    ...(current.cookieNames || []),
+    ...parseCookieHeaderNames(read('cookie') || '')
+  ])].sort((left, right) => left.localeCompare(right))
+  const diagnostic = {
+    ...current,
+    headerNames,
+    origin: read('origin') ?? current.origin ?? '',
+    referer: read('referer') !== undefined
+      ? sanitizeDiagnosticPageUrl(read('referer'))
+      : (current.referer || ''),
+    userAgent: read('user-agent') ?? current.userAgent ?? '',
+    acceptLanguage: read('accept-language') ?? current.acceptLanguage ?? '',
+    secChUa: read('sec-ch-ua') ?? current.secChUa ?? '',
+    secChUaMobile: read('sec-ch-ua-mobile') ?? current.secChUaMobile ?? '',
+    secChUaPlatform: read('sec-ch-ua-platform') ?? current.secChUaPlatform ?? '',
+    secFetchSite: read('sec-fetch-site') ?? current.secFetchSite ?? '',
+    secFetchMode: read('sec-fetch-mode') ?? current.secFetchMode ?? '',
+    secFetchDest: read('sec-fetch-dest') ?? current.secFetchDest ?? '',
+    contentType: read('content-type') ?? current.contentType ?? '',
+    cookieHeaderPresent: cookieNames.length > 0,
+    cookieNames,
+    criticalCookies: Object.fromEntries(
+      TAOBAO_REQUEST_CRITICAL_COOKIE_NAMES.map(name => [name, cookieNames.includes(name)])
+    )
+  }
+  if (associatedCookies !== undefined) {
+    diagnostic.associatedCookies = summarizeAssociatedCookies(associatedCookies)
+  }
+  return diagnostic
+}
+
 function pageXhrPostAndCapture(win, requestUrl, postBody) {
   return new Promise(async (resolve, reject) => {
     let debug
@@ -1075,7 +1489,7 @@ function pageXhrPostAndCapture(win, requestUrl, postBody) {
     let requestId = ''
     let requestDiagnostic = {}
     let responseDiagnostic = {}
-    const extraHeadersByRequestId = new Map()
+    const extraInfoByRequestId = new Map()
     let settled = false
     let timeout
 
@@ -1092,26 +1506,19 @@ function pageXhrPostAndCapture(win, requestUrl, postBody) {
     }
     const onMessage = async (_event, method, params) => {
       try {
-        const mergeSafeHeaders = (headers = {}) => {
-          const entries = Object.entries(headers)
-          const header = (name) => {
-            const match = entries.find(([key]) => String(key).toLowerCase() === name.toLowerCase())
-            return match ? String(match[1] || '') : ''
-          }
-          requestDiagnostic = {
-            ...requestDiagnostic,
-            origin: header('Origin') || requestDiagnostic.origin || '',
-            referer: sanitizeDiagnosticPageUrl(header('Referer')) || requestDiagnostic.referer || '',
-            userAgent: header('User-Agent') || requestDiagnostic.userAgent || '',
-            secChUa: header('sec-ch-ua') || requestDiagnostic.secChUa || '',
-            secFetchSite: header('Sec-Fetch-Site') || requestDiagnostic.secFetchSite || '',
-            contentType: header('Content-Type') || requestDiagnostic.contentType || '',
-            cookieHeaderPresent: !!header('Cookie')
-          }
-        }
         if (method === 'Network.requestWillBeSentExtraInfo') {
-          extraHeadersByRequestId.set(params.requestId, params.headers || {})
-          if (requestId && params.requestId === requestId) mergeSafeHeaders(params.headers || {})
+          const extraInfo = {
+            headers: params.headers || {},
+            associatedCookies: params.associatedCookies || []
+          }
+          extraInfoByRequestId.set(params.requestId, extraInfo)
+          if (requestId && params.requestId === requestId) {
+            requestDiagnostic = mergeSafeRequestDiagnostics(
+              requestDiagnostic,
+              extraInfo.headers,
+              extraInfo.associatedCookies
+            )
+          }
           return
         }
         if (method === 'Network.requestWillBeSent') {
@@ -1121,18 +1528,18 @@ function pageXhrPostAndCapture(win, requestUrl, postBody) {
           if (parsed.searchParams.get('t') === expectedTime && parsed.searchParams.get('sign') === expectedSign) {
             requestId = params.requestId
             const headers = params.request.headers || {}
-            const header = (name) => headers[name] || headers[name.toLowerCase()] || headers[name.toUpperCase()] || ''
-            requestDiagnostic = {
+            requestDiagnostic = mergeSafeRequestDiagnostics({
               method: params.request.method || '',
-              origin: header('Origin'),
-              referer: sanitizeDiagnosticPageUrl(header('Referer')),
-              userAgent: header('User-Agent'),
-              secChUa: header('sec-ch-ua'),
-              secFetchSite: header('Sec-Fetch-Site'),
-              contentType: header('Content-Type'),
               initiatorType: params.initiator?.type || ''
+            }, headers)
+            const extraInfo = extraInfoByRequestId.get(requestId)
+            if (extraInfo) {
+              requestDiagnostic = mergeSafeRequestDiagnostics(
+                requestDiagnostic,
+                extraInfo.headers,
+                extraInfo.associatedCookies
+              )
             }
-            mergeSafeHeaders(extraHeadersByRequestId.get(requestId) || {})
           }
           return
         }
@@ -2504,6 +2911,11 @@ function enqueueSearch(partition, task) {
 
 async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automatic = false }) {
   const requestStartedAt = Date.now()
+  runtimeLog.writeLog(
+    'TaobaoSame',
+    '搜同款IPC已进入主进程: purchaseAccountId=' + accountId +
+      ', automatic=' + !!automatic
+  )
   let state = await getOrCreateTaobaoSearchWindow(accountId)
   const windowReadyAt = Date.now()
   const partition = state.partition
@@ -2540,6 +2952,25 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
 
     const authStartedAt = Date.now()
 
+    if (state.loginWin && !state.loginWin.isDestroyed()) {
+      if (!state.loginCallbackHidden) {
+        showDedicatedLoginWindow(state, '淘宝同款专用账号 - 登录环境稳定中')
+      }
+      return {
+        success: false,
+        retryable: true,
+        pendingLoginConfirmation: true,
+        message: '淘宝同款专用账号正在完成登录，请等待窗口自动关闭后重新搜索'
+      }
+    }
+    if (!win || win.isDestroyed()) {
+      return {
+        success: false,
+        retryable: true,
+        message: '淘宝搜索承载窗口尚未创建，请稍后重新搜索'
+      }
+    }
+
     const currentCookies = await ses.cookies.get({})
     if (!hasTaobaoLoginCookie(currentCookies)) {
       await openDedicatedTaobaoSearchLogin(state, 'login_cookie_missing_before_search')
@@ -2551,7 +2982,39 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     }
 
     if (!state.bootstrapComplete) {
-      await bootstrapSearchWindow(state)
+      const bootstrapReady = await bootstrapSearchWindow(state)
+      win = state.win
+      if (!bootstrapReady) {
+        const failedUrl = win && !win.isDestroyed() ? win.webContents.getURL() : ''
+        const failedAuthentication = await readTaobaoSearchAuthenticationPageState(win)
+        const verificationRequired = isTaobaoVerificationUrl(failedUrl) ||
+          failedAuthentication.needVerification
+        const loginRequired = isTaobaoLoginPageUrl(failedUrl) || failedAuthentication.needLogin
+        if (verificationRequired || loginRequired) {
+          const targetUrl = verificationRequired && isTaobaoVerificationUrl(failedUrl)
+            ? failedUrl
+            : TB_SEARCH_LOGIN_URL
+          await openDedicatedTaobaoSearchLogin(
+            state,
+            verificationRequired ? 'verification_required' : 'carrier_redirected_to_login',
+            targetUrl,
+            verificationRequired
+          )
+          return {
+            success: false,
+            needLogin: !verificationRequired,
+            needVerification: verificationRequired,
+            message: verificationRequired
+              ? '淘宝要求安全验证，请在弹窗中完成后重新搜索'
+              : '请先登录淘宝同款专用账号，登录后重新搜索'
+          }
+        }
+        return {
+          success: false,
+          retryable: true,
+          message: '淘宝搜索承载页尚未稳定，请稍后重新搜索'
+        }
+      }
     }
 
     // 只有关键登录Cookie身份和成功代际完全一致时才允许热复用；
@@ -2574,7 +3037,13 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       }
     }
     if (authState.needVerification) {
-      showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
+      const authUrl = isTaobaoVerificationUrl(authState.url) ? authState.url : TB_SEARCH_LOGIN_URL
+      await openDedicatedTaobaoSearchLogin(
+        state,
+        authState.reason || 'verification_required',
+        authUrl,
+        isTaobaoVerificationUrl(authUrl)
+      )
       return {
         success: false,
         needVerification: true,
@@ -2583,7 +3052,7 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     }
     if (authState.pendingAutomaticLogin) {
       runtimeLog.writeLog('TaobaoSame', '淘宝首次自动登录确认未在等待时间内结束，显示原会话供用户确认')
-      showSearchWindow(state, '淘宝搜同款 - 请确认自动登录')
+      await openDedicatedTaobaoSearchLogin(state, 'automatic_login_pending')
       return {
         success: false,
         retryable: true,
@@ -2657,9 +3126,35 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     )
 
     let lastMessage = ''
-    let emptyResultRetryUsed = false
+    let emptyResultCount = 0
     let riskRetryUsed = false
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let tokenRetryUsed = false
+    const taskWindow = win
+    const taskWebContents = win.webContents
+    const taskSession = ses
+    for (let attempt = 0; attempt < TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS; attempt++) {
+      const sameSearchEnvironment = state.win === taskWindow &&
+        !taskWindow.isDestroyed() &&
+        taskWindow.webContents === taskWebContents &&
+        state.ses === taskSession &&
+        state.partition === partition
+      if (!sameSearchEnvironment) {
+        state.firstSearchPrepared = false
+        state.bootstrapComplete = false
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '同任务补查前搜索环境已变化，停止继续请求: attempt=' + (attempt + 1) +
+            ', sameWindow=' + (state.win === taskWindow) +
+            ', sameWebContents=' + (!taskWindow.isDestroyed() && taskWindow.webContents === taskWebContents) +
+            ', sameSession=' + (state.ses === taskSession) +
+            ', samePartition=' + (state.partition === partition)
+        )
+        return {
+          success: false,
+          retryable: true,
+          message: '淘宝搜索环境发生变化，请重新搜索'
+        }
+      }
       const requestIdentity = await readTaobaoSessionIdentity(ses)
       const identityChangedAfterAuthentication = state.identityDirty === true ||
         Number(state.sessionGeneration || 0) !== Number(authState.sessionGeneration ?? -1) ||
@@ -2753,12 +3248,12 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
               ', waitMs=' + resolution.waitMs
             )
           } else {
-            state.bootstrapComplete = false
-            state.verificationPending = true
-            win.loadURL(verificationUrl).catch(error => {
-              runtimeLog.writeLog('TaobaoSame', '打开淘宝登录/验证地址失败: ' + error.message)
-            })
-            showSearchWindow(state, '淘宝搜同款 - 请完成登录或安全验证')
+            await openDedicatedTaobaoSearchLogin(
+              state,
+              'verification_required',
+              verificationUrl,
+              true
+            )
           }
           return {
             success: false,
@@ -2830,12 +3325,12 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             ', waitMs=' + resolution.waitMs
           )
         } else if (verificationUrl) {
-          state.bootstrapComplete = false
-          state.verificationPending = true
-          win.loadURL(verificationUrl).catch(error => {
-            runtimeLog.writeLog('TaobaoSame', '打开淘宝验证地址失败: ' + error.message)
-          })
-          showSearchWindow(state, '淘宝搜同款 - 请完成安全验证')
+          await openDedicatedTaobaoSearchLogin(
+            state,
+            'verification_required',
+            verificationUrl,
+            true
+          )
         }
         runtimeLog.writeLog(
           'TaobaoSame',
@@ -2857,7 +3352,10 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       if (isTaobaoTokenRet(retText)) {
         await sleep(300)
         const refreshedToken = await waitForTaobaoMtopToken(ses, 2000)
-        if (attempt < 2 && shouldRetryWithRefreshedToken(retText, token, refreshedToken)) {
+        if (!tokenRetryUsed &&
+          attempt + 1 < TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS &&
+          shouldRetryWithRefreshedToken(retText, token, refreshedToken)) {
+          tokenRetryUsed = true
           runtimeLog.writeLog('TaobaoSame', 'MTOP Token已刷新，执行一次受控重试: attempt=' + (attempt + 1))
           continue
         }
@@ -2925,14 +3423,27 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         runtimeLog.writeLog(
           'TaobaoSame',
           '搜同款返回空结果: attempt=' + (attempt + 1) +
+          ', emptyAttempt=' + (emptyResultCount + 1) +
           ', response=' + summarizeTaobaoSearchResponse(resultJson, responseBody)
         )
-        if (!emptyResultRetryUsed) {
-          emptyResultRetryUsed = true
-          await sleep(automatic ? 1500 : 500)
+        emptyResultCount++
+        if (shouldRetryEmptyTaobaoSearch(attempt, products.length)) {
+          runtimeLog.writeLog(
+            'TaobaoSame',
+            'SUCCESS零商品进入同任务高频补查: currentAttempt=' + (attempt + 1) +
+              ', nextAttempt=' + (attempt + 2) +
+              ', delayMs=' + TAOBAO_SEARCH_EMPTY_RETRY_DELAY_MS +
+              ', webContentsId=' + taskWebContents.id +
+              ', sameWindow=YES, sameSession=YES, samePartition=YES'
+          )
+          await sleep(TAOBAO_SEARCH_EMPTY_RETRY_DELAY_MS)
           continue
         }
-        runtimeLog.writeLog('TaobaoSame', '搜同款失败: 淘宝接口调用成功，但解析结果为空；已停止继续请求')
+        runtimeLog.writeLog(
+          'TaobaoSame',
+          '搜同款失败: SUCCESS零商品已完成同任务高频补查; attempts=' +
+            TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS + ', 已停止继续请求'
+        )
         return {
           success: false,
           message: '淘宝接口调用成功，但未返回同款商品',
@@ -3005,14 +3516,29 @@ module.exports = {
   isTaobaoTokenRet,
   extractTaobaoVerificationUrl,
   shouldRetryWithRefreshedToken,
+  shouldRetryEmptyTaobaoSearch,
   hasCoherentBixiTokens,
   summarizeBixiTokens,
   shouldRetryTaobaoBusyResponse,
+  parseCookieHeaderNames,
+  summarizeAssociatedCookies,
+  mergeSafeRequestDiagnostics,
   classifyTaobaoAuthenticationSnapshot,
   readTaobaoSearchAuthenticationPageState,
+  shouldHideDedicatedLoginWindow,
+  shouldClearTaobaoRiskCooldownAfterLogin,
+  settleTaobaoPromiseWithTimeout,
+  loadTaobaoWindowWithTimeout,
   TAOBAO_SEARCH_AUTH_TIMEOUT,
   TAOBAO_SEARCH_AUTH_STABLE_MS,
+  TAOBAO_SEARCH_LOGIN_STABLE_MS,
   TAOBAO_SEARCH_WARM_STABLE_MS,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS,
+  TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS,
+  TAOBAO_SEARCH_EMPTY_RETRY_DELAY_MS,
+  TAOBAO_SEARCH_WINDOW_LOAD_TIMEOUT_MS,
+  TAOBAO_AUTH_PAGE_READ_TIMEOUT_MS,
+  TAOBAO_AUTH_FRAME_READ_TIMEOUT_MS,
+  TAOBAO_SESSION_READ_TIMEOUT_MS,
   TAOBAO_SEARCH_WEB_SECURITY
 }
