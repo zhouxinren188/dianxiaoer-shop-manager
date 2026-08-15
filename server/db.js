@@ -747,6 +747,23 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 店小二本机动作日志。目前仅记录处理异常前自动提交京东采购编号备注的结果；
+    // 云仓查询与处理日志直接来自 cloud_external_commands，避免重复保存第三方回执。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_order_process_logs (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        purchase_order_id INT NOT NULL,
+        actor_user_id INT NOT NULL,
+        action VARCHAR(30) NOT NULL,
+        status VARCHAR(20) NOT NULL,
+        message_redacted VARCHAR(500) DEFAULT '',
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_process_order (owner_id, purchase_order_id, created_at),
+        CONSTRAINT fk_cloud_process_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 云仓助手运行状态。机器码只负责路由，执行器使用独立凭据认证。
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_executor_machines (

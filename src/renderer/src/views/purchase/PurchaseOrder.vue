@@ -450,23 +450,23 @@
               <span class="cloud-order-status-value">
                 <el-tag size="small" :type="cloudOrderStatus.tagType">{{ cloudOrderStatus.label }}</el-tag>
                 <el-button
-                  v-if="cloudOrderStatus.key === 'unknown'"
+                  v-if="cloudExceptionResolving || cloudOrderStatus.key === 'exception'"
                   type="primary"
                   link
                   class="cloud-exception-action"
-                  :loading="cloudTaskActionLoading || (cloudTaskActive && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.check')"
+                  :loading="cloudExceptionResolving"
+                  :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudExceptionAction"
+                >{{ cloudExceptionResolving ? '处理中…' : '处理异常' }}</el-button>
+                <el-button
+                  v-else-if="cloudOrderStatus.key === 'unknown'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudExceptionChecking"
                   :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
                   @click="handleCloudExceptionCheck"
                 >查询</el-button>
-                <el-button
-                  v-else-if="cloudOrderStatus.key === 'exception'"
-                  type="primary"
-                  link
-                  class="cloud-exception-action"
-                  :loading="cloudTaskActionLoading && cloudOrderConfig?.workflow?.currentTask?.command === 'exception.order.resolve'"
-                  :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
-                  @click="handleCloudExceptionAction"
-                >处理异常</el-button>
               </span>
             </el-descriptions-item>
             <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
@@ -480,7 +480,7 @@
           </el-descriptions>
 
           <div class="cloud-conversation-section">
-            <div class="cloud-conversation-title">接口对话记录</div>
+            <div class="cloud-conversation-title">处理日志</div>
             <el-alert
               v-if="!cloudOrderConfig.locatorReady"
               :title="cloudOrderConfig.locatorMessage || '当前订单缺少有效的订单编号或订单年份。'"
@@ -507,14 +507,40 @@
                 show-icon
                 class="cloud-order-alert"
               />
-              <div v-if="cloudOrderConfig.exception" class="cloud-exception-panel">
-                <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid" class="cloud-exception-heading">
+              <el-alert
+                v-if="cloudOrderConfig.workflow?.refreshFailure"
+                :title="`状态查询失败：${cloudOrderConfig.workflow.refreshFailure.message || '暂时无法取得云仓助手最新状态，将继续保留已有任务和回执记录。'}`"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="cloud-order-alert"
+              />
+              <div v-if="cloudProcessLogs.length" class="cloud-process-log-list">
+                <div v-for="log in cloudProcessLogs" :key="log.id" class="cloud-process-log-item">
+                  <div class="cloud-process-log-heading">
+                    <span>{{ cloudProcessActionLabel(log.action) }}</span>
+                    <el-tag size="small" :type="cloudProcessStatusTagType(log.status)">
+                      {{ cloudProcessStatusLabel(log.status) }}
+                    </el-tag>
+                  </div>
+                  <div v-if="log.message" class="cloud-process-log-message">{{ log.message }}</div>
+                  <div class="cloud-process-log-time">{{ formatCloudProcessTime(log.occurredAt) }}</div>
+                </div>
+              </div>
+              <el-empty
+                v-else
+                description="暂无处理日志"
+                :image-size="64"
+              />
+
+              <div v-if="cloudHasExceptionResult" class="cloud-exception-panel">
+                <div class="cloud-exception-heading">
                   <span>异常查询结果</span>
-                  <el-tag :type="cloudOrderConfig.exception.exceptionCount > 0 ? 'danger' : 'success'">
+                  <el-tag type="danger">
                     {{ cloudOrderConfig.exception.exceptionCount }} 条
                   </el-tag>
                 </div>
-                <div v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptions?.length" class="cloud-exception-list">
+                <div class="cloud-exception-list">
                   <div v-for="(item, index) in cloudOrderConfig.exception.exceptions" :key="index" class="cloud-exception-item">
                     <div class="cloud-exception-source">{{ cloudExceptionSourceLabel(item.source) }}</div>
                     <div><span>异常类型：</span>{{ item.exceptionTypeMasked || '--' }}</div>
@@ -523,35 +549,13 @@
                   </div>
                 </div>
                 <el-alert
-                  v-if="cloudOrderConfig.exception.status === 'succeeded' && cloudOrderConfig.exception.resultShapeValid && cloudOrderConfig.exception.exceptionCount > 0"
                   title="点击处理异常后，云仓助手服务器会自动关联最近一次异常查询结果。"
                   type="warning"
                   :closable="false"
                   show-icon
                   class="cloud-order-alert"
                 />
-                <el-alert
-                  v-if="cloudOrderConfig.exception.status !== 'succeeded' || !cloudOrderConfig.exception.resultShapeValid"
-                  :title="cloudOrderConfig.exception.message || '异常查询结果不完整，需人工复核，不能确认当前订单无异常。'"
-                  type="error"
-                  :closable="false"
-                  show-icon
-                  class="cloud-order-alert"
-                />
               </div>
-              <el-alert
-                v-if="cloudOrderConfig.exceptionResolution?.status === 'succeeded' && cloudOrderConfig.exceptionResolution?.observedStatus === 'waiting_arrival'"
-                title="异常已处理并完成写后复验，当前进入等待到仓状态。"
-                type="success"
-                :closable="false"
-                show-icon
-                class="cloud-order-alert"
-              />
-              <el-empty
-                v-if="!cloudOrderConfig.workflow?.currentTask && !cloudOrderConfig.exception && !cloudOrderConfig.exceptionResolution && cloudOrderConfig.workflow?.state !== 'review_required'"
-                description="暂无接口对话记录"
-                :image-size="72"
-              />
             </template>
           </div>
         </div>
@@ -1199,14 +1203,15 @@ import {
 import { fetchPurchaseOrders, updatePurchaseStatus, syncPlatformOrders, syncSinglePurchaseOrder, fetchLogisticsTracking, createPurchaseOrder, fetchNextPurchaseNo, bindPlatformOrderNo, updatePurchaseOrder, batchImportPurchaseOrders, fetchRelatedSales, deletePurchaseOrder, checkPurchaseBinding } from '@/api/purchaseOrder'
 import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, deletePurchaseAccount } from '@/api/purchaseAccount'
 import { searchInventory, createSkuBinding, quickCreateInventory, fetchWarehouses } from '@/api/warehouse'
-import { updateRemark } from '@/api/salesOrder'
+import { submitVendorRemark, updateOrderRemark, updateRemark } from '@/api/salesOrder'
 import {
   fetchCloudMachineBinding,
   bindCloudMachine,
   unbindCloudMachine,
   fetchCloudOrderConfiguration,
   startCloudExceptionCheck,
-  startCloudExceptionResolve
+  startCloudExceptionResolve,
+  recordCloudAutomaticRemark
 } from '@/api/cloudWarehouse'
 
 // ==================== 常量配置 ====================
@@ -1348,15 +1353,49 @@ const cloudBinding = reactive({
 })
 const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
 const cloudOrderConfig = ref(null)
+const cloudLocalProcessLogs = ref([])
 const cloudTaskActionLoading = ref(false)
+const cloudTaskActionKind = ref('')
 let cloudOrderPollTimer = null
 let cloudLastNotifiedState = ''
 const cloudTaskActive = computed(() => !!cloudOrderConfig.value?.workflow?.currentTask)
 const cloudThirdPartyReady = computed(() => cloudOrderConfig.value?.transportMode === 'third_party')
+const cloudExceptionResolving = computed(() => (
+  cloudTaskActionLoading.value && cloudTaskActionKind.value === 'resolve'
+) || (
+  cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'exception.order.resolve'
+))
+const cloudExceptionChecking = computed(() => (
+  cloudTaskActionLoading.value && cloudTaskActionKind.value === 'check'
+) || (
+  cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'exception.order.check'
+))
+const cloudProcessLogs = computed(() => mergeCloudProcessLogs(
+  cloudOrderConfig.value,
+  cloudLocalProcessLogs.value
+))
+const cloudHasExceptionResult = computed(() => {
+  const exception = cloudOrderConfig.value?.exception
+  return exception?.status === 'succeeded' &&
+    exception.resultShapeValid === true &&
+    Number(exception.exceptionCount) > 0 &&
+    Array.isArray(exception.exceptions) &&
+    exception.exceptions.length > 0
+})
 const cloudOrderStatus = computed(() => {
+  const config = cloudOrderConfig.value
   const workflowState = cloudOrderConfig.value?.workflow?.state
   if (cloudTaskActive.value || workflowState === 'review_required') {
     return { key: 'unknown', label: '未知', tagType: 'info' }
+  }
+  const exception = config?.exception
+  if (hasExceptionCheckAfterResolve(config)) {
+    if (exception?.status !== 'succeeded' || !exception?.resultShapeValid) {
+      return { key: 'unknown', label: '未知', tagType: 'info' }
+    }
+    return Number(exception.exceptionCount) > 0
+      ? { key: 'exception', label: '异常', tagType: 'danger' }
+      : { key: 'normal', label: '暂无异常', tagType: 'success' }
   }
   if (workflowState === 'waiting_arrival' || workflowState === 'exception_clear') {
     return { key: 'normal', label: '暂无异常', tagType: 'success' }
@@ -1364,7 +1403,6 @@ const cloudOrderStatus = computed(() => {
   if (workflowState === 'exception_found') {
     return { key: 'exception', label: '异常', tagType: 'danger' }
   }
-  const exception = cloudOrderConfig.value?.exception
   if (exception?.status !== 'succeeded' || !exception?.resultShapeValid) {
     return { key: 'unknown', label: '未知', tagType: 'info' }
   }
@@ -1749,6 +1787,82 @@ function cloudExceptionSourceLabel(source) {
   return labels[source] || '未知来源'
 }
 
+function cloudProcessActionLabel(action) {
+  const labels = {
+    exception_check: '查询异常',
+    auto_remark: '自动备注',
+    exception_resolve: '处理异常'
+  }
+  return labels[action] || '云仓处理'
+}
+
+function cloudProcessStatusLabel(status) {
+  const labels = {
+    processing: '处理中',
+    succeeded: '成功',
+    failed: '失败'
+  }
+  return labels[status] || '未知'
+}
+
+function cloudProcessStatusTagType(status) {
+  if (status === 'succeeded') return 'success'
+  if (status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function formatCloudProcessTime(value) {
+  if (!value) return '--'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function buildLegacyCloudProcessLogs(config) {
+  const logs = []
+  const currentTask = config?.workflow?.currentTask
+  const appendCommand = (item, action, fallbackId) => {
+    if (!item) return
+    const processing = currentTask?.taskId === item.taskId
+    logs.push({
+      id: `command:${item.taskId || fallbackId}`,
+      action,
+      status: processing ? 'processing' : (item.status === 'succeeded' ? 'succeeded' : 'failed'),
+      reason: item.reason || '',
+      message: item.message || (processing ? '已提交，等待云仓助手返回结果' : ''),
+      occurredAt: item.resultRecordedAt || item.queriedAt || item.completedAt || currentTask?.createdAt || null
+    })
+  }
+  appendCommand(config?.exception, 'exception_check', 'latest-check')
+  appendCommand(config?.exceptionResolution, 'exception_resolve', 'latest-resolve')
+  if (currentTask && !logs.some(log => log.id === `command:${currentTask.taskId}`)) {
+    logs.push({
+      id: `command:${currentTask.taskId}`,
+      action: currentTask.command === 'exception.order.resolve' ? 'exception_resolve' : 'exception_check',
+      status: 'processing',
+      reason: '',
+      message: '已提交，等待云仓助手返回结果',
+      occurredAt: currentTask.createdAt || null
+    })
+  }
+  return logs
+}
+
+function mergeCloudProcessLogs(config, localLogs) {
+  const serverLogs = Array.isArray(config?.processLogs)
+    ? config.processLogs
+    : buildLegacyCloudProcessLogs(config)
+  const deduplicated = new Map()
+  for (const log of [...serverLogs, ...(localLogs || [])]) {
+    if (log?.id) deduplicated.set(log.id, log)
+  }
+  return [...deduplicated.values()].sort((left, right) => {
+    const leftTime = new Date(left.occurredAt || 0).getTime()
+    const rightTime = new Date(right.occurredAt || 0).getTime()
+    return leftTime - rightTime
+  })
+}
+
 function clearCloudOrderPolling() {
   if (cloudOrderPollTimer) {
     clearTimeout(cloudOrderPollTimer)
@@ -1766,11 +1880,32 @@ function notifyCloudWorkflowState(config) {
     ElMessage.warning(`查询到 ${config.exception?.exceptionCount || 0} 条云仓异常，请确认后处理`)
   } else if (workflow.state === 'exception_clear') {
     ElMessage.success('云仓助手确认当前订单无待处理异常')
-  } else if (workflow.state === 'waiting_arrival') {
-    ElMessage.success('异常处理成功，已进入等待到仓状态')
   } else if (workflow.state === 'review_required') {
     ElMessage.error('云仓任务结果不确定，已转为待人工复核')
   }
+}
+
+function shouldAutoCheckCloudException(config) {
+  return config?.transportMode === 'third_party' &&
+    config.machineBound === true &&
+    config.locatorReady === true &&
+    !config.workflow &&
+    !config.exception &&
+    !config.exceptionResolution
+}
+
+function shouldRecheckAfterExceptionResolve(config) {
+  const resolution = config?.exceptionResolution
+  if (resolution?.transportStatus !== 'completed' || resolution.status !== 'succeeded') return false
+  const resolveRecordedAt = Date.parse(resolution.resultRecordedAt || resolution.completedAt || '')
+  if (!Number.isFinite(resolveRecordedAt)) return false
+  return !hasExceptionCheckAfterResolve(config)
+}
+
+function hasExceptionCheckAfterResolve(config) {
+  const checkRecordedAt = Date.parse(config?.exception?.resultRecordedAt || config?.exception?.queriedAt || '')
+  const resolveRecordedAt = Date.parse(config?.exceptionResolution?.resultRecordedAt || config?.exceptionResolution?.completedAt || '')
+  return Number.isFinite(checkRecordedAt) && Number.isFinite(resolveRecordedAt) && checkRecordedAt > resolveRecordedAt
 }
 
 async function refreshCloudOrderConfiguration({ notify = false } = {}) {
@@ -1788,7 +1923,11 @@ function scheduleCloudOrderPolling() {
   cloudOrderPollTimer = setTimeout(async () => {
     try {
       const config = await refreshCloudOrderConfiguration({ notify: true })
-      if (config?.workflow?.currentTask) scheduleCloudOrderPolling()
+      if (config?.workflow?.currentTask) {
+        scheduleCloudOrderPolling()
+      } else {
+        await startExceptionRecheckAfterResolve(config)
+      }
     } catch (error) {
       ElMessage.error('刷新云仓任务状态失败: ' + (error.message || ''))
       clearCloudOrderPolling()
@@ -1796,7 +1935,16 @@ function scheduleCloudOrderPolling() {
   }, 2000)
 }
 
-async function handleCloudExceptionCheck() {
+async function startExceptionRecheckAfterResolve(config) {
+  if (!shouldRecheckAfterExceptionResolve(config)) return false
+  ElMessage.info({ message: '异常处理中，正在重新查询是否仍有异常', duration: 3000 })
+  await handleCloudExceptionCheck({ automatic: true, followUp: true })
+  return true
+}
+
+async function handleCloudExceptionCheck(options = {}) {
+  const automatic = options?.automatic === true
+  const followUp = options?.followUp === true
   const row = currentReceiveRow.value
   if (!row || cloudTaskActive.value || cloudTaskActionLoading.value) return
   if (!cloudThirdPartyReady.value) {
@@ -1812,16 +1960,32 @@ async function handleCloudExceptionCheck() {
     return
   }
   cloudTaskActionLoading.value = true
+  cloudTaskActionKind.value = 'check'
   try {
-    const task = await startCloudExceptionCheck(row.id)
+    let task
+    try {
+      task = await startCloudExceptionCheck(row.id)
+    } catch (error) {
+      ElMessage.error(`${automatic ? '自动查询异常失败' : '发送异常查询指令失败'}: ${error.message || ''}`)
+      return
+    }
     cloudLastNotifiedState = ''
-    await refreshCloudOrderConfiguration()
-    scheduleCloudOrderPolling()
-    ElMessage.success(task.reused ? '异常查询任务正在执行' : '已发送异常查询指令')
-  } catch (error) {
-    ElMessage.error('发送异常查询指令失败: ' + (error.message || ''))
+    if (task?.final && task.executionStatus && task.executionStatus !== 'succeeded') {
+      ElMessage.error(task.message || '云仓助手未能确认异常查询结果')
+    } else {
+      ElMessage.success(task.reused
+        ? '异常查询任务正在执行'
+        : (followUp ? '已开始复查异常状态' : (automatic ? '已自动发送异常查询指令' : '已发送异常查询指令')))
+    }
+    try {
+      await refreshCloudOrderConfiguration()
+      scheduleCloudOrderPolling()
+    } catch (error) {
+      ElMessage.warning(`异常查询指令已提交，但读取最新状态失败：${error.message || '请稍后重新打开查看'}`)
+    }
   } finally {
     cloudTaskActionLoading.value = false
+    if (cloudTaskActionKind.value === 'check') cloudTaskActionKind.value = ''
   }
 }
 
@@ -1843,18 +2007,104 @@ async function handleCloudExceptionAction() {
       '确认处理云仓异常',
       { confirmButtonText: '确认处理', cancelButtonText: '取消', type: 'warning' }
     )
-    cloudTaskActionLoading.value = true
-    await startCloudExceptionResolve(row.id)
-    cloudLastNotifiedState = ''
-    await refreshCloudOrderConfiguration()
-    scheduleCloudOrderPolling()
-    ElMessage.success('已发送异常处理指令')
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    ElMessage.error('发送异常处理指令失败: ' + (error.message || ''))
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error('确认处理异常失败: ' + (error.message || ''))
+    }
+    return
+  }
+
+  cloudTaskActionLoading.value = true
+  cloudTaskActionKind.value = 'resolve'
+  try {
+    const remarkResult = await submitPurchaseNumberToJdRemark(row)
+    await saveCloudAutomaticRemarkLog(row.id, remarkResult)
+    if (remarkResult.success) {
+      ElMessage.success('采购编号已自动备注到京东订单')
+    } else {
+      ElMessage.warning({
+        message: `京东自动备注未成功：${remarkResult.message}，将继续处理云仓异常`,
+        duration: 3000
+      })
+    }
+    let task
+    try {
+      task = await startCloudExceptionResolve(row.id)
+    } catch (error) {
+      ElMessage.error('发送异常处理指令失败: ' + (error.message || ''))
+      return
+    }
+    const resolveConfirmed = task?.final === true && task.executionStatus === 'succeeded'
+    if (task?.final && task.executionStatus && task.executionStatus !== 'succeeded') {
+      ElMessage.error(task.message || '云仓助手未确认异常处理成功')
+    } else if (resolveConfirmed) {
+      ElMessage.success('云仓助手已确认异常处理成功')
+    } else {
+      ElMessage.success('已发送异常处理指令')
+    }
+    cloudLastNotifiedState = ''
+    let config
+    try {
+      config = await refreshCloudOrderConfiguration()
+    } catch (error) {
+      ElMessage.warning(`${resolveConfirmed ? '异常处理已经成功' : '异常处理指令已提交'}，但读取最新状态失败：${error.message || '请稍后重新打开查看'}`)
+      return
+    }
+    if (config?.workflow?.currentTask) {
+      scheduleCloudOrderPolling()
+    } else {
+      cloudTaskActionLoading.value = false
+      await startExceptionRecheckAfterResolve(config)
+    }
   } finally {
     cloudTaskActionLoading.value = false
+    if (cloudTaskActionKind.value === 'resolve') cloudTaskActionKind.value = ''
   }
+}
+
+async function submitPurchaseNumberToJdRemark(row) {
+  try {
+    const salesOrder = forwardSalesData.value
+    const purchaseNo = String(cloudOrderConfig.value?.purchaseNo || row?.purchase_no || '').trim()
+    if (!purchaseNo) return { success: false, message: '当前采购单缺少采购编号' }
+    if (!salesOrder?.storeId || !salesOrder?.orderId) {
+      return { success: false, message: '当前采购单缺少关联销售订单或店铺信息' }
+    }
+    if (salesOrder.storePlatform !== 'jd') return { success: false, message: '关联销售订单不是京东订单' }
+
+    const result = await submitVendorRemark(salesOrder.storeId, salesOrder.orderId, purchaseNo)
+    if (!result?.success) return { success: false, message: result?.message || '京东未明确返回备注成功' }
+
+    const salesOrderId = Number(row?.sales_order_id)
+    if (Number.isInteger(salesOrderId) && salesOrderId > 0) {
+      try {
+        await updateOrderRemark(salesOrderId, purchaseNo)
+      } catch (error) {
+        console.warn('[云仓异常处理] 京东备注成功，但本地备注同步失败:', error.message)
+      }
+    }
+    return { success: true, message: '采购编号已自动备注到京东订单' }
+  } catch (error) {
+    return { success: false, message: error.message || '京东备注请求异常' }
+  }
+}
+
+async function saveCloudAutomaticRemarkLog(purchaseOrderId, result) {
+  let log
+  try {
+    log = await recordCloudAutomaticRemark(purchaseOrderId, result)
+  } catch (error) {
+    console.warn('[云仓异常处理] 自动备注日志保存失败:', error.message)
+    log = {
+      id: `local:auto-remark:${Date.now()}`,
+      action: 'auto_remark',
+      status: result?.success === true ? 'succeeded' : 'failed',
+      reason: '',
+      message: result?.message || (result?.success ? '采购编号已自动备注到京东订单' : '京东自动备注未成功'),
+      occurredAt: new Date().toISOString()
+    }
+  }
+  cloudLocalProcessLogs.value = [...cloudLocalProcessLogs.value, log]
 }
 
 // 监听 Electron 主进程登录成功事件，自动刷新列表
@@ -2292,6 +2542,7 @@ async function handleForward() {
   forwardLoading.value = true
   forwardSalesData.value = null
   cloudOrderConfig.value = null
+  cloudLocalProcessLogs.value = []
   forwardDialogVisible.value = true
   const [salesResult, cloudResult] = await Promise.allSettled([
     fetchRelatedSales(row.id),
@@ -2308,7 +2559,13 @@ async function handleForward() {
     ElMessage.error('读取云仓订单配置失败: ' + (cloudResult.reason?.message || ''))
   }
   forwardLoading.value = false
-  if (cloudOrderConfig.value?.workflow?.currentTask) scheduleCloudOrderPolling()
+  if (cloudOrderConfig.value?.workflow?.currentTask) {
+    scheduleCloudOrderPolling()
+  } else if (shouldRecheckAfterExceptionResolve(cloudOrderConfig.value)) {
+    await startExceptionRecheckAfterResolve(cloudOrderConfig.value)
+  } else if (shouldAutoCheckCloudException(cloudOrderConfig.value)) {
+    await handleCloudExceptionCheck({ automatic: true })
+  }
 }
 
 // 原有手工兜底流程独立于云仓助手：用户在线下完成发货后标记采购单已转发。
@@ -4113,8 +4370,49 @@ function handleImportDialogClose() {
   margin-top: 14px;
 }
 
+.cloud-process-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  margin-top: 12px;
+  padding-right: 2px;
+  overflow-y: auto;
+}
+
+.cloud-process-log-item {
+  padding: 9px 11px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.cloud-process-log-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #303133;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cloud-process-log-message {
+  margin-top: 5px;
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.cloud-process-log-time {
+  margin-top: 4px;
+  color: #a8abb2;
+  font-size: 11px;
+}
+
 .cloud-exception-panel {
   margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #ebeef5;
 }
 
 .cloud-exception-heading {

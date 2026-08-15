@@ -147,6 +147,12 @@ function parseStoredResponse(value) {
   try { return JSON.parse(value) } catch { return {} }
 }
 
+function sanitizeProcessLogMessage(value) {
+  return String(value || '')
+    .replace(/((?:authorization|api[_-]?key|cookie|token|password|secret|credential)\s*[:=]\s*)\S+/ig, '$1[已脱敏]')
+    .slice(0, 500)
+}
+
 function commandRowSummary(row) {
   if (!row) return null
   const response = parseStoredResponse(row.response_json)
@@ -166,6 +172,40 @@ function commandRowSummary(row) {
     updatedAt: row.updated_at || null,
     completedAt: row.completed_at || payload.completed_at || null
   }
+}
+
+function commandProcessLog(row) {
+  const command = commandRowSummary(row)
+  if (!command) return null
+  const active = ACTIVE_STATUSES.has(String(command.status || '').toLowerCase())
+  const succeeded = command.final && command.executionStatus === 'succeeded'
+  return {
+    id: `command:${command.requestId}`,
+    action: command.command === 'exception.order.resolve' ? 'exception_resolve' : 'exception_check',
+    status: active ? 'processing' : (succeeded ? 'succeeded' : 'failed'),
+    reason: command.reason || '',
+    message: command.message || (active ? '已提交，等待云仓助手返回结果' : '云仓助手未返回明确结果'),
+    occurredAt: command.updatedAt || command.createdAt || null
+  }
+}
+
+function localProcessLog(row) {
+  return {
+    id: `local:${row.id}`,
+    action: row.action,
+    status: row.status,
+    reason: '',
+    message: row.message_redacted || '',
+    occurredAt: row.created_at || null
+  }
+}
+
+function sortProcessLogs(logs) {
+  return logs.filter(Boolean).sort((left, right) => {
+    const leftTime = new Date(left.occurredAt || 0).getTime()
+    const rightTime = new Date(right.occurredAt || 0).getTime()
+    return leftTime - rightTime
+  })
 }
 
 async function persistCommandResponse(pool, ownerId, normalized) {
@@ -193,6 +233,29 @@ async function queryMachineStatus(pool, apiClient, user) {
   if (!binding) throw serviceError('machine_binding_missing', '请先绑定云仓助手机器码')
   const machineCode = assertMachineCode(binding.machine_code)
   return normalizeMachineStatus(await apiClient.getMachineStatus(machineCode), machineCode)
+}
+
+async function recordAutomaticRemarkLog(pool, user, purchaseOrderId, result) {
+  const ownerId = getTenantOwnerId(user)
+  const order = await readAccessiblePurchaseOrder(pool, user, purchaseOrderId)
+  const status = result?.success === true ? 'succeeded' : 'failed'
+  const message = sanitizeProcessLogMessage(result?.message || (
+    status === 'succeeded' ? '采购编号已自动备注到京东订单' : '京东自动备注未成功'
+  ))
+  const [insertResult] = await pool.execute(
+    `INSERT INTO cloud_order_process_logs
+       (owner_id, purchase_order_id, actor_user_id, action, status, message_redacted)
+     VALUES (?, ?, ?, 'auto_remark', ?, ?)`,
+    [ownerId, Number(order.id), Number(user.id), status, message]
+  )
+  return {
+    id: `local:${insertResult.insertId}`,
+    action: 'auto_remark',
+    status,
+    reason: '',
+    message,
+    occurredAt: new Date().toISOString()
+  }
 }
 
 async function submitOrderCommand(pool, apiClient, { user, purchaseOrderId, command }) {
@@ -295,6 +358,7 @@ function exceptionFromCommand(command) {
     exceptionSnapshotRef: String(result.exception_snapshot_ref || '').slice(0, 200),
     state: String(result.state || '').slice(0, 50),
     queriedAt: result.queried_at || command.completedAt || null,
+    resultRecordedAt: command.updatedAt || command.completedAt || null,
     exceptions: rawExceptions.map(item => ({
       source: String(item?.source || '').slice(0, 50),
       exceptionTypeMasked: String(item?.exception_type_masked || '').slice(0, 200),
@@ -313,7 +377,8 @@ function resolutionFromCommand(command) {
     reason: command.reason,
     message: command.message,
     observedStatus: String(command.result?.state || command.result?.observed_status || '').slice(0, 80),
-    completedAt: command.completedAt || null
+    completedAt: command.completedAt || null,
+    resultRecordedAt: command.updatedAt || command.completedAt || null
   }
 }
 
@@ -330,6 +395,14 @@ async function attachExternalCommands(pool, user, purchaseOrderId, configuration
       LIMIT 20`,
     [ownerId, Number(purchaseOrderId)]
   )
+  const [localLogRows] = await pool.execute(
+    `SELECT id, action, status, message_redacted, created_at
+       FROM cloud_order_process_logs
+      WHERE owner_id = ? AND purchase_order_id = ?
+      ORDER BY created_at DESC
+      LIMIT 20`,
+    [ownerId, Number(purchaseOrderId)]
+  )
   const check = rows.find(row => row.command === 'exception.order.check')
   const resolve = rows.find(row => row.command === 'exception.order.resolve')
   const active = rows.find(row => ACTIVE_STATUSES.has(String(row.transport_status || '').toLowerCase()))
@@ -337,21 +410,28 @@ async function attachExternalCommands(pool, user, purchaseOrderId, configuration
   const resolveSummary = commandRowSummary(resolve)
   const exception = exceptionFromCommand(checkSummary)
   const exceptionResolution = resolutionFromCommand(resolveSummary)
+  const checkIsLatest = !!check && (!resolve || rows.indexOf(check) < rows.indexOf(resolve))
   let state = ''
   if (active) state = 'executing'
-  else if (exception?.status === 'succeeded' && exception?.resultShapeValid) {
+  else if (!checkIsLatest && exceptionResolution?.status === 'succeeded') {
+    state = exceptionResolution.observedStatus || 'resolved'
+  } else if (!checkIsLatest && resolveSummary?.final) {
+    state = 'review_required'
+  } else if (exception?.status === 'succeeded' && exception?.resultShapeValid) {
     state = exception.state === 'exception_found' || exception.exceptionCount > 0
       ? 'exception_found'
       : 'exception_clear'
   } else if (checkSummary?.final) state = 'review_required'
-  if (exceptionResolution?.status === 'succeeded') state = exceptionResolution.observedStatus || 'resolved'
-  else if (resolveSummary?.final) state = 'review_required'
 
   return {
     ...configuration,
     orderRefId: '',
     exception,
     exceptionResolution,
+    processLogs: sortProcessLogs([
+      ...rows.map(commandProcessLog),
+      ...localLogRows.map(localProcessLog)
+    ]),
     workflow: rows.length ? {
       workflowId: '',
       state,
@@ -382,11 +462,13 @@ module.exports = {
   attachExternalCommands,
   buildCommandPayload,
   commandRowSummary,
+  commandProcessLog,
   createRequestId,
   exceptionFromCommand,
   normalizeCommandResponse,
   normalizeMachineStatus,
   queryMachineStatus,
+  recordAutomaticRemarkLog,
   refreshCommandResult,
   resolutionFromCommand,
   sanitizeExternalValue,

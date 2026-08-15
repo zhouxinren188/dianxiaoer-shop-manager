@@ -45,6 +45,23 @@ function parseResponseBody(buffer, statusCode) {
   }
 }
 
+function responseErrorMessage(responseBody, statusCode) {
+  const body = responseBody && typeof responseBody === 'object' ? responseBody : {}
+  const nestedError = body.error && typeof body.error === 'object' ? body.error : {}
+  const candidates = [
+    body.message,
+    typeof body.error === 'string' ? body.error : '',
+    body.detail,
+    body.reason,
+    nestedError.message,
+    nestedError.detail,
+    nestedError.reason,
+    nestedError.code
+  ]
+  const message = candidates.find(value => typeof value === 'string' && value.trim())
+  return String(message || `HTTP ${statusCode}`).trim().slice(0, 500)
+}
+
 function createRequest(config) {
   return function requestJson(method, pathname, body, expectedStatuses) {
     const target = new URL(pathname, config.baseUrl)
@@ -82,7 +99,7 @@ function createRequest(config) {
             const statusCode = Number(response.statusCode || 0)
             const responseBody = parseResponseBody(Buffer.concat(chunks), statusCode)
             if (!expectedStatuses.includes(statusCode)) {
-              const message = String(responseBody.message || responseBody.error || `HTTP ${statusCode}`).slice(0, 500)
+              const message = responseErrorMessage(responseBody, statusCode)
               return reject(clientError('cloud_api_request_failed', `云仓助手接口请求失败：${message}`, {
                 httpStatus: statusCode,
                 responseBody
@@ -126,5 +143,6 @@ function createCloudWarehouseApiClient({ env = process.env, requestJson } = {}) 
 module.exports = {
   DEFAULT_BASE_URL,
   createCloudWarehouseApiClient,
-  getConfig
+  getConfig,
+  responseErrorMessage
 }

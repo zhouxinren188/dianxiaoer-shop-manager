@@ -23,3 +23,10 @@ export function startCloudExceptionCheck(purchaseOrderId) {
 export function startCloudExceptionResolve(purchaseOrderId) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/exception/resolve`, {})
 }
+
+export function recordCloudAutomaticRemark(purchaseOrderId, result) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/process-logs/auto-remark`, {
+    success: result?.success === true,
+    message: String(result?.message || '')
+  })
+}

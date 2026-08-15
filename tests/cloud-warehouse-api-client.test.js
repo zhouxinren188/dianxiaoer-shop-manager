@@ -4,7 +4,8 @@ import apiClientModule from '../server/services/cloud-warehouse-api-client.js'
 const {
   DEFAULT_BASE_URL,
   createCloudWarehouseApiClient,
-  getConfig
+  getConfig,
+  responseErrorMessage
 } = apiClientModule
 
 describe('云仓助手第三方接口安全配置', () => {
@@ -50,5 +51,13 @@ describe('云仓助手第三方三接口', () => {
       }, [200, 202]],
       ['GET', '/api/cloud-warehouse/v1/commands/request-001', undefined, [200, 202]]
     ])
+  })
+
+  it('第三方错误体为对象时提取可读消息而不是显示 object Object', () => {
+    expect(responseErrorMessage({
+      error: { code: 'machine_busy', message: '目标云仓助手正在执行其他任务' }
+    }, 409)).toBe('目标云仓助手正在执行其他任务')
+    expect(responseErrorMessage({ error: { code: 'rate_limited' } }, 429)).toBe('rate_limited')
+    expect(responseErrorMessage({ error: {} }, 502)).toBe('HTTP 502')
   })
 })
