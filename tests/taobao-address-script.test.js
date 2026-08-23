@@ -141,4 +141,22 @@ describe('淘宝地址管理脚本 v2', () => {
     expect(script).toContain('getRowAction(row, /^取消置顶$/)')
     expect(script).toContain('"detail":"仓库路1号【A9002】"')
   })
+
+  it('保存后记录目标地址是否默认、是否位于首位，且不输出地址原文', () => {
+    const script = buildTaobaoAddressManagerScript('诊断收件人', '13800138000', {
+      province: '江苏省',
+      city: '宿迁市',
+      area: '沭阳县',
+      other: '诊断路1号【A9003】'
+    })
+
+    expect(script).toContain("logTargetAddressState('POST_SAVE_STATE'")
+    expect(script).toContain("logTargetAddressState('EXISTING_ADDRESS_STATE'")
+    expect(script).toContain("',targetFound=' + !!targetRow")
+    expect(script).toContain("',default=' + isDefault")
+    expect(script).toContain("',index=' + targetIndex")
+    expect(script).toContain("',first=' + (targetIndex === 0)")
+    expect(script).toContain("log('SAVE_CLICKED', 'defaultVerified=' + defaultOk)")
+    expect(script).not.toContain('POST_SAVE_STATE text=')
+  })
 })

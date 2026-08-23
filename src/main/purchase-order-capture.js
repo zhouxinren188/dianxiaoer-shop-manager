@@ -2726,7 +2726,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
 
   if (window.__dxeAddressCodeGuard &&
       window.__dxeAddressCodeGuard.guardKey === guardKey) {
-    window.__dxeAddressCodeGuard.refresh();
+    window.__dxeAddressCodeGuard.refresh('reinject');
     return '[DXE_ADDR_GUARD] refreshed: mode=' + config.mode;
   }
 
@@ -2805,14 +2805,14 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
       for (var i = 0; i < selectedTexts.length; i++) {
         var selectedText = selectedTexts[i];
         if (config.mode === 'warehouse' && selectedText.indexOf(expectedToken) >= 0) {
-          return { ok: true, method: 'warehouse-purchase-code', selectedText: selectedText };
+          return { ok: true, method: 'warehouse-purchase-code', selectedText: selectedText, selectedCount: selectedTexts.length };
         }
         if (config.mode === 'dropship') {
           var selectedDigits = selectedText.replace(/\D/g, '');
           var contactMatched = config.contactDigits.length >= 4 &&
             selectedDigits.indexOf(config.contactDigits) >= 0;
           if (contactMatched) {
-            return { ok: true, method: 'dropship-contact-marker', selectedText: selectedText };
+            return { ok: true, method: 'dropship-contact-marker', selectedText: selectedText, selectedCount: selectedTexts.length };
           }
 
           var nameMatched = !!config.expectedName &&
@@ -2820,14 +2820,26 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
           var phoneTail = config.shippingPhoneDigits.slice(-4);
           var phoneMatched = phoneTail.length === 4 && selectedDigits.indexOf(phoneTail) >= 0;
           if (nameMatched && phoneMatched) {
-            return { ok: true, method: 'dropship-name-phone', selectedText: selectedText };
+            return { ok: true, method: 'dropship-name-phone', selectedText: selectedText, selectedCount: selectedTexts.length };
           }
         }
       }
-      return { ok: false, method: 'selected-address-mismatch', selectedText: selectedTexts[0] };
+      return { ok: false, method: 'selected-address-mismatch', selectedText: selectedTexts[0], selectedCount: selectedTexts.length };
     }
 
-    return { ok: false, method: 'selected-address-unresolved', selectedText: '' };
+    return { ok: false, method: 'selected-address-unresolved', selectedText: '', selectedCount: 0 };
+  }
+
+  var lastValidationDiagnostic = '';
+  function logValidation(context, result) {
+    var diagnosticKey = [result.ok, result.method, result.selectedCount].join('|');
+    if (diagnosticKey === lastValidationDiagnostic && context !== 'submit') return;
+    lastValidationDiagnostic = diagnosticKey;
+    console.log('[DXE_ADDR_GUARD] validation: mode=' + config.mode +
+      ',context=' + context +
+      ',ok=' + result.ok +
+      ',method=' + result.method +
+      ',selectedCount=' + result.selectedCount);
   }
 
   function ensureStatus(result) {
@@ -2889,7 +2901,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
     window.__dxeAddressBlockedTimer = setTimeout(function() {
       if (notice && notice.parentNode) notice.parentNode.removeChild(notice);
     }, 8000);
-    console.warn('[DXE_ADDR_GUARD] blocked submit: mode=' + config.mode + ', method=' + result.method);
+    console.warn('[DXE_ADDR_GUARD] blocked submit: mode=' + config.mode + ', method=' + result.method + ', selectedCount=' + result.selectedCount);
   }
 
   function isSubmitAction(target) {
@@ -2903,7 +2915,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
 
   function blockIfInvalid(event) {
     if (event.type === 'click' && !isSubmitAction(event.target)) {
-      refresh();
+      refresh('interaction');
       return;
     }
     if (event.type === 'submit') {
@@ -2912,8 +2924,9 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
     }
     var result = validateSelectedAddress();
     ensureStatus(result);
+    logValidation('submit', result);
     if (result.ok) {
-      console.log('[DXE_ADDR_GUARD] submit allowed: mode=' + config.mode + ', method=' + result.method);
+      console.log('[DXE_ADDR_GUARD] submit allowed: mode=' + config.mode + ', method=' + result.method + ', selectedCount=' + result.selectedCount);
       return;
     }
     event.preventDefault();
@@ -2924,10 +2937,12 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
   }
 
   var refreshTimer = null;
-  function refresh() {
+  function refresh(context) {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(function() {
-      ensureStatus(validateSelectedAddress());
+      var result = validateSelectedAddress();
+      ensureStatus(result);
+      logValidation(context || 'refresh', result);
     }, 120);
   }
 
@@ -2941,7 +2956,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
           element.closest('#dxe-address-code-status,#dxe-address-code-blocked-notice')) {
         continue;
       }
-      refresh();
+      refresh('mutation');
       break;
     }
   });
@@ -2952,7 +2967,7 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
     refresh: refresh,
     validate: validateSelectedAddress
   };
-  refresh();
+  refresh('installed');
   console.log('[DXE_ADDR_GUARD] installed: mode=' + config.mode);
   return '[DXE_ADDR_GUARD] installed: mode=' + config.mode;
 })()
@@ -3807,27 +3822,38 @@ function buildAddressRefreshScript(purchaseInfo) {
   return `
 (function() {
   var url = window.location.href.toLowerCase();
+  var diagnostics = {
+    page: 'other',
+    addressCandidateCount: 0,
+    action: 'none'
+  };
   console.log('[AddressRefresh] Refreshing address on: ' + url.substring(0, 100));
 
   // 淘宝/天猫结算页：刷新地址列表并选中新地址
   if (url.includes('buy.taobao.com') || url.includes('buy.tmall.com')) {
+    diagnostics.page = 'taobao-checkout';
     // 方案1：找到地址列表中最后一个地址（新添加的）并点击选中
     var addrItems = document.querySelectorAll('[class*="address"] [class*="item"], [class*="addrItem"], [data-value]');
+    diagnostics.addressCandidateCount = addrItems ? addrItems.length : 0;
     if (addrItems && addrItems.length > 0) {
       var lastItem = addrItems[addrItems.length - 1];
       lastItem.click();
+      diagnostics.action = 'clicked-last-candidate';
+      diagnostics.clickedIndex = addrItems.length - 1;
       console.log('[AddressRefresh] Clicked last address item (total: ' + addrItems.length + ')');
     }
     // 方案2：尝试点击地址选择器下拉触发重新加载
     var addrSelector = document.querySelector('[class*="addressSelect"], [class*="addrSelect"], [class*="address-list"]');
     if (addrSelector && !addrItems.length) {
       addrSelector.click();
+      diagnostics.action = 'clicked-address-selector';
       console.log('[AddressRefresh] Clicked address selector');
     }
   }
 
   // 1688结算页：点击"更改地址"，在弹窗中选择默认地址（即刚设置好的地址）
   if (url.includes('order.1688.com') || url.includes('trade.1688.com')) {
+    diagnostics.page = '1688-checkout';
     console.log('[AddressRefresh] 1688结算页开始刷新地址');
 
     // 目标地址关键词（从purchaseInfo提取，用于匹配）
@@ -3895,6 +3921,10 @@ function buildAddressRefreshScript(purchaseInfo) {
   }
 
   window.__addrRefreshDone = true;
+  console.log('[AddressRefresh] RESULT page=' + diagnostics.page +
+    ',candidates=' + diagnostics.addressCandidateCount +
+    ',action=' + diagnostics.action);
+  return diagnostics;
 })()
 `
 }
@@ -4279,14 +4309,6 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   })
   // 注意：dl 不做 UA 伪装，Electron 默认 UA 对各平台正常工作
 
-  // 绝对生存期比阶段超时多留10秒，仅用于防止异常窗口泄漏。
-  const maxLifetime = setTimeout(() => {
-    if (!addrWin.isDestroyed()) {
-      console.log('[AddrSetupWin] Max lifetime reached, closing')
-      addrWin.destroy()
-    }
-  }, addressAbsoluteTimeoutMs + 10000)
-
   let addrDone = false
   let lastAddressIssue = ''
   let taobaoAddressInjectTimer = null
@@ -4294,6 +4316,43 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   let taobaoAddressReinjectRequested = false
   let taobaoAddressInjectAttempt = 0
   let taobaoAddressScriptStarted = false
+  let addressPollErrorCount = 0
+  let addressOutcome = 'pending'
+  let addressCloseReason = 'unexpected'
+  let addressCloseRequest = 'none'
+
+  // 绝对生存期比阶段超时多留10秒，仅用于防止异常窗口泄漏。
+  const maxLifetime = setTimeout(() => {
+    if (!addrWin.isDestroyed()) {
+      addressOutcome = 'failed:max_lifetime'
+      addressCloseReason = 'max_lifetime'
+      addressCloseRequest = 'max_lifetime'
+      runtimeLog.writeLog(
+        'AddrSetupWin',
+        `地址窗口达到最大生存期: platform=${platform}, purchaseNo=${purchaseNo}, stage=${addressLastStage}, elapsedMs=${Date.now() - addressStartedAt}`
+      )
+      console.log('[AddrSetupWin] Max lifetime reached, closing')
+      addrWin.destroy()
+    }
+  }, addressAbsoluteTimeoutMs + 10000)
+
+  addrWin.__dxeDestroyAddressSetup = (reason = 'external_cleanup') => {
+    addressCloseRequest = reason
+    if (!addrDone) {
+      addressOutcome = 'interrupted'
+      addressCloseReason = reason
+    }
+    if (!addrWin.isDestroyed()) addrWin.destroy()
+  }
+
+  addrWin.on('closed', () => {
+    clearTimeout(maxLifetime)
+    if (taobaoAddressInjectTimer) clearTimeout(taobaoAddressInjectTimer)
+    runtimeLog.writeLog(
+      'AddrSetupWin',
+      `地址窗口关闭: platform=${platform}, purchaseNo=${purchaseNo}, done=${addrDone}, outcome=${addressOutcome}, closeReason=${addressCloseReason}, closeRequest=${addressCloseRequest}, stage=${addressLastStage}, elapsedMs=${Date.now() - addressStartedAt}`
+    )
+  })
 
   function sendAddressSetupDone(extra = {}) {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4301,9 +4360,63 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     }
   }
 
-  function closeAddressWindowAfterFailure() {
+  function closeAddressWindowAfterFailure(reason = lastAddressIssue || 'failed') {
+    addressOutcome = addressOutcome === 'pending' ? `failed:${reason}` : addressOutcome
+    addressCloseReason = `failure:${reason}`
+    addressCloseRequest = `failure:${reason}`
     if (addrWin.isDestroyed()) return
     addrWin.destroy()
+  }
+
+  function classifyPurchaseAddressPage(url) {
+    const lower = String(url || '').toLowerCase()
+    if (lower.includes('buy.taobao.com') || lower.includes('buy.tmall.com')) return 'taobao-checkout'
+    if (lower.includes('order.1688.com') || lower.includes('trade.1688.com')) return '1688-checkout'
+    if (lower.includes('item.taobao.com') || lower.includes('detail.tmall.com') || lower.includes('chaoshi.detail.tmall.com')) return 'product-detail'
+    return 'other'
+  }
+
+  function schedulePurchaseAddressRefresh(source) {
+    setTimeout(() => {
+      if (!purchaseWin || purchaseWin.isDestroyed()) {
+        runtimeLog.writeLog(
+          'PurchaseAddressRefresh',
+          `跳过地址刷新: purchaseNo=${purchaseNo}, source=${source}, reason=purchase_window_destroyed`
+        )
+        return
+      }
+
+      const purchaseUrl = purchaseWin.webContents.getURL()
+      const page = classifyPurchaseAddressPage(purchaseUrl)
+      if (page !== 'taobao-checkout' && page !== '1688-checkout') {
+        runtimeLog.writeLog(
+          'PurchaseAddressRefresh',
+          `跳过地址刷新: purchaseNo=${purchaseNo}, source=${source}, reason=not_checkout, page=${page}`
+        )
+        return
+      }
+
+      runtimeLog.writeLog(
+        'PurchaseAddressRefresh',
+        `开始地址刷新: purchaseNo=${purchaseNo}, source=${source}, page=${page}`
+      )
+      purchaseWin.webContents.executeJavaScript(buildAddressRefreshScript(purchaseInfo))
+        .then(result => {
+          const diagnostic = result && typeof result === 'object'
+            ? JSON.stringify(result)
+            : String(result || 'none')
+          runtimeLog.writeLog(
+            'PurchaseAddressRefresh',
+            `地址刷新脚本完成: purchaseNo=${purchaseNo}, source=${source}, result=${diagnostic.substring(0, 400)}`
+          )
+        })
+        .catch(error => {
+          runtimeLog.writeLog(
+            'PurchaseAddressRefresh',
+            `地址刷新脚本失败: purchaseNo=${purchaseNo}, source=${source}, error=${String(error?.message || error).replace(/\s+/g, ' ').substring(0, 400)}`
+          )
+        })
+    }, 2000)
   }
 
   // 转发后台窗口的console.log + 检测地址操作成功信号
@@ -4337,6 +4450,8 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     //   3. "DIALOG_SAVE_SUCCESS" — 对话框保存成功回调
     if (!addrDone && (message.includes('Address added successfully') || message.includes('1688_DIALOG_SUBMITTED') || message.includes('DIALOG_SAVE_SUCCESS'))) {
       console.log('[AddrSetupWin] Address success detected via console-message: ' + message.substring(0, 80))
+      addressOutcome = 'success:console_message'
+      addressCloseReason = 'success:console_message'
       addrDone = true
       clearTimeout(maxLifetime)
       // 通知前端：地址设置完成
@@ -4344,23 +4459,14 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       // ★ 在采购小窗中显示绿色居中提示（与result轮询一致）
       if (purchaseWin && !purchaseWin.isDestroyed()) {
         purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
-        // 延迟2秒后刷新结算页地址
-        setTimeout(() => {
-          if (purchaseWin.isDestroyed()) return
-          const purchaseUrl = purchaseWin.webContents.getURL().toLowerCase()
-          const isCheckout = purchaseUrl.includes('buy.taobao.com') ||
-                             purchaseUrl.includes('buy.tmall.com') ||
-                             purchaseUrl.includes('order.1688.com') ||
-                             purchaseUrl.includes('trade.1688.com')
-          if (isCheckout) {
-            purchaseWin.webContents.executeJavaScript(buildAddressRefreshScript(purchaseInfo)).catch(() => {})
-            console.log('[AddrSetupWin] Address refresh script injected to purchase window (via console-message)')
-          }
-        }, 2000)
+        schedulePurchaseAddressRefresh('console_message_success')
       }
       // 延迟关闭，等保存完成
       setTimeout(() => {
-        if (!addrWin.isDestroyed()) addrWin.destroy()
+        if (!addrWin.isDestroyed()) {
+          addressCloseRequest = 'success_delay'
+          addrWin.destroy()
+        }
       }, 3000)
     }
   })
@@ -4659,21 +4765,23 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
       console.log(`[AddrSetupWin] Address setup timeout: stage=${addressLastStage}, elapsedMs=${elapsedMs}`)
       const reason = lastAddressIssue || 'timeout'
       runtimeLog.writeLog('AddrSetupWin', `地址设置超时: platform=${platform}, purchaseNo=${purchaseNo}, reason=${reason}, stage=${addressLastStage}, elapsedMs=${elapsedMs}`)
+      addressOutcome = `failed:${reason}`
       addrDone = true
       clearTimeout(maxLifetime)
       // 超时必须明确标记失败，禁止前端误报“地址已修改成功”。
       sendAddressSetupDone({ failed: true, reason })
-      closeAddressWindowAfterFailure()
+      closeAddressWindowAfterFailure(reason)
       return
     }
 
     if (TAOBAO_TERMINAL_FAILURE_RESULTS.includes(lastAddressIssue)) {
       clearInterval(checkTimer)
+      addressOutcome = `failed:${lastAddressIssue}`
       addrDone = true
       clearTimeout(maxLifetime)
       runtimeLog.writeLog('AddrSetupWin', `地址脚本失败: platform=${platform}, purchaseNo=${purchaseNo}, reason=${lastAddressIssue}`)
       sendAddressSetupDone({ failed: true, reason: lastAddressIssue })
-      closeAddressWindowAfterFailure()
+      closeAddressWindowAfterFailure(lastAddressIssue)
       return
     }
 
@@ -4686,6 +4794,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
         const result = state && typeof state === 'object' ? state.result : state
         const resultDetail = state && typeof state === 'object' ? String(state.detail || '') : ''
         if (!result || addrDone) return
+        addressOutcome = `${result}${resultDetail ? `:${resultDetail}` : ''}`
         console.log(`[AddrSetupWin] Address setup result: ${result}`)
         runtimeLog.writeLog(
           'AddrSetupWin',
@@ -4695,6 +4804,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
         if (result === 'success' || result === 'submitted') {
           clearInterval(checkTimer)
+          addressCloseReason = 'success:poll_result'
           addrDone = true
           clearTimeout(maxLifetime)
           // 通知前端：地址设置完成
@@ -4702,39 +4812,41 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
           // 在采购小窗中显示绿色居中提示
           if (purchaseWin && !purchaseWin.isDestroyed()) {
             purchaseWin.webContents.executeJavaScript(ADDRESS_SUCCESS_TOAST).catch(() => {})
-            // 延迟2秒后刷新结算页地址（等服务端地址数据传播完成）
-            setTimeout(() => {
-              if (purchaseWin.isDestroyed()) return
-              const purchaseUrl = purchaseWin.webContents.getURL().toLowerCase()
-              const isCheckout = purchaseUrl.includes('buy.taobao.com') ||
-                                 purchaseUrl.includes('buy.tmall.com') ||
-                                 purchaseUrl.includes('order.1688.com') ||
-                                 purchaseUrl.includes('trade.1688.com')
-              if (isCheckout) {
-                purchaseWin.webContents.executeJavaScript(buildAddressRefreshScript(purchaseInfo)).catch(() => {})
-                console.log('[AddrSetupWin] Address refresh script injected to purchase window')
-              }
-            }, 2000)
+            schedulePurchaseAddressRefresh('poll_success')
           }
           // 延迟关闭，等保存完成
           setTimeout(() => {
-            if (!addrWin.isDestroyed()) addrWin.destroy()
+            if (!addrWin.isDestroyed()) {
+              addressCloseReason = 'success:poll_result'
+              addressCloseRequest = 'success_delay'
+              addrWin.destroy()
+            }
           }, 1500)
         } else if (result === 'need_login' || result === 'need_verify') {
           // 需要登录或验证 — 显示窗口让用户手动操作
           lastAddressIssue = result
+          addressOutcome = `waiting:${result}`
           if (!addrWin.isDestroyed() && !addrWin.isVisible()) addrWin.show()
           console.log(`[AddrSetupWin] Address setup issue: ${result}, showing window`)
         } else if (TAOBAO_TERMINAL_FAILURE_RESULTS.includes(result)) {
           clearInterval(checkTimer)
+          addressOutcome = `failed:${result}${resultDetail ? `:${resultDetail}` : ''}`
           addrDone = true
           clearTimeout(maxLifetime)
           lastAddressIssue = result
           sendAddressSetupDone({ failed: true, reason: result })
-          closeAddressWindowAfterFailure()
+          closeAddressWindowAfterFailure(result)
         }
       })
-      .catch(() => {})
+      .catch(error => {
+        addressPollErrorCount++
+        if (addressPollErrorCount <= 3 || addressPollErrorCount % 10 === 0) {
+          runtimeLog.writeLog(
+            'AddrSetupWin',
+            `地址结果轮询失败: platform=${platform}, purchaseNo=${purchaseNo}, count=${addressPollErrorCount}, stage=${addressLastStage}, error=${String(error?.message || error).replace(/\s+/g, ' ').substring(0, 400)}`
+          )
+        }
+      })
   }, 1000)
 
   // 加载地址管理页
@@ -4742,6 +4854,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   runtimeLog.writeLog('AddrSetupWin', `开始地址设置: platform=${platform}, purchaseNo=${purchaseNo}, url=${addrUrl}`)
   addrWin.loadURL(addrUrl).catch((err) => {
     lastAddressIssue = 'load_failed'
+    addressOutcome = 'failed:load_failed'
     runtimeLog.writeLog('AddrSetupWin', `地址页加载失败: ${err.message}`)
   })
 
@@ -5061,12 +5174,20 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     }
     activePurchaseWindows.set(purchaseNo, windowState)
 
-    function cleanup() {
+    function cleanup(reason = 'purchase_cleanup') {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
       if (pddCookieSaveTimer) { clearInterval(pddCookieSaveTimer); pddCookieSaveTimer = null }
       // 联动清理后台地址窗口
       if (backgroundAddrWin && !backgroundAddrWin.isDestroyed()) {
-        backgroundAddrWin.destroy()
+        runtimeLog.writeLog(
+          'AddrSetupWin',
+          `采购窗口请求联动关闭地址窗口: platform=${platform}, purchaseNo=${purchaseNo}, reason=${reason}`
+        )
+        if (typeof backgroundAddrWin.__dxeDestroyAddressSetup === 'function') {
+          backgroundAddrWin.__dxeDestroyAddressSetup(reason)
+        } else {
+          backgroundAddrWin.destroy()
+        }
         backgroundAddrWin = null
       }
       // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏到其他窗口）
@@ -5126,7 +5247,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       resolved = true
       windowState.resolved = true
       console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}`)
-      cleanup()
+      cleanup('order_captured')
       setPaymentWindowLocked(win, true)
       const paymentLockWatchdog = setTimeout(() => {
         setPaymentWindowLocked(win, false)
@@ -5629,7 +5750,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (resolved) return
       resolved = true
       windowState.resolved = true
-      cleanup()
+      cleanup('purchase_window_closed')
 
       // 通知前端：未捕获到订单号
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -5654,6 +5775,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
       if (message.startsWith('[DXE_ADDR_GUARD]')) {
         runtimeLog.writeLog('PurchaseAddressGuard', message)
+        console.log(`[PurchaseCapture] ${message}`)
+        return
+      }
+      if (message.startsWith('[AddressRefresh]')) {
+        runtimeLog.writeLog('PurchaseAddressRefresh', message)
         console.log(`[PurchaseCapture] ${message}`)
         return
       }

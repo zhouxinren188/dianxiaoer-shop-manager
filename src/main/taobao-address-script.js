@@ -700,6 +700,37 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     return rows[0];
   }
 
+  function logTargetAddressState(code, source) {
+    var rows = collectManageableAddressRows();
+    var targetIndex = -1;
+    var targetRow = null;
+    for (var i = 0; i < rows.length; i++) {
+      if (!matchesTargetAddressRow(rows[i])) continue;
+      targetIndex = i;
+      targetRow = rows[i];
+      break;
+    }
+    var isDefault = !!(targetRow && getRowAction(targetRow, /^取消默认$/));
+    log(code,
+      'source=' + source +
+      ',targetFound=' + !!targetRow +
+      ',default=' + isDefault +
+      ',index=' + targetIndex +
+      ',first=' + (targetIndex === 0) +
+      ',count=' + rows.length
+    );
+  }
+
+  function schedulePostSaveStateLogs(source) {
+    logTargetAddressState('POST_SAVE_STATE', source + ':immediate');
+    setTimeout(function() {
+      logTargetAddressState('POST_SAVE_STATE', source + ':delayed-500ms');
+    }, 500);
+    setTimeout(function() {
+      logTargetAddressState('POST_SAVE_STATE', source + ':delayed-1200ms');
+    }, 1200);
+  }
+
   function targetAddressVisibleOutsideForm() {
     return !!findTargetAddressOutsideForm();
   }
@@ -852,6 +883,7 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     try { await cleanupHistoricalAddresses(0); } catch (cleanupError) { log('CLEANUP_ERROR', cleanupError && cleanupError.message ? cleanupError.message : 'unknown'); }
     existingAddress = findTargetAddressOutsideForm();
     var existingDefaultOk = await ensureExistingAddressDefault(existingAddress);
+    logTargetAddressState('EXISTING_ADDRESS_STATE', existingDefaultOk ? 'default-confirmed' : 'default-unconfirmed');
     return finish(existingDefaultOk ? 'success' : 'default_unconfirmed', existingDefaultOk ? 'existing_address_default' : 'existing_address_not_default');
   }
 
@@ -902,12 +934,18 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   if (!saveButton) return finish('no_save_button', 'save_button_not_found');
   saveClicked = true;
   saveButton.click();
-  log('SAVE_CLICKED');
+  log('SAVE_CLICKED', 'defaultVerified=' + defaultOk);
 
   for (var resultTry = 0; resultTry < 50; resultTry++) {
-    if (explicitSuccessVisible()) return finish('success', 'success_notice');
+    if (explicitSuccessVisible()) {
+      schedulePostSaveStateLogs('success_notice');
+      return finish('success', 'success_notice');
+    }
     clickSecondaryConfirm();
-    if (resultTry > 3 && targetAddressVisibleOutsideForm()) return finish('success', 'address_list_verified');
+    if (resultTry > 3 && targetAddressVisibleOutsideForm()) {
+      schedulePostSaveStateLogs('address_list_verified');
+      return finish('success', 'address_list_verified');
+    }
 
     var currentIssue = detectBlockingIssue();
     if (currentIssue) return finish(currentIssue, 'after_save');
