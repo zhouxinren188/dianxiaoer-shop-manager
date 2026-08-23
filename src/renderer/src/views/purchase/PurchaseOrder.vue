@@ -467,6 +467,15 @@
                   :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
                   @click="handleCloudExceptionCheck"
                 >查询</el-button>
+                <el-button
+                  v-else-if="cloudOrderStatus.key === 'normal'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudExceptionChecking"
+                  :disabled="!cloudThirdPartyReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudExceptionCheck"
+                >再次查询</el-button>
               </span>
             </el-descriptions-item>
             <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>

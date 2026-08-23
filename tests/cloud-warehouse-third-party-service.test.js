@@ -8,7 +8,8 @@ const {
   normalizeCommandResponse,
   normalizeMachineStatus,
   queryMachineStatus,
-  recordAutomaticRemarkLog
+  recordAutomaticRemarkLog,
+  refreshCommandResult
 } = service
 
 describe('云仓助手在线状态', () => {
@@ -213,6 +214,65 @@ describe('异常查询简化协议', () => {
 })
 
 describe('异常处理后的复查结果', () => {
+  it('远端明确返回指令不存在时结束本地处理中状态并允许再次操作', async () => {
+    let row = {
+      request_id: 'request-missing-001',
+      purchase_order_id: 99,
+      machine_code: 'YC-7F3K-92MX',
+      command: 'exception.order.resolve',
+      order_no: '3590463007646092',
+      order_year: 2026,
+      transport_status: 'executing',
+      http_status: 202,
+      reason: '',
+      message_redacted: '',
+      response_json: {},
+      created_at: '2026-08-16 17:09:19',
+      updated_at: '2026-08-16 17:09:20',
+      completed_at: null
+    }
+    const execute = vi.fn(async (sql, params) => {
+      if (sql.includes('WHERE owner_id = ? AND request_id = ?') && sql.includes('SELECT request_id')) {
+        return [[row]]
+      }
+      if (sql.includes("SET transport_status = 'failed'")) {
+        row = {
+          ...row,
+          transport_status: 'failed',
+          http_status: params[0],
+          reason: 'remote_command_not_found',
+          message_redacted: params[1],
+          response_json: JSON.parse(params[2]),
+          completed_at: '2026-08-16 17:09:30'
+        }
+        return [{ affectedRows: 1 }]
+      }
+      throw new Error(`unexpected_sql:${sql.replace(/\s+/g, ' ').trim()}`)
+    })
+    const missing = Object.assign(new Error('云仓助手接口请求失败：指令不存在'), {
+      code: 'cloud_api_request_failed',
+      httpStatus: 404,
+      responseBody: { message: '指令不存在' }
+    })
+
+    const result = await refreshCommandResult(
+      { execute },
+      { getCommandResult: vi.fn(async () => { throw missing }) },
+      { id: 18, user_type: 'master' },
+      row.request_id
+    )
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      reason: 'remote_command_not_found',
+      message: '云仓助手接口请求失败：指令不存在'
+    })
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("SET transport_status = 'failed'"),
+      expect.arrayContaining([404, '云仓助手接口请求失败：指令不存在'])
+    )
+  })
+
   it('最新复查结果优先于较早的处理回执决定页面状态', async () => {
     const rows = [{
       request_id: 'check-after-resolve',

@@ -153,6 +153,31 @@ function sanitizeProcessLogMessage(value) {
     .slice(0, 500)
 }
 
+function isRemoteCommandMissingError(error) {
+  if (error?.code !== 'cloud_api_request_failed') return false
+  const httpStatus = Number(error?.httpStatus || 0)
+  if (httpStatus === 404 || httpStatus === 410) return true
+  let responseText = ''
+  try { responseText = JSON.stringify(error?.responseBody || {}) } catch { /* ignore invalid error body */ }
+  return /指令不存在|命令不存在|command[^\n]{0,40}not found|request[^\n]{0,40}not found/i.test(
+    `${error?.message || ''} ${responseText}`
+  )
+}
+
+async function persistTerminalCommandFailure(pool, ownerId, requestId, error) {
+  const httpStatus = Number(error?.httpStatus || 0) || null
+  const message = sanitizeProcessLogMessage(error?.message || '云仓助手未找到该指令，请重新操作')
+  const response = sanitizeExternalValue(error?.responseBody || {})
+  await pool.execute(
+    `UPDATE cloud_external_commands
+        SET transport_status = 'failed', http_status = ?, reason = 'remote_command_not_found',
+            message_redacted = ?, response_json = ?, completed_at = NOW(3), updated_at = NOW(3)
+      WHERE owner_id = ? AND request_id = ?
+        AND transport_status IN ('submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing')`,
+    [httpStatus, message, JSON.stringify(response), ownerId, requestId]
+  )
+}
+
 function commandRowSummary(row) {
   if (!row) return null
   const response = parseStoredResponse(row.response_json)
@@ -319,12 +344,16 @@ async function submitOrderCommand(pool, apiClient, { user, purchaseOrderId, comm
     await persistCommandResponse(pool, ownerId, normalized)
     return commandRowSummary(await readCommand(pool, ownerId, requestId))
   } catch (error) {
-    await pool.execute(
-      `UPDATE cloud_external_commands
-          SET transport_status = 'submission_unknown', reason = ?, message_redacted = ?, updated_at = NOW(3)
-        WHERE owner_id = ? AND request_id = ?`,
-      [String(error.code || 'cloud_api_error').slice(0, 100), String(error.message || '').slice(0, 500), ownerId, requestId]
-    )
+    if (isRemoteCommandMissingError(error)) {
+      await persistTerminalCommandFailure(pool, ownerId, requestId, error)
+    } else {
+      await pool.execute(
+        `UPDATE cloud_external_commands
+            SET transport_status = 'submission_unknown', reason = ?, message_redacted = ?, updated_at = NOW(3)
+          WHERE owner_id = ? AND request_id = ?`,
+        [String(error.code || 'cloud_api_error').slice(0, 100), String(error.message || '').slice(0, 500), ownerId, requestId]
+      )
+    }
     error.requestId = requestId
     throw error
   }
@@ -335,8 +364,13 @@ async function refreshCommandResult(pool, apiClient, user, requestId) {
   const row = await readCommand(pool, ownerId, requestId)
   if (!row) throw serviceError('cloud_command_not_found', '云仓指令不存在或当前账号无权查看')
   if (!ACTIVE_STATUSES.has(String(row.transport_status || '').toLowerCase())) return commandRowSummary(row)
-  const normalized = normalizeCommandResponse(await apiClient.getCommandResult(requestId), requestId, row.command)
-  await persistCommandResponse(pool, ownerId, normalized)
+  try {
+    const normalized = normalizeCommandResponse(await apiClient.getCommandResult(requestId), requestId, row.command)
+    await persistCommandResponse(pool, ownerId, normalized)
+  } catch (error) {
+    if (!isRemoteCommandMissingError(error)) throw error
+    await persistTerminalCommandFailure(pool, ownerId, requestId, error)
+  }
   return commandRowSummary(await readCommand(pool, ownerId, requestId))
 }
 
@@ -465,6 +499,7 @@ module.exports = {
   commandProcessLog,
   createRequestId,
   exceptionFromCommand,
+  isRemoteCommandMissingError,
   normalizeCommandResponse,
   normalizeMachineStatus,
   queryMachineStatus,

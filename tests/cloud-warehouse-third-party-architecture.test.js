@@ -58,6 +58,15 @@ describe('云仓助手第三方服务架构', () => {
     expect(renderer).toContain('await handleCloudExceptionCheck({ automatic: true })')
   })
 
+  it('暂无异常后提供蓝色再次查询入口且不受一次性自动查询限制', () => {
+    const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
+    expect(renderer).toContain('v-else-if="cloudOrderStatus.key === \'normal\'"')
+    expect(renderer).toContain('>再次查询</el-button>')
+    expect(renderer).toContain('type="primary"')
+    expect(renderer).toContain('link')
+    expect(renderer).toContain('@click="handleCloudExceptionCheck"')
+  })
+
   it('处理异常前先尝试京东采购编号备注，失败提示后仍继续处理', () => {
     const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
     expect(renderer).toContain('async function submitPurchaseNumberToJdRemark(row)')
