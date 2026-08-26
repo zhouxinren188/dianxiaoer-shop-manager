@@ -493,7 +493,8 @@ function doOpenBackend(row, url) {
   window.electronAPI.invoke('open-store-backend-url', {
     storeId: row.id,
     url,
-    title: `店铺后台 - ${row.name}`
+    title: `${row.name} - 店铺后台`,
+    focusExisting: true
   }).catch(err => {
     ElMessage.error('打开店铺后台失败: ' + err.message)
   })

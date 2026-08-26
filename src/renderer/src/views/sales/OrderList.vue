@@ -3848,7 +3848,7 @@ async function handleGongxiaoDetail(order) {
     await window.electronAPI.invoke('open-store-backend-url', {
       storeId: store.id,
       url: gongxiaoUrl,
-      title: `采购单详情 - ${store.name || '京东代销'}`
+      title: `${store.name || '京东代销'} - 采购单详情`
     })
   } catch (err) {
     ElMessage.error('打开采购单详情失败: ' + (err.message || ''))

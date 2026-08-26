@@ -23,6 +23,7 @@ const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
 const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
+const { openStoreBackendBrowser, closeAllStoreBackendBrowsers } = require('./store-backend-browser')
 const {
   startHeartbeat,
   recoverStoreSessionFromServer,
@@ -252,29 +253,16 @@ async function updateStoreOnlineStatus(storeId, online, reason, verified = false
 }
 
 // 用店铺cookie打开京东后台指定页面（售后/纠纷/合规等）
-ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title }) => {
+ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, focusExisting }) => {
   if (!url || !storeId) return { success: false, message: '参数不完整' }
   const partitionName = `persist:platform-${storeId}`
   await refreshCookiesFromServerIfNewer(storeId, {
     skipFlush: true,
     context: 'backend_window_precheck'
   })
-  const urlWin = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    title: title || new URL(url).hostname,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      partition: partitionName
-    }
-  })
 
   // ★ 检测登录重定向：Cookie失效时京东会重定向到 passport.jd.com/login
-  let recoveryAttempted = false
-  let recoveryInProgress = false
-  let finalFailureReported = false
+  const recoveryStates = new WeakMap()
 
   function isJdLoginUrl(navUrl) {
     try {
@@ -288,48 +276,67 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title }) 
     }
   }
 
-  async function handleLoginRedirect(navUrl, navigationType) {
-    if (!isJdLoginUrl(navUrl) || recoveryInProgress || finalFailureReported) return
-    runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=login_redirect type=${navigationType} recovery_attempted=${recoveryAttempted} url_host=${new URL(navUrl).hostname}`)
+  async function handleLoginRedirect(webContents, navUrl, navigationType) {
+    if (!isJdLoginUrl(navUrl) || webContents.isDestroyed()) return
+    let recoveryState = recoveryStates.get(webContents)
+    if (!recoveryState) {
+      recoveryState = { attempted: false, inProgress: false, finalFailureReported: false }
+      recoveryStates.set(webContents, recoveryState)
+    }
+    if (recoveryState.inProgress || recoveryState.finalFailureReported) return
+    runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=login_redirect type=${navigationType} recovery_attempted=${recoveryState.attempted} url_host=${new URL(navUrl).hostname}`)
 
-    if (!recoveryAttempted) {
-      recoveryAttempted = true
-      recoveryInProgress = true
+    if (!recoveryState.attempted) {
+      recoveryState.attempted = true
+      recoveryState.inProgress = true
       const recovered = await recoverStoreSessionFromServer(storeId, 'jd')
-      recoveryInProgress = false
-      if (recovered !== false && !urlWin.isDestroyed()) {
+      recoveryState.inProgress = false
+      if (recovered !== false && !webContents.isDestroyed()) {
         runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=${recovered === true ? 'verified' : 'check_uncertain'} action=reload_original_url`)
         if (recovered === true) {
           await updateStoreOnlineStatus(storeId, true, 'backend_cookie_recovered', true)
         }
-        urlWin.loadURL(url).catch(error => {
+        const recoveryUrl = webContents.__storeBackendRequestedUrl || url
+        webContents.loadURL(recoveryUrl).catch(error => {
           runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=reload result=failed reason=${error.message}`)
         })
         return
       }
     }
 
-    finalFailureReported = true
+    recoveryState.finalFailureReported = true
     runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=failed final=device_offline`)
     await updateStoreOnlineStatus(storeId, false, 'backend_login_redirect_after_recovery', false)
   }
 
-  urlWin.webContents.on('did-navigate', (event, navUrl) => {
-    handleLoginRedirect(navUrl, 'did-navigate').catch(error => {
-      runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+  function attachBackendSessionRecovery(webContents) {
+    recoveryStates.set(webContents, { attempted: false, inProgress: false, finalFailureReported: false })
+    webContents.on('did-navigate', (event, navUrl) => {
+      handleLoginRedirect(webContents, navUrl, 'did-navigate').catch(error => {
+        runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+      })
     })
-  })
-
-  urlWin.webContents.on('did-navigate-in-page', (event, navUrl) => {
-    handleLoginRedirect(navUrl, 'did-navigate-in-page').catch(error => {
-      runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+    webContents.on('did-navigate-in-page', (event, navUrl) => {
+      handleLoginRedirect(webContents, navUrl, 'did-navigate-in-page').catch(error => {
+        runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)
+      })
     })
-  })
+  }
 
-  urlWin.loadURL(url).catch(err => {
-    console.error('[StoreBackend] loadURL failed:', err.message)
+  const opened = openStoreBackendBrowser({
+    storeId,
+    url,
+    title: title || new URL(url).hostname,
+    partitionName,
+    focusExisting: !!focusExisting,
+    onWebContentsCreated: attachBackendSessionRecovery,
+    runtimeLog
   })
-  return { success: true }
+  return {
+    success: true,
+    reused: opened.reused,
+    tabId: opened.tabId
+  }
 })
 
 // 用采购账号cookie打开指定页面（如淘宝退款、拼多多订单详情页面）
@@ -1086,6 +1093,7 @@ app.on('before-quit', () => {
   // BrowserWindow's close event. Mark this as an intentional shutdown so the
   // normal user-facing close confirmation cannot block updater installation.
   isQuitting = true
+  closeAllStoreBackendBrowsers()
   try {
     // 扫描所有 partition session 并 flush（Electron 的 session API 不提供列举方法，
     // 所以 flush defaultSession + 已知的 partition pattern）

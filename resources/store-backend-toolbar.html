@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>店铺后台</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #eef2f7; color: #303133; }
+    .toolbar { height: 84px; border-bottom: 1px solid #d8dee8; background: #f5f7fa; user-select: none; }
+    .tabs-row { height: 43px; display: flex; align-items: flex-end; gap: 2px; padding: 5px 8px 0; background: #e8edf5; }
+    .store-label { flex: 0 0 auto; max-width: 180px; height: 32px; display: flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; color: #52606d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tabs { min-width: 0; flex: 1; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: thin; }
+    .tab { flex: 0 1 220px; min-width: 120px; max-width: 240px; height: 34px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; display: flex; align-items: center; gap: 7px; padding: 0 8px 0 11px; background: #dfe5ee; cursor: default; }
+    .tab:hover { background: #f0f3f8; }
+    .tab.active { background: #fff; border-color: #d8dee8; }
+    .tab-status { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: #a8b3c2; }
+    .tab.loading .tab-status { border: 2px solid #a9c7ff; border-top-color: #337ecc; background: transparent; animation: spin .8s linear infinite; }
+    .tab.crashed .tab-status { background: #f56c6c; }
+    .tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .tab-close { flex: 0 0 20px; width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: #667085; font-size: 16px; line-height: 18px; cursor: pointer; }
+    .tab-close:hover { background: #d7dee9; color: #303133; }
+    .nav-row { height: 41px; display: flex; align-items: center; gap: 5px; padding: 5px 10px; background: #fff; }
+    .nav-button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: transparent; color: #475467; cursor: pointer; font-size: 17px; }
+    .nav-button:hover:not(:disabled) { background: #edf1f6; }
+    .nav-button:disabled { color: #c4cad3; cursor: default; }
+    .address { flex: 1; min-width: 0; height: 30px; border: 1px solid transparent; border-radius: 16px; padding: 0 14px; outline: none; background: #f1f3f6; color: #344054; font-size: 12px; }
+    .address:focus { border-color: #79bbff; background: #fff; box-shadow: 0 0 0 2px rgba(64, 158, 255, .12); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="tabs-row">
+      <div id="storeLabel" class="store-label">店铺后台</div>
+      <div id="tabs" class="tabs"></div>
+    </div>
+    <div class="nav-row">
+      <button id="back" class="nav-button" title="后退">‹</button>
+      <button id="forward" class="nav-button" title="前进">›</button>
+      <button id="reload" class="nav-button" title="刷新">↻</button>
+      <button id="home" class="nav-button" title="店铺首页">⌂</button>
+      <input id="address" class="address" aria-label="网址" autocomplete="off" spellcheck="false">
+    </div>
+  </div>
+  <script>
+    (function() {
+      var api = window.storeBackendTabs;
+      var tabsEl = document.getElementById('tabs');
+      var storeLabel = document.getElementById('storeLabel');
+      var address = document.getElementById('address');
+      var back = document.getElementById('back');
+      var forward = document.getElementById('forward');
+
+      function action(name, payload) {
+        if (api) api.action(name, payload || {});
+      }
+
+      function render(state) {
+        state = state || {};
+        storeLabel.textContent = state.baseTitle || '店铺后台';
+        storeLabel.title = state.baseTitle || '店铺后台';
+        address.value = state.activeUrl || '';
+        back.disabled = !state.canGoBack;
+        forward.disabled = !state.canGoForward;
+        tabsEl.replaceChildren();
+
+        (state.tabs || []).forEach(function(tab) {
+          var tabEl = document.createElement('div');
+          tabEl.className = 'tab' + (tab.id === state.activeTabId ? ' active' : '') + (tab.loading ? ' loading' : '') + (tab.crashed ? ' crashed' : '');
+          tabEl.title = tab.title || tab.url || '新标签页';
+          tabEl.addEventListener('click', function() { action('activate', { tabId: tab.id }); });
+          tabEl.addEventListener('auxclick', function(event) {
+            if (event.button === 1) action('close', { tabId: tab.id });
+          });
+
+          var status = document.createElement('span');
+          status.className = 'tab-status';
+          var title = document.createElement('span');
+          title.className = 'tab-title';
+          title.textContent = tab.title || '新标签页';
+          var close = document.createElement('button');
+          close.className = 'tab-close';
+          close.textContent = '×';
+          close.title = '关闭标签页';
+          close.addEventListener('click', function(event) {
+            event.stopPropagation();
+            action('close', { tabId: tab.id });
+          });
+          tabEl.append(status, title, close);
+          tabsEl.appendChild(tabEl);
+        });
+
+        var active = tabsEl.querySelector('.tab.active');
+        if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+
+      document.getElementById('back').addEventListener('click', function() { action('back'); });
+      document.getElementById('forward').addEventListener('click', function() { action('forward'); });
+      document.getElementById('reload').addEventListener('click', function() { action('reload'); });
+      document.getElementById('home').addEventListener('click', function() { action('home'); });
+      address.addEventListener('keydown', function(event) {
+        if (event.key !== 'Enter') return;
+        var url = address.value.trim();
+        if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+        action('navigate', { url: url });
+        address.blur();
+      });
+
+      if (api) api.onState(render);
+    })();
+  </script>
+</body>
+</html>
