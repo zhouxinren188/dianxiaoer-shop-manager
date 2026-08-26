@@ -1274,6 +1274,7 @@ import {
   saveTaobaoSameHistory,
   withTaobaoSameSearchTimeout
 } from '@/utils/taobaoSameHistory'
+import { normalizeBuyerAddress } from '@/utils/buyerAddress'
 
 // ==================== 筛选项配置 ====================
 
@@ -1693,12 +1694,13 @@ async function handleRevealBuyerInfo(order) {
 
     if (result.success && result.data) {
       const info = result.data
+      const buyerAddress = normalizeBuyerAddress(info.buyerAddress)
       if (info.buyerName) {
         order.customerName = info.buyerName
         order.receiver = info.buyerName
       }
       if (info.buyerPhone) order.customerPhone = info.buyerPhone
-      if (info.buyerAddress) order.address = info.buyerAddress
+      if (buyerAddress) order.address = buyerAddress
       ElMessage.success('买家真实信息已获取')
 
       // 通过主进程IPC保存到服务器（比渲染进程直接HTTP更可靠）
@@ -1709,7 +1711,7 @@ async function handleRevealBuyerInfo(order) {
           orderNo: order.orderNo,
           buyerName: info.buyerName,
           buyerPhone: info.buyerPhone,
-          buyerAddress: info.buyerAddress
+          buyerAddress
         })
         if (!saveResult.success) {
           console.warn('[BuyerInfo] 回写服务器失败:', saveResult.message)
@@ -1722,7 +1724,7 @@ async function handleRevealBuyerInfo(order) {
       // 二次比对打假人库（账号精确匹配 + 地址相似度匹配）
       if (order.issueEvent !== '职业打假') {
         try {
-          const checkResult = await checkFraudster(order.buyerAccount, order.id, info.buyerAddress || order.address)
+          const checkResult = await checkFraudster(order.buyerAccount, order.id, buyerAddress || order.address)
           if (checkResult.data && checkResult.data.matched) {
             order.issueEvent = '疑似打假'
             const f = checkResult.data.fraudster
@@ -1769,6 +1771,7 @@ async function handleRevealBuyerInfoInPurchase() {
 
     if (result.success && result.data) {
       const info = result.data
+      const buyerAddress = normalizeBuyerAddress(info.buyerAddress)
       // 更新 purchaseInfo
       if (info.buyerName) {
         purchaseInfo.buyerName = info.buyerName
@@ -1776,8 +1779,8 @@ async function handleRevealBuyerInfoInPurchase() {
       if (info.buyerPhone) {
         purchaseInfo.buyerPhone = info.buyerPhone
       }
-      if (info.buyerAddress) {
-        purchaseInfo.buyerAddress = info.buyerAddress
+      if (buyerAddress) {
+        purchaseInfo.buyerAddress = buyerAddress
       }
       // 三方代发时重新按格式生成收货地址预览
       if (purchaseInfo.purchaseType === 'dropship') {
@@ -1791,7 +1794,7 @@ async function handleRevealBuyerInfoInPurchase() {
           order.receiver = info.buyerName
         }
         if (info.buyerPhone) order.customerPhone = info.buyerPhone
-        if (info.buyerAddress) order.address = info.buyerAddress
+        if (buyerAddress) order.address = buyerAddress
       }
       ElMessage.success('买家真实信息已获取')
       purchaseInfo._buyerRevealed = true
@@ -1804,7 +1807,7 @@ async function handleRevealBuyerInfoInPurchase() {
           orderNo: purchaseInfo.salesOrderNo,
           buyerName: info.buyerName,
           buyerPhone: info.buyerPhone,
-          buyerAddress: info.buyerAddress
+          buyerAddress
         })
         if (!saveResult.success) {
           console.warn('[BuyerInfo] 回写服务器失败:', saveResult.message)
@@ -2549,7 +2552,7 @@ function updateDropshipShipping() {
   purchaseInfo.shippingName = (purchaseInfo.buyerName || '').replace(/\[\d+\]/, '').trim()
   purchaseInfo.shippingPhone = purchaseInfo.warehousePhone || purchaseInfo.buyerPhone || ''
   // 地址也去掉.[编号]或[编号]，再追加派件联系后缀
-  let addr = (purchaseInfo.buyerAddress || '').replace(/\.?\[\d+\]/, '').trim()
+  let addr = normalizeBuyerAddress(purchaseInfo.buyerAddress).replace(/\.?\[\d+\]/, '').trim()
   if (purchaseInfo.buyerPhone) {
     addr = addr + '【派件联系' + purchaseInfo.buyerPhone + '】'
   }

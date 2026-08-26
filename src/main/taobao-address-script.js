@@ -71,6 +71,8 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   var addressCleanupBatch = ${TAOBAO_ADDRESS_CLEANUP_BATCH};
   var formRoot = null;
   var saveClicked = false;
+  var saveSuccessNoticeBaseline = [];
+  var saveSuccessNoticeLogged = false;
   var finished = false;
   var startedAt = Date.now();
 
@@ -547,12 +549,36 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     return false;
   }
 
-  function explicitSuccessVisible() {
-    if (!saveClicked) return false;
+  function collectSaveSuccessNotices() {
     var notices = visibleAll('[role="alert"], .next-message, .next-feedback, [class*="toast"], [class*="Toast"], [class*="message"], [class*="Message"]', document);
+    var matches = [];
     for (var i = 0; i < notices.length; i++) {
       var text = nodeText(notices[i]);
-      if (/((保存|新增|添加|修改).{0,8}成功)|操作成功/.test(text)) return true;
+      if (/((保存|新增|添加|修改).{0,8}成功)/.test(text)) {
+        matches.push({ node: notices[i], text: text });
+      }
+    }
+    return matches;
+  }
+
+  function captureSaveSuccessNoticeBaseline() {
+    saveSuccessNoticeBaseline = collectSaveSuccessNotices();
+    log('SAVE_NOTICE_BASELINE', 'count=' + saveSuccessNoticeBaseline.length);
+  }
+
+  function newSaveSuccessNoticeVisible() {
+    if (!saveClicked) return false;
+    var current = collectSaveSuccessNotices();
+    for (var i = 0; i < current.length; i++) {
+      var existedBeforeSave = false;
+      for (var baselineIndex = 0; baselineIndex < saveSuccessNoticeBaseline.length; baselineIndex++) {
+        var baseline = saveSuccessNoticeBaseline[baselineIndex];
+        if (baseline.node === current[i].node && baseline.text === current[i].text) {
+          existedBeforeSave = true;
+          break;
+        }
+      }
+      if (!existedBeforeSave) return true;
     }
     return false;
   }
@@ -731,10 +757,6 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     }, 1200);
   }
 
-  function targetAddressVisibleOutsideForm() {
-    return !!findTargetAddressOutsideForm();
-  }
-
   function cleanupRowIsProtected(row) {
     return matchesTargetAddressRow(row) ||
       matchesProtectedAddressRow(row) ||
@@ -832,28 +854,24 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       return false;
     }
 
-    if (getRowAction(row, /^取消默认$/)) {
-      log('EXISTING_ADDRESS_ALREADY_DEFAULT');
-      return true;
-    }
-
-    var setDefaultButton = getRowAction(row, /^(设为默认|设置默认|设为默认地址|设为默认收货地址)$/);
-    if (!setDefaultButton) {
-      log('EXISTING_DEFAULT_ACTION_MISSING');
-      return false;
-    }
-
-    setDefaultButton.click();
-    log('EXISTING_DEFAULT_CLICKED');
+    var defaultClickMade = false;
     for (var checkTry = 0; checkTry < 20; checkTry++) {
-      await sleep(150);
       var refreshedRow = findTargetAddressOutsideForm();
       if (refreshedRow && getRowAction(refreshedRow, /^取消默认$/)) {
-        log('EXISTING_DEFAULT_CONFIRMED');
+        log(defaultClickMade ? 'EXISTING_DEFAULT_CONFIRMED' : 'EXISTING_ADDRESS_ALREADY_DEFAULT');
         return true;
       }
+      if (refreshedRow && !defaultClickMade) {
+        var setDefaultButton = getRowAction(refreshedRow, /^(设为默认|设置默认|设为默认地址|设为默认收货地址)$/);
+        if (setDefaultButton) {
+          setDefaultButton.click();
+          defaultClickMade = true;
+          log('EXISTING_DEFAULT_CLICKED');
+        }
+      }
+      await sleep(150);
     }
-    log('EXISTING_DEFAULT_UNCONFIRMED');
+    log(defaultClickMade ? 'EXISTING_DEFAULT_UNCONFIRMED' : 'EXISTING_DEFAULT_ACTION_MISSING');
     return false;
   }
 
@@ -932,19 +950,26 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   var saveButton = findSaveButton();
   if (!saveButton) return finish('no_save_button', 'save_button_not_found');
+  captureSaveSuccessNoticeBaseline();
   saveClicked = true;
   saveButton.click();
   log('SAVE_CLICKED', 'defaultVerified=' + defaultOk);
 
   for (var resultTry = 0; resultTry < 50; resultTry++) {
-    if (explicitSuccessVisible()) {
-      schedulePostSaveStateLogs('success_notice');
-      return finish('success', 'success_notice');
+    if (!saveSuccessNoticeLogged && newSaveSuccessNoticeVisible()) {
+      saveSuccessNoticeLogged = true;
+      log('SAVE_SUCCESS_NOTICE_SEEN', 'awaitingAddressVerification=true');
     }
     clickSecondaryConfirm();
-    if (resultTry > 3 && targetAddressVisibleOutsideForm()) {
-      schedulePostSaveStateLogs('address_list_verified');
-      return finish('success', 'address_list_verified');
+    if (resultTry > 3) {
+      var savedAddress = findTargetAddressOutsideForm();
+      if (savedAddress) {
+        var savedDefaultOk = await ensureExistingAddressDefault(savedAddress);
+        schedulePostSaveStateLogs(savedDefaultOk ? 'address-list-default-verified' : 'address-list-default-unconfirmed');
+        return savedDefaultOk
+          ? finish('success', 'address_list_default_verified')
+          : finish('default_unconfirmed', 'saved_address_not_default');
+      }
     }
 
     var currentIssue = detectBlockingIssue();

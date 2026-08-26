@@ -159,4 +159,33 @@ describe('淘宝地址管理脚本 v2', () => {
     expect(script).toContain("log('SAVE_CLICKED', 'defaultVerified=' + defaultOk)")
     expect(script).not.toContain('POST_SAVE_STATE text=')
   })
+
+  it('不会把清理旧地址遗留的通用操作成功提示误判为新增成功', () => {
+    const script = buildTaobaoAddressManagerScript('诊断收件人', '13800138000', {
+      province: '江苏省',
+      city: '宿迁市',
+      area: '沭阳县',
+      other: '诊断路2号【A9004】'
+    })
+
+    expect(script).toContain('captureSaveSuccessNoticeBaseline()')
+    expect(script).toContain("log('SAVE_SUCCESS_NOTICE_SEEN', 'awaitingAddressVerification=true')")
+    expect(script).not.toContain('|操作成功')
+    expect(script).not.toContain("finish('success', 'success_notice')")
+  })
+
+  it('只有目标地址出现在列表且默认状态确认后才返回成功', () => {
+    const script = buildTaobaoAddressManagerScript('诊断收件人', '13800138000', {
+      province: '江苏省',
+      city: '宿迁市',
+      area: '沭阳县',
+      other: '诊断路3号【A9005】'
+    })
+
+    expect(script).toContain('var savedAddress = findTargetAddressOutsideForm()')
+    expect(script).toContain('var savedDefaultOk = await ensureExistingAddressDefault(savedAddress)')
+    expect(script).toContain("finish('success', 'address_list_default_verified')")
+    expect(script).toContain("finish('default_unconfirmed', 'saved_address_not_default')")
+    expect(script).not.toContain("finish('success', 'address_list_verified')")
+  })
 })
