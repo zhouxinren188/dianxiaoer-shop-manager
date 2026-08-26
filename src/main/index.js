@@ -22,7 +22,11 @@ const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
-const { registerAftersaleFetchIpc } = require('./aftersale-fetch')
+const {
+  registerAftersaleFetchIpc,
+  updateAftersaleAutoSyncAuth,
+  stopAftersaleAutoSync
+} = require('./aftersale-fetch')
 const { openStoreBackendBrowser, closeAllStoreBackendBrowsers } = require('./store-backend-browser')
 const {
   startHeartbeat,
@@ -930,6 +934,7 @@ ipcMain.handle('window-set-main-size', (event) => {
 // 注册 auth token 同步（渲染进程登录后将 token 传递给主进程）
 ipcMain.handle('set-auth-token', (event, token) => {
   setAuthToken(token || null)
+  updateAftersaleAutoSyncAuth(token || null)
   console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')
 })
 
@@ -1093,6 +1098,7 @@ app.on('before-quit', () => {
   // BrowserWindow's close event. Mark this as an intentional shutdown so the
   // normal user-facing close confirmation cannot block updater installation.
   isQuitting = true
+  stopAftersaleAutoSync()
   closeAllStoreBackendBrowsers()
   try {
     // 扫描所有 partition session 并 flush（Electron 的 session API 不提供列举方法，

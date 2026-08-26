@@ -456,6 +456,7 @@ function refineStatusByTracking(status, tracking, logisticsStatus) {
 // ============ Cookie 有效性检查 ============
 
 const PLATFORM_DOMAINS = {
+  jd: ['jd.com', 'jd.hk'],
   pinduoduo: ['pinduoduo.com', 'yangkeduo.com'],
   taobao: ['taobao.com', 'tmall.com'],
   '1688': ['1688.com', 'alibaba.com'],

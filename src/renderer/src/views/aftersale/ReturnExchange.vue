@@ -12,6 +12,14 @@
         </div>
       </div>
       <div class="header-right">
+        <el-checkbox
+          v-model="autoSyncEnabled"
+          :disabled="autoSyncUpdating"
+          @change="handleAutoSyncToggle"
+        >
+          每小时自动同步
+        </el-checkbox>
+        <span v-if="autoSyncEnabled" class="auto-sync-status">{{ autoSyncStatusText }}</span>
         <el-button type="warning" @click="handleSyncAll" :loading="syncing" :disabled="syncing">
           <el-icon><Refresh /></el-icon>
           {{ syncing && syncProgress ? syncProgress : '同步所有店铺' }}
@@ -166,7 +174,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Service, Search, Refresh } from '@element-plus/icons-vue'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
@@ -175,9 +183,27 @@ import { fetchStores } from '@/api/store'
 const loading = ref(false)
 const syncing = ref(false)
 const syncProgress = ref('')
+const autoSyncEnabled = ref(false)
+const autoSyncUpdating = ref(false)
+const autoSyncRunning = ref(false)
+const autoSyncNextRunAt = ref(null)
+const autoSyncNow = ref(Date.now())
 const storeOptions = ref([])
 const tableData = ref([])
 const lastUpdateTime = ref('')
+let unsubscribeAutoSyncStart = null
+let unsubscribeAutoSyncResult = null
+let autoSyncClockTimer = null
+
+const autoSyncStatusText = computed(() => {
+  if (autoSyncRunning.value) return '正在自动同步…'
+  const nextRunAt = Number(autoSyncNextRunAt.value || 0)
+  if (nextRunAt > autoSyncNow.value) {
+    const minutes = Math.max(1, Math.ceil((nextRunAt - autoSyncNow.value) / 60000))
+    return `下次约 ${minutes} 分钟后`
+  }
+  return '已开启，等待同步'
+})
 
 const summary = reactive({
   totalOverdueOrders: 0,
@@ -326,6 +352,7 @@ async function loadData() {
 }
 
 async function handleSyncAll() {
+  if (syncing.value) return
   syncing.value = true
   syncProgress.value = ''
 
@@ -347,9 +374,7 @@ async function handleSyncAll() {
       const result = await window.electronAPI.invoke('fetch-aftersale-metrics', { storeId: store.id })
       if (result.success) {
         successCount++
-        // 每成功一个店铺就刷新表格，实时展示数据
-        loadData()
-      } else if (result.message && result.message.includes('Cookie')) {
+      } else if (/Cookie|登录|未登录|过期/i.test(result.message || '')) {
         skipCount++
       } else {
         failCount++
@@ -364,6 +389,8 @@ async function handleSyncAll() {
   syncing.value = false
   syncProgress.value = ''
 
+  if (successCount > 0) await loadData()
+
   if (successCount > 0) {
     const parts = [`${successCount}个成功`]
     if (failCount > 0) parts.push(`${failCount}个失败`)
@@ -373,6 +400,43 @@ async function handleSyncAll() {
     ElMessage.warning(`${skipCount}个京东店铺均未登录，请先在「店铺管理」中登录京东后台`)
   } else {
     ElMessage.error(`同步失败：${failCount}个失败${skipCount > 0 ? `，${skipCount}个未登录跳过` : ''}`)
+  }
+}
+
+async function loadAutoSyncStatus() {
+  try {
+    const status = await window.electronAPI.invoke('aftersale-auto-sync-status')
+    autoSyncEnabled.value = !!status?.enabled
+    autoSyncRunning.value = !!status?.running
+    autoSyncNextRunAt.value = status?.nextRunAt || null
+  } catch (err) {
+    console.error('[商家售后纠纷] 读取自动同步状态失败:', err.message)
+  }
+}
+
+async function handleAutoSyncToggle(enabled) {
+  if (autoSyncUpdating.value) return
+  autoSyncUpdating.value = true
+  try {
+    const result = await window.electronAPI.invoke('toggle-aftersale-auto-sync', { enabled: !!enabled })
+    if (!result?.success) {
+      autoSyncEnabled.value = !!result?.enabled
+      ElMessage.error(result?.message || '自动同步设置失败')
+      return
+    }
+    autoSyncEnabled.value = !!result.enabled
+    autoSyncRunning.value = !!result.running
+    autoSyncNextRunAt.value = result.nextRunAt || null
+    if (result.enabled) {
+      ElMessage.success('已开启，正在立即同步所有京东店铺')
+    } else {
+      ElMessage.info('已关闭售后纠纷自动同步')
+    }
+  } catch (err) {
+    autoSyncEnabled.value = !enabled
+    ElMessage.error('自动同步设置失败: ' + (err.message || '未知错误'))
+  } finally {
+    autoSyncUpdating.value = false
   }
 }
 
@@ -394,8 +458,35 @@ function handleReset() {
 }
 
 onMounted(() => {
+  if (window.electronAPI?.onUpdate) {
+    unsubscribeAutoSyncStart = window.electronAPI.onUpdate('aftersale-auto-sync-start', () => {
+      autoSyncRunning.value = true
+      autoSyncNextRunAt.value = null
+    })
+    unsubscribeAutoSyncResult = window.electronAPI.onUpdate('aftersale-auto-sync-result', async result => {
+      autoSyncRunning.value = false
+      await loadAutoSyncStatus()
+      if (result && result.successCount > 0) {
+        await loadData()
+        ElMessage.success(`自动同步完成：${result.successCount}个成功${result.skipCount ? `，${result.skipCount}个未登录跳过` : ''}${result.failCount ? `，${result.failCount}个失败` : ''}`)
+      } else if (result && !result.interrupted) {
+        ElMessage.warning(`自动同步完成：${result.skipCount || 0}个跳过，${result.failCount || 0}个失败`)
+      }
+    })
+  }
+  autoSyncClockTimer = setInterval(() => { autoSyncNow.value = Date.now() }, 30000)
   loadStoreOptions()
   loadData()
+  loadAutoSyncStatus()
+})
+
+onUnmounted(() => {
+  if (unsubscribeAutoSyncStart) unsubscribeAutoSyncStart()
+  if (unsubscribeAutoSyncResult) unsubscribeAutoSyncResult()
+  if (autoSyncClockTimer) clearInterval(autoSyncClockTimer)
+  unsubscribeAutoSyncStart = null
+  unsubscribeAutoSyncResult = null
+  autoSyncClockTimer = null
 })
 </script>
 
@@ -448,7 +539,14 @@ onMounted(() => {
 
 .header-right {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.auto-sync-status {
+  color: #909399;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 /* 统计卡片 */
