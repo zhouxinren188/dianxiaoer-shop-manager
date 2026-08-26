@@ -562,10 +562,10 @@ const PRODUCT_INFO_OVERLAY = `
                    url.indexOf('buyer.trade.1688.com') >= 0;
 
   var isTaobaoProductPage = !isCheckout && (
-    /item\.taobao\.com\/item\.htm/.test(url) ||
-    /detail\.tmall\.(com|hk)\/item\.htm/.test(url) ||
-    /h5\.m\.taobao\.com\/awp\/core\/detail\.htm/.test(url) ||
-    /main\.m\.taobao\.com\/security-h5-detail\/home/.test(url)
+    /item\\.taobao\\.com\\/item\\.htm/.test(url) ||
+    /detail\\.tmall\\.(com|hk)\\/item\\.htm/.test(url) ||
+    /h5\\.m\\.taobao\\.com\\/awp\\/core\\/detail\\.htm/.test(url) ||
+    /main\\.m\\.taobao\\.com\\/security-h5-detail\\/home/.test(url)
   );
 
   // === PDD结算页不显示浮层（PDD不是隐藏改地址，不需要核对地址） ===
@@ -955,9 +955,14 @@ const PRODUCT_INFO_OVERLAY = `
     buildOverlay();
   };
 
-  // 立即构建浮层
-  buildManualRefreshButton();
+  // 原商品信息浮层是采购核心辅助信息，必须先构建；刷新按钮属于附加能力，
+  // 即使淘宝页面结构变化导致其初始化失败，也绝不能影响原浮层。
   buildOverlay();
+  try {
+    buildManualRefreshButton();
+  } catch (refreshError) {
+    console.warn('[PurchaseManualRefresh] initialization failed:', refreshError && refreshError.message);
+  }
 })()
 `
 
