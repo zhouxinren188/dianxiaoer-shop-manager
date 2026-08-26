@@ -25,6 +25,8 @@ const validInvokeChannels = [
   'fetch-sales-orders',
   'set-auth-token',
   'proxy-fetch',
+  'purchase-dialog-render-timing',
+  'prepare-purchase-order-url',
   'open-purchase-order-window',
   'close-purchase-order-window',
   'refresh-purchase-cookies',

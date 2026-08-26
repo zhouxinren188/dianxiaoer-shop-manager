@@ -362,6 +362,7 @@
       @closed="onPurchaseDialogClosed"
       class="purchase-dialog-redesign"
       top="5vh"
+      :transition="purchaseDialogTransition"
     >
       <template #header>
         <div class="purchase-dialog-header">
@@ -385,8 +386,13 @@
         </div>
       </template>
       
+      <div v-if="purchaseDialogPreparing" class="purchase-dialog-preparing">
+        <el-icon :size="32" class="is-loading"><Loading /></el-icon>
+        <span>正在准备采购信息...</span>
+      </div>
+
       <!-- Step 1: idle 状态 -->
-      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
+      <div v-else-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
         <!-- 顶部：收货地址 -->
         <div class="shipping-banner">
           <div class="card-body">
@@ -605,7 +611,7 @@
       </div>
 
       <template #footer>
-        <template v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
+        <template v-if="!purchaseDialogPreparing && purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
           <el-button @click="purchaseDialogVisible = false">取消</el-button>
           <el-button type="primary" :disabled="!purchaseInfo.sourceUrl.trim() || !purchaseInfo.selectedAccountId" @click="handleGoOrder">去下单</el-button>
         </template>
@@ -655,7 +661,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import {
   Goods, Search, Refresh, Plus, Link, ShoppingCart, Edit, Loading,
   CircleCheck, Delete, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Box
@@ -993,6 +999,8 @@ function getItemColor(name) {
 }
 
 const purchaseDialogVisible = ref(false)
+const purchaseDialogPreparing = ref(false)
+const purchaseDialogTransition = Object.freeze({ name: 'purchase-dialog-instant', duration: 0 })
 const purchaseAccounts = ref([])
 const purchaseInfo = reactive({
   step: 1,
@@ -1024,6 +1032,84 @@ const purchaseInfo = reactive({
   warehousePhone: '',
   warehouseAddress: ''
 })
+
+function waitForPurchaseDialogFrame(timeoutMs = 120) {
+  return new Promise(resolve => {
+    let settled = false
+    let fallbackTimer = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (fallbackTimer) window.clearTimeout(fallbackTimer)
+      resolve()
+    }
+
+    fallbackTimer = window.setTimeout(finish, timeoutMs)
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(finish)
+    } else {
+      window.setTimeout(finish, 16)
+    }
+  })
+}
+
+function reportPurchaseDialogTiming(context, stage, startedAt) {
+  try {
+    const request = window.electronAPI?.invoke('purchase-dialog-render-timing', {
+      context,
+      stage,
+      elapsedMs: performance.now() - startedAt
+    })
+    Promise.resolve(request).catch(() => {})
+  } catch {}
+}
+
+async function showPurchaseDialogShell(context) {
+  const startedAt = performance.now()
+  purchaseDialogPreparing.value = true
+  purchaseDialogVisible.value = true
+  await nextTick()
+  await waitForPurchaseDialogFrame()
+  await waitForPurchaseDialogFrame()
+  reportPurchaseDialogTiming(context, 'shell_painted', startedAt)
+  if (!purchaseDialogVisible.value) return false
+
+  purchaseDialogPreparing.value = false
+  await nextTick()
+  await waitForPurchaseDialogFrame()
+  reportPurchaseDialogTiming(context, 'content_painted', startedAt)
+  return purchaseDialogVisible.value
+}
+
+let purchaseUrlPrefetchTimer = null
+
+function schedulePurchaseUrlPrefetch() {
+  if (purchaseUrlPrefetchTimer) {
+    clearTimeout(purchaseUrlPrefetchTimer)
+    purchaseUrlPrefetchTimer = null
+  }
+  if (!purchaseDialogVisible.value || !['taobao', 'tmall'].includes(purchaseInfo.platform)) return
+
+  const sourceUrl = String(purchaseInfo.sourceUrl || '').trim()
+  if (!sourceUrl) return
+  purchaseUrlPrefetchTimer = setTimeout(() => {
+    purchaseUrlPrefetchTimer = null
+    if (!purchaseDialogVisible.value || String(purchaseInfo.sourceUrl || '').trim() !== sourceUrl) return
+    const purchaseUrl = /^https?:\/\//i.test(sourceUrl) ? sourceUrl : `https://${sourceUrl}`
+    window.electronAPI?.invoke('prepare-purchase-order-url', {
+      purchaseUrl,
+      platform: purchaseInfo.platform
+    }).catch(error => {
+      console.warn('[采购下单] 预取返利链接失败:', error.message)
+    })
+  }, 120)
+}
+
+watch(
+  [() => purchaseDialogVisible.value, () => purchaseInfo.sourceUrl, () => purchaseInfo.platform],
+  schedulePurchaseUrlPrefetch,
+  { flush: 'post' }
+)
 
 // 确认采购数量（采购单绑定后可编辑）
 const confirmingQty = ref(0)
@@ -1083,7 +1169,7 @@ async function handlePurchase(row) {
   purchaseInfo.shippingName = ''
   purchaseInfo.shippingPhone = ''
   purchaseInfo.shippingAddress = ''
-  purchaseDialogVisible.value = true
+  if (!(await showPurchaseDialogShell('warehouse'))) return
 
   // 注册 IPC 事件监听
   try {
@@ -1092,7 +1178,8 @@ async function handlePurchase(row) {
     console.warn('[采购下单] IPC监听注册失败:', e.message)
   }
 
-  // 加载采购账号列表
+  // 货源与账号并行加载；货源链接一到就会触发返利预取。
+  const sourceLoadPromise = loadSkuSources(purchaseInfo.skuId)
   try {
     const res = await fetchPurchaseAccounts()
     const rawList = res && res.list ? res.list : (Array.isArray(res) ? res : [])
@@ -1119,8 +1206,7 @@ async function handlePurchase(row) {
     updateWarehouseShipping()
   }
 
-  // 加载该SKU的货源列表
-  await loadSkuSources(purchaseInfo.skuId)
+  await sourceLoadPromise
 
   // 根据平台自动选择上次使用的账号
   const lastId = localStorage.getItem('lastPurchaseAccount_' + purchaseInfo.platform)
@@ -1532,6 +1618,11 @@ function cleanupPurchaseListeners() {
 }
 
 function onPurchaseDialogClosed() {
+  purchaseDialogPreparing.value = false
+  if (purchaseUrlPrefetchTimer) {
+    clearTimeout(purchaseUrlPrefetchTimer)
+    purchaseUrlPrefetchTimer = null
+  }
   cleanupPurchaseListeners()
   // 如果在 confirming/captured 状态关闭（未走正常确认流程），仍然刷新列表
   if (purchaseInfo.captureStatus === 'confirming' || purchaseInfo.captureStatus === 'captured') {
@@ -1665,6 +1756,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (purchaseUrlPrefetchTimer) { clearTimeout(purchaseUrlPrefetchTimer); purchaseUrlPrefetchTimer = null }
   cleanupPurchaseListeners()
 })
 </script>
@@ -1961,6 +2053,22 @@ onUnmounted(() => {
 }
 
 /* ========== 采购下单弹窗样式 ========== */
+.purchase-dialog-preparing {
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #606266;
+  font-size: 14px;
+  background: #fafbfc;
+}
+
+.purchase-dialog-preparing .el-icon {
+  color: #2b5aed;
+}
+
 .purchase-dialog-redesign {
   border-radius: 8px;
   overflow: hidden;

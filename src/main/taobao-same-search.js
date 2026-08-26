@@ -32,6 +32,9 @@ const TAOBAO_SEARCH_AUTH_TIMEOUT = 20000
 const TAOBAO_SEARCH_AUTH_STABLE_MS = 1200
 const TAOBAO_SEARCH_LOGIN_STABLE_MS = 2000
 const TAOBAO_SEARCH_LOGIN_TIMEOUT = 5 * 60 * 1000
+// 单次IPC在扫码登录后等待原任务自动续跑的上限。超过后renderer会保持
+// “正在等待登录”状态并再次接续，避免要求用户手动重复点击搜索。
+const TAOBAO_SEARCH_LOGIN_RESUME_WAIT_MS = 45 * 1000
 const TAOBAO_SEARCH_WARM_STABLE_MS = 250
 const TAOBAO_SEARCH_RISK_COOLDOWN_MS = 30 * 60 * 1000
 const TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS = 5
@@ -160,8 +163,18 @@ function isTaobaoCookieDomain(domain) {
     normalized.endsWith('.tmall.hk')
 }
 
-function hasTaobaoLoginCookie(cookies) {
-  return (cookies || []).some(cookie => cookie && (cookie.name === 'unb' || cookie.name === 'cookie17'))
+function isUsableTaobaoCookie(cookie, nowSeconds = Date.now() / 1000) {
+  if (!cookie || !isTaobaoCookieDomain(cookie.domain) || !String(cookie.value || '')) return false
+  if (cookie.session === true) return true
+  const expirationDate = Number(cookie.expirationDate)
+  return !Number.isFinite(expirationDate) || expirationDate <= 0 || expirationDate > nowSeconds
+}
+
+function hasTaobaoLoginCookie(cookies, nowSeconds = Date.now() / 1000) {
+  const usableCookies = (cookies || []).filter(cookie => isUsableTaobaoCookie(cookie, nowSeconds))
+  const hasIdentity = usableCookies.some(cookie => cookie.name === 'unb' || cookie.name === 'cookie17')
+  const hasSession = usableCookies.some(cookie => cookie.name === 'cookie2')
+  return hasIdentity && hasSession
 }
 
 function isTaobaoIdentityCookie(cookie) {
@@ -526,6 +539,35 @@ function shouldClearTaobaoRiskCooldownAfterLogin({ verificationWasPending, authR
   return verificationWasPending === true && authReady === true && carrierReady === true
 }
 
+function shouldFinalizeDedicatedTaobaoLogin({ loginReady, carrierReady }) {
+  return loginReady === true && carrierReady === true
+}
+
+function getTaobaoWebContentsLoadingState(webContents = null) {
+  let loading = true
+  let mainFrameLoading = true
+  try {
+    loading = typeof webContents?.isLoading === 'function' ? webContents.isLoading() : true
+  } catch (_) {}
+  try {
+    mainFrameLoading = typeof webContents?.isLoadingMainFrame === 'function'
+      ? webContents.isLoadingMainFrame()
+      : loading
+  } catch (_) {}
+  return { loading, mainFrameLoading }
+}
+
+function isTaobaoSearchDocumentReady(authenticationPage = {}, webContents = null) {
+  const readyState = String(authenticationPage.mainReadyState || '').toLowerCase()
+  if (readyState === 'complete') return true
+
+  // 淘宝过期占位承载页偶尔会有损坏或永久pending的子frame，使页面脚本读取
+  // readyState超时并返回空值。此时以Chromium主frame的加载状态兜底；认证页和
+  // 验证页仍由调用方的URL/frame检查拦截，不能仅凭此条件放行。
+  const { mainFrameLoading } = getTaobaoWebContentsLoadingState(webContents)
+  return (readyState === '' || readyState === 'interactive') && !mainFrameLoading
+}
+
 function showDedicatedLoginWindow(state, title) {
   if (!state || !state.loginWin || state.loginWin.isDestroyed()) return
   state.loginWin.setTitle(title || '淘宝同款专用账号 - 请登录淘宝')
@@ -686,8 +728,8 @@ async function waitForDedicatedTaobaoLoginStable(
     const cookies = await state.ses.cookies.get({})
     const token = await getTaobaoMtopToken(state.ses)
     const identity = buildTaobaoSessionIdentity(cookies, token)
-    const pageReady = authenticationPage.mainReadyState === 'complete'
-    const loading = win.webContents.isLoading()
+    const pageReady = isTaobaoSearchDocumentReady(authenticationPage, win.webContents)
+    const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(win.webContents)
     latest = {
       ready: false,
       url,
@@ -696,9 +738,11 @@ async function waitForDedicatedTaobaoLoginStable(
       tokenFingerprint: identity.tokenFingerprint,
       sessionGeneration: Number(state.sessionGeneration || 0),
       pageReady,
+      loading,
+      mainFrameLoading,
       reason: 'login_environment_not_stable'
     }
-    if (hasTaobaoLoginCookie(cookies) && token && pageReady && !loading) {
+    if (hasTaobaoLoginCookie(cookies) && token && pageReady && !mainFrameLoading) {
       const signature = [
         url,
         identity.fingerprint,
@@ -730,7 +774,6 @@ async function completeDedicatedTaobaoLogin(state) {
   const verificationWasPending = state.verificationPending === true
   const authState = await waitForDedicatedTaobaoLoginStable(state)
   if (!authState.ready) return authState
-  closeDedicatedLoginWindow(state)
   // 如果旧搜索窗口曾被淘宝重定向到登录/验证页，它不是可复用的承载窗口。
   // 销毁它只重建 BrowserWindow，固定 partition 的原生 BrowserSession 会继续复用。
   if (state.win && !state.win.isDestroyed() &&
@@ -742,7 +785,45 @@ async function completeDedicatedTaobaoLogin(state) {
   }
   createTaobaoSearchBrowserWindow(state)
   const bootstrapReady = await bootstrapSearchWindow(state)
-  if (!bootstrapReady) return { ...authState, ready: false, reason: 'carrier_not_ready' }
+  if (!shouldFinalizeDedicatedTaobaoLogin({
+    loginReady: authState.ready,
+    carrierReady: bootstrapReady
+  })) {
+    const failedWin = state.win
+    const failedUrl = failedWin && !failedWin.isDestroyed() ? failedWin.webContents.getURL() : ''
+    const failedAuthentication = await readTaobaoSearchAuthenticationPageState(failedWin)
+    const verificationRequired = isTaobaoVerificationUrl(failedUrl) ||
+      failedAuthentication.needVerification
+    const loginRequired = isTaobaoLoginPageUrl(failedUrl) || failedAuthentication.needLogin
+    runtimeLog.writeLog(
+      'TaobaoSame',
+      '登录后搜索承载页复核未通过: carrier=' + isTaobaoSearchCarrierUrl(failedUrl) +
+        ', loginRequired=' + loginRequired +
+        ', verificationRequired=' + verificationRequired +
+        ', mainReadyState=' + (failedAuthentication.mainReadyState || 'EMPTY') +
+        ', inspectionTimedOut=' + !!failedAuthentication.inspectionTimedOut
+    )
+    if (verificationRequired || loginRequired) {
+      const targetUrl = verificationRequired && isTaobaoVerificationUrl(failedUrl)
+        ? failedUrl
+        : TB_SEARCH_LOGIN_URL
+      await openDedicatedTaobaoSearchLogin(
+        state,
+        verificationRequired ? 'carrier_verification_required' : 'carrier_login_required',
+        targetUrl,
+        true
+      )
+      return {
+        ...authState,
+        ready: false,
+        reason: verificationRequired ? 'carrier_verification_required' : 'carrier_login_required'
+      }
+    }
+    // 登录窗口仍保留在后台。renderer会自动接续下一轮严格复核，用户无需
+    // 再次点击；只有承载页通过后才真正关闭登录窗口。
+    return { ...authState, ready: false, reason: 'carrier_not_ready' }
+  }
+  closeDedicatedLoginWindow(state)
   state.verificationPending = false
   if (shouldClearTaobaoRiskCooldownAfterLogin({
     verificationWasPending,
@@ -777,6 +858,51 @@ function scheduleDedicatedTaobaoLoginCompletion(state) {
   return completion
 }
 
+async function waitForDedicatedTaobaoLoginResume(
+  state,
+  timeoutMs = TAOBAO_SEARCH_LOGIN_RESUME_WAIT_MS
+) {
+  const completion = state?.loginCompletionCheck || scheduleDedicatedTaobaoLoginCompletion(state)
+  if (!completion) return { ready: false, pending: false, reason: 'login_completion_missing' }
+  const result = await settleTaobaoPromiseWithTimeout(completion, timeoutMs)
+  if (!result.settled) {
+    return { ready: false, pending: true, reason: 'login_resume_wait_timeout' }
+  }
+  if (result.error) {
+    return { ready: false, pending: false, reason: 'login_completion_exception' }
+  }
+  return { ...(result.value || {}), pending: false }
+}
+
+function buildTaobaoLoginResumeResponse(loginState = {}) {
+  const reason = String(loginState.reason || '')
+  if (loginState.pending || [
+    'login_environment_timeout',
+    'carrier_not_ready',
+    'carrier_login_required',
+    'carrier_verification_required'
+  ].includes(reason)) {
+    return {
+      success: false,
+      retryable: true,
+      pendingLoginConfirmation: true,
+      message: '淘宝登录正在完成，完成后将自动继续搜索'
+    }
+  }
+  if (reason === 'login_window_closed') {
+    return {
+      success: false,
+      needLogin: true,
+      message: '淘宝登录窗口已关闭，请重新搜索并完成扫码登录'
+    }
+  }
+  return {
+    success: false,
+    retryable: true,
+    message: '淘宝登录未完成，请在弹窗中完成后重新搜索'
+  }
+}
+
 async function openDedicatedTaobaoSearchLogin(
   state,
   reason = 'login_required',
@@ -786,7 +912,8 @@ async function openDedicatedTaobaoSearchLogin(
   if (!state) return null
   state.bootstrapComplete = false
   state.firstSearchPrepared = false
-  state.verificationPending = isTaobaoVerificationUrl(targetUrl) || reason === 'verification_required'
+  state.verificationPending = isTaobaoVerificationUrl(targetUrl) ||
+    String(reason || '').includes('verification')
   state.loginPromptVisible = true
   state.loginCallbackHidden = false
   const { win, created } = createDedicatedTaobaoLoginWindow(state)
@@ -867,12 +994,26 @@ async function waitForTaobaoSearchCarrierReady(
     if (!win || win.isDestroyed()) return { ...latest, reason: 'window_destroyed' }
     const url = win.webContents.getURL()
     const authenticationPage = await readTaobaoSearchAuthenticationPageState(win)
+    const cookies = await state.ses.cookies.get({})
+    const loginCookieReady = hasTaobaoLoginCookie(cookies)
     const token = await getTaobaoMtopToken(state.ses)
     const carrier = isTaobaoSearchCarrierUrl(url)
-    const pageReady = authenticationPage.mainReadyState === 'complete'
-    const loading = win.webContents.isLoading()
-    latest = { ready: false, reason: 'carrier_not_ready', url, token, carrier, pageReady }
-    if (carrier && pageReady && !loading && token &&
+    const pageReady = isTaobaoSearchDocumentReady(authenticationPage, win.webContents)
+    const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(win.webContents)
+    latest = {
+      ready: false,
+      reason: 'carrier_not_ready',
+      url,
+      token,
+      carrier,
+      pageReady,
+      mainReadyState: authenticationPage.mainReadyState || '',
+      inspectionTimedOut: authenticationPage.inspectionTimedOut === true,
+      loading,
+      mainFrameLoading,
+      loginCookieReady
+    }
+    if (carrier && pageReady && !mainFrameLoading && loginCookieReady && token &&
       !authenticationPage.needLogin && !authenticationPage.needVerification &&
       !authenticationPage.automaticLoginPending) {
       const tokenFingerprint = shortFingerprint(token)
@@ -927,7 +1068,13 @@ async function bootstrapSearchWindow(state) {
         'TaobaoSame',
         '搜索承载页未达到严格稳定条件: reason=' + carrierState.reason +
           ', carrier=' + !!carrierState.carrier +
-          ', pageReady=' + !!carrierState.pageReady
+          ', pageReady=' + !!carrierState.pageReady +
+          ', mainReadyState=' + (carrierState.mainReadyState || 'EMPTY') +
+          ', inspectionTimedOut=' + !!carrierState.inspectionTimedOut +
+          ', loading=' + !!carrierState.loading +
+          ', mainFrameLoading=' + !!carrierState.mainFrameLoading +
+          ', loginCookieReady=' + !!carrierState.loginCookieReady +
+          ', tokenReady=' + !!carrierState.token
       )
     }
     return state.bootstrapComplete
@@ -1037,12 +1184,7 @@ async function getOrCreateTaobaoSearchWindow(accountId) {
   }
 
   createTaobaoSearchBrowserWindow(state)
-  runtimeLog.writeLog('TaobaoSame', '搜索承载窗口已创建，开始检查承载页')
-  await bootstrapSearchWindow(state)
-  runtimeLog.writeLog(
-    'TaobaoSame',
-    '搜索承载页初始化结束: ready=' + state.bootstrapComplete
-  )
+  runtimeLog.writeLog('TaobaoSame', '搜索承载窗口已创建，等待当前任务执行严格登录复核')
   return state
 }
 
@@ -1253,8 +1395,8 @@ async function waitForTaobaoSearchAuthentication(
     const loginCookieReady = hasTaobaoLoginCookie(cookies)
     const token = await getTaobaoMtopToken(state.ses)
     const identity = buildTaobaoSessionIdentity(cookies, token)
-    const loading = state.win.webContents.isLoading()
-    const pageReady = authenticationPage.mainReadyState === 'complete'
+    const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(state.win.webContents)
+    const pageReady = isTaobaoSearchDocumentReady(authenticationPage, state.win.webContents)
     const carrierPage = isTaobaoSearchCarrierUrl(url)
     latest = {
       ready: false,
@@ -1267,10 +1409,12 @@ async function waitForTaobaoSearchAuthentication(
       tokenFingerprint: identity.tokenFingerprint,
       sessionGeneration: Number(state.sessionGeneration || 0),
       pageReady,
+      loading,
+      mainFrameLoading,
       carrierPage
     }
 
-    if (loginCookieReady && token && !loading && pageReady && carrierPage) {
+    if (loginCookieReady && token && !mainFrameLoading && pageReady && carrierPage) {
       const signature = [
         url,
         identity.fingerprint,
@@ -3024,11 +3168,20 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
       if (!state.loginCallbackHidden) {
         showDedicatedLoginWindow(state, '淘宝同款专用账号 - 登录环境稳定中')
       }
-      return {
-        success: false,
-        retryable: true,
-        pendingLoginConfirmation: true,
-        message: '淘宝同款专用账号正在完成登录，请等待窗口自动关闭后重新搜索'
+      const loginState = await waitForDedicatedTaobaoLoginResume(state)
+      if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+      win = state.win
+      ses = state.ses
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '扫码登录环境已稳定，原搜同款任务自动续跑: accountId=' + accountId
+      )
+      if (!win || win.isDestroyed()) {
+        return {
+          success: false,
+          retryable: true,
+          message: '淘宝搜索承载窗口尚未创建，请稍后重新搜索'
+        }
       }
     }
     if (!win || win.isDestroyed()) {
@@ -3042,11 +3195,14 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
     const currentCookies = await ses.cookies.get({})
     if (!hasTaobaoLoginCookie(currentCookies)) {
       await openDedicatedTaobaoSearchLogin(state, 'login_cookie_missing_before_search')
-      return {
-        success: false,
-        needLogin: true,
-        message: '请先登录淘宝同款专用账号，登录后重新搜索'
-      }
+      const loginState = await waitForDedicatedTaobaoLoginResume(state)
+      if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+      win = state.win
+      ses = state.ses
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '首次扫码登录环境已稳定，原搜同款任务自动续跑: accountId=' + accountId
+      )
     }
 
     if (!state.bootstrapComplete) {
@@ -3068,19 +3224,21 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
             targetUrl,
             verificationRequired
           )
+          const loginState = await waitForDedicatedTaobaoLoginResume(state)
+          if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+          win = state.win
+          ses = state.ses
+          runtimeLog.writeLog(
+            'TaobaoSame',
+            '承载页登录复核通过，原搜同款任务自动续跑: accountId=' + accountId
+          )
+        } else {
           return {
             success: false,
-            needLogin: !verificationRequired,
-            needVerification: verificationRequired,
-            message: verificationRequired
-              ? '淘宝要求安全验证，请在弹窗中完成后重新搜索'
-              : '请先登录淘宝同款专用账号，登录后重新搜索'
+            retryable: true,
+            pendingLoginConfirmation: true,
+            message: '淘宝搜索环境仍在准备，完成后将自动继续搜索'
           }
-        }
-        return {
-          success: false,
-          retryable: true,
-          message: '淘宝搜索承载页尚未稳定，请稍后重新搜索'
         }
       }
     }
@@ -3098,11 +3256,12 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         '淘宝同款专用账号需要登录: requestAccountId=' + accountId + ', reason=' + authState.reason
       )
       await openDedicatedTaobaoSearchLogin(state, authState.reason || 'authentication_required')
-      return {
-        success: false,
-        needLogin: true,
-        message: '请先登录淘宝同款专用账号，登录后重新搜索'
-      }
+      const loginState = await waitForDedicatedTaobaoLoginResume(state)
+      if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+      authState = loginState
+      win = state.win
+      ses = state.ses
+      runtimeLog.writeLog('TaobaoSame', '登录复核通过，原搜同款任务自动续跑: accountId=' + accountId)
     }
     if (authState.needVerification) {
       const authUrl = isTaobaoVerificationUrl(authState.url) ? authState.url : TB_SEARCH_LOGIN_URL
@@ -3112,28 +3271,29 @@ async function searchTaobaoImageDirect({ accountId, imageUrl, limit = 20, automa
         authUrl,
         isTaobaoVerificationUrl(authUrl)
       )
-      return {
-        success: false,
-        needVerification: true,
-        message: '淘宝要求安全验证，请在弹窗中完成后重新搜索'
-      }
+      const loginState = await waitForDedicatedTaobaoLoginResume(state)
+      if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+      authState = loginState
+      win = state.win
+      ses = state.ses
+      runtimeLog.writeLog('TaobaoSame', '安全验证复核通过，原搜同款任务自动续跑: accountId=' + accountId)
     }
     if (authState.pendingAutomaticLogin) {
       runtimeLog.writeLog('TaobaoSame', '淘宝首次自动登录确认未在等待时间内结束，显示原会话供用户确认')
       await openDedicatedTaobaoSearchLogin(state, 'automatic_login_pending')
-      return {
-        success: false,
-        retryable: true,
-        pendingLoginConfirmation: true,
-        message: '淘宝正在等待自动登录确认，请在弹窗中确认后重新搜索'
-      }
+      const loginState = await waitForDedicatedTaobaoLoginResume(state)
+      if (!loginState.ready) return buildTaobaoLoginResumeResponse(loginState)
+      authState = loginState
+      win = state.win
+      ses = state.ses
     }
     if (!authState.ready) {
       runtimeLog.writeLog('TaobaoSame', '搜索会话尚未稳定: reason=' + authState.reason)
       return {
         success: false,
         retryable: true,
-        message: '淘宝登录会话尚未准备完成，请稍后再试'
+        pendingLoginConfirmation: true,
+        message: '淘宝登录会话仍在准备，完成后将自动继续搜索'
       }
     }
 
@@ -3572,6 +3732,7 @@ module.exports = {
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
+  isUsableTaobaoCookie,
   isTaobaoCookieDomain,
   isTaobaoIdentityCookie,
   buildTaobaoSessionIdentity,
@@ -3595,11 +3756,17 @@ module.exports = {
   readTaobaoSearchAuthenticationPageState,
   shouldHideDedicatedLoginWindow,
   shouldClearTaobaoRiskCooldownAfterLogin,
+  shouldFinalizeDedicatedTaobaoLogin,
+  getTaobaoWebContentsLoadingState,
+  isTaobaoSearchDocumentReady,
+  waitForDedicatedTaobaoLoginResume,
+  buildTaobaoLoginResumeResponse,
   settleTaobaoPromiseWithTimeout,
   loadTaobaoWindowWithTimeout,
   TAOBAO_SEARCH_AUTH_TIMEOUT,
   TAOBAO_SEARCH_AUTH_STABLE_MS,
   TAOBAO_SEARCH_LOGIN_STABLE_MS,
+  TAOBAO_SEARCH_LOGIN_RESUME_WAIT_MS,
   TAOBAO_SEARCH_WARM_STABLE_MS,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS,
   TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS,

@@ -32,4 +32,22 @@ describe('采购地址诊断日志', () => {
     expect(source).toContain("refresh('mutation')")
     expect(source).not.toContain("selectedText=' + result.selectedText")
   })
+
+  it('结算页地址浮层可复制完整收货信息并兼容剪贴板降级', () => {
+    expect(source).toContain("copyBtn.textContent = '\\u590d\\u5236'")
+    expect(source).toContain("[info.shippingName, info.shippingPhone, info.shippingAddress]")
+    expect(source).toContain("navigator.clipboard.writeText(copyText)")
+    expect(source).toContain("fallbackCopyShippingInfo(copyText)")
+    expect(source).toContain("document.execCommand('copy')")
+    expect(source).toContain('titleGroup.appendChild(copyBtn)')
+    expect(source).not.toContain('btnGroup.appendChild(copyBtn)')
+  })
+
+  it('开发版和正式版都隐藏自动改地址窗口，失败时也不保留诊断窗口', () => {
+    expect(source).toContain('title: `设置收货地址 - ${platform}`')
+    expect(source).toContain('show: false')
+    expect(source).not.toContain('addressSetupVisualDebug')
+    expect(source).not.toContain('debug_kept_open:${reason}')
+    expect(source).not.toContain('本地诊断模式保留失败地址窗口')
+  })
 })

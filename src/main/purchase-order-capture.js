@@ -22,6 +22,7 @@ const {
   loadDevelopmentRebateConfig,
   convertTaobaoRebateUrlDirect
 } = require('./taobao-rebate')
+const { createTaobaoRebatePrefetchCache } = require('./taobao-rebate-prefetch')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -529,6 +530,8 @@ const PRODUCT_INFO_OVERLAY = `
 (function() {
   var old = document.getElementById('jd-product-overlay');
   if (old) old.remove();
+  var oldRefresh = document.getElementById('__dxe_purchase_refresh_row__');
+  if (oldRefresh) oldRefresh.remove();
 
   var info = window.__jdProductInfo;
   if (!info) return '[OVERLAY] skipped: no __jdProductInfo';
@@ -558,6 +561,13 @@ const PRODUCT_INFO_OVERLAY = `
                    url.indexOf('trade.1688.com') >= 0 ||
                    url.indexOf('buyer.trade.1688.com') >= 0;
 
+  var isTaobaoProductPage = !isCheckout && (
+    /item\.taobao\.com\/item\.htm/.test(url) ||
+    /detail\.tmall\.(com|hk)\/item\.htm/.test(url) ||
+    /h5\.m\.taobao\.com\/awp\/core\/detail\.htm/.test(url) ||
+    /main\.m\.taobao\.com\/security-h5-detail\/home/.test(url)
+  );
+
   // === PDD结算页不显示浮层（PDD不是隐藏改地址，不需要核对地址） ===
   if (isPdd && isCheckout) return;
 
@@ -567,6 +577,93 @@ const PRODUCT_INFO_OVERLAY = `
       window.__rebuildOverlay && window.__rebuildOverlay();
     });
     return '[OVERLAY] waiting for DOM';
+  }
+
+  // 淘宝商品页价格偶尔需要浏览器二次加载。只提供用户主动触发的刷新按钮，
+  // 不做自动刷新，避免打断规格选择、登录或正常采购操作。
+  function buildManualRefreshButton() {
+    if (!isTaobaoProductPage || document.getElementById('__dxe_purchase_refresh_row__')) return;
+    var refreshRow = document.createElement('div');
+    refreshRow.id = '__dxe_purchase_refresh_row__';
+    refreshRow.style.cssText = 'position:fixed;z-index:2147483001;display:flex;align-items:center;justify-content:center;width:118px;height:40px;margin:0;padding:0;box-sizing:border-box;';
+
+    var refreshBtn = document.createElement('button');
+    refreshBtn.id = '__dxe_purchase_refresh_control__';
+    refreshBtn.type = 'button';
+    refreshBtn.title = '\u4ef7\u683c\u672a\u663e\u793a\u65f6\u624b\u52a8\u5237\u65b0\u9875\u9762';
+    refreshBtn.setAttribute('aria-label', '\u5237\u65b0\u9875\u9762');
+    refreshBtn.style.cssText = 'appearance:none;display:flex;align-items:center;justify-content:center;width:116px;height:38px;margin:0;padding:0 10px;border:1px solid #b3d8ff;border-radius:8px;background:#fff;color:#409eff;font-family:"Microsoft YaHei",sans-serif;font-size:13px;line-height:20px;white-space:nowrap;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.10);';
+
+    var refreshIcon = document.createElement('span');
+    refreshIcon.textContent = '\u21bb';
+    refreshIcon.style.cssText = 'display:inline-block;margin-right:5px;font-size:18px;line-height:18px;';
+    var refreshLabel = document.createElement('span');
+    refreshLabel.textContent = '\u5237\u65b0\u9875\u9762';
+    refreshLabel.style.cssText = 'display:inline-block;font-weight:500;';
+    refreshBtn.appendChild(refreshIcon);
+    refreshBtn.appendChild(refreshLabel);
+
+    refreshBtn.addEventListener('mouseenter', function() {
+      if (!refreshBtn.disabled) refreshBtn.style.background = 'rgba(64,158,255,.10)';
+    });
+    refreshBtn.addEventListener('mouseleave', function() {
+      refreshBtn.style.background = '#fff';
+    });
+    refreshBtn.addEventListener('click', function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (refreshBtn.disabled) return;
+      refreshBtn.disabled = true;
+      refreshBtn.style.cursor = 'default';
+      refreshLabel.textContent = '\u5237\u65b0\u4e2d...';
+      console.log('[PurchaseManualRefresh] clicked');
+      window.location.reload();
+    });
+
+    refreshRow.appendChild(refreshBtn);
+    document.body.appendChild(refreshRow);
+
+    function placeLikeSameSourceControl() {
+      if (!refreshRow.isConnected) return;
+      var rowWidth = 118;
+      var rowHeight = 40;
+      var toolkitList = document.querySelector('#J_Toolkit .tb-toolkit-list-new') ||
+        document.querySelector('#J_Toolkit .tb-toolkit-list') ||
+        document.querySelector('#tb-toolkit-new .tb-toolkit-list-new');
+      if (toolkitList) {
+        var toolkitRoot = toolkitList.closest('#J_Toolkit') || toolkitList;
+        var toolkitRect = toolkitRoot.getBoundingClientRect();
+        var toolkitVisible = toolkitRect.width >= 32 && toolkitRect.height >= 32 &&
+          toolkitRect.right > 0 && toolkitRect.left < window.innerWidth &&
+          toolkitRect.bottom > 0 && toolkitRect.top < window.innerHeight;
+        if (toolkitVisible) {
+          refreshRow.style.left = Math.max(8, Math.min(window.innerWidth - rowWidth - 8, Math.round(toolkitRect.left + (toolkitRect.width - 48) / 2) - 510)) + 'px';
+          refreshRow.style.top = Math.max(8, Math.min(window.innerHeight - rowHeight - 8, Math.round(toolkitRect.top - 52) + 510)) + 'px';
+          return;
+        }
+      }
+      refreshRow.style.left = Math.max(8, window.innerWidth - rowWidth - 530) + 'px';
+      refreshRow.style.top = Math.max(8, Math.min(window.innerHeight - rowHeight - 8, 656)) + 'px';
+    }
+
+    placeLikeSameSourceControl();
+    requestAnimationFrame(placeLikeSameSourceControl);
+    if (window.__dxePurchaseRefreshObserver) window.__dxePurchaseRefreshObserver.disconnect();
+    var placementScheduled = false;
+    window.__dxePurchaseRefreshObserver = new MutationObserver(function() {
+      if (placementScheduled || !refreshRow.isConnected) return;
+      placementScheduled = true;
+      requestAnimationFrame(function() {
+        placementScheduled = false;
+        placeLikeSameSourceControl();
+      });
+    });
+    window.__dxePurchaseRefreshObserver.observe(document.documentElement, { childList: true, subtree: true });
+    if (window.__dxePurchaseRefreshResizeHandler) {
+      window.removeEventListener('resize', window.__dxePurchaseRefreshResizeHandler);
+    }
+    window.__dxePurchaseRefreshResizeHandler = placeLikeSameSourceControl;
+    window.addEventListener('resize', window.__dxePurchaseRefreshResizeHandler);
   }
 
   function buildOverlay() {
@@ -586,12 +683,73 @@ const PRODUCT_INFO_OVERLAY = `
   var header = document.createElement('div');
   header.style.cssText = 'padding:10px 12px;display:flex;align-items:center;justify-content:space-between;cursor:move;border-bottom:1px solid #f0f0f0;background:#fafafa;';
 
+  var titleGroup = document.createElement('div');
+  titleGroup.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;';
+
   var titleSpan = document.createElement('span');
-  titleSpan.style.cssText = 'font-weight:600;font-size:13px;color:#303133;flex:1;';
+  titleSpan.style.cssText = 'font-weight:600;font-size:13px;color:#303133;white-space:nowrap;';
   titleSpan.textContent = isCheckout ? '\\u6536\\u8d27\\u5730\\u5740' : '\\u5546\\u54c1\\u4fe1\\u606f';
 
   var btnGroup = document.createElement('div');
   btnGroup.style.cssText = 'display:flex;gap:8px;';
+
+  var hasShippingInfo = !!(info.shippingName || info.shippingPhone || info.shippingAddress);
+  if (isCheckout && hasShippingInfo) {
+    var copyBtn = document.createElement('span');
+    copyBtn.style.cssText = 'cursor:pointer;color:#409eff;font-size:12px;height:20px;padding:0 4px;display:flex;align-items:center;justify-content:center;border-radius:4px;transition:background .2s;white-space:nowrap;';
+    copyBtn.textContent = '\u590d\u5236';
+    copyBtn.title = '\u590d\u5236\u5b8c\u6574\u6536\u8d27\u4fe1\u606f';
+
+    function fallbackCopyShippingInfo(text) {
+      var textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0;';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (e) {}
+      if (textarea.parentNode) textarea.parentNode.removeChild(textarea);
+      return copied;
+    }
+
+    function showCopyResult(copied) {
+      copyBtn.textContent = copied ? '\u5df2\u590d\u5236' : '\u590d\u5236\u5931\u8d25';
+      copyBtn.style.color = copied ? '#67c23a' : '#f56c6c';
+      clearTimeout(copyBtn.__resetTimer);
+      copyBtn.__resetTimer = setTimeout(function() {
+        if (!copyBtn.isConnected) return;
+        copyBtn.textContent = '\u590d\u5236';
+        copyBtn.style.color = '#409eff';
+      }, 1600);
+    }
+
+    copyBtn.addEventListener('mousedown', function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    copyBtn.addEventListener('click', function(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      var copyText = [info.shippingName, info.shippingPhone, info.shippingAddress]
+        .filter(Boolean)
+        .join('\uff0c');
+      if (!copyText) {
+        showCopyResult(false);
+        return;
+      }
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(copyText)
+          .then(function() { showCopyResult(true); })
+          .catch(function() { showCopyResult(fallbackCopyShippingInfo(copyText)); });
+      } else {
+        showCopyResult(fallbackCopyShippingInfo(copyText));
+      }
+    });
+    titleGroup.appendChild(copyBtn);
+  }
 
   var toggleBtn = document.createElement('span');
   toggleBtn.style.cssText = 'cursor:pointer;color:#909399;font-size:12px;width:20px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;transition:background .2s;';
@@ -605,7 +763,8 @@ const PRODUCT_INFO_OVERLAY = `
 
   btnGroup.appendChild(toggleBtn);
   btnGroup.appendChild(closeBtn);
-  header.appendChild(titleSpan);
+  titleGroup.insertBefore(titleSpan, titleGroup.firstChild);
+  header.appendChild(titleGroup);
   header.appendChild(btnGroup);
 
   // === 内容区 ===
@@ -797,6 +956,7 @@ const PRODUCT_INFO_OVERLAY = `
   };
 
   // 立即构建浮层
+  buildManualRefreshButton();
   buildOverlay();
 })()
 `
@@ -2526,6 +2686,38 @@ async function resolveTaobaoRebatePurchaseUrl(originalUrl) {
 
   runtimeLog.writeLog('TaobaoRebate', `服务端转链不可用，使用原链接: ${serverFailure || 'unknown'}`)
   return { url: originalUrl, converted: false, reason: serverFailure || 'service_unavailable' }
+}
+
+const taobaoRebatePrefetchCache = createTaobaoRebatePrefetchCache({
+  resolveUrl: resolveTaobaoRebatePurchaseUrl
+})
+
+function prepareTaobaoRebatePurchaseUrl(originalUrl, trigger) {
+  const prepared = taobaoRebatePrefetchCache.prepare(originalUrl)
+  let urlHost = 'invalid'
+  try {
+    urlHost = new URL(originalUrl).hostname || 'unknown'
+  } catch {}
+  runtimeLog.writeLog(
+    'TaobaoRebatePrefetch',
+    `trigger=${trigger}, state=${prepared.state}, urlHost=${urlHost}`
+  )
+  if (prepared.state === 'miss') {
+    prepared.promise
+      .then(result => {
+        runtimeLog.writeLog(
+          'TaobaoRebatePrefetch',
+          `trigger=${trigger}, state=ready, elapsedMs=${Date.now() - prepared.startedAt}, converted=${result?.converted === true}`
+        )
+      })
+      .catch(error => {
+        runtimeLog.writeLog(
+          'TaobaoRebatePrefetch',
+          `trigger=${trigger}, state=failed, elapsedMs=${Date.now() - prepared.startedAt}, error=${String(error?.message || error).slice(0, 160)}`
+        )
+      })
+  }
+  return prepared
 }
 
 // 支付密码只通过独立 HTTPS 入口读取，并固定校验服务端证书指纹。
@@ -4864,6 +5056,30 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 // ============ IPC 注册 ============
 
 function registerPurchaseOrderCaptureIpc(mainWindow) {
+  ipcMain.handle('purchase-dialog-render-timing', async (event, params = {}) => {
+    const stage = String(params.stage || 'unknown').replace(/[^a-z_]/gi, '').slice(0, 40)
+    const elapsedMs = Math.max(0, Math.round(Number(params.elapsedMs) || 0))
+    const context = String(params.context || 'unknown').replace(/[^a-z_]/gi, '').slice(0, 40)
+    runtimeLog.writeLog('PurchaseDialogTiming', `context=${context}, stage=${stage}, elapsedMs=${elapsedMs}`)
+    return { success: true }
+  })
+
+  // 采购卡片展示货源后提前转链；只准备当前选中的淘宝货源，不创建窗口、不读取账号 Cookie。
+  ipcMain.handle('prepare-purchase-order-url', async (event, params = {}) => {
+    const { purchaseUrl, platform } = params
+    if (platform !== 'taobao' && platform !== 'tmall') {
+      return { success: true, state: 'not_taobao' }
+    }
+
+    const decodedTaobaoSource = decodeTaobaoSkuSourceUrl(purchaseUrl)
+    if (!isTaobaoUrl(decodedTaobaoSource.url)) {
+      return { success: false, state: 'invalid_url' }
+    }
+
+    const prepared = prepareTaobaoRebatePurchaseUrl(decodedTaobaoSource.url, 'purchase_dialog')
+    return { success: true, state: prepared.state }
+  })
+
   // 打开采购下单窗口
   ipcMain.handle('open-purchase-order-window', async (event, params) => {
     const { accountId, accountName, password, purchaseUrl, platform, purchaseInfo } = params
@@ -4894,10 +5110,26 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     const prefetchedServerCookies = (platform === 'taobao' || platform === 'tmall' || platform === 'pinduoduo')
       ? loadServerPurchaseCookies(accountId)
       : null
-    const rebateResult = (platform === 'taobao' || platform === 'tmall')
-      ? await resolveTaobaoRebatePurchaseUrl(decodedTaobaoSource.url)
-      : { url: decodedTaobaoSource.url, converted: false, reason: 'not_taobao_platform' }
-    logOpenTiming('rebate_resolved', `converted=${rebateResult.converted === true}`)
+    const rebatePreparation = (platform === 'taobao' || platform === 'tmall')
+      ? prepareTaobaoRebatePurchaseUrl(decodedTaobaoSource.url, 'open_window')
+      : null
+    let rebateResult = { url: decodedTaobaoSource.url, converted: false, reason: 'not_taobao_platform' }
+    if (rebatePreparation) {
+      try {
+        rebateResult = await rebatePreparation.promise
+      } catch (error) {
+        // 返利是附加能力，任何预取异常都必须回退原商品链接，不能阻断正常采购。
+        runtimeLog.writeLog(
+          'TaobaoRebatePrefetch',
+          `trigger=open_window, state=fallback, error=${String(error?.message || error).slice(0, 160)}`
+        )
+        rebateResult = { url: decodedTaobaoSource.url, converted: false, reason: 'prefetch_failed' }
+      }
+    }
+    logOpenTiming(
+      'rebate_resolved',
+      `converted=${rebateResult.converted === true}, prefetchState=${rebatePreparation?.state || 'not_taobao'}`
+    )
     // 返利短链需要先完成淘宝落地跳转，不能向短链强行追加 skuId。
     // SKU 仍由商品页加载后的自动选中脚本恢复；仅原链接回退时才追加 skuId。
     const effectivePurchaseUrl = rebateResult.converted

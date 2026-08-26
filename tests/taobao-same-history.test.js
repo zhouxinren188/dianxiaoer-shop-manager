@@ -151,7 +151,7 @@ describe('淘宝同款历史记录与货源标识', () => {
   })
 
   it('IPC无响应时会按上限解除淘宝同款加载状态', async () => {
-    expect(TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS).toBe(60000)
+    expect(TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS).toBe(90000)
     await expect(withTaobaoSameSearchTimeout(Promise.resolve('ok'), 20)).resolves.toBe('ok')
     await expect(withTaobaoSameSearchTimeout(new Promise(() => {}), 5))
       .rejects.toThrow('淘宝同款搜索等待超时')

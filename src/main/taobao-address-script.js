@@ -75,6 +75,12 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   var saveSuccessNoticeLogged = false;
   var finished = false;
   var startedAt = Date.now();
+  var secondaryConfirmLastButton = null;
+  var secondaryConfirmLastDialog = null;
+  var secondaryConfirmLastClickAt = 0;
+  var secondaryConfirmClickCount = 0;
+  var secondaryConfirmDismissalLogged = false;
+  var saveAttemptCount = 0;
 
   function log(code, detail) {
     console.log('[AddressAutoFill][TB] ' + code + ' elapsedMs=' + (Date.now() - startedAt) + (detail ? ' ' + detail : ''));
@@ -492,6 +498,20 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
 
   function findSaveButton() {
     var root = formRoot || document;
+    // 当前淘宝地址页的新增地址主弹窗有稳定语义类 address-dialog。
+    // 优先精确定位它自己的 footer 主按钮，避免与后续 confirm-dialog 的确定混淆。
+    var addressDialog = firstVisible([
+      '.next-dialog.address-dialog[role="dialog"]',
+      '.next-dialog.address-dialog',
+      '[role="dialog"].address-dialog'
+    ], document);
+    if (addressDialog) {
+      var addressDialogButton = firstVisible([
+        '.next-dialog-footer .next-btn-primary.next-dialog-btn',
+        '.next-dialog-footer .next-btn-primary'
+      ], addressDialog);
+      if (addressDialogButton) return addressDialogButton;
+    }
     var button = findButtonByText(/^(保存|提交|确认保存|确定)$/, root);
     if (button) return button;
     return firstVisible([
@@ -499,6 +519,75 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       '[class*="dialog"] [class*="primary"]', '[class*="Dialog"] [class*="primary"]',
       'button[type="submit"]'
     ], root);
+  }
+
+  function describeControl(el) {
+    if (!el) return 'none';
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+    var tag = String(el.tagName || '-').toLowerCase();
+    var role = el.getAttribute ? (el.getAttribute('role') || '-') : '-';
+    var label = /^(button|a)$/.test(tag) || role === 'button' ? nodeText(el).slice(0, 24) : '-';
+    var className = String(el.className || '-').replace(/\s+/g, '.').slice(0, 80);
+    return 'tag=' + tag + ',role=' + role + ',label=' + label +
+      ',disabled=' + !!el.disabled + ',class=' + className +
+      ',rect=' + [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)].join('/');
+  }
+
+  function countVisibleSuggestionLayers() {
+    return visibleAll([
+      '[role="listbox"]', '.next-menu',
+      '[class*="suggest"]', '[class*="Suggest"]',
+      '[class*="autocomplete"]', '[class*="Autocomplete"]',
+      '[class*="associate"] [class*="dropdown"]',
+      '[class*="associate"] [class*="popup"]'
+    ].join(','), document).length;
+  }
+
+  function countVisibleDialogCandidates() {
+    return visibleAll('[role="dialog"], .next-dialog, [class*="Dialog"], [class*="dialog"], [class*="Modal"], [class*="modal"]', document).length;
+  }
+
+  async function activateSaveButton(button, source, detailEl) {
+    if (!button || !isVisible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true') {
+      log('SAVE_ACTIVATION_REJECTED', 'source=' + source + ',button=' + describeControl(button));
+      return false;
+    }
+
+    var activeBefore = describeControl(document.activeElement);
+    var suggestionsBefore = countVisibleSuggestionLayers();
+    try {
+      if (detailEl) {
+        detailEl.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape', code: 'Escape' }));
+        detailEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Escape', code: 'Escape' }));
+        detailEl.blur();
+      }
+      button.scrollIntoView({ block: 'center', inline: 'center' });
+      button.focus({ preventScroll: true });
+    } catch (e) {}
+
+    // 淘宝的详细地址联想层可能在 blur 后异步收起；等它完成一次 React 更新，
+    // 再重新定位按钮，避免点击旧节点或只关闭了联想层而没有提交。
+    await sleep(220);
+    var currentButton = findSaveButton() || button;
+    if (!isVisible(currentButton) || currentButton.disabled || currentButton.getAttribute('aria-disabled') === 'true') {
+      log('SAVE_ACTIVATION_REJECTED', 'source=' + source + ',afterFocus=true,button=' + describeControl(currentButton));
+      return false;
+    }
+
+    try {
+      currentButton.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, button: 0 }));
+      currentButton.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, button: 0 }));
+    } catch (e) {}
+    currentButton.click();
+    saveAttemptCount++;
+    log('SAVE_ACTIVATED',
+      'source=' + source + ',attempt=' + saveAttemptCount +
+      ',activeBefore={' + activeBefore + '}' +
+      ',suggestionsBefore=' + suggestionsBefore +
+      ',suggestionsAfterFocus=' + countVisibleSuggestionLayers() +
+      ',button={' + describeControl(currentButton) + '}'
+    );
+    return true;
   }
 
   async function trySmartPaste() {
@@ -875,21 +964,89 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     return false;
   }
 
-  function clickSecondaryConfirm() {
+  function secondaryConfirmDialogArea(dialog) {
+    if (!dialog || !dialog.getBoundingClientRect) return Number.MAX_SAFE_INTEGER;
+    var rect = dialog.getBoundingClientRect();
+    return Math.max(1, rect.width) * Math.max(1, rect.height);
+  }
+
+  function secondaryConfirmDialogZIndex(dialog) {
+    if (!dialog) return 0;
+    var zIndex = Number(window.getComputedStyle(dialog).zIndex);
+    return Number.isFinite(zIndex) ? zIndex : 0;
+  }
+
+  function findStreetRecommendationConfirm() {
+    // 实测当前淘宝第二层纠正弹窗使用 confirm-dialog，且 z-index 为 10000。
+    // 先走精确结构；只有灰度页面没有该类名时才进入下面的语义后备。
+    var exactDialogs = visibleAll('.next-dialog.confirm-dialog[role="dialog"], .next-dialog.confirm-dialog, [role="dialog"].confirm-dialog', document);
+    var exactMatches = [];
+    for (var exactIndex = 0; exactIndex < exactDialogs.length; exactIndex++) {
+      var exactDialog = exactDialogs[exactIndex];
+      var exactText = nodeText(exactDialog);
+      if (!/系统检测到您的地址属于|是否修改当前选择|是否修改.{0,20}(街道|地址)/.test(exactText)) continue;
+      var exactButton = firstVisible([
+        '.next-dialog-footer .next-btn-primary.next-dialog-btn',
+        '.next-dialog-footer .next-btn-primary'
+      ], exactDialog) || findButtonByText(/^(确认|确定|继续保存)$/, exactDialog);
+      if (!exactButton || exactButton.disabled || exactButton.getAttribute('aria-disabled') === 'true') continue;
+      exactMatches.push({ dialog: exactDialog, button: exactButton, selector: 'confirm-dialog' });
+    }
+    exactMatches.sort(function(a, b) {
+      var zOrder = secondaryConfirmDialogZIndex(b.dialog) - secondaryConfirmDialogZIndex(a.dialog);
+      return zOrder || secondaryConfirmDialogArea(a.dialog) - secondaryConfirmDialogArea(b.dialog);
+    });
+    if (exactMatches.length) return exactMatches[0];
+
     var dialogs = visibleAll('[role="dialog"], .next-dialog, [class*="Dialog"], [class*="dialog"], [class*="Modal"], [class*="modal"]', document);
+    var matches = [];
     for (var i = 0; i < dialogs.length; i++) {
       var dialog = dialogs[i];
-      if (formRoot && (dialog === formRoot || dialog.contains(formRoot))) continue;
+      if (formRoot && dialog === formRoot) continue;
       var text = nodeText(dialog);
-      if (!/确认|确定|街道|地址/.test(text)) continue;
+      // 淘宝在省市区缺少街道时会弹出“系统检测到您的地址属于XX街道，
+      // 是否修改当前选择？”确认层。这里只处理这种明确的推荐提示，避免误点
+      // 下方“添加收货地址”表单自己的确定按钮。
+      if (!/系统检测到您的地址属于|是否修改当前选择|是否修改.{0,20}(街道|地址)|推荐.{0,12}(街道|地址)/.test(text)) continue;
       var button = findButtonByText(/^(确认|确定|继续保存)$/, dialog);
-      if (button) {
-        button.click();
-        log('SECONDARY_CONFIRM_CLICKED');
-        return true;
-      }
+      if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') continue;
+      matches.push({ dialog: dialog, button: button, selector: 'semantic-fallback' });
     }
-    return false;
+
+    // class*="dialog" 可能同时命中外层地址表单、弹窗包裹层和真正的街道确认层。
+    // 优先最内层、面积最小的候选，确保点击截图中最上层橙色“确定”。
+    matches.sort(function(a, b) {
+      if (a.dialog.contains(b.dialog)) return 1;
+      if (b.dialog.contains(a.dialog)) return -1;
+      return secondaryConfirmDialogArea(a.dialog) - secondaryConfirmDialogArea(b.dialog);
+    });
+    return matches[0] || null;
+  }
+
+  function clickSecondaryConfirm() {
+    if (secondaryConfirmLastDialog && !secondaryConfirmDismissalLogged &&
+        (!secondaryConfirmLastDialog.isConnected || !isVisible(secondaryConfirmLastDialog))) {
+      secondaryConfirmDismissalLogged = true;
+      log('SECONDARY_CONFIRM_DISMISSED', 'clicks=' + secondaryConfirmClickCount);
+    }
+
+    var match = findStreetRecommendationConfirm();
+    if (!match) return false;
+
+    var now = Date.now();
+    if (match.button === secondaryConfirmLastButton && now - secondaryConfirmLastClickAt < 1200) return false;
+    if (match.dialog !== secondaryConfirmLastDialog) {
+      secondaryConfirmLastDialog = match.dialog;
+      secondaryConfirmClickCount = 0;
+      secondaryConfirmDismissalLogged = false;
+    }
+    secondaryConfirmLastButton = match.button;
+    secondaryConfirmLastClickAt = now;
+    secondaryConfirmClickCount++;
+    try { match.button.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+    match.button.click();
+    log('SECONDARY_CONFIRM_CLICKED', 'type=street_recommendation,selector=' + match.selector + ',attempt=' + secondaryConfirmClickCount);
+    return true;
   }
 
   log('START', location.host + location.pathname);
@@ -952,7 +1109,8 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
   if (!saveButton) return finish('no_save_button', 'save_button_not_found');
   captureSaveSuccessNoticeBaseline();
   saveClicked = true;
-  saveButton.click();
+  var saveActivated = await activateSaveButton(saveButton, 'initial', detailEl);
+  if (!saveActivated) return finish('no_save_button', 'save_button_not_activatable');
   log('SAVE_CLICKED', 'defaultVerified=' + defaultOk);
 
   for (var resultTry = 0; resultTry < 50; resultTry++) {
@@ -960,7 +1118,7 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
       saveSuccessNoticeLogged = true;
       log('SAVE_SUCCESS_NOTICE_SEEN', 'awaitingAddressVerification=true');
     }
-    clickSecondaryConfirm();
+    var secondaryConfirmClicked = clickSecondaryConfirm();
     if (resultTry > 3) {
       var savedAddress = findTargetAddressOutsideForm();
       if (savedAddress) {
@@ -978,6 +1136,36 @@ function buildTaobaoAddressManagerScript(receiverName, receiverPhone, parsedAddr
     var bodyText = nodeText(document.body);
     if (resultTry > 5 && /请输入|请选择|格式不正确|地址信息不完整|手机号格式/.test(bodyText) && isVisible(formRoot)) {
       return finish('validation_failed', 'page_validation_message');
+    }
+
+    // 第一次程序化点击可能只让详细地址联想框失焦，没有真正触发表单提交。
+    // 表单仍可见、没有街道确认层、也没有保存结果时，最多再受控重试两次。
+    if (resultTry === 4 || resultTry === 12) {
+      var retryBlockedReason = '';
+      if (saveSuccessNoticeLogged) retryBlockedReason = 'success_notice_seen';
+      else if (secondaryConfirmClickCount > 0 || secondaryConfirmClicked) retryBlockedReason = 'secondary_confirm_already_clicked';
+      else if (!isVisible(formRoot)) retryBlockedReason = 'form_closed';
+      else if (saveAttemptCount >= 3) retryBlockedReason = 'attempt_limit';
+
+      if (retryBlockedReason) {
+        log('SAVE_RETRY_BLOCKED', 'resultTry=' + resultTry + ',reason=' + retryBlockedReason + ',attempts=' + saveAttemptCount);
+      } else {
+        var retrySaveButton = findSaveButton();
+        var retryActivated = await activateSaveButton(retrySaveButton, 'retry-' + saveAttemptCount, detailEl);
+        log(retryActivated ? 'SAVE_RETRY_CLICKED' : 'SAVE_RETRY_SKIPPED', 'resultTry=' + resultTry + ',attempts=' + saveAttemptCount);
+      }
+    }
+
+    if ([2, 5, 10, 20, 35, 49].indexOf(resultTry) >= 0) {
+      log('SAVE_WAIT_STATE',
+        'try=' + resultTry + ',attempts=' + saveAttemptCount +
+        ',formVisible=' + isVisible(formRoot) +
+        ',suggestions=' + countVisibleSuggestionLayers() +
+        ',dialogs=' + countVisibleDialogCandidates() +
+        ',streetConfirm=' + !!findStreetRecommendationConfirm() +
+        ',active={' + describeControl(document.activeElement) + '}' +
+        ',saveButton={' + describeControl(findSaveButton()) + '}'
+      );
     }
     await sleep(400);
   }

@@ -188,4 +188,69 @@ describe('淘宝地址管理脚本 v2', () => {
     expect(script).toContain("finish('default_unconfirmed', 'saved_address_not_default')")
     expect(script).not.toContain("finish('success', 'address_list_verified')")
   })
+
+  it('只点击淘宝缺少街道时最上层的推荐确认弹窗', () => {
+    const script = buildTaobaoAddressManagerScript('街道测试', '13800138000', {
+      province: '河北省',
+      city: '保定市',
+      area: '莲池区',
+      other: '东金庄乡王兰大街东部凤景小区A区13-2-102号'
+    })
+
+    expect(script).toContain('系统检测到您的地址属于')
+    expect(script).toContain('是否修改当前选择')
+    expect(script).toContain('if (formRoot && dialog === formRoot) continue')
+    expect(script).toContain('if (a.dialog.contains(b.dialog)) return 1')
+    expect(script).toContain("log('SECONDARY_CONFIRM_CLICKED', 'type=street_recommendation,selector='")
+    expect(script).toContain("log('SECONDARY_CONFIRM_DISMISSED', 'clicks='")
+    expect(script).not.toContain('if (!/确认|确定|街道|地址/.test(text)) continue')
+  })
+
+  it('按淘宝真实 DOM 分别定位 address-dialog 和 confirm-dialog 的主按钮', () => {
+    const script = buildTaobaoAddressManagerScript('弹窗测试', '13800138000', {
+      province: '河北省',
+      city: '保定市',
+      area: '莲池区',
+      other: '测试小区2号'
+    })
+
+    expect(script).toContain('.next-dialog.address-dialog[role="dialog"]')
+    expect(script).toContain('.next-dialog.confirm-dialog[role="dialog"]')
+    expect(script).toContain('.next-dialog-footer .next-btn-primary.next-dialog-btn')
+    expect(script).toContain("selector: 'confirm-dialog'")
+    expect(script).toContain("selector: 'semantic-fallback'")
+    expect(script).toContain('secondaryConfirmDialogZIndex(b.dialog)')
+  })
+
+  it('保存前关闭详细地址联想层并在首次提交未生效时受控重试和记录诊断', () => {
+    const script = buildTaobaoAddressManagerScript('保存测试', '13800138000', {
+      province: '河北省',
+      city: '保定市',
+      area: '莲池区',
+      other: '测试小区1号'
+    })
+
+    expect(script).toContain("detailEl.dispatchEvent(new KeyboardEvent('keydown'")
+    expect(script).toContain("await activateSaveButton(saveButton, 'initial', detailEl)")
+    expect(script).toContain('saveAttemptCount >= 3')
+    expect(script).toContain('(resultTry === 4 || resultTry === 12)')
+    expect(script).toContain("log('SAVE_ACTIVATED'")
+    expect(script).toContain("log('SAVE_WAIT_STATE'")
+    expect(script).toContain('suggestionsAfterFocus=')
+    expect(script).not.toContain('active.value')
+  })
+
+  it('保存成功或点击过街道纠正确认后禁止再次提交地址表单', () => {
+    const script = buildTaobaoAddressManagerScript('防重复测试', '13800138000', {
+      province: '河北省',
+      city: '保定市',
+      area: '莲池区',
+      other: '测试小区3号'
+    })
+
+    expect(script).toContain("retryBlockedReason = 'success_notice_seen'")
+    expect(script).toContain("retryBlockedReason = 'secondary_confirm_already_clicked'")
+    expect(script).toContain('secondaryConfirmClickCount > 0 || secondaryConfirmClicked')
+    expect(script).toContain("log('SAVE_RETRY_BLOCKED'")
+  })
 })

@@ -548,6 +548,7 @@
       @closed="onPurchaseDialogClosed"
       class="purchase-dialog-redesign"
       top="5vh"
+      :transition="purchaseDialogTransition"
     >
       <template #header>
         <div class="purchase-dialog-header">
@@ -574,8 +575,13 @@
         </div>
       </template>
       
+      <div v-if="purchaseDialogPreparing" class="purchase-dialog-preparing">
+        <el-icon :size="32" class="is-loading"><Loading /></el-icon>
+        <span>正在准备采购信息...</span>
+      </div>
+
       <!-- Step 1: idle 状态 - 信息+选账号 -->
-      <div v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
+      <div v-else-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
         <!-- 顶部：收货地址 -->
         <div class="shipping-banner">
           <div class="card-body">
@@ -841,7 +847,7 @@
 
       <template #footer>
         <!-- idle: 去下单 -->
-        <template v-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
+        <template v-if="!purchaseDialogPreparing && purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'">
           <el-button @click="purchaseDialogVisible = false">取消</el-button>
           <el-button type="primary" :disabled="!purchaseInfo.sourceUrl.trim() || !purchaseInfo.selectedAccountId" @click="handleGoOrder">去下单</el-button>
         </template>
@@ -871,6 +877,7 @@
       align-center
       :close-on-click-modal="false"
       class="taobao-same-dialog"
+      @closed="onTaobaoSameDialogClosed"
     >
       <div class="taobao-same-source">
         <div class="taobao-same-source-media">
@@ -907,7 +914,7 @@
       </div>
 
       <div v-if="taobaoSameSearchLoading" class="taobao-same-loading" v-loading="true">
-        正在调用淘宝图片搜索，请稍候…
+        正在创建图片搜索环境，请稍候…
       </div>
       <el-empty v-else-if="taobaoSameSearchError" :description="taobaoSameSearchError" :image-size="80">
         <el-button type="danger" plain @click="handleSearchTaobaoSame">重新搜索</el-button>
@@ -1925,7 +1932,7 @@ async function handlePurchase(order, item, itemIdx) {
     initAddr = initAddr + '【派件联系' + order.customerPhone + '】'
   }
   purchaseInfo.shippingAddress = initAddr
-  purchaseDialogVisible.value = true
+  if (!(await showPurchaseDialogShell('sales'))) return
 
   // 注册 IPC 事件监听（用 try-catch 保护，避免阻断后续 API 加载）
   try {
@@ -1934,7 +1941,8 @@ async function handlePurchase(order, item, itemIdx) {
     console.warn('[采购下单] IPC监听注册失败:', e.message)
   }
 
-  // 加载采购账号列表和仓库列表（并行请求，减少卡顿）
+  // 货源与账号/仓库并行加载；货源链接一到就会触发返利预取。
+  const sourceLoadPromise = loadSkuSources(purchaseInfo.skuId)
   const [accountsRes, warehousesRes] = await Promise.all([
     fetchPurchaseAccounts().catch(e => {
       console.warn('[采购下单] 加载采购账号失败:', e.message)
@@ -1987,8 +1995,7 @@ async function handlePurchase(order, item, itemIdx) {
     }
   }
 
-  // 加载该SKU的货源列表
-  await loadSkuSources(purchaseInfo.skuId)
+  await sourceLoadPromise
 
   // 根据平台自动选择上次使用的账号
   const lastId = localStorage.getItem('lastPurchaseAccount_' + purchaseInfo.platform)
@@ -2156,6 +2163,8 @@ async function handleDeleteSource(row, index) {
 
 // 采购弹窗相关
 const purchaseDialogVisible = ref(false)
+const purchaseDialogPreparing = ref(false)
+const purchaseDialogTransition = Object.freeze({ name: 'purchase-dialog-instant', duration: 0 })
 const purchaseAccounts = ref([])
 const purchaseInfo = reactive({
   step: 1,
@@ -2197,6 +2206,84 @@ const purchaseInfo = reactive({
   _buyerRevealed: false
 })
 
+function waitForPurchaseDialogFrame(timeoutMs = 120) {
+  return new Promise(resolve => {
+    let settled = false
+    let fallbackTimer = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (fallbackTimer) window.clearTimeout(fallbackTimer)
+      resolve()
+    }
+
+    fallbackTimer = window.setTimeout(finish, timeoutMs)
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(finish)
+    } else {
+      window.setTimeout(finish, 16)
+    }
+  })
+}
+
+function reportPurchaseDialogTiming(context, stage, startedAt) {
+  try {
+    const request = window.electronAPI?.invoke('purchase-dialog-render-timing', {
+      context,
+      stage,
+      elapsedMs: performance.now() - startedAt
+    })
+    Promise.resolve(request).catch(() => {})
+  } catch {}
+}
+
+async function showPurchaseDialogShell(context) {
+  const startedAt = performance.now()
+  purchaseDialogPreparing.value = true
+  purchaseDialogVisible.value = true
+  await nextTick()
+  await waitForPurchaseDialogFrame()
+  await waitForPurchaseDialogFrame()
+  reportPurchaseDialogTiming(context, 'shell_painted', startedAt)
+  if (!purchaseDialogVisible.value) return false
+
+  purchaseDialogPreparing.value = false
+  await nextTick()
+  await waitForPurchaseDialogFrame()
+  reportPurchaseDialogTiming(context, 'content_painted', startedAt)
+  return purchaseDialogVisible.value
+}
+
+let purchaseUrlPrefetchTimer = null
+
+function schedulePurchaseUrlPrefetch() {
+  if (purchaseUrlPrefetchTimer) {
+    clearTimeout(purchaseUrlPrefetchTimer)
+    purchaseUrlPrefetchTimer = null
+  }
+  if (!purchaseDialogVisible.value || !['taobao', 'tmall'].includes(purchaseInfo.platform)) return
+
+  const sourceUrl = String(purchaseInfo.sourceUrl || '').trim()
+  if (!sourceUrl) return
+  purchaseUrlPrefetchTimer = setTimeout(() => {
+    purchaseUrlPrefetchTimer = null
+    if (!purchaseDialogVisible.value || String(purchaseInfo.sourceUrl || '').trim() !== sourceUrl) return
+    const purchaseUrl = /^https?:\/\//i.test(sourceUrl) ? sourceUrl : `https://${sourceUrl}`
+    window.electronAPI?.invoke('prepare-purchase-order-url', {
+      purchaseUrl,
+      platform: purchaseInfo.platform
+    }).catch(error => {
+      console.warn('[采购下单] 预取返利链接失败:', error.message)
+    })
+  }, 120)
+}
+
+watch(
+  [() => purchaseDialogVisible.value, () => purchaseInfo.sourceUrl, () => purchaseInfo.platform],
+  schedulePurchaseUrlPrefetch,
+  { flush: 'post' }
+)
+
 // 淘宝按图搜同款
 const taobaoSameDialogVisible = ref(false)
 const taobaoSameSearchLoading = ref(false)
@@ -2205,6 +2292,8 @@ const taobaoSameSearchError = ref('')
 const taobaoSameAccountId = ref(null)
 const taobaoSameFromHistory = ref(false)
 const taobaoSameHistoryKey = ref('')
+const TAOBAO_SAME_LOGIN_AUTO_RESUME_TIMEOUT_MS = 5 * 60 * 1000
+let taobaoSameSearchRequestId = 0
 
 // 货源管理
 const skuSources = ref([])
@@ -3155,10 +3244,12 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
   taobaoSameSearchLoading.value = true
   taobaoSameFromHistory.value = false
   taobaoSameResults.value = []
+  const requestId = ++taobaoSameSearchRequestId
 
-  if (forceRefresh !== true) {
-    const history = await readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
-    if (history) {
+    if (forceRefresh !== true) {
+      const history = await readTaobaoSameHistory(localStorage, taobaoSameHistoryKey.value)
+      if (requestId !== taobaoSameSearchRequestId || !taobaoSameDialogVisible.value) return
+      if (history) {
       taobaoSameResults.value = history.products
       taobaoSameFromHistory.value = true
       taobaoSameSearchLoading.value = false
@@ -3172,14 +3263,32 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
   }
 
   try {
-    const result = await withTaobaoSameSearchTimeout(
-      window.electronAPI.invoke('search-taobao-same-product', {
+    const searchParams = {
         imgUrl: purchaseInfo.image,
         accountId: account.id,
         automatic: false,
         limit: 20
-      })
-    )
+      }
+    const loginWaitStartedAt = Date.now()
+    let result
+    do {
+      result = await withTaobaoSameSearchTimeout(
+        window.electronAPI.invoke('search-taobao-same-product', searchParams)
+      )
+      if (!result?.pendingLoginConfirmation) break
+      if (requestId !== taobaoSameSearchRequestId || !taobaoSameDialogVisible.value) return
+      if (Date.now() - loginWaitStartedAt >= TAOBAO_SAME_LOGIN_AUTO_RESUME_TIMEOUT_MS) {
+        result = {
+          success: false,
+          needLogin: true,
+          message: '等待淘宝扫码登录超时，请重新搜索并完成登录'
+        }
+        break
+      }
+      console.info('[淘宝同款] 扫码登录仍在完成，保持当前任务并自动接续')
+      await new Promise(resolve => setTimeout(resolve, 500))
+    } while (true)
+    if (requestId !== taobaoSameSearchRequestId || !taobaoSameDialogVisible.value) return
     if (result && result.success) {
       taobaoSameResults.value = result.products || result.items || []
       if (taobaoSameResults.value.length === 0) {
@@ -3200,8 +3309,13 @@ async function handleSearchTaobaoSame(forceRefresh = false) {
     taobaoSameSearchError.value = error.message || '淘宝同款搜索失败'
     ElMessage.error('淘宝同款搜索失败: ' + taobaoSameSearchError.value)
   } finally {
-    taobaoSameSearchLoading.value = false
+    if (requestId === taobaoSameSearchRequestId) taobaoSameSearchLoading.value = false
   }
+}
+
+function onTaobaoSameDialogClosed() {
+  taobaoSameSearchRequestId++
+  taobaoSameSearchLoading.value = false
 }
 
 async function handleOpenTaobaoSameProduct(product) {
@@ -3616,6 +3730,11 @@ function cleanupPurchaseListeners() {
 }
 
 function onPurchaseDialogClosed() {
+  purchaseDialogPreparing.value = false
+  if (purchaseUrlPrefetchTimer) {
+    clearTimeout(purchaseUrlPrefetchTimer)
+    purchaseUrlPrefetchTimer = null
+  }
   taobaoSameDialogVisible.value = false
   taobaoSameResults.value = []
   taobaoSameSearchError.value = ''
@@ -4272,6 +4391,7 @@ onUnmounted(() => {
   purchaseDialogVisible.value = false
   // 清理京东同步自动开启定时器
   if (jdSyncAutoStartTimer) { clearTimeout(jdSyncAutoStartTimer); jdSyncAutoStartTimer = null }
+  if (purchaseUrlPrefetchTimer) { clearTimeout(purchaseUrlPrefetchTimer); purchaseUrlPrefetchTimer = null }
   if (sourceTimelinessTimer) { clearTimeout(sourceTimelinessTimer); sourceTimelinessTimer = null }
   sourceTimelinessRequestId++
   // 清理采购相关 IPC 监听器
@@ -6148,6 +6268,22 @@ onUnmounted(() => {
 }
 
 /* 采购下单对话框 - 全新设计 */
+.purchase-dialog-preparing {
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #606266;
+  font-size: 14px;
+  background: #fafbfc;
+}
+
+.purchase-dialog-preparing .el-icon {
+  color: #2b5aed;
+}
+
 .purchase-dialog-redesign {
   border-radius: 8px;
   overflow: hidden;

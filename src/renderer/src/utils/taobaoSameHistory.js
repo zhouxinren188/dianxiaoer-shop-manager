@@ -1,7 +1,9 @@
 export const TAOBAO_SAME_HISTORY_STORAGE_KEY = 'dianxiaoer:taobao-same-history:v1'
 export const TAOBAO_SAME_HISTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000
 export const TAOBAO_SAME_HISTORY_MAX_ENTRIES = 10000
-export const TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS = 60 * 1000
+// 首次扫码登录由主进程等待并自动续跑，界面超时需覆盖45秒登录等待与
+// 随后的图片下载、MTOP请求，避免刚登录成功就被renderer提前解除加载。
+export const TAOBAO_SAME_SEARCH_UI_TIMEOUT_MS = 90 * 1000
 export const TAOBAO_SAME_HISTORY_READ_TIMEOUT_MS = 1500
 const TAOBAO_SAME_HISTORY_DB_NAME = 'dianxiaoer-taobao-same-history'
 const TAOBAO_SAME_HISTORY_DB_VERSION = 1

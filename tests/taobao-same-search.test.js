@@ -18,6 +18,7 @@ const {
   parseMtopJson,
   buildTaobaoImageSearchRequest,
   hasTaobaoLoginCookie,
+  isUsableTaobaoCookie,
   isTaobaoCookieDomain,
   isTaobaoIdentityCookie,
   buildTaobaoSessionIdentity,
@@ -41,11 +42,17 @@ const {
   readTaobaoSearchAuthenticationPageState,
   shouldHideDedicatedLoginWindow,
   shouldClearTaobaoRiskCooldownAfterLogin,
+  shouldFinalizeDedicatedTaobaoLogin,
+  getTaobaoWebContentsLoadingState,
+  isTaobaoSearchDocumentReady,
+  waitForDedicatedTaobaoLoginResume,
+  buildTaobaoLoginResumeResponse,
   settleTaobaoPromiseWithTimeout,
   loadTaobaoWindowWithTimeout,
   TAOBAO_SEARCH_AUTH_TIMEOUT,
   TAOBAO_SEARCH_AUTH_STABLE_MS,
   TAOBAO_SEARCH_LOGIN_STABLE_MS,
+  TAOBAO_SEARCH_LOGIN_RESUME_WAIT_MS,
   TAOBAO_SEARCH_WARM_STABLE_MS,
   TAOBAO_SEARCH_RISK_COOLDOWN_MS,
   TAOBAO_SEARCH_EMPTY_MAX_ATTEMPTS,
@@ -184,8 +191,25 @@ describe('淘宝按图搜同款', () => {
   })
 
   it('淘宝同款专用账号与采购账号分区严格隔离', () => {
-    expect(hasTaobaoLoginCookie([{ name: 'cookie2' }, { name: 'unb' }])).toBe(true)
-    expect(hasTaobaoLoginCookie([{ name: 'cookie2' }])).toBe(false)
+    const validCookie = (name, value = name) => ({
+      name,
+      value,
+      domain: '.taobao.com',
+      expirationDate: 2000
+    })
+    expect(hasTaobaoLoginCookie([
+      validCookie('cookie2'),
+      validCookie('unb')
+    ], 1000)).toBe(true)
+    expect(hasTaobaoLoginCookie([validCookie('cookie2')], 1000)).toBe(false)
+    expect(hasTaobaoLoginCookie([
+      validCookie('cookie2'),
+      validCookie('unb')
+    ], 3000)).toBe(false)
+    expect(isUsableTaobaoCookie(validCookie('unb'), 1000)).toBe(true)
+    expect(isUsableTaobaoCookie(validCookie('unb'), 3000)).toBe(false)
+    expect(isUsableTaobaoCookie({ ...validCookie('unb'), session: true, expirationDate: 0 }, 3000)).toBe(true)
+    expect(isUsableTaobaoCookie({ ...validCookie('unb'), domain: '.example.com' }, 1000)).toBe(false)
     expect(isTaobaoCookieDomain('.taobao.com')).toBe(true)
     expect(isTaobaoCookieDomain('h5api.m.taobao.com')).toBe(true)
     expect(isTaobaoCookieDomain('.tmall.hk')).toBe(true)
@@ -235,6 +259,7 @@ describe('淘宝按图搜同款', () => {
     expect(TAOBAO_SEARCH_AUTH_TIMEOUT).toBeGreaterThanOrEqual(20000)
     expect(TAOBAO_SEARCH_AUTH_STABLE_MS).toBeGreaterThanOrEqual(1200)
     expect(TAOBAO_SEARCH_LOGIN_STABLE_MS).toBeGreaterThanOrEqual(2000)
+    expect(TAOBAO_SEARCH_LOGIN_RESUME_WAIT_MS).toBeLessThan(60 * 1000)
     expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeGreaterThan(0)
     expect(TAOBAO_SEARCH_WARM_STABLE_MS).toBeLessThan(TAOBAO_SEARCH_AUTH_STABLE_MS)
   })
@@ -476,6 +501,57 @@ describe('淘宝按图搜同款', () => {
       needVerification: false,
       mainReadyState: '',
       inspectionTimedOut: true
+    })
+    expect(isTaobaoSearchDocumentReady({
+      mainReadyState: '',
+      inspectionTimedOut: true
+    }, {
+      isLoading: () => true,
+      isLoadingMainFrame: () => false
+    })).toBe(true)
+    expect(getTaobaoWebContentsLoadingState({
+      isLoading: () => true,
+      isLoadingMainFrame: () => false
+    })).toEqual({ loading: true, mainFrameLoading: false })
+    expect(isTaobaoSearchDocumentReady({ mainReadyState: '' }, {
+      isLoading: () => true,
+      isLoadingMainFrame: () => true
+    })).toBe(false)
+  })
+
+  it('登录窗口只有登录态与搜索承载页同时稳定后才能销毁', () => {
+    expect(shouldFinalizeDedicatedTaobaoLogin({ loginReady: true, carrierReady: true })).toBe(true)
+    expect(shouldFinalizeDedicatedTaobaoLogin({ loginReady: true, carrierReady: false })).toBe(false)
+    expect(shouldFinalizeDedicatedTaobaoLogin({ loginReady: false, carrierReady: true })).toBe(false)
+  })
+
+  it('首次扫码完成后原搜索任务自动续跑，超时阶段不提示用户重复点击', async () => {
+    await expect(waitForDedicatedTaobaoLoginResume({
+      loginCompletionCheck: Promise.resolve({ ready: true, reason: 'ready' })
+    }, 20)).resolves.toMatchObject({ ready: true, pending: false, reason: 'ready' })
+
+    const pending = await waitForDedicatedTaobaoLoginResume({
+      loginCompletionCheck: new Promise(() => {})
+    }, 5)
+    expect(pending).toMatchObject({ ready: false, pending: true, reason: 'login_resume_wait_timeout' })
+    expect(buildTaobaoLoginResumeResponse(pending)).toMatchObject({
+      success: false,
+      pendingLoginConfirmation: true,
+      retryable: true
+    })
+    expect(buildTaobaoLoginResumeResponse({ reason: 'carrier_login_required' })).toMatchObject({
+      success: false,
+      pendingLoginConfirmation: true,
+      retryable: true
+    })
+    expect(buildTaobaoLoginResumeResponse({ reason: 'carrier_not_ready' })).toMatchObject({
+      success: false,
+      pendingLoginConfirmation: true,
+      retryable: true
+    })
+    expect(buildTaobaoLoginResumeResponse({ reason: 'login_window_closed' })).toMatchObject({
+      success: false,
+      needLogin: true
     })
   })
 
