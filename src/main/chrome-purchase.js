@@ -12,7 +12,7 @@ const { spawn } = require('child_process')
 const http = require('http')
 const path = require('path')
 const fs = require('fs')
-const os = require('os')
+const { getStoragePaths } = require('./storage-manager')
 
 // Chrome 可执行文件路径
 const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
@@ -351,7 +351,7 @@ async function openChromePurchaseWindow({ accountId, accountName, password, purc
   activeChromeWindows.set(purchaseNo, state)
 
   // ========== 启动 Chrome ==========
-  const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'dxe-chrome-profiles', `purchase-${accountId}`)
+  const userDataDir = path.join(getStoragePaths().chromePurchaseProfilesDir, `purchase-${accountId}`)
 
   // 每次启动前删除旧 Profile，避免被 PDD 标记（之前 CDP/puppeteer 会话可能已污染 profile）
   try {

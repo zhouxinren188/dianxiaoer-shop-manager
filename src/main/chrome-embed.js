@@ -54,10 +54,10 @@ async function launchEmbeddedChrome({ url, parentWindow, partition, cookies, use
   // 1. 确定用户数据目录（用于 Cookie/LocalStorage 隔离）
   const path = require('path')
   const fs = require('fs')
-  const app = require('electron').app
+  const { getStoragePaths } = require('./storage-manager')
 
   if (!userDataDir) {
-    const chromeDataDir = path.join(app.getPath('userData'), 'ChromeData', partition.replace('persist:', ''))
+    const chromeDataDir = path.join(getStoragePaths().chromeDataDir, partition.replace('persist:', ''))
     if (!fs.existsSync(chromeDataDir)) {
       fs.mkdirSync(chromeDataDir, { recursive: true })
     }

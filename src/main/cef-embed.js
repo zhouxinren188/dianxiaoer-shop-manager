@@ -12,7 +12,7 @@
 const { spawn } = require('child_process')
 const path = require('path')
 const fs = require('fs')
-const { app } = require('electron')
+const { getStoragePaths } = require('./storage-manager')
 
 // CEF 二进制包路径
 const CEF_DIR = getCefDir()
@@ -52,7 +52,7 @@ async function launchEmbeddedCEF({ url, parentWindow, partition, cookies, userDa
   // 确定缓存目录
   const path2 = path
   if (!userDataDir) {
-    const chromeDataDir = path2.join(app.getPath('userData'), 'CEFData', partition.replace('persist:', ''))
+    const chromeDataDir = path2.join(getStoragePaths().cefDataDir, partition.replace('persist:', ''))
     if (!fs.existsSync(chromeDataDir)) {
       fs.mkdirSync(chromeDataDir, { recursive: true })
     }

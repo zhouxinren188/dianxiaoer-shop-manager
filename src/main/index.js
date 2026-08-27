@@ -3,6 +3,17 @@
 
 const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
 const path = require('path')
+
+// 开发 worktree 的隔离目录必须先于任何 Session 和存储迁移初始化。
+if (!app.isPackaged && process.env.DXE_DEV_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.DXE_DEV_USER_DATA_DIR))
+}
+
+// 先取得单实例锁，避免两个正式版进程同时复制或清理旧会话数据。
+const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock()
+const { initializeStorage, confirmStorageAndCleanup } = require('./storage-manager')
+const storageContext = hasSingleInstanceLock ? initializeStorage(app) : null
+
 const QRCode = require('qrcode')
 
 // 防止 EPIPE broken pipe 错误弹窗（stdout/stderr 管道断开时忽略）
@@ -40,17 +51,10 @@ const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 
-// 支持并行 worktree 使用独立的开发资料目录，避免两个 Electron 开发实例
-// 同时读写同一套 Chromium Cookie、LocalStorage 和搜索 partition。
-if (!app.isPackaged && process.env.DXE_DEV_USER_DATA_DIR) {
-  app.setPath('userData', path.resolve(process.env.DXE_DEV_USER_DATA_DIR))
-}
-
 // Packaged builds share the same electron-updater cache directory. Running two
 // packaged instances at once can make one updater delete the other updater's
 // temp installer immediately before it is renamed into place. Keep development
 // mode independent so a developer can still run it alongside the installed app.
-const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock()
 if (!hasSingleInstanceLock) {
   app.quit()
 } else if (app.isPackaged) {
@@ -1000,6 +1004,12 @@ app.whenReady().then(async () => {
   // ★ 启动日志：写入桌面运行日志文件，方便用户版问题排查
   // 使用 app.getVersion()（package.json版本号），不用 getCurrentVersion()（可能被旧热更新覆盖）
   runtimeLog.logStartup(app.getVersion())
+  runtimeLog.writeLog(
+    'STORAGE',
+    `managed=${storageContext?.usingManagedStorage === true} fallback=${storageContext?.fallback === true} ` +
+      `migrationPending=${storageContext?.migrationPending === true} sessionData=${app.getPath('sessionData')} ` +
+      `error=${storageContext?.error || 'none'}`
+  )
 
   // 启动诊断：检查用户数据目录是否可写（影响localStorage持久化和缓存）
   try {
@@ -1058,6 +1068,19 @@ app.whenReady().then(async () => {
   }
 
   const mainWindow = createWindow()
+
+  // 只有新 sessionData 已实际承载 Electron Session 且主界面成功加载后，
+  // 才延迟清理 C 盘旧数据；若启动中断，旧登录数据会保留到下次重试。
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(async () => {
+      try {
+        const result = await confirmStorageAndCleanup(app, session)
+        runtimeLog.writeLog('STORAGE', `finalize=${JSON.stringify(result)}`)
+      } catch (error) {
+        runtimeLog.writeLog('STORAGE', `finalize_error=${error.message}`)
+      }
+    }, 5000)
+  })
 
   // 初始化统一更新管理器（协调全量更新 + 热更新）
   initUpdateManager(mainWindow)

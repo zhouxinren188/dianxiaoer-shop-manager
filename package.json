@@ -1,6 +1,6 @@
 {
   "name": "dianxiaoer-shop-manager",
-  "version": "1.9.64",
+  "version": "1.9.65",
   "description": "店小二网店管家 - 网店管理桌面工具",
   "main": "./out/main/index.js",
   "scripts": {
@@ -17,6 +17,7 @@
     "publish:hot": "node scripts/build-hot-update.js --upload",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:storage-electron": "node tests/verify-storage-migration-electron.js",
     "publish:full": "node scripts/publish-full.js"
   },
   "build": {

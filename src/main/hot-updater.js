@@ -4,9 +4,17 @@ const https = require('https')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const { getStoragePaths } = require('./storage-manager')
 
-const HOT_UPDATE_DIR = path.join(app.getPath('userData'), 'hot-update')
+const HOT_UPDATE_DIR = getStoragePaths().hotUpdateDir
 const VERSION_FILE = path.join(HOT_UPDATE_DIR, 'version.json')
+
+function getUpdateTempFile() {
+  const managedTempDir = getStoragePaths().tempDir
+  const tempDir = managedTempDir || app.getPath('temp')
+  fs.mkdirSync(tempDir, { recursive: true })
+  return path.join(tempDir, 'dianxiaoer-update.zip')
+}
 
 // 获取当前热更新版本（优先使用热更新版本，否则返回 app 内置版本）
 function getCurrentVersion() {
@@ -55,7 +63,7 @@ function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
         return reject(new Error('下载失败: HTTP ' + res.statusCode))
       }
       const totalSize = parseInt(res.headers['content-length'] || '0', 10)
-      const tmpFile = path.join(app.getPath('temp'), 'dianxiaoer-update.zip')
+      const tmpFile = getUpdateTempFile()
       const ws = fs.createWriteStream(tmpFile)
       let downloaded = 0
 
@@ -127,7 +135,7 @@ function downloadAndApplyUpdate(url, expectedSha256, onProgress) {
         reject(err)
       })
     }).on('error', (err) => {
-      try { fs.unlinkSync(path.join(app.getPath('temp'), 'dianxiaoer-update.zip')) } catch (e) {}
+      try { fs.unlinkSync(getUpdateTempFile()) } catch (e) {}
       reject(err)
     })
       .on('timeout', function () { this.destroy(); reject(new Error('下载超时')) })

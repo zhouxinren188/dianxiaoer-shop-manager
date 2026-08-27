@@ -81,6 +81,15 @@ version.json                版本元数据
 | 引用 purchase-preload | `path.join(app.getAppPath(), 'out/main/purchase-preload.js')` |
 | 引用 platform-login-preload | `path.join(app.getAppPath(), 'resources/platform-login-preload.js')` |
 
+### 客户端缓存与数据路径
+- 除运行日志、设备标识、数据目录迁移指针和少量必要配置外，客户端产生的缓存及大体积运行数据不得写入 C 盘的 `%APPDATA%`、`%LOCALAPPDATA%` 或 `%TEMP%`
+- Electron `sessionData`、`persist:` 店铺/采购分区、Chrome/CEF 用户资料、热更新文件和临时下载必须统一通过 `src/main/storage-manager.js` 获取安装盘数据路径，禁止自行拼接或硬编码 C 盘路径
+- 新增缓存功能时必须区分“可再生缓存”和“业务/登录数据”；自动清理仅允许删除 HTTP Cache、Code Cache、GPU/Shader Cache、CacheStorage 等可再生内容
+- Cookie、Local Storage、IndexedDB、WebStorage、店铺登录状态及业务历史数据不得纳入通用缓存清理；例如淘宝同款历史由业务自身按 30 天、最多 10000 条规则管理
+- 通用缓存维护可每 7 天检查一次，但“7 天”只是检查周期，不是数据保留期；未达到容量阈值且磁盘空间正常时不删除缓存，更不得借此修改任何业务功能自己的保留规则
+- 旧版 C 盘会话数据迁移必须遵循“复制 → 文件完整性校验 → 切换并确认新 `sessionData` 生效 → 删除旧数据”的顺序；任一步失败必须保留旧数据并自动回退
+- 所有递归删除必须先验证目标位于受管数据根目录或明确的旧版会话目录内，不得对用户目录、盘符根目录或未解析路径执行删除
+
 ### Cookie 有效性校验
 使用 `hasValidPlatformCookies(cookies, platform)` 代替 `cookies.length === 0` 检查：
 - 仅检查 cookies 数量会遗漏已过期但非空的场景
