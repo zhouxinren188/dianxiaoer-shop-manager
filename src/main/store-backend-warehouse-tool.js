@@ -9,6 +9,8 @@ const WAREHOUSE_MANAGE_PATH = '/jdm/trade/warehousing/warehouse-manage'
 const TOOL_RESOURCE = path.join('resources', 'store-backend-warehouse-tool.js')
 const TOOL_LOGO_RESOURCE = path.join('resources', 'store-backend-wolf-logo.png')
 const TOOL_LOGO_PLACEHOLDER = '__DXE_WAREHOUSE_LOGO_URL__'
+const TOOL_DIAGNOSTIC_PREFIX = '[DXE_WAREHOUSE_DIAG]'
+const TOOL_PRELOAD_DIAGNOSTIC_PREFIX = '[DXE_WAREHOUSE_PRELOAD]'
 
 let cachedToolSource = null
 
@@ -48,6 +50,21 @@ function attachWarehouseRegionTool(webContents, options = {}) {
     }
   }
 
+  const onConsoleMessage = (_event, levelOrDetails, ...legacyArgs) => {
+    const message = String(
+      levelOrDetails && typeof levelOrDetails === 'object'
+        ? levelOrDetails.message || ''
+        : legacyArgs[0] || ''
+    )
+    if (message.startsWith(TOOL_DIAGNOSTIC_PREFIX)) {
+      log(`diagnostic=${message.slice(TOOL_DIAGNOSTIC_PREFIX.length, 3500)}`)
+    } else if (message.startsWith(TOOL_PRELOAD_DIAGNOSTIC_PREFIX)) {
+      log(`preload_error=${message.slice(TOOL_PRELOAD_DIAGNOSTIC_PREFIX.length, 800)}`)
+    }
+  }
+
+  webContents.on('console-message', onConsoleMessage)
+
   const inject = async reason => {
     if (webContents.isDestroyed()) return false
     const url = webContents.getURL()
@@ -77,6 +94,7 @@ function attachWarehouseRegionTool(webContents, options = {}) {
   webContents.once('destroyed', () => {
     if (injectionTimer) clearTimeout(injectionTimer)
     injectionTimer = null
+    try { webContents.removeListener('console-message', onConsoleMessage) } catch (_) {}
   })
 }
 

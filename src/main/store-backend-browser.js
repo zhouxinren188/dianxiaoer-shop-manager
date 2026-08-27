@@ -66,6 +66,7 @@ class StoreBackendBrowser {
 
     const appPath = options.resourceRoot || app.getAppPath()
     this.resourceRoot = options.resourceRoot
+    this.pagePreloadPath = path.join(appPath, 'resources', 'store-backend-page-preload.js')
     this.window = new BrowserWindow({
       width: 1320,
       height: 860,
@@ -186,6 +187,7 @@ class StoreBackendBrowser {
         webPreferences: {
           ...inheritedPreferences,
           session: this.platformSession,
+          preload: this.pagePreloadPath,
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,

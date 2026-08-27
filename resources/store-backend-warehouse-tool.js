@@ -40,6 +40,7 @@
 
   const REQUEST_SOURCE = "ECOMMERCE_TOOLBOX_WAREHOUSE_EXTENSION_V1";
   const RESPONSE_SOURCE = "ECOMMERCE_TOOLBOX_WAREHOUSE_PAGE_V1";
+  const DIAGNOSTIC_PREFIX = "[DXE_WAREHOUSE_DIAG]";
   const REQUEST_APP_ID = "KZFBL0OIH93MGTTRPGQK";
   const DEFAULT_SECURITY_BUSINESS_ID = "0248a";
   const API_VERSION = "1.0";
@@ -50,6 +51,14 @@
     save: "dsm.order.bff.PartitionWarehousePriorityService.saveWarehousePriorityByRegionId"
   };
   const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  function diagnostic(payload) {
+    try {
+      console.info(DIAGNOSTIC_PREFIX + JSON.stringify({time: new Date().toISOString(), ...payload}));
+    } catch (_error) {
+      // 诊断信息不能影响业务请求。
+    }
+  }
 
   async function waitForSecuritySdk(timeoutMs = 20000) {
     const deadline = Date.now() + timeoutMs;
@@ -70,42 +79,46 @@
     throw new Error("京麦页面签名组件未就绪，请刷新仓库管理页面后重试");
   }
 
-  function cookieLanguage() {
-    const match = /(?:^|;)\s*dsm-lang\s*=\s*([^;]+)/i.exec(document.cookie);
-    return match ? match[1].trim().replaceAll("-", "_") : "zh_CN";
-  }
-
   function traceId() {
-    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
-      const random = Math.floor(Math.random() * 16);
-      const value = character === "x" ? random : (random & 0x3) | 0x8;
-      return value.toString(16);
-    });
+    const first = Math.floor(4000000 + Math.random() * 7200000);
+    const suffix = Math.floor(Math.random() * 10000).toString().padStart(4, "0");
+    return `${first}.41661.${Date.now()}${suffix}`;
   }
 
-  function getJsToken() {
+  function readJsTokenOnce(callbackTimeoutMs = 3000) {
     if (typeof window.getJsToken !== "function") return Promise.resolve("");
     return new Promise((resolve) => {
       let settled = false;
       const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          resolve("");
-        }
-      }, 1500);
+        if (settled) return;
+        settled = true;
+        resolve("");
+      }, callbackTimeoutMs + 500);
       try {
         window.getJsToken((result) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
           resolve(result?.jsToken || "");
-        }, 1200);
+        }, callbackTimeoutMs);
       } catch (_error) {
         clearTimeout(timer);
         resolve("");
       }
     });
+  }
+
+  async function getRequiredJsToken(timeoutMs = 12000) {
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts += 1;
+      const remaining = Math.max(800, deadline - Date.now());
+      const token = await readJsTokenOnce(Math.min(3000, remaining));
+      if (token) return {token, attempts};
+      await sleep(300);
+    }
+    throw new Error("京麦设备凭证未就绪，请等待页面加载完成后重试");
   }
 
   function withPageContext(body) {
@@ -148,29 +161,38 @@
       v: API_VERSION
     });
     if (!signed?.h5st) throw new Error("京麦未能生成仓库接口签名");
-    return encodeURI(signed.h5st);
+    return {h5st: encodeURI(signed.h5st), businessId};
   }
 
   async function callApi(api, rawBody = {}) {
     const body = withPageContext(rawBody);
     const bodyText = JSON.stringify(body);
-    const [h5st, eid] = await Promise.all([signBody(api, body), getJsToken()]);
-    const language = cookieLanguage();
+    const [signed, eidResult] = await Promise.all([signBody(api, body), getRequiredJsToken()]);
+    const trace = traceId();
     const headers = {
       "accept": "application/json, text/plain, */*",
       "content-type": "application/json;charset=UTF-8",
+      "dsm-eid": eidResult.token,
       "dsm-file-path": "lineation-price",
-      "dsm-lang": language,
-      "dsm-language": language,
       "dsm-platform": "pc",
-      "dsm-site": "",
-      "dsm-trace-id": traceId(),
-      "h5st": h5st,
+      "dsm-trace-id": trace,
+      "h5st": signed.h5st,
       "x-referer-page": location.href,
       "x-requested-with": "XMLHttpRequest",
-      "x-rp-client": "h5_1.0.0"
+      "x-rp-client": "h5_2.4.0"
     };
-    if (eid) headers["dsm-eid"] = eid;
+    diagnostic({
+      phase: "request",
+      api: String(api).split(".").pop(),
+      regionId: body?.request?.data?.regionId ?? null,
+      detailCount: Array.isArray(body?.request?.data?.details) ? body.request.data.details.length : 0,
+      eidPresent: true,
+      eidLength: eidResult.token.length,
+      eidAttempts: eidResult.attempts,
+      businessId: signed.businessId,
+      rpClient: "h5_2.4.0",
+      injection: "late_fallback"
+    });
 
     const endpoint = `https://sff.jd.com/api?v=${API_VERSION}&appId=${REQUEST_APP_ID}&api=${encodeURIComponent(api)}`;
     const response = await fetch(endpoint, {
@@ -191,12 +213,22 @@
       const code = result?.bCode || result?.code || "未知代码";
       throw new Error(`${result?.msg || "仓库接口调用失败"}（${code}）`);
     }
+    diagnostic({
+      phase: "response",
+      api: String(api).split(".").pop(),
+      regionId: body?.request?.data?.regionId ?? null,
+      httpStatus: response.status,
+      code: result?.code ?? null,
+      hasData: Object.prototype.hasOwnProperty.call(result || {}, "data"),
+      responseTraceId: String(result?.["dsm-trace-id"] || "").slice(0, 80)
+    });
     return result.data;
   }
 
   async function handle(message) {
     if (message.type === "PING") {
       await waitForSecuritySdk();
+      await getRequiredJsToken();
       return {ready: true};
     }
     if (message.type === "LOAD_REGIONS") return callApi(API.regions, {});
@@ -218,14 +250,13 @@
           type: item.type,
           warehouseId: item.warehouseId
         }))
-        : [];
-      if (!details.length) throw new Error("未选择要保存的仓库");
+        : null;
       return callApi(API.save, {
         request: {
           data: {
             regionId: Number(message.regionId),
             level: Number(message.level),
-            details
+            details: details?.length ? details : null
           }
         }
       });
@@ -367,6 +398,74 @@
     }).filter((item) => item.key && !item.immutable && Number(item.seqNum) !== 0);
   }
 
+  function collectPriorityDetails(value) {
+    const details = [];
+    const seen = new WeakSet();
+    const walk = (node, depth = 0) => {
+      if (node == null || depth > 8) return;
+      if (Array.isArray(node)) {
+        node.forEach((item) => walk(item, depth + 1));
+        return;
+      }
+      if (typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const seqNum = node.seqNum ?? node.warehouseSeqNum ?? node.warehouseCode;
+      const warehouseId = node.warehouseId ?? node.id;
+      const priority = node.priority ?? node.warehousePriority ?? node.priorityNum;
+      if ((seqNum != null || warehouseId != null) && priority != null && Number.isFinite(Number(priority))) {
+        details.push({
+          seqNum: seqNum == null ? "" : String(seqNum),
+          warehouseId: warehouseId == null ? "" : String(warehouseId),
+          priority: Number(priority)
+        });
+      }
+      Object.values(node).forEach((item) => walk(item, depth + 1));
+    };
+    walk(value);
+    return details;
+  }
+
+  function assertPriorityDetails(value, expectedDetails) {
+    const actualDetails = collectPriorityDetails(value);
+    if (!expectedDetails.length) {
+      if (actualDetails.length) {
+        throw new Error(`回读仍有 ${actualDetails.length} 个仓库优先级`);
+      }
+      return;
+    }
+    if (!actualDetails.length) throw new Error("回读接口未返回仓库优先级");
+    for (const expected of expectedDetails) {
+      const expectedSeqNum = String(expected.seqNum ?? "");
+      const expectedWarehouseId = String(expected.warehouseId ?? "");
+      const current = actualDetails.find((item) =>
+        (expectedSeqNum && item.seqNum === expectedSeqNum) ||
+        (expectedWarehouseId && item.warehouseId === expectedWarehouseId)
+      );
+      if (!current) throw new Error(`回读未找到仓库 ${expectedSeqNum || expectedWarehouseId}`);
+      if (current.priority !== Number(expected.priority)) {
+        throw new Error(`仓库 ${expectedSeqNum || expectedWarehouseId} 优先级仍为 ${current.priority}`);
+      }
+    }
+  }
+
+  async function verifyRegionPriorities(region, expectedDetails) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (attempt > 1) await sleep(400 * attempt);
+      try {
+        const result = await bridgeRequest("LOAD_PRIORITIES", {
+          regionId: region.id,
+          level: region.level
+        });
+        assertPriorityDetails(result, expectedDetails);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw new Error(`接口返回成功但配置未生效：${lastError?.message || "回读不一致"}`);
+  }
+
   function bridgeRequest(type, payload = {}, timeoutMs = 25000) {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve, reject) => {
@@ -421,7 +520,6 @@
     const selectedRegionList = selectedRegions();
     if (!selectedRegionList.length) throw new Error("请至少勾选一个省份");
     const rules = selectedRules();
-    if (!rules.length) throw new Error("请至少勾选一个仓库");
     for (const rule of rules) {
       const priority = Number(rule.priority);
       if (!Number.isInteger(priority) || priority < 0 || priority > 10000) {
@@ -478,6 +576,7 @@
   }
 
   async function detailsForRegion(region, rules) {
+    if (!rules.length) return [];
     const result = await bridgeRequest("LOAD_WAREHOUSES", {
       regionId: region.id,
       level: region.level
@@ -537,9 +636,13 @@
           details
         });
         if (state.status !== "running" || token !== runToken) return;
+        await verifyRegionPriorities(region, details);
+        if (state.status !== "running" || token !== runToken) return;
         state.success += 1;
         consecutiveFailures = 0;
-        addLog(region, "success", `已保存 ${details.length} 个仓库`);
+        addLog(region, "success", details.length
+          ? `已保存并核验 ${details.length} 个仓库`
+          : "已清空并核验仓库配置");
       } catch (error) {
         state.failed += 1;
         consecutiveFailures += 1;
@@ -558,7 +661,7 @@
     }
 
     if (token !== runToken) return;
-    state.status = "done";
+    state.status = state.failed > 0 ? "error" : "done";
     state.message = `处理完成：成功 ${state.success}，失败 ${state.failed}`;
     await persist();
   }
@@ -664,7 +767,7 @@
       <div class="card progress-card"><div class="status-row"><span class="status ${statusClass()}">${statusText()}</span>${state.status === "running" && state.currentRegion ? `<span class="current-region" title="正在设置：${escapeHtml(state.currentRegion)}">正在设置：${escapeHtml(state.currentRegion)}</span>` : ""}<div class="compact-summary"><span><b>${state.success}</b>成功</span><span class="failed-count" title="${escapeHtml(failedRegionTooltip())}"><b>${state.failed}</b>失败</span><span><b>${state.processed}/${state.total}</b>进度</span></div><button class="reload" data-action="reload" ${busy ? "disabled" : ""}>重新读取</button></div><div class="progress"><i style="width:${progress}%"></i></div>${progressNote ? `<p class="progress-note">${escapeHtml(progressNote)}</p>` : ""}</div>
       <div class="card"><div class="section-head"><strong>选择省份</strong><small>已选 ${selectedRegions().length}/${regions.length}</small></div><div class="toolbar"><button class="mini" data-action="regions-all" ${busy ? "disabled" : ""}>全选</button><button class="mini" data-action="regions-invert" ${busy ? "disabled" : ""}>反选</button><button class="mini" data-action="regions-clear" ${busy ? "disabled" : ""}>清空</button></div><div class="regions">${regionHtml}</div></div>
       <div class="card"><div class="section-head"><strong>仓库与优先级</strong><small>数值越小越优先</small></div><div class="toolbar"><button class="mini" data-action="warehouses-all" ${busy ? "disabled" : ""}>全选并排序</button><button class="mini" data-action="warehouses-clear" ${busy ? "disabled" : ""}>清空选择</button></div><div class="warehouses">${warehouseHtml}</div></div>
-      <div class="card"><div class="settings"><span>每个省份处理间隔</span><input type="number" min="0.5" max="10" step="0.5" data-setting="delay" value="${state.delayMs / 1000}" ${busy ? "disabled" : ""}><span>秒</span></div><div class="notice"><b>温馨提示：</b>将按上方选择的仓库和优先级覆盖所选省份的现有设置，未勾选省份不会处理。</div></div>
+      <div class="card"><div class="settings"><span>每个省份处理间隔</span><input type="number" min="0.5" max="10" step="0.5" data-setting="delay" value="${state.delayMs / 1000}" ${busy ? "disabled" : ""}><span>秒</span></div><div class="notice"><b>温馨提示：</b>将按上方选择的仓库和优先级覆盖所选省份的现有设置；未选择仓库时将清空所选省份配置，未勾选省份不会处理。</div></div>
       <div class="actions"><button class="primary" data-action="toggle-run" ${state.status === "loading" ? "disabled" : ""}>${state.status === "running" ? "停止处理" : "开始批量设置"}</button></div>
     `;
   }
