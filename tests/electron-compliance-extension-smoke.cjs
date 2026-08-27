@@ -4,8 +4,10 @@ const path = require('path')
 const { app, BrowserWindow, WebContentsView, session, webContents } = require('electron')
 
 const TEST_SKU_ID = '10213098975565'
+const TEST_SIBLING_SKU_ID = '10213098975566'
 const TEST_PRODUCT_ID = '123456789'
 const SKU_STATUS_STORAGE_KEY = 'ecommerceToolboxComplianceSkuStatusCacheV1'
+const PROCESSED_SKU_STORAGE_KEY = 'ecommerceToolboxComplianceProcessedSkus'
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
 async function waitFor(check, errorMessage, timeoutMs = 8000) {
@@ -38,18 +40,45 @@ app.whenReady().then(async () => {
     const extensionPath = path.resolve(__dirname, '..', 'resources', 'dxe-compliance-extension')
     const storeSession = session.fromPartition('persist:platform-compliance-smoke')
     let productApiRequestCount = 0
+    let productState = 4
+    let productDeleted = false
+    let includeSiblingRow = false
     const intercepted = storeSession.protocol.interceptBufferProtocol('https', (request, callback) => {
       const target = new URL(request.url)
       if (target.hostname === 'sff.jd.com') {
         productApiRequestCount += 1
         const api = target.searchParams.get('api') || ''
-        const list = api.includes('queryValidProductList')
-          ? [{
+        let list = []
+        if (api.includes('queryValidProductList') && !productDeleted) {
+          list = [{
               productId: Number(TEST_PRODUCT_ID),
-              productState: 4,
-              skuInfoVOList: [{skuId: Number(TEST_SKU_ID)}]
+              productState,
+              skuInfoVOList: [
+                {skuId: Number(TEST_SKU_ID)},
+                ...(includeSiblingRow ? [{skuId: Number(TEST_SIBLING_SKU_ID)}] : [])
+              ]
             }]
-          : []
+        } else if (api.includes('queryRecycleProductList') && productDeleted) {
+          list = [{
+            productId: Number(TEST_PRODUCT_ID),
+            productState: 1,
+            skuInfoVOList: [
+              {skuId: Number(TEST_SKU_ID)},
+              {skuId: Number(TEST_SIBLING_SKU_ID)}
+            ]
+          }]
+        } else if (api.includes('updateProductStatus')) {
+          const bodyText = (request.uploadData || [])
+            .map(part => part.bytes ? Buffer.from(part.bytes).toString('utf8') : '')
+            .join('')
+          let operation = ''
+          try {
+            operation = JSON.parse(bodyText)?.productStatusReq?.operation || ''
+          } catch (_error) {}
+          if (operation === 'down' || (!operation && productState === 4)) productState = 1
+          if (operation === 'del' || (!operation && productState !== 4)) productDeleted = true
+          list = [{data: Number(TEST_PRODUCT_ID), success: true}]
+        }
         callback({
           mimeType: 'application/json',
           charset: 'utf-8',
@@ -79,11 +108,27 @@ app.whenReady().then(async () => {
                   <div role="gridcell" class="ag-cell" col-id="recordId">TEST-1</div>
                   <div role="gridcell" class="ag-cell subject-cell" col-id="subject">预警主体 SKU：${TEST_SKU_ID}</div>
                 </div>
+                ${includeSiblingRow ? `<div role="row" row-id="1" row-index="1" aria-rowindex="3" class="ag-row">
+                  <div role="gridcell" class="ag-cell" col-id="recordId">TEST-2</div>
+                  <div role="gridcell" class="ag-cell sibling-subject-cell" col-id="subject">预警主体 SKU：${TEST_SIBLING_SKU_ID}</div>
+                </div>` : ''}
               </div>
               <div class="ag-pinned-right-cols-container">
                 <div role="row" row-id="0" row-index="0" aria-rowindex="2" class="ag-row">
-                  <div role="gridcell" class="ag-cell operation-cell" col-id="custom">查看</div>
+                  <div role="gridcell" class="ag-cell operation-cell" col-id="custom" style="width:115px;height:70px">
+                    <span class="ag-cell-wrapper"><span class="ag-cell-value">
+                      <div style="width:80px"><button type="button" class="el-button el-button--text original-detail-action"><span>查看详情</span></button></div>
+                      <div style="width:80px;display:none"><button type="button" class="el-button el-button--text"><span>查看违约单</span></button></div>
+                    </span></span>
+                  </div>
                 </div>
+                ${includeSiblingRow ? `<div role="row" row-id="1" row-index="1" aria-rowindex="3" class="ag-row">
+                  <div role="gridcell" class="ag-cell sibling-operation-cell" col-id="custom" style="width:115px;height:70px">
+                    <span class="ag-cell-wrapper"><span class="ag-cell-value">
+                      <div style="width:80px"><button type="button" class="el-button el-button--text sibling-detail-action"><span>查看详情</span></button></div>
+                    </span></span>
+                  </div>
+                </div>` : ''}
               </div>
             </div>
           </body></html>`
@@ -235,15 +280,22 @@ app.whenReady().then(async () => {
       const button = controls?.querySelector(".et-c-status-delete");
       const subjectCell = document.querySelector(".subject-cell");
       const operationCell = document.querySelector(".operation-cell");
-      const operationStyle = operationCell ? getComputedStyle(operationCell) : null;
+      const actionContainer = operationCell?.querySelector(".ag-cell-value");
+      const originalAction = actionContainer?.querySelector(".original-detail-action");
+      const buttonStyle = button ? getComputedStyle(button) : null;
       return Boolean(
         controls && badge && button
         && badge.parentElement === subjectCell
         && !controls.contains(badge)
         && getComputedStyle(controls).display === "flex"
-        && operationStyle?.display === "flex"
-        && operationStyle?.alignItems === "center"
-        && controls.parentElement === operationCell
+        && getComputedStyle(actionContainer).display === "flex"
+        && getComputedStyle(actionContainer).flexWrap === "wrap"
+        && controls.parentElement === actionContainer
+        && originalAction?.textContent.trim() === "查看详情"
+        && actionContainer.contains(originalAction)
+        && buttonStyle?.color === "rgb(245, 34, 45)"
+        && buttonStyle?.borderTopStyle === "none"
+        && buttonStyle?.backgroundColor === "rgba(0, 0, 0, 0)"
       );
     })()`)
     if (!statusBesideSkuAndDeleteInOperationColumn) throw new Error('SKU 状态没有紧跟编号，或删除按钮没有移动到操作列')
@@ -308,6 +360,93 @@ app.whenReady().then(async () => {
     await waitFor(async () => complianceView.webContents.executeJavaScript(
       'document.querySelector(".et-c-status-delete")?.textContent === "删除商品"'
     ), '过期缓存实时刷新为售卖中后没有恢复删除按钮')
+    await backgroundPage.executeJavaScript(`(async () => {
+      const key = ${JSON.stringify(SKU_STATUS_STORAGE_KEY)};
+      const stored = await chrome.storage.local.get(key);
+      stored[key][${JSON.stringify(TEST_SIBLING_SKU_ID)}] = {
+        kind: "onsale",
+        label: "售卖中",
+        title: "同一 SPU 的另一个 SKU",
+        productId: ${JSON.stringify(TEST_PRODUCT_ID)},
+        checkedAt: Date.now()
+      };
+      await chrome.storage.local.set(stored);
+    })()`)
+    includeSiblingRow = true
+    await complianceView.webContents.reload()
+    await waitFor(async () => complianceView.webContents.executeJavaScript(
+      'document.querySelectorAll(".et-c-status-delete").length === 2'
+    ), '同一 SPU 的两个 SKU 没有同时显示删除操作')
+    await complianceView.webContents.executeJavaScript(`(() => {
+      document.querySelector('.operation-cell .et-c-status-delete')?.click();
+      return true;
+    })()`)
+    await waitFor(async () => complianceView.webContents.executeJavaScript(
+      'Boolean(document.querySelector("#et-c-info-confirm-host")?.open)'
+    ), '删除商品确认框没有出现')
+    await complianceView.webContents.executeJavaScript(`(() => {
+      const host = document.querySelector('#et-c-info-confirm-host');
+      host?.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+      return true;
+    })()`)
+    let linkedSkuDeletePropagation
+    try {
+      linkedSkuDeletePropagation = await waitFor(async () => complianceView.webContents.executeJavaScript(`(() => {
+        const labels = [...document.querySelectorAll('.subject-cell .et-c-processed-badge, .sibling-subject-cell .et-c-processed-badge')]
+          .map((badge) => badge.textContent.trim());
+        return labels.length === 2
+          && labels.every((label) => label === '已删除')
+          && document.querySelectorAll('.et-c-status-delete').length === 0;
+      })()`), '删除一个 SKU 后没有把同一 SPU 的其他 SKU 联动标记为已删除', 12000)
+    } catch (error) {
+      const snapshot = await complianceView.webContents.executeJavaScript(`(() => ({
+        badges: [...document.querySelectorAll('.et-c-processed-badge')].map((item) => item.textContent.trim()),
+        buttons: [...document.querySelectorAll('.et-c-status-delete')].map((item) => ({text: item.textContent.trim(), title: item.title, disabled: item.disabled})),
+        confirmOpen: Boolean(document.querySelector('#et-c-info-confirm-host')?.open)
+      }))()`)
+      const stored = await backgroundPage.executeJavaScript(
+        `chrome.storage.local.get([${JSON.stringify(SKU_STATUS_STORAGE_KEY)}, ${JSON.stringify(PROCESSED_SKU_STORAGE_KEY)}])`
+      )
+      throw new Error(`${error.message}；state=${JSON.stringify({productState, productDeleted, snapshot, stored})}`)
+    }
+
+    await backgroundPage.executeJavaScript(`(async () => {
+      const statusKey = ${JSON.stringify(SKU_STATUS_STORAGE_KEY)};
+      const processedKey = ${JSON.stringify(PROCESSED_SKU_STORAGE_KEY)};
+      const stored = await chrome.storage.local.get([statusKey, processedKey]);
+      delete stored[processedKey][${JSON.stringify(TEST_SIBLING_SKU_ID)}];
+      stored[statusKey][${JSON.stringify(TEST_SIBLING_SKU_ID)}] = {
+        kind: "onsale",
+        label: "售卖中",
+        title: "模拟其他 SKU 删除后遗留的旧状态",
+        productId: ${JSON.stringify(TEST_PRODUCT_ID)},
+        checkedAt: Date.now()
+      };
+      await chrome.storage.local.set({
+        [statusKey]: stored[statusKey],
+        [processedKey]: stored[processedKey]
+      });
+    })()`)
+    await complianceView.webContents.reload()
+    await waitFor(async () => complianceView.webContents.executeJavaScript(
+      'document.querySelector(".sibling-operation-cell .et-c-status-delete")?.textContent === "删除商品"'
+    ), '没有恢复用于模拟旧状态的同 SPU 删除按钮')
+    await complianceView.webContents.executeJavaScript(
+      'document.querySelector(".sibling-operation-cell .et-c-status-delete")?.click()'
+    )
+    await waitFor(async () => complianceView.webContents.executeJavaScript(
+      'Boolean(document.querySelector("#et-c-info-confirm-host")?.open)'
+    ), '再次删除商品确认框没有出现')
+    await complianceView.webContents.executeJavaScript(`(() => {
+      const host = document.querySelector('#et-c-info-confirm-host');
+      host?.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+      return true;
+    })()`)
+    const alreadyDeletedRecovery = await waitFor(async () => complianceView.webContents.executeJavaScript(`(() => {
+      const badge = document.querySelector('.sibling-subject-cell .et-c-processed-badge');
+      return badge?.textContent.trim() === '已删除'
+        && !document.querySelector('.sibling-operation-cell .et-c-status-delete');
+    })()`), '商品已在回收站时仍停留在重试删除状态', 12000)
     console.log(JSON.stringify({
       ok: true,
       backgroundReady: true,
@@ -317,6 +456,8 @@ app.whenReady().then(async () => {
       expiredCacheRequeried: true,
       deleteButtonRules: true,
       statusBesideSkuAndDeleteInOperationColumn: true,
+      linkedSkuDeletePropagation,
+      alreadyDeletedRecovery,
       jdAiAutoPopupPreferenceToggle: true,
       refreshedCheckedAt: refreshedCache.checkedAt,
       productHostTabId: channelResult.tabId,

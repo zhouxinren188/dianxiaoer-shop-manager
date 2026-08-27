@@ -248,19 +248,31 @@
     annotateProcessedRows();
   }
 
+  function knownSkuIdsForProduct(product) {
+    const productId = String(product?.productId ?? "").trim();
+    const skuIds = new Set((product?.skuIds || []).map((skuId) => String(skuId)));
+    for (const [skuId, status] of Object.entries(skuStatusRecords)) {
+      if (String(status?.productId || "") === productId) skuIds.add(String(skuId));
+    }
+    for (const [skuId, record] of Object.entries(processedSkuRecords)) {
+      if (String(record?.productId || "") === productId) skuIds.add(String(skuId));
+    }
+    return [...skuIds].filter((skuId) => /^\d{8,20}$/.test(skuId));
+  }
+
   async function markProductDeleted(product) {
-    await markSkuIdsDeleted((product.skuIds || []).map((skuId) => ({
+    await markSkuIdsDeleted(knownSkuIdsForProduct(product).map((skuId) => ({
       skuId,
       productId: product.productId,
-      source: "delete"
+      source: product.deletionSource === "recycle" ? "recycle" : "delete"
     })));
   }
 
   async function markProductsDeleted(productsToMark) {
-    await markSkuIdsDeleted(productsToMark.flatMap((product) => (product.skuIds || []).map((skuId) => ({
+    await markSkuIdsDeleted(productsToMark.flatMap((product) => knownSkuIdsForProduct(product).map((skuId) => ({
       skuId,
       productId: product.productId,
-      source: "delete"
+      source: product.deletionSource === "recycle" ? "recycle" : "delete"
     }))));
   }
 
@@ -384,6 +396,14 @@
     return null;
   }
 
+  function findOperationActionsContainer(operationCell) {
+    if (!(operationCell instanceof Element)) return null;
+    return operationCell.querySelector(':scope > .ag-cell-wrapper > .ag-cell-value')
+      || operationCell.querySelector('.ag-cell-wrapper .ag-cell-value')
+      || operationCell.querySelector('.ag-cell-value')
+      || operationCell;
+  }
+
   function annotateProcessedRows() {
     if (!Object.keys(processedSkuRecords).length && !Object.keys(skuStatusRecords).length && !visibleSkuStatusPending.size) return;
     const rows = [...document.querySelectorAll("tbody tr, tr.render-row, [role='row']")];
@@ -404,8 +424,10 @@
         if (!new RegExp(`SKU\\s*[:：]\\s*${controlsSkuId}(?!\\d)`, "i").test(text)) controls.remove();
       }
       const operationCell = findRowOperationCell(row);
-      if (operationCell) {
+      const actionContainer = findOperationActionsContainer(operationCell);
+      if (operationCell && actionContainer) {
         operationCell.classList.add('et-c-operation-cell');
+        actionContainer.classList.add('et-c-operation-actions-container');
         for (const controls of operationCell.querySelectorAll('.et-c-status-actions[data-sku-id]')) {
           if (!skuIds.includes(controls.dataset.skuId || '')) controls.remove();
         }
@@ -449,7 +471,7 @@
           && new Set(["onsale", "offsale"]).has(statusRecord?.kind)
           && /^\d{8,20}$/.test(String(statusRecord?.productId || ""))
         );
-        if (!canDelete || !operationCell) {
+        if (!canDelete || !operationCell || !actionContainer) {
           deleteButton?.remove();
           controls?.remove();
           continue;
@@ -458,9 +480,9 @@
           controls = document.createElement("span");
           controls.className = "et-c-status-actions";
           controls.dataset.skuId = skuId;
-          operationCell.appendChild(controls);
+          actionContainer.appendChild(controls);
         }
-        if (controls.parentElement !== operationCell) operationCell.appendChild(controls);
+        if (controls.parentElement !== actionContainer) actionContainer.appendChild(controls);
         if (deleteButton && deleteButton.parentElement !== controls) controls.appendChild(deleteButton);
         const productId = String(statusRecord.productId);
         if (deleteButton?.dataset.productId !== productId) {
@@ -470,7 +492,7 @@
         if (!deleteButton) {
           deleteButton = document.createElement("button");
           deleteButton.type = "button";
-          deleteButton.className = "et-c-info-delete et-c-status-delete";
+          deleteButton.className = "el-button el-button--text et-c-status-delete";
           deleteButton.dataset.skuId = skuId;
           deleteButton.dataset.productId = productId;
           deleteButton.textContent = "删除商品";
@@ -1188,7 +1210,7 @@
       .et-c-row{display:flex;align-items:center;justify-content:space-between;gap:10px}.et-c-row label{color:#46526d}.et-c-delay{display:flex;align-items:center;gap:6px}.et-c-delay input{width:58px;height:32px;padding:4px 7px;border:1px solid #bfcaf0;border-radius:8px;text-align:center;outline:none}
       .et-c-note{margin-top:10px;padding-top:9px;border-top:1px solid #edf0f5;color:#e34a32;font-size:12px}
       .et-c-actions{display:grid;grid-template-columns:1fr 1.45fr;gap:9px}.et-c-btn{height:40px;border:0;border-radius:10px;cursor:pointer;font-weight:700}.et-c-read{background:#eef2ff;color:#3558d9;border:1px solid #cbd6ff}.et-c-run{background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}.et-c-btn:disabled{cursor:not-allowed;opacity:.45}.et-c-fail{cursor:help;color:#d94834!important}
-      .et-c-operation-cell{display:flex!important;align-items:center!important;gap:8px!important;height:100%!important;padding-top:0!important;padding-bottom:0!important;line-height:normal!important}.et-c-operation-cell>.ag-cell-wrapper{display:flex!important;align-items:center!important;min-height:0!important}.et-c-status-actions{display:flex!important;align-items:center!important;gap:7px!important;width:max-content!important;max-width:100%!important;margin:0!important;line-height:24px!important;white-space:nowrap!important}.et-c-status-actions .et-c-processed-badge{margin-left:0!important}.et-c-processed-badge{display:inline-block!important;margin-left:7px!important;padding:1px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font:700 12px/19px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:middle!important;white-space:nowrap!important}.et-c-state-deleted{border-color:#97d7ad!important;background:#eaf8ef!important;color:#168044!important}.et-c-state-onsale{border-color:#8db7ff!important;background:#eaf2ff!important;color:#2464cb!important}.et-c-state-offsale{border-color:#c7ceda!important;background:#f1f3f6!important;color:#596274!important}.et-c-state-unknown{border-color:#f0bd70!important;background:#fff5e5!important;color:#b46b08!important}.et-c-state-nonexistent{border-color:#c8cdd5!important;background:#eef0f3!important;color:#666d78!important}
+      .et-c-operation-cell{height:100%!important;padding-top:0!important;padding-bottom:0!important;line-height:normal!important}.et-c-operation-cell>.ag-cell-wrapper{display:flex!important;align-items:center!important;width:100%!important;height:100%!important;min-height:0!important}.et-c-operation-actions-container{display:flex!important;align-items:center!important;flex-wrap:wrap!important;column-gap:10px!important;row-gap:0!important;width:100%!important;max-width:100%!important;overflow:visible!important;line-height:24px!important;white-space:normal!important}.et-c-operation-actions-container>div{width:auto!important;min-width:0!important;margin:0!important}.et-c-status-actions{display:inline-flex!important;align-items:center!important;width:auto!important;min-width:0!important;max-width:100%!important;margin:0!important;line-height:24px!important;white-space:nowrap!important}.et-c-status-delete{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:auto!important;height:24px!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;color:#f5222d!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important;cursor:pointer!important}.et-c-status-delete:hover{background:transparent!important;color:#cf1322!important}.et-c-status-delete.is-done{color:#168044!important;cursor:default!important}.et-c-status-delete.is-failed{color:#c93320!important}.et-c-status-actions .et-c-processed-badge{margin-left:0!important}.et-c-processed-badge{display:inline-block!important;margin-left:7px!important;padding:1px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font:700 12px/19px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:middle!important;white-space:nowrap!important}.et-c-state-deleted{border-color:#97d7ad!important;background:#eaf8ef!important;color:#168044!important}.et-c-state-onsale{border-color:#8db7ff!important;background:#eaf2ff!important;color:#2464cb!important}.et-c-state-offsale{border-color:#c7ceda!important;background:#f1f3f6!important;color:#596274!important}.et-c-state-unknown{border-color:#f0bd70!important;background:#fff5e5!important;color:#b46b08!important}.et-c-state-nonexistent{border-color:#c8cdd5!important;background:#eef0f3!important;color:#666d78!important}
       .et-c-info-action{display:flex!important;align-items:center!important;gap:7px!important;width:max-content!important;margin-top:4px!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}.et-c-info-select{width:14px!important;height:14px!important;margin:0!important;accent-color:#f05236!important}.et-c-info-sales{color:#657087!important}.et-c-info-sales-number{color:inherit!important;font-weight:400!important}.et-c-info-sales-number.is-positive{color:#169653!important;font-weight:700!important}.et-c-info-delete{height:24px!important;padding:0 8px!important;border:1px solid #ffb7a8!important;border-radius:5px!important;background:#fff2ef!important;color:#e44029!important;font:12px/22px Arial,"Microsoft YaHei",sans-serif!important;cursor:pointer!important}.et-c-info-delete:hover{border-color:#f06a52!important;background:#ffe8e2!important}.et-c-info-delete.is-done{border-color:#9dd8af!important;background:#eaf8ef!important;color:#178044!important;cursor:default!important}.et-c-info-delete.is-failed{border-color:#ef8a78!important;background:#fff0ed!important;color:#c93320!important}.et-c-detail-action{display:inline-flex!important;align-items:center!important;gap:7px!important;margin-left:10px!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}.et-c-detail-status{display:inline-block!important;padding:1px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font-weight:700!important;line-height:19px!important}.et-c-detail-action .et-c-info-delete[hidden]{display:none!important}#et-c-info-batch-toolbar{display:inline-flex!important;align-items:center!important;gap:8px!important;margin-left:9px!important;vertical-align:middle!important;font:13px/28px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}#et-c-info-batch-toolbar .et-c-info-select-all{width:15px!important;height:15px!important;margin:0!important;accent-color:#f05236!important;cursor:pointer!important}.et-c-info-batch-delete{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:auto!important;min-width:0!important;max-width:none!important;height:28px!important;padding:0 6px!important;border:1px solid #f36b55!important;border-radius:5px!important;background:#fff4f1!important;color:#df4029!important;font:12px/26px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important;cursor:pointer!important}.et-c-info-batch-delete.is-failed{border-color:#dc3825!important;background:#ffe7e2!important;color:#bd2818!important}.et-c-info-batch-delete:disabled{opacity:.45!important;cursor:not-allowed!important}
       .et-c-info-confirm-mask{position:fixed;inset:0;z-index:2147483646;display:grid;place-items:center;padding:18px;background:transparent;backdrop-filter:none;font:14px/1.45 Arial,"Microsoft YaHei",sans-serif}.et-c-info-confirm-box{width:min(360px,calc(100vw - 36px));padding:20px;border:1px solid #e3e7ef;border-radius:15px;background:#fff;box-shadow:0 18px 44px #15204738;text-align:center}.et-c-info-confirm-box h3{margin:0 0 12px;font-size:18px;color:#26324b}.et-c-info-confirm-box p{margin:0;color:#59657e;line-height:1.75;white-space:pre-line}.et-c-info-confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.et-c-info-confirm-actions button{height:38px;border-radius:9px;font-weight:700;cursor:pointer}.et-c-info-confirm-cancel{border:1px solid #d4daea;background:#fff;color:#536079}.et-c-info-confirm-ok{border:0;background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}
       .et-c-confirm-mask{position:absolute;inset:0;z-index:20;display:grid;place-items:center;padding:18px;border-radius:18px;background:#17213b73;backdrop-filter:blur(2px)}.et-c-confirm-box{width:100%;max-width:350px;padding:20px;border-radius:15px;background:#fff;box-shadow:0 18px 44px #1520474d;text-align:center}.et-c-confirm-box h3{margin:0 0 12px;font-size:18px;color:#26324b}.et-c-confirm-box p{margin:0;color:#59657e;line-height:1.75;white-space:pre-line}.et-c-confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.et-c-confirm-actions button{height:38px;border-radius:9px;font-weight:700;cursor:pointer}.et-c-confirm-cancel{border:1px solid #d4daea;background:#fff;color:#536079}.et-c-confirm-ok{border:0;background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}
@@ -1363,6 +1385,21 @@
     return items;
   }
 
+  async function findProductInRecycle(product, token) {
+    const productId = String(product?.productId ?? "").trim();
+    const skuIds = knownSkuIdsForProduct(product).slice(0, 100);
+    if (!/^\d{8,20}$/.test(productId) || !skuIds.length) return null;
+    if (token !== runToken) throw new Error("用户停止处理");
+    const result = await bridgeRequest("QUERY_RECYCLE_PRODUCTS", {skuIds}, 35000);
+    if (token !== runToken) throw new Error("用户停止处理");
+    const matched = productItems(result).find((item) =>
+      String(item?.productId ?? item?.productInfoVO?.productId ?? "").trim() === productId
+    );
+    if (!matched) return null;
+    diagnosticLog("product_already_deleted_confirmed", {productId, skuIds});
+    return {...product, skuIds, deletionSource: "recycle"};
+  }
+
   function updateProductStatusFromItem(product, item) {
     product.productState = itemState(item);
     product.statusDescription = itemStatusDescription(item);
@@ -1408,8 +1445,14 @@
 
   async function processBatch(batch, token) {
     const failures = new Map();
+    const deleted = [];
     const fail = (product, error) => {
       if (!failures.has(String(product.productId))) failures.set(String(product.productId), {product, error});
+    };
+    const acceptDeleted = (product) => {
+      const productId = String(product?.productId ?? "");
+      failures.delete(productId);
+      if (!deleted.some((item) => String(item.productId) === productId)) deleted.push(product);
     };
     const productIds = batch.map((product) => String(product.productId));
     state.message = `正在查询本批 ${batch.length} 个商品状态`;
@@ -1421,7 +1464,9 @@
     for (const product of batch) {
       const fresh = freshItems.get(String(product.productId));
       if (!fresh) {
-        fail(product, "批量复查时未找到该商品");
+        const recycled = await findProductInRecycle(product, token);
+        if (recycled) acceptDeleted(recycled);
+        else fail(product, "批量复查时未找到该商品，回收站也未确认已删除");
         continue;
       }
       updateProductStatusFromItem(product, fresh);
@@ -1443,7 +1488,11 @@
       for (const product of onSaleProducts) {
         const result = downResults.get(String(product.productId));
         if (result?.success) downSucceeded.push(product);
-        else fail(product, result?.error || "批量下架未返回成功");
+        else {
+          const recycled = await findProductInRecycle(product, token);
+          if (recycled) acceptDeleted(recycled);
+          else fail(product, result?.error || "批量下架未返回成功");
+        }
       }
       const verification = downSucceeded.length
         ? await waitBatchUntilOffSale(downSucceeded, token)
@@ -1457,7 +1506,6 @@
     }
 
     const deletable = readyToDelete.filter((product) => !failures.has(String(product.productId)));
-    const deleted = [];
     if (deletable.length) {
       if (token !== runToken) throw new Error("用户停止处理");
       state.message = `正在批量删除 ${deletable.length} 个商品`;
@@ -1469,8 +1517,12 @@
       const deleteResults = operationResultMap(deleteResult);
       for (const product of deletable) {
         const result = deleteResults.get(String(product.productId));
-        if (result?.success) deleted.push(product);
-        else fail(product, result?.error || "批量删除未返回成功");
+        if (result?.success) acceptDeleted(product);
+        else {
+          const recycled = await findProductInRecycle(product, token);
+          if (recycled) acceptDeleted(recycled);
+          else fail(product, result?.error || "批量删除未返回成功");
+        }
       }
     }
     if (deleted.length) await markProductsDeleted(deleted);
@@ -1571,6 +1623,11 @@
       host.addEventListener("cancel", (event) => {
         event.preventDefault();
         finish(false);
+      });
+      host.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        finish(true);
       });
       (document.body || document.documentElement).appendChild(host);
       host.showModal();

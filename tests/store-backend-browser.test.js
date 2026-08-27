@@ -75,6 +75,16 @@ describe('店铺后台多标签浏览器', () => {
     expect(toolbar).toContain("action('navigate'")
   })
 
+  it('像普通浏览器一样处理网页离开确认，允许用户决定重载或保留编辑内容', () => {
+    const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
+
+    expect(source).toContain("contents.on('will-prevent-unload'")
+    expect(source).toContain("message: '离开此网站？'")
+    expect(source).toContain("buttons: ['离开', '取消']")
+    expect(source).toContain("action=${shouldLeave ? 'leave' : 'cancel'}")
+    expect(source).toContain('if (shouldLeave) event.preventDefault()')
+  })
+
   it('提供普通浏览器一致的网页右键菜单', () => {
     const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
 

@@ -1,7 +1,7 @@
 'use strict'
 
 const path = require('path')
-const { app, BrowserWindow, WebContentsView, Menu, clipboard, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, WebContentsView, Menu, clipboard, dialog, ipcMain, session, shell } = require('electron')
 const {
   isHttpUrl,
   normalizeTabUrl,
@@ -45,6 +45,18 @@ class StoreBackendBrowser {
       ? options.onWebContentsCreated
       : null
     this.runtimeLog = options.runtimeLog || null
+    this.confirmBeforeUnload = typeof options.confirmBeforeUnload === 'function'
+      ? options.confirmBeforeUnload
+      : () => dialog.showMessageBoxSync(this.window, {
+          type: 'warning',
+          title: '离开此网站？',
+          message: '离开此网站？',
+          detail: '系统可能不会保存您所做的更改。',
+          buttons: ['离开', '取消'],
+          defaultId: 0,
+          cancelId: 1,
+          noLink: true
+        }) === 0
     this.maxTabs = Math.max(2, Number(options.maxTabs) || DEFAULT_MAX_TABS)
     this.showWindow = options.show !== false
     this.tabs = []
@@ -222,7 +234,13 @@ class StoreBackendBrowser {
 
     contents.setWindowOpenHandler(details => {
       if (isHttpUrl(details.url) || details.url === 'about:blank') {
-        this.log(`popup_requested opener_tab=${tab.id} disposition=${details.disposition || 'unknown'}`)
+        const openerUrl = contents.getURL() || tab.url || tab.requestedUrl || ''
+        this.log(
+          `popup_requested opener_tab=${tab.id} disposition=${details.disposition || 'unknown'}` +
+          ` opener_url=${JSON.stringify(openerUrl)} target_url=${JSON.stringify(details.url || '')}` +
+          ` frame_name=${JSON.stringify(details.frameName || '')}`
+        )
+
         return {
           action: 'allow',
           outlivesOpener: true,
@@ -295,6 +313,22 @@ class StoreBackendBrowser {
       tab.loading = false
       this.log(`tab_process_gone tab_id=${tab.id} reason=${details.reason}`)
       this.syncToolbarState()
+    })
+    contents.on('will-prevent-unload', event => {
+      let shouldLeave = false
+      try {
+        shouldLeave = this.confirmBeforeUnload({
+          tabId: tab.id,
+          title: tab.title,
+          url: contents.getURL() || tab.url || tab.requestedUrl || ''
+        }) === true
+      } catch (error) {
+        this.log(`before_unload_prompt_failed tab_id=${tab.id} reason=${error.message}`)
+      }
+      this.log(`before_unload_decision tab_id=${tab.id} action=${shouldLeave ? 'leave' : 'cancel'}`)
+      // Electron 与浏览器提示框的语义相反：preventDefault 表示忽略页面的
+      // beforeunload 阻止并继续离开；不调用则留在当前页面。
+      if (shouldLeave) event.preventDefault()
     })
     contents.on('destroyed', () => this.removeDestroyedTab(tab.id))
     contents.on('before-input-event', (event, input) => this.handleTabShortcut(event, input))
