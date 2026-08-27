@@ -34,6 +34,19 @@ describe('店铺后台多标签浏览器', () => {
     expect(orderList).toContain("title: `${store.name || '京东代销'} - 采购单详情`")
   })
 
+  it('隐藏系统标题栏并把原生窗口按钮叠加到标签栏右侧', () => {
+    const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
+    const toolbar = fs.readFileSync(path.resolve('resources/store-backend-toolbar.html'), 'utf8')
+
+    expect(source).toContain("titleBarStyle: 'hidden'")
+    expect(source).toContain('titleBarOverlay: {')
+    expect(source).toContain("color: '#e8edf5'")
+    expect(source).toContain('height: 43')
+    expect(toolbar).toContain('padding: 5px 142px 0 8px')
+    expect(toolbar).toContain('-webkit-app-region: drag')
+    expect(toolbar).toContain('-webkit-app-region: no-drag')
+  })
+
   it('达到标签上限时只回收最久未使用的后台标签', () => {
     const tabs = [
       { id: 'active', lastActiveAt: 1 },
@@ -60,5 +73,25 @@ describe('店铺后台多标签浏览器', () => {
     expect(source).toContain('session: this.platformSession')
     expect(toolbar).toContain('关闭标签页')
     expect(toolbar).toContain("action('navigate'")
+  })
+
+  it('提供普通浏览器一致的网页右键菜单', () => {
+    const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
+
+    expect(source).toContain("contents.on('context-menu'")
+    expect(source).toContain("label: '复制'")
+    expect(source).toContain("label: '粘贴'")
+    expect(source).toContain("label: '在新标签页中打开链接'")
+    expect(source).toContain("label: '复制链接地址'")
+    expect(source).toContain("label: '后退'")
+    expect(source).toContain("label: '重新加载'")
+    expect(source).toContain("label: '查看网页源代码'")
+    expect(source).toContain("label: '检查'")
+    expect(source).toContain("'打开开发者工具（F12）'")
+    expect(source).toContain("key === 'f12'")
+    expect(source).toContain("input.control && input.shift && key === 'i'")
+    expect(source).toContain("contents.openDevTools({ mode: 'detach', activate: true })")
+    expect(source).toContain('contents.inspectElement(params.x, params.y)')
+    expect(source).toContain('const sourceUrl = `view-source:${url}`')
   })
 })

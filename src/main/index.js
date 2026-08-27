@@ -28,6 +28,8 @@ const {
   stopAftersaleAutoSync
 } = require('./aftersale-fetch')
 const { openStoreBackendBrowser, closeAllStoreBackendBrowsers } = require('./store-backend-browser')
+const { attachWarehouseRegionTool } = require('./store-backend-warehouse-tool')
+const { ensureStoreBackendComplianceExtension } = require('./store-backend-compliance-extension')
 const {
   startHeartbeat,
   recoverStoreSessionFromServer,
@@ -264,6 +266,11 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
     skipFlush: true,
     context: 'backend_window_precheck'
   })
+  try {
+    await ensureStoreBackendComplianceExtension(partitionName, { runtimeLog })
+  } catch (error) {
+    runtimeLog.writeLog('COMPLIANCE_TOOL', `store_id=${storeId} phase=prepare result=failed error=${error.message}`)
+  }
 
   // ★ 检测登录重定向：Cookie失效时京东会重定向到 passport.jd.com/login
   const recoveryStates = new WeakMap()
@@ -315,6 +322,10 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
 
   function attachBackendSessionRecovery(webContents) {
     recoveryStates.set(webContents, { attempted: false, inProgress: false, finalFailureReported: false })
+    attachWarehouseRegionTool(webContents, {
+      storeId,
+      runtimeLog
+    })
     webContents.on('did-navigate', (event, navUrl) => {
       handleLoginRedirect(webContents, navUrl, 'did-navigate').catch(error => {
         runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=handler result=exception reason=${error.message}`)

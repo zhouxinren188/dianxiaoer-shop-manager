@@ -1,0 +1,48 @@
+{
+  "manifest_version": 2,
+  "name": "店小二内置·京麦违规商品清理",
+  "version": "1.0.0",
+  "description": "店小二网店管家内置的京麦违规商品清理模块。",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "https://wares-jdm.jd.com/*",
+    "https://shop.jd.com/*",
+    "https://*.shop.jd.com/*",
+    "https://keeper-jdm.jd.com/*",
+    "https://sff.jd.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://wares-jdm.jd.com/ware/wareList*"
+      ],
+      "js": [
+        "product-host-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://shop.jd.com/*",
+        "https://*.shop.jd.com/*",
+        "https://keeper-jdm.jd.com/*"
+      ],
+      "js": [
+        "compliance-product-cleaner.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    "assets/wolf-logo.png"
+  ]
+}

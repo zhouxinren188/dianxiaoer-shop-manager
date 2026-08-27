@@ -8,7 +8,12 @@
     <div class="search-card">
       <el-form :model="searchForm" inline>
         <el-form-item label="店铺名称">
-          <el-input v-model="searchForm.name" placeholder="请输入店铺名称" clearable />
+          <el-input
+            v-model="searchForm.name"
+            placeholder="请输入店铺名称"
+            clearable
+            @input="handleKeywordInput"
+          />
         </el-form-item>
         <el-form-item label="商家ID">
           <el-input
@@ -16,6 +21,7 @@
             placeholder="输入连续几位即可搜索"
             clearable
             style="width: 180px"
+            @input="handleKeywordInput"
           />
         </el-form-item>
         <el-form-item label="标签">
@@ -285,6 +291,8 @@ const pageInfo = reactive({
 
 const tableData = ref([])
 const loading = ref(false)
+let keywordSearchTimer = null
+let storeRequestId = 0
 
 // 编辑弹窗
 const editDialogVisible = ref(false)
@@ -316,6 +324,7 @@ const loginPending = reactive({
 const removeListeners = []
 
 async function loadStores() {
+  const requestId = ++storeRequestId
   loading.value = true
   try {
     const { merchant_id, ...otherFilters } = searchForm
@@ -326,12 +335,14 @@ async function loadStores() {
       merchant_id_keyword: merchant_id
     }
     const data = await fetchStores(params)
+    if (requestId !== storeRequestId) return
     tableData.value = data.list || []
     pageInfo.total = data.total || 0
   } catch (err) {
+    if (requestId !== storeRequestId) return
     ElMessage.error('加载店铺列表失败: ' + err.message)
   } finally {
-    loading.value = false
+    if (requestId === storeRequestId) loading.value = false
   }
 }
 
@@ -344,12 +355,30 @@ async function loadAllTagOptions() {
   }
 }
 
+function cancelKeywordSearch() {
+  if (keywordSearchTimer) {
+    clearTimeout(keywordSearchTimer)
+    keywordSearchTimer = null
+  }
+}
+
+function handleKeywordInput() {
+  cancelKeywordSearch()
+  pageInfo.page = 1
+  keywordSearchTimer = setTimeout(() => {
+    keywordSearchTimer = null
+    loadStores()
+  }, 300)
+}
+
 function handleSearch() {
+  cancelKeywordSearch()
   pageInfo.page = 1
   loadStores()
 }
 
 function handleReset() {
+  cancelKeywordSearch()
   searchForm.name = ''
   searchForm.merchant_id = ''
   searchForm.tag = ''
@@ -618,6 +647,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  cancelKeywordSearch()
   removeListeners.forEach(fn => fn && fn())
 })
 </script>

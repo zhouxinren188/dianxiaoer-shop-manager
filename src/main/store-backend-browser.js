@@ -1,13 +1,17 @@
 'use strict'
 
 const path = require('path')
-const { app, BrowserWindow, WebContentsView, ipcMain, session, shell } = require('electron')
+const { app, BrowserWindow, WebContentsView, Menu, clipboard, ipcMain, session, shell } = require('electron')
 const {
   isHttpUrl,
   normalizeTabUrl,
   isLikelyLoginUrl,
   selectOldestInactiveTab
 } = require('./store-backend-browser-helpers')
+const {
+  isStoreBackendComplianceUrl,
+  createStoreBackendComplianceProductHost
+} = require('./store-backend-compliance-extension')
 
 const TOOLBAR_HEIGHT = 84
 const DEFAULT_MAX_TABS = 10
@@ -46,8 +50,10 @@ class StoreBackendBrowser {
     this.tabs = []
     this.activeTabId = null
     this.closing = false
+    this.complianceProductHost = null
 
     const appPath = options.resourceRoot || app.getAppPath()
+    this.resourceRoot = options.resourceRoot
     this.window = new BrowserWindow({
       width: 1320,
       height: 860,
@@ -55,6 +61,12 @@ class StoreBackendBrowser {
       minHeight: 600,
       show: false,
       title: this.baseTitle,
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#e8edf5',
+        symbolColor: '#303133',
+        height: 43
+      },
       backgroundColor: '#f5f7fa',
       icon: path.join(appPath, 'resources', 'icon.ico'),
       webPreferences: {
@@ -238,6 +250,7 @@ class StoreBackendBrowser {
     })
 
     contents.on('did-start-navigation', (_event, url, _isInPlace, isMainFrame) => {
+      if (isHttpUrl(url)) this.ensureComplianceProductHost(url)
       if (!isMainFrame || !isHttpUrl(url) || isLikelyLoginUrl(url)) return
       tab.requestedUrl = url
       contents.__storeBackendRequestedUrl = url
@@ -251,6 +264,7 @@ class StoreBackendBrowser {
       this.syncToolbarState()
     })
     contents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+      if (isHttpUrl(url)) this.ensureComplianceProductHost(url)
       if (!isMainFrame) return
       tab.url = url
       if (!isLikelyLoginUrl(url)) {
@@ -284,6 +298,111 @@ class StoreBackendBrowser {
     })
     contents.on('destroyed', () => this.removeDestroyedTab(tab.id))
     contents.on('before-input-event', (event, input) => this.handleTabShortcut(event, input))
+    contents.on('context-menu', (_event, params) => this.showPageContextMenu(contents, params))
+  }
+
+  ensureComplianceProductHost(url) {
+    if (!isStoreBackendComplianceUrl(url) || this.isDestroyed()) return
+    if (this.complianceProductHost && !this.complianceProductHost.webContents.isDestroyed()) return
+    try {
+      this.complianceProductHost = createStoreBackendComplianceProductHost(this.platformSession, {
+        partitionName: this.partitionName,
+        resourceRoot: this.resourceRoot,
+        runtimeLog: this.runtimeLog
+      })
+      this.window.contentView.addChildView(this.complianceProductHost.view)
+      this.complianceProductHost.view.setBounds({x: -100, y: -100, width: 1, height: 1})
+      this.log('compliance_product_host_created')
+    } catch (error) {
+      this.complianceProductHost = null
+      this.log(`compliance_product_host_failed reason=${error.message}`)
+    }
+  }
+
+  showPageContextMenu(contents, params = {}) {
+    if (!contents || contents.isDestroyed() || this.isDestroyed()) return
+    const template = []
+    const appendSeparator = () => {
+      if (template.length && template[template.length - 1].type !== 'separator') {
+        template.push({ type: 'separator' })
+      }
+    }
+    const editFlags = params.editFlags || {}
+
+    if (params.isEditable) {
+      template.push(
+        { label: '撤销', enabled: !!editFlags.canUndo, click: () => contents.undo() },
+        { label: '重做', enabled: !!editFlags.canRedo, click: () => contents.redo() },
+        { type: 'separator' },
+        { label: '剪切', enabled: !!editFlags.canCut, click: () => contents.cut() },
+        { label: '复制', enabled: !!editFlags.canCopy, click: () => contents.copy() },
+        { label: '粘贴', enabled: !!editFlags.canPaste, click: () => contents.paste() },
+        { label: '粘贴为纯文本', enabled: !!editFlags.canPaste, click: () => contents.pasteAndMatchStyle() },
+        { label: '全选', enabled: !!editFlags.canSelectAll, click: () => contents.selectAll() }
+      )
+    } else if (params.selectionText || editFlags.canCopy) {
+      template.push({ label: '复制', enabled: !!editFlags.canCopy, click: () => contents.copy() })
+    }
+
+    if (isHttpUrl(params.linkURL)) {
+      appendSeparator()
+      template.push(
+        {
+          label: '在新标签页中打开链接',
+          click: () => this.createTab({
+            url: params.linkURL,
+            title: params.linkText || '新标签页',
+            activate: true,
+            autoLoad: true
+          })
+        },
+        { label: '复制链接地址', click: () => clipboard.writeText(params.linkURL) }
+      )
+    }
+
+    appendSeparator()
+    const history = contents.navigationHistory
+    template.push(
+      { label: '后退', enabled: !!(history && history.canGoBack()), click: () => history.goBack() },
+      { label: '前进', enabled: !!(history && history.canGoForward()), click: () => history.goForward() },
+      { label: '重新加载', click: () => contents.reload() }
+    )
+
+    const currentUrl = contents.getURL()
+    if (isHttpUrl(currentUrl)) {
+      appendSeparator()
+      template.push({ label: '查看网页源代码', click: () => this.openViewSource(currentUrl) })
+    }
+    template.push(
+      {
+        label: contents.isDevToolsOpened() ? '关闭开发者工具（F12）' : '打开开发者工具（F12）',
+        click: () => this.toggleDevTools(contents)
+      },
+      {
+        label: '检查',
+        click: () => {
+          if (!contents.isDestroyed()) contents.inspectElement(params.x, params.y)
+        }
+      }
+    )
+
+    while (template[0]?.type === 'separator') template.shift()
+    while (template[template.length - 1]?.type === 'separator') template.pop()
+    Menu.buildFromTemplate(template).popup({ window: this.window })
+  }
+
+  openViewSource(url) {
+    if (!isHttpUrl(url) || this.isDestroyed()) return
+    const sourceUrl = `view-source:${url}`
+    const tab = this.createTab({
+      url: sourceUrl,
+      title: '网页源代码',
+      activate: true,
+      autoLoad: false
+    })
+    tab.view.webContents.loadURL(sourceUrl).catch(error => {
+      this.log(`view_source_load_failed reason=${error.message}`)
+    })
   }
 
   handleTabShortcut(event, input) {
@@ -304,6 +423,18 @@ class StoreBackendBrowser {
     } else if (key === 'f5' || (input.control && key === 'r')) {
       event.preventDefault()
       this.reload()
+    } else if (key === 'f12' || (input.control && input.shift && key === 'i')) {
+      event.preventDefault()
+      this.toggleDevTools()
+    }
+  }
+
+  toggleDevTools(contents = this.activeContents()) {
+    if (!contents || contents.isDestroyed()) return
+    if (contents.isDevToolsOpened()) {
+      contents.closeDevTools()
+    } else {
+      contents.openDevTools({ mode: 'detach', activate: true })
     }
   }
 
@@ -480,6 +611,11 @@ class StoreBackendBrowser {
     backendBrowsers.delete(this.storeId)
     for (const tab of this.tabs) {
       if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close()
+    }
+    if (this.complianceProductHost) {
+      if (!this.isDestroyed()) this.window.contentView.removeChildView(this.complianceProductHost.view)
+      this.complianceProductHost.dispose()
+      this.complianceProductHost = null
     }
     this.tabs = []
     this.activeTabId = null
