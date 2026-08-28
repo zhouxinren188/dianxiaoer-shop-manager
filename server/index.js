@@ -4699,67 +4699,114 @@ app.get('/api/purchase-orders/by-sales-order/:orderNo', async (req, res) => {
     const orderNo = String(req.params.orderNo || '').trim()
     if (!/^\d{10,30}$/.test(orderNo)) return res.status(400).json(fail('销售订单号无效'))
 
-    let sql
-    let params
+    // 先按店铺 + 订单号走 sales_orders.uk_store_order 精确查找。不要把 sales_orders
+    // 直接用 OR + CAST 联到 purchase_orders；生产数据量下会触发全表扫描并超过 15 秒。
+    const [linkedSalesOrders] = await pool.execute(
+      `SELECT so.id, so.order_id, so.product_name, so.product_image, so.sku_id, so.quantity,
+              so.buyer_name, so.buyer_phone, so.buyer_address, so.warehouse_name
+       FROM stores owner_store
+       STRAIGHT_JOIN sales_orders so
+         ON so.store_id = owner_store.id AND so.order_id = ?
+       WHERE owner_store.owner_id = ?`,
+      [orderNo, ownerId]
+    )
+
     const fields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
-      COALESCE(NULLIF(po.goods_name, ''), NULLIF(i.product_name, ''), NULLIF(so.product_name, '')) AS goods_name,
-      COALESCE(NULLIF(po.goods_image, ''), NULLIF(so.product_image, '')) AS goods_image,
-      COALESCE(NULLIF(po.sku, ''), NULLIF(i.sku, ''), NULLIF(so.sku_id, '')) AS sku,
-      CASE WHEN po.quantity IS NULL OR po.quantity <= 0 THEN COALESCE(NULLIF(so.quantity, 0), 1) ELSE po.quantity END AS quantity,
+      COALESCE(NULLIF(po.goods_name, ''), NULLIF(i.product_name, '')) AS goods_name,
+      po.goods_image,
+      COALESCE(NULLIF(po.sku, ''), NULLIF(i.sku, '')) AS sku,
+      po.quantity,
       po.actual_quantity, po.source_url,
       po.platform, po.purchase_price, po.total_amount, po.shipping_fee, po.remark, po.purchase_type,
-      COALESCE(NULLIF(po.shipping_name, ''), NULLIF(so.buyer_name, '')) AS shipping_name,
-      COALESCE(NULLIF(po.shipping_phone, ''), NULLIF(so.buyer_phone, '')) AS shipping_phone,
-      COALESCE(NULLIF(po.shipping_address, ''), NULLIF(so.buyer_address, '')) AS shipping_address,
+      po.shipping_name, po.shipping_phone, po.shipping_address,
       po.account_id, po.status, po.platform_order_no,
       po.logistics_no, po.logistics_company,
       po.aftersale_status, po.aftersale_remark,
       po.created_at, po.updated_at,
       pa.account AS account_name,
-      COALESCE(NULLIF(w.name, ''), NULLIF(so.warehouse_name, '')) AS warehouse_name,
-      so.order_id AS linked_sales_order_no`
+      COALESCE(NULLIF(w.name, ''), '') AS warehouse_name`
 
-    if (req.user.user_type === 'sub') {
-      sql = `SELECT ${fields}
-        FROM purchase_orders po
-        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
-        LEFT JOIN inventory i ON po.inventory_id = i.id
-        LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (
-          (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR))
-          OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND po.sales_order_no = so.order_id)
-        ) AND EXISTS (
-          SELECT 1 FROM stores linked_store
-          WHERE linked_store.id = so.store_id AND linked_store.owner_id = po.owner_id
-        )
-        LEFT JOIN user_purchase_accounts upa
-          ON po.account_id = upa.account_id AND upa.user_id = ?
-        WHERE po.owner_id = ? AND (po.sales_order_no = ? OR so.order_id = ?)
-          AND (upa.user_id IS NOT NULL
-               OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL)))
-        ORDER BY po.id ASC
-        LIMIT 100`
-      params = [req.user.id, ownerId, orderNo, orderNo, req.user.id]
-    } else {
-      sql = `SELECT ${fields}
-        FROM purchase_orders po
-        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
-        LEFT JOIN inventory i ON po.inventory_id = i.id
-        LEFT JOIN warehouses w ON i.warehouse_id = w.id
-        LEFT JOIN sales_orders so ON (
-          (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR))
-          OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND po.sales_order_no = so.order_id)
-        ) AND EXISTS (
-          SELECT 1 FROM stores linked_store
-          WHERE linked_store.id = so.store_id AND linked_store.owner_id = po.owner_id
-        )
-        WHERE po.owner_id = ? AND (po.sales_order_no = ? OR so.order_id = ?)
-        ORDER BY po.id ASC
-        LIMIT 100`
-      params = [ownerId, orderNo, orderNo]
+    const queryPurchaseRows = async (condition, conditionParams) => {
+      const isSubAccount = req.user.user_type === 'sub'
+      const subAccountJoin = isSubAccount
+        ? `LEFT JOIN user_purchase_accounts upa
+             ON po.account_id = upa.account_id AND upa.user_id = ?`
+        : ''
+      const subAccountFilter = isSubAccount
+        ? `AND (upa.user_id IS NOT NULL
+                OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL)))`
+        : ''
+      const params = isSubAccount
+        ? [req.user.id, ownerId, ...conditionParams, req.user.id]
+        : [ownerId, ...conditionParams]
+      const [rows] = await pool.execute(
+        `SELECT ${fields}
+         FROM purchase_orders po
+         LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+         LEFT JOIN inventory i ON po.inventory_id = i.id
+         LEFT JOIN warehouses w ON i.warehouse_id = w.id
+         ${subAccountJoin}
+         WHERE po.owner_id = ? AND ${condition}
+         ${subAccountFilter}
+         ORDER BY po.id ASC
+         LIMIT 100`,
+        params
+      )
+      return rows
     }
 
-    const [rows] = await pool.execute(sql, params)
+    // 现代数据直接保存 sales_order_no；旧数据可能只保存 sales_orders.id。
+    // 分两次精确查询后去重，比跨表 OR 联表稳定得多。
+    const directRows = await queryPurchaseRows('po.sales_order_no = ?', [orderNo])
+    const linkedSalesOrderIds = [...new Set(
+      linkedSalesOrders
+        .map((row) => Number(row.id))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )]
+    const legacyRows = linkedSalesOrderIds.length > 0
+      ? await queryPurchaseRows(
+          `po.sales_order_id IN (${linkedSalesOrderIds.map(() => '?').join(',')})`,
+          linkedSalesOrderIds
+        )
+      : []
+
+    const purchaseRows = [...new Map(
+      [...directRows, ...legacyRows].map((row) => [String(row.id), row])
+    ).values()]
+    const linkedSalesById = new Map(
+      linkedSalesOrders.map((row) => [String(row.id), row])
+    )
+    const linkedSalesByOrderNo = new Map(
+      linkedSalesOrders.map((row) => [String(row.order_id), row])
+    )
+    const firstText = (...values) => {
+      for (const value of values) {
+        const text = value == null ? '' : String(value).trim()
+        if (text) return text
+      }
+      return ''
+    }
+    const rows = purchaseRows.map((row) => {
+      const linkedSalesOrder = linkedSalesById.get(String(row.sales_order_id || ''))
+        || linkedSalesByOrderNo.get(String(row.sales_order_no || ''))
+      const purchaseQuantity = Number(row.quantity)
+      const salesQuantity = Number(linkedSalesOrder?.quantity)
+      return {
+        ...row,
+        goods_name: firstText(row.goods_name, linkedSalesOrder?.product_name),
+        goods_image: firstText(row.goods_image, linkedSalesOrder?.product_image),
+        sku: firstText(row.sku, linkedSalesOrder?.sku_id),
+        quantity: Number.isFinite(purchaseQuantity) && purchaseQuantity > 0
+          ? purchaseQuantity
+          : (Number.isFinite(salesQuantity) && salesQuantity > 0 ? salesQuantity : 1),
+        shipping_name: firstText(row.shipping_name, linkedSalesOrder?.buyer_name),
+        shipping_phone: firstText(row.shipping_phone, linkedSalesOrder?.buyer_phone),
+        shipping_address: firstText(row.shipping_address, linkedSalesOrder?.buyer_address),
+        warehouse_name: firstText(row.warehouse_name, linkedSalesOrder?.warehouse_name),
+        linked_sales_order_no: firstText(linkedSalesOrder?.order_id, row.sales_order_no)
+      }
+    })
+
     res.json(ok({ list: rows }))
   } catch (err) {
     res.status(500).json(fail(err.message))
