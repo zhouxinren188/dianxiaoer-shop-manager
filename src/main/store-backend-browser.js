@@ -14,6 +14,7 @@ const {
 } = require('./store-backend-compliance-extension')
 
 const TOOLBAR_HEIGHT = 84
+const WINDOW_BORDER_SIZE = 1
 const DEFAULT_MAX_TABS = 10
 const backendBrowsers = new Map()
 const toolbarOwners = new Map()
@@ -67,6 +68,22 @@ class StoreBackendBrowser {
     const appPath = options.resourceRoot || app.getAppPath()
     this.resourceRoot = options.resourceRoot
     this.pagePreloadPath = path.join(appPath, 'resources', 'store-backend-page-preload.js')
+    this.pagePreloadRegistrationId = `dxe-store-backend-page-${this.storeId}`
+    try {
+      const registered = this.platformSession.getPreloadScripts().some(script =>
+        script.id === this.pagePreloadRegistrationId
+      )
+      if (!registered) {
+        this.platformSession.registerPreloadScript({
+          id: this.pagePreloadRegistrationId,
+          type: 'frame',
+          filePath: this.pagePreloadPath
+        })
+      }
+      this.log(`page_preload_registered id=${this.pagePreloadRegistrationId}`)
+    } catch (error) {
+      this.log(`page_preload_register_failed reason=${error.message}`)
+    }
     this.window = new BrowserWindow({
       width: 1320,
       height: 860,
@@ -74,6 +91,9 @@ class StoreBackendBrowser {
       minHeight: 600,
       show: false,
       title: this.baseTitle,
+      hasShadow: false,
+      thickFrame: false,
+      roundedCorners: true,
       titleBarStyle: 'hidden',
       titleBarOverlay: {
         color: '#e8edf5',
@@ -89,6 +109,8 @@ class StoreBackendBrowser {
         sandbox: true
       }
     })
+    this.window.setHasShadow(false)
+    this.log(`window_frame_config stage=created thick_frame=false has_shadow=${this.window.hasShadow()}`)
     this.window.setMenuBarVisibility(false)
     this.toolbarWebContentsId = this.window.webContents.id
     toolbarOwners.set(this.toolbarWebContentsId, this)
@@ -101,6 +123,8 @@ class StoreBackendBrowser {
     this.window.on('closed', () => this.dispose())
     this.window.once('ready-to-show', () => {
       if (this.isDestroyed() || !this.showWindow) return
+      this.window.setHasShadow(false)
+      this.log(`window_frame_config stage=ready_to_show thick_frame=false has_shadow=${this.window.hasShadow()}`)
       this.window.show()
       this.window.focus()
     })
@@ -187,7 +211,6 @@ class StoreBackendBrowser {
         webPreferences: {
           ...inheritedPreferences,
           session: this.platformSession,
-          preload: this.pagePreloadPath,
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: true,
@@ -315,6 +338,9 @@ class StoreBackendBrowser {
       tab.loading = false
       this.log(`tab_process_gone tab_id=${tab.id} reason=${details.reason}`)
       this.syncToolbarState()
+    })
+    contents.on('preload-error', (_event, preloadPath, error) => {
+      this.log(`page_preload_error tab_id=${tab.id} path=${JSON.stringify(preloadPath)} reason=${error?.message || error}`)
     })
     contents.on('will-prevent-unload', event => {
       let shouldLeave = false
@@ -503,10 +529,10 @@ class StoreBackendBrowser {
     if (!active || this.isDestroyed()) return
     const bounds = this.window.getContentBounds()
     active.view.setBounds({
-      x: 0,
+      x: WINDOW_BORDER_SIZE,
       y: TOOLBAR_HEIGHT,
-      width: Math.max(1, bounds.width),
-      height: Math.max(1, bounds.height - TOOLBAR_HEIGHT)
+      width: Math.max(1, bounds.width - WINDOW_BORDER_SIZE * 2),
+      height: Math.max(1, bounds.height - TOOLBAR_HEIGHT - WINDOW_BORDER_SIZE)
     })
   }
 

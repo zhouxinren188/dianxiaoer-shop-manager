@@ -317,7 +317,7 @@ const paymentVaultResolveLimiter = rateLimit({
 })
 
 // JWT 认证中间件
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const authHeader = req.headers['authorization']
   if (!authHeader) {
     return res.status(401).json({ success: false, message: '未提供认证令牌' })
@@ -329,7 +329,16 @@ function authMiddleware(req, res, next) {
   const token = parts[1]
   try {
     const decoded = jwt.verify(token, JWT_SECRET)
+    const [tokenRows] = await dbPool.execute(
+      'SELECT device FROM user_tokens WHERE token = ? LIMIT 1',
+      [token]
+    )
+    if (!tokenRows.length) {
+      return res.status(401).json({ success: false, message: '当前端登录已失效，请重新登录' })
+    }
     req.user = decoded
+    req.authToken = token
+    req.authDevice = tokenRows[0].device || decoded.device || 'desktop'
     next()
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -388,6 +397,8 @@ app.post('/api/register', registerLimiter, async (req, res) => {
 // 登录
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body
+  // 3001 是桌面端登录入口。服务端固定客户端类型，旧版客户端无需升级也兼容。
+  const device = 'desktop'
 
   if (!username || !password) {
     return res.status(400).json({ success: false, message: '参数不完整' })
@@ -418,27 +429,25 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 
     // 签发 JWT（7天有效期）
     const accessToken = jwt.sign(
-      { sub: username, phone: user.phone || '', role: user.role || 'staff' },
+      { sub: username, phone: user.phone || '', role: user.role || 'staff', device, jti: crypto.randomUUID() },
       JWT_SECRET,
       { expiresIn: '7d', issuer: 'dianxiaoer-api' }
     )
 
-    // 单点登录：删除该用户旧 token，再写入新 token
-    try {
-      await dbPool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
-      await dbPool.execute(
-        'INSERT INTO user_tokens (user_id, token) VALUES (?, ?)',
-        [user.id, accessToken]
-      )
-    } catch (tokenErr) {
-      console.warn('[API] 写入 user_tokens 失败（非致命）:', tokenErr.message)
-    }
+    // 只替换当前客户端类型的会话，其他端（例如微信小程序）继续在线。
+    // 写入失败必须让登录失败，否则会返回一个无法通过 3002 鉴权的“假成功” token。
+    await dbPool.execute(
+      `INSERT INTO user_tokens (user_id, token, device) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE token = VALUES(token), created_at = CURRENT_TIMESTAMP`,
+      [user.id, accessToken, device]
+    )
 
     console.log(`[API] 用户登录: ${username}`)
     res.json({
       success: true,
       message: '登录成功',
       accessToken,
+      device,
       tokenType: 'Bearer',
       expiresIn: 604800,
       user: {
@@ -453,7 +462,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   }
 })
 
-// 登出（删除 user_tokens 中的当前 token，实现单点登录踢出）
+// 登出只删除当前 token，不影响同账号的其他客户端类型。
 app.post('/api/logout', authMiddleware, async (req, res) => {
   const username = req.user.sub
   const token = (req.headers['authorization'] || '').replace('Bearer ', '').trim()
@@ -477,14 +486,31 @@ app.post('/api/refresh', authMiddleware, async (req, res) => {
     }
     
     const accessToken = jwt.sign(
-      { sub: username, phone: user.phone || '', role: user.role || 'staff' },
+      {
+        sub: username,
+        phone: user.phone || '',
+        role: user.role || 'staff',
+        device: req.authDevice,
+        jti: crypto.randomUUID()
+      },
       JWT_SECRET,
       { expiresIn: '7d', issuer: 'dianxiaoer-api' }
     )
+
+    const [rotateResult] = await dbPool.execute(
+      `UPDATE user_tokens
+       SET token = ?, created_at = CURRENT_TIMESTAMP
+       WHERE token = ? AND user_id = ? AND device = ?`,
+      [accessToken, req.authToken, user.id, req.authDevice]
+    )
+    if (rotateResult.affectedRows !== 1) {
+      return res.status(401).json({ success: false, message: '当前端登录已失效，请重新登录' })
+    }
     
     res.json({
       success: true,
       accessToken,
+      device: req.authDevice,
       tokenType: 'Bearer',
       expiresIn: 604800
     })
@@ -536,7 +562,7 @@ app.post('/api/payment-vault/resolve', requireSecureVaultTransport, paymentVault
       return res.status(400).json({ success: false, message: '付款账号格式无效' })
     }
 
-    // 单点登录校验：仅验证 JWT 签名还不够，token 必须仍在 user_tokens 中。
+    // 会话校验：仅验证 JWT 签名还不够，token 必须仍在 user_tokens 中。
     const [userRows] = await dbPool.execute(
       `SELECT u.id, u.username, u.user_type, u.parent_id, u.status
        FROM users u
@@ -1508,6 +1534,51 @@ app.use((err, req, res, next) => {
 async function runMigrations() {
   try {
     await dbPool.execute(`
+      CREATE TABLE IF NOT EXISTS user_tokens (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        token VARCHAR(512) NOT NULL UNIQUE,
+        device VARCHAR(32) NOT NULL DEFAULT 'desktop',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_token (token),
+        KEY idx_user_id (user_id),
+        UNIQUE KEY uk_user_device (user_id, device)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    await dbPool.execute(`ALTER TABLE user_tokens MODIFY COLUMN token VARCHAR(512) NOT NULL`)
+    try {
+      await dbPool.execute(`ALTER TABLE user_tokens ADD COLUMN device VARCHAR(32) NOT NULL DEFAULT 'desktop' AFTER token`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
+    const [existingTokens] = await dbPool.execute(`SELECT id, token, device FROM user_tokens`)
+    for (const row of existingTokens) {
+      const decoded = jwt.decode(row.token) || {}
+      const migratedDevice = decoded.iss === 'dianxiaoer-server' ? 'miniprogram' : 'desktop'
+      if (row.device !== migratedDevice) {
+        await dbPool.execute(`UPDATE user_tokens SET device = ? WHERE id = ?`, [migratedDevice, row.id])
+      }
+    }
+    await dbPool.execute(`
+      DELETE older FROM user_tokens older
+      INNER JOIN user_tokens newer
+        ON newer.user_id = older.user_id
+       AND newer.device = older.device
+       AND newer.id > older.id
+    `)
+    try {
+      await dbPool.execute(`ALTER TABLE user_tokens ADD UNIQUE KEY uk_user_device (user_id, device)`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_KEYNAME') throw e
+    }
+    console.log('[迁移] user_tokens 多端登录字段已就绪')
+  } catch (e) {
+    console.error('[迁移] user_tokens 多端登录迁移失败:', e.message)
+    throw e
+  }
+
+  try {
+    await dbPool.execute(`
       CREATE TABLE IF NOT EXISTS payment_vault (
         id INT PRIMARY KEY AUTO_INCREMENT,
         owner_id INT NOT NULL,
@@ -1540,16 +1611,24 @@ async function runMigrations() {
   }
 }
 
-// HTTP 服务器（仅 HTTP，新版本客户端正常更新）
-const http = require('http')
-http.createServer(app).listen(PORT, '0.0.0.0', async () => {
-  console.log(`[API] 店小二后端服务已启动: http://0.0.0.0:${PORT}`)
+// 迁移完成后才开放端口，避免服务重启瞬间登录请求先于 device 字段创建。
+async function startServers() {
   await runMigrations()
-})
 
-// 密码本和管理后台同时提供独立 HTTPS 入口；原 HTTP 端口继续服务旧客户端更新/登录。
-if (PAYMENT_VAULT_HTTPS_PORT !== Number(PORT)) {
-  https.createServer(sslOptions, app).listen(PAYMENT_VAULT_HTTPS_PORT, '0.0.0.0', () => {
-    console.log(`[API] 密码本安全入口已启动: https://0.0.0.0:${PAYMENT_VAULT_HTTPS_PORT}`)
+  const http = require('http')
+  http.createServer(app).listen(PORT, '0.0.0.0', () => {
+    console.log(`[API] 店小二后端服务已启动: http://0.0.0.0:${PORT}`)
   })
+
+  // 密码本和管理后台同时提供独立 HTTPS 入口；原 HTTP 端口继续服务旧客户端更新/登录。
+  if (PAYMENT_VAULT_HTTPS_PORT !== Number(PORT)) {
+    https.createServer(sslOptions, app).listen(PAYMENT_VAULT_HTTPS_PORT, '0.0.0.0', () => {
+      console.log(`[API] 密码本安全入口已启动: https://0.0.0.0:${PAYMENT_VAULT_HTTPS_PORT}`)
+    })
+  }
 }
+
+startServers().catch(err => {
+  console.error('[FATAL] 认证服务启动失败:', err.message)
+  process.exit(1)
+})

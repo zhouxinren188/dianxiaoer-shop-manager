@@ -7,6 +7,7 @@ require('dotenv').config({ path: path.join(__dirname, '.env.sms') })
 require('dotenv').config({ path: path.join(__dirname, '.env.rebate') })
 const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
+const crypto = require('crypto')
 const { pool, initDB, startKeepAlive } = require('./db')
 const {
   getSmsConfig,
@@ -156,13 +157,14 @@ app.use(async (req, res, next) => {
             [username]
           )
           if (rows.length) {
-            // 校验 token 是否仍在 user_tokens 表中（单点登录：同一用户不可同时在线）
+            // 校验 token 是否仍在 user_tokens 表中；同一用户允许不同客户端类型同时在线，
+            // 但同类型再次登录会替换旧 token。
             const [tokenRows] = await pool.execute(
               'SELECT 1 FROM user_tokens WHERE token = ? LIMIT 1',
               [token]
             )
             if (tokenRows.length === 0) {
-              return res.status(401).json({ code: 1, message: '账号在其他设备登录，请重新登录', needsRelogin: true })
+              return res.status(401).json({ code: 1, message: '当前端登录已失效，请重新登录', needsRelogin: true })
             }
             user = rows[0]
             user.user_id = user.id
@@ -3116,14 +3118,98 @@ app.get('/api/sales-trend', async (req, res) => {
 // ============ 售后纠纷指标 ============
 
 // 写入店铺售后纠纷指标（由 Electron 客户端调用）
+const AFTERSALE_SINGLE_METRIC_COLUMNS = Object.freeze({
+  pending_violations: 'pending_violations',
+  pending_follow_ups: 'pending_follow_ups'
+})
+
+const PENDING_INVOICE_DEADLINE_MS = 10 * 24 * 60 * 60 * 1000
+
+function normalizePendingInvoicesPayload(value) {
+  if (!Array.isArray(value)) return null
+  const result = []
+  const seen = new Set()
+  for (const item of value.slice(0, 100)) {
+    const orderId = String(item?.orderId ?? '').trim().slice(0, 30)
+    if (!/^\d{10,30}$/.test(orderId) || seen.has(orderId)) continue
+    seen.add(orderId)
+    const amount = Number(item?.invoiceAmount)
+    const applyTime = Number(item?.applyTime)
+    const normalizedApplyTime = Number.isFinite(applyTime) && applyTime > 0
+      ? Math.trunc(applyTime)
+      : null
+    result.push({
+      orderId,
+      invoiceTitle: String(item?.invoiceTitle ?? '').trim().slice(0, 200),
+      invoiceAmount: Number.isFinite(amount) && amount >= 0 ? amount : 0,
+      companyName: String(item?.companyName ?? '').trim().slice(0, 200),
+      applyTime: normalizedApplyTime,
+      countdownEndTime: normalizedApplyTime
+        ? normalizedApplyTime + PENDING_INVOICE_DEADLINE_MS
+        : null
+    })
+  }
+  return result
+}
+
+function parsePendingInvoicesJson(value) {
+  try {
+    const parsed = JSON.parse(value || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+// Update one confirmed JD metric without replacing the other values in the latest snapshot.
+app.post('/api/store-aftersale-metrics/:storeId/metric', async (req, res) => {
+  try {
+    const storeId = Number(req.params.storeId)
+    const platform = String(req.body?.platform || '').toLowerCase()
+    const metric = String(req.body?.metric || '')
+    const value = Number(req.body?.value)
+    const column = AFTERSALE_SINGLE_METRIC_COLUMNS[metric]
+
+    if (!Number.isSafeInteger(storeId) || storeId <= 0 || platform !== 'jd' || !column) {
+      return res.status(400).json(fail('invalid store metric request'))
+    }
+    if (!Number.isSafeInteger(value) || value < 0 || value > 1000000) {
+      return res.status(400).json(fail('invalid metric value'))
+    }
+
+    const accessibleStoreIds = await getAccessibleStoreIds(req.user)
+    if (!accessibleStoreIds.includes(storeId)) {
+      return res.status(403).json(fail('store access denied'))
+    }
+
+    await pool.execute(
+      `INSERT INTO store_aftersale_metrics (store_id, platform, ${column})
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE ${column}=VALUES(${column})`,
+      [storeId, platform, value]
+    )
+
+    console.log(`[售后指标-单项] storeId=${storeId} metric=${metric} value=${value} 写入成功`)
+    res.json(ok({ storeId, platform, metric, value }))
+  } catch (err) {
+    console.error('[售后指标-单项] 写入错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
 app.post('/api/store-aftersale-metrics/:storeId', async (req, res) => {
   try {
     const storeId = +req.params.storeId
-    const { platform, metrics, raw_data } = req.body
+    const { platform, metrics, raw_data, pending_invoices } = req.body
 
     if (!storeId || !platform) {
       return res.status(400).json(fail('缺少 storeId 或 platform'))
     }
+
+    const normalizedPendingInvoices = normalizePendingInvoicesPayload(pending_invoices)
+    const pendingInvoicesJson = normalizedPendingInvoices === null
+      ? null
+      : JSON.stringify(normalizedPendingInvoices)
 
     await pool.execute(
       `INSERT INTO store_aftersale_metrics
@@ -3131,8 +3217,9 @@ app.post('/api/store-aftersale-metrics/:storeId', async (req, res) => {
         pending_review_aftersales, pending_process_aftersales, pending_receive_aftersales,
         pending_reply_disputes, pending_evidence_disputes, pending_execute_disputes,
         pending_compensation, pending_warnings, pending_violations,
-        pending_industry_complaints, pending_task_orders, raw_data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        pending_industry_complaints, pending_task_orders, pending_logistics_exceptions,
+        pending_consumer_invoices, pending_invoices_json, raw_data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
        overdue_orders=VALUES(overdue_orders), pending_follow_ups=VALUES(pending_follow_ups),
        cancelled_orders=VALUES(cancelled_orders), pending_review_aftersales=VALUES(pending_review_aftersales),
@@ -3141,6 +3228,9 @@ app.post('/api/store-aftersale-metrics/:storeId', async (req, res) => {
        pending_execute_disputes=VALUES(pending_execute_disputes), pending_compensation=VALUES(pending_compensation),
        pending_warnings=VALUES(pending_warnings), pending_violations=VALUES(pending_violations),
        pending_industry_complaints=VALUES(pending_industry_complaints), pending_task_orders=VALUES(pending_task_orders),
+       pending_logistics_exceptions=VALUES(pending_logistics_exceptions),
+       pending_consumer_invoices=VALUES(pending_consumer_invoices),
+       pending_invoices_json=IF(VALUES(pending_invoices_json) IS NULL, pending_invoices_json, VALUES(pending_invoices_json)),
        raw_data=VALUES(raw_data)`,
       [
         storeId, platform,
@@ -3158,6 +3248,9 @@ app.post('/api/store-aftersale-metrics/:storeId', async (req, res) => {
         metrics.pending_violations || 0,
         metrics.pending_industry_complaints || 0,
         metrics.pending_task_orders || 0,
+        metrics.pending_logistics_exceptions || 0,
+        metrics.pending_consumer_invoices || 0,
+        pendingInvoicesJson,
         raw_data || ''
       ]
     )
@@ -3177,7 +3270,7 @@ app.get('/api/store-aftersale-metrics', async (req, res) => {
     const storeIds = await getAccessibleStoreIds(req.user)
 
     if (!storeIds.length) {
-      return res.json(ok({ summary: { totalOverdueOrders: 0, totalPendingFollowUps: 0, totalPendingReviewAftersales: 0, totalPendingProcessAftersales: 0, totalPendingReplyDisputes: 0, totalPendingWarnings: 0, totalPendingViolations: 0 }, list: [] }))
+      return res.json(ok({ summary: { totalOverdueOrders: 0, totalPendingFollowUps: 0, totalPendingReviewAftersales: 0, totalPendingProcessAftersales: 0, totalPendingReplyDisputes: 0, totalPendingWarnings: 0, totalPendingViolations: 0, totalPendingLogisticsExceptions: 0, totalPendingConsumerInvoices: 0 }, list: [], pendingInvoices: [] }))
     }
 
     let targetStoreIds = storeIds
@@ -3196,6 +3289,7 @@ app.get('/api/store-aftersale-metrics', async (req, res) => {
               m.pending_reply_disputes, m.pending_evidence_disputes, m.pending_execute_disputes,
               m.pending_compensation, m.pending_warnings, m.pending_violations,
               m.pending_industry_complaints, m.pending_task_orders,
+              m.pending_logistics_exceptions, m.pending_consumer_invoices, m.pending_invoices_json,
               m.updated_at,
               s.name as storeName, s.tags
        FROM store_aftersale_metrics m
@@ -3234,6 +3328,11 @@ app.get('/api/store-aftersale-metrics', async (req, res) => {
         pendingViolations: m ? m.pending_violations : 0,
         pendingIndustryComplaints: m ? m.pending_industry_complaints : 0,
         pendingTaskOrders: m ? m.pending_task_orders : 0,
+        pendingLogisticsExceptions: m ? m.pending_logistics_exceptions : 0,
+        pendingConsumerInvoices: m ? m.pending_consumer_invoices : 0,
+        pendingInvoices: m && Number(m.pending_consumer_invoices) > 0
+          ? parsePendingInvoicesJson(m.pending_invoices_json)
+          : [],
         updatedAt: m ? m.updated_at : null
       }
     })
@@ -3245,10 +3344,24 @@ app.get('/api/store-aftersale-metrics', async (req, res) => {
       totalPendingProcessAftersales: list.reduce((s, r) => s + r.pendingProcessAftersales, 0),
       totalPendingReplyDisputes: list.reduce((s, r) => s + r.pendingReplyDisputes, 0),
       totalPendingWarnings: list.reduce((s, r) => s + r.pendingWarnings, 0),
-      totalPendingViolations: list.reduce((s, r) => s + r.pendingViolations, 0)
+      totalPendingViolations: list.reduce((s, r) => s + r.pendingViolations, 0),
+      totalPendingLogisticsExceptions: list.reduce((s, r) => s + r.pendingLogisticsExceptions, 0),
+      totalPendingConsumerInvoices: list.reduce((s, r) => s + r.pendingConsumerInvoices, 0)
     }
 
-    res.json(ok({ summary, list }))
+    const pendingInvoices = list
+      .flatMap(store => store.pendingInvoices.map(invoice => ({
+        ...invoice,
+        storeId: store.storeId,
+        storeName: store.storeName
+      })))
+      .sort((a, b) => {
+        const aEnd = Number(a.countdownEndTime) || Number.MAX_SAFE_INTEGER
+        const bEnd = Number(b.countdownEndTime) || Number.MAX_SAFE_INTEGER
+        return aEnd - bEnd || String(a.orderId).localeCompare(String(b.orderId))
+      })
+
+    res.json(ok({ summary, list, pendingInvoices }))
   } catch (err) {
     console.error('[售后指标] 查询错误:', err.message)
     res.status(500).json(fail(err.message))
@@ -4575,6 +4688,82 @@ app.get('/api/purchase-orders/aftersale', async (req, res) => {
 
     res.json(ok({ list: rows, total, aftersaleStatusCounts }))
   } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
+// 京东店铺后台订单详情页和售后详情页使用：按销售订单号精确读取对应采购单。
+// 返回完整采购展示字段，但继续排除 logistics_tracking 等大字段，避免复用采购列表接口
+// 产生模糊查询和状态统计开销。
+app.get('/api/purchase-orders/by-sales-order/:orderNo', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const orderNo = String(req.params.orderNo || '').trim()
+    if (!/^\d{10,30}$/.test(orderNo)) return res.status(400).json(fail('销售订单号无效'))
+
+    let sql
+    let params
+    const fields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
+      COALESCE(NULLIF(po.goods_name, ''), NULLIF(i.product_name, ''), NULLIF(so.product_name, '')) AS goods_name,
+      COALESCE(NULLIF(po.goods_image, ''), NULLIF(so.product_image, '')) AS goods_image,
+      COALESCE(NULLIF(po.sku, ''), NULLIF(i.sku, ''), NULLIF(so.sku_id, '')) AS sku,
+      CASE WHEN po.quantity IS NULL OR po.quantity <= 0 THEN COALESCE(NULLIF(so.quantity, 0), 1) ELSE po.quantity END AS quantity,
+      po.actual_quantity, po.source_url,
+      po.platform, po.purchase_price, po.total_amount, po.shipping_fee, po.remark, po.purchase_type,
+      COALESCE(NULLIF(po.shipping_name, ''), NULLIF(so.buyer_name, '')) AS shipping_name,
+      COALESCE(NULLIF(po.shipping_phone, ''), NULLIF(so.buyer_phone, '')) AS shipping_phone,
+      COALESCE(NULLIF(po.shipping_address, ''), NULLIF(so.buyer_address, '')) AS shipping_address,
+      po.account_id, po.status, po.platform_order_no,
+      po.logistics_no, po.logistics_company,
+      po.aftersale_status, po.aftersale_remark,
+      po.created_at, po.updated_at,
+      pa.account AS account_name,
+      COALESCE(NULLIF(w.name, ''), NULLIF(so.warehouse_name, '')) AS warehouse_name,
+      so.order_id AS linked_sales_order_no`
+
+    if (req.user.user_type === 'sub') {
+      sql = `SELECT ${fields}
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (
+          (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR))
+          OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND po.sales_order_no = so.order_id)
+        ) AND EXISTS (
+          SELECT 1 FROM stores linked_store
+          WHERE linked_store.id = so.store_id AND linked_store.owner_id = po.owner_id
+        )
+        LEFT JOIN user_purchase_accounts upa
+          ON po.account_id = upa.account_id AND upa.user_id = ?
+        WHERE po.owner_id = ? AND (po.sales_order_no = ? OR so.order_id = ?)
+          AND (upa.user_id IS NOT NULL
+               OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL)))
+        ORDER BY po.id ASC
+        LIMIT 100`
+      params = [req.user.id, ownerId, orderNo, orderNo, req.user.id]
+    } else {
+      sql = `SELECT ${fields}
+        FROM purchase_orders po
+        LEFT JOIN purchase_accounts pa ON po.account_id = pa.id
+        LEFT JOIN inventory i ON po.inventory_id = i.id
+        LEFT JOIN warehouses w ON i.warehouse_id = w.id
+        LEFT JOIN sales_orders so ON (
+          (po.sales_order_id IS NOT NULL AND po.sales_order_id != '' AND po.sales_order_id = CAST(so.id AS CHAR))
+          OR (po.sales_order_no IS NOT NULL AND po.sales_order_no != '' AND po.sales_order_no = so.order_id)
+        ) AND EXISTS (
+          SELECT 1 FROM stores linked_store
+          WHERE linked_store.id = so.store_id AND linked_store.owner_id = po.owner_id
+        )
+        WHERE po.owner_id = ? AND (po.sales_order_no = ? OR so.order_id = ?)
+        ORDER BY po.id ASC
+        LIMIT 100`
+      params = [ownerId, orderNo, orderNo]
+    }
+
+    const [rows] = await pool.execute(sql, params)
+    res.json(ok({ list: rows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
 })
 
 app.get('/api/purchase-orders', async (req, res) => {
@@ -7447,6 +7636,9 @@ async function queryExpress100(logisticsNo, company) {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body
+    // 该接口专供微信小程序使用，服务端固定客户端类型，避免伪造任意
+    // device 值造成 token 无限累积或误替换桌面端会话。
+    const device = 'miniprogram'
     if (!username || !password) {
       return res.json(fail('用户名和密码不能为空'))
     }
@@ -7473,21 +7665,22 @@ app.post('/api/auth/login', async (req, res) => {
 
     // 签发 JWT
     const token = jwt.sign(
-      { sub: user.username, user_id: user.id },
+      { sub: user.username, user_id: user.id, device, jti: crypto.randomUUID() },
       JWT_SECRET,
       { expiresIn: '7d', issuer: 'dianxiaoer-server' }
     )
 
-    // 删除该用户的所有旧 token（踢掉其他设备的会话）
-    await pool.execute('DELETE FROM user_tokens WHERE user_id = ?', [user.id])
-    // 保存新 token 到 user_tokens 表
+    // 仅替换当前客户端类型的旧 token，保留桌面端等其他类型的会话。
+    // uk_user_device 约束同时避免并发登录产生同端多条 token。
     await pool.execute(
-      'INSERT INTO user_tokens (user_id, token) VALUES (?, ?)',
-      [user.id, token]
+      `INSERT INTO user_tokens (user_id, token, device) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE token = VALUES(token), created_at = CURRENT_TIMESTAMP`,
+      [user.id, token, device]
     )
 
     res.json(ok({
       token,
+      device,
       user: {
         id: user.id,
         username: user.username,

@@ -114,15 +114,57 @@ function richTextToPlain(val) {
   return String(val)
 }
 
+function normalizeTrackingTime(value, referenceDate = new Date()) {
+  if (value == null || value === '') return ''
+  const reference = new Date(referenceDate)
+  const now = Number.isNaN(reference.getTime()) ? new Date() : reference
+  const pad = number => String(number).padStart(2, '0')
+  const format = (date, hasSeconds = false) => {
+    const base = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+    return hasSeconds ? `${base}:${pad(date.getSeconds())}` : base
+  }
+
+  if (typeof value === 'number') {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? String(value) : format(date, true)
+  }
+
+  const text = richTextToPlain(value).replace(/\s+/g, ' ').trim()
+  if (!text) return ''
+  const relativeMatch = text.match(/^(今天|今日|昨天|昨日|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (relativeMatch) {
+    const offsets = { 今天: 0, 今日: 0, 昨天: -1, 昨日: -1, 前天: -2 }
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsets[relativeMatch[1]], Number(relativeMatch[2]), Number(relativeMatch[3]), Number(relativeMatch[4] || 0))
+    return format(date, Boolean(relativeMatch[4]))
+  }
+
+  const fullMatch = text.match(/^(\d{4})[年\/-](\d{1,2})[月\/-](\d{1,2})日?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (fullMatch) {
+    const date = new Date(Number(fullMatch[1]), Number(fullMatch[2]) - 1, Number(fullMatch[3]), Number(fullMatch[4]), Number(fullMatch[5]), Number(fullMatch[6] || 0))
+    return format(date, Boolean(fullMatch[6]))
+  }
+
+  const monthDayMatch = text.match(/^(\d{1,2})[月\/-](\d{1,2})日?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/)
+  if (monthDayMatch) {
+    let date = new Date(now.getFullYear(), Number(monthDayMatch[1]) - 1, Number(monthDayMatch[2]), Number(monthDayMatch[3]), Number(monthDayMatch[4]), Number(monthDayMatch[5] || 0))
+    // 物流轨迹不会来自未来；跨年时平台常省略年份，需要回退到上一年。
+    if (date.getTime() > now.getTime() + 24 * 60 * 60 * 1000) {
+      date = new Date(now.getFullYear() - 1, Number(monthDayMatch[1]) - 1, Number(monthDayMatch[2]), Number(monthDayMatch[3]), Number(monthDayMatch[4]), Number(monthDayMatch[5] || 0))
+    }
+    return format(date, Boolean(monthDayMatch[5]))
+  }
+  return text
+}
+
 /**
  * 标准化单条轨迹记录为 {time, context} 格式
  */
-function normalizeTrackingItem(item) {
+function normalizeTrackingItem(item, referenceDate = new Date()) {
   if (!item || typeof item !== 'object') return null
   let time = ''
   for (const key of TRACKING_TIME_FIELDS) {
     if (item[key] != null && item[key] !== '') {
-      time = typeof item[key] === 'number' ? new Date(item[key]).toLocaleString('zh-CN') : String(item[key])
+      time = normalizeTrackingTime(item[key], referenceDate)
       break
     }
   }
@@ -140,11 +182,11 @@ function normalizeTrackingItem(item) {
 /**
  * 标准化轨迹数组
  */
-function normalizeTrackingItems(items) {
+function normalizeTrackingItems(items, referenceDate = new Date()) {
   if (!Array.isArray(items)) return null
   const normalized = []
   for (const item of items) {
-    const n = normalizeTrackingItem(item)
+    const n = normalizeTrackingItem(item, referenceDate)
     if (n) normalized.push(n)
   }
   return normalized.length > 0 ? normalized : null
@@ -739,7 +781,7 @@ module.exports = {
   // Logistics
   CP_CODE_MAP, resolveLogisticsCompany,
   // Tracking
-  extractTrackingFromData, normalizeTrackingItems, looksLikeTrackingArray, richTextToPlain,
+  extractTrackingFromData, normalizeTrackingItems, normalizeTrackingTime, looksLikeTrackingArray, richTextToPlain,
   // Status
   ORDER_STATUS_MAP, mapOrderStatus, refineStatusByTracking,
   // CDP

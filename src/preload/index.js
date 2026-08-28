@@ -78,6 +78,7 @@ const validOnChannels = [
   'auto-sync-progress',
   'aftersale-auto-sync-start',
   'aftersale-auto-sync-result',
+  'aftersale-metric-updated',
   'batch-sync-progress',
   'pdd-product-link-update',
   'taobao-same-source-selected',

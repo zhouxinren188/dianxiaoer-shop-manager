@@ -133,6 +133,16 @@
             <span :class="clickableClass(row.pendingFollowUps)" @click="openBackend(row, 'pendingFollowUps')">{{ row.pendingFollowUps || '-' }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="物流异常" width="100" align="center">
+          <template #default="{ row }">
+            <span :class="clickableClass(row.pendingLogisticsExceptions)" @click="openBackend(row, 'pendingLogisticsExceptions')">{{ row.pendingLogisticsExceptions || '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="消费者发票" width="110" align="center">
+          <template #default="{ row }">
+            <span :class="clickableClass(row.pendingConsumerInvoices)" @click="openBackend(row, 'pendingConsumerInvoices')">{{ row.pendingConsumerInvoices || '-' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="取消订单" width="100" align="center">
           <template #default="{ row }">
             <span :class="clickableClass(row.cancelledOrders)" @click="openBackend(row, 'cancelledOrders')">{{ row.cancelledOrders || '-' }}</span>
@@ -193,7 +203,9 @@ const tableData = ref([])
 const lastUpdateTime = ref('')
 let unsubscribeAutoSyncStart = null
 let unsubscribeAutoSyncResult = null
+let unsubscribeMetricUpdated = null
 let autoSyncClockTimer = null
+let metricRefreshTimer = null
 
 const autoSyncStatusText = computed(() => {
   if (autoSyncRunning.value) return '正在自动同步…'
@@ -274,6 +286,8 @@ function clickableClass(val) {
 const BACKEND_URL_MAP = {
   overdueOrders: 'https://shop.jd.com/jdm/trade/risk/warning-center?type=sendGoodsWorning&secondType=sendGoodsWorningOvertime',
   pendingFollowUps: 'https://shop.jd.com/jdm/trade/risk/warning-center',
+  pendingLogisticsExceptions: 'https://shop.jd.com/jdm/trade/order/orderList/hadOut?orderTags=[%229%22]',
+  pendingConsumerInvoices: 'https://shop.jd.com/jdm/finance/consumerInvoice/cinvoiceOrder',
   cancelledOrders: 'https://shop.jd.com/jdm/trade/after-sale/independent-after-sale/list?tabCode=waitAudit',
   pendingReviewAftersales: 'https://shop.jd.com/jdm/trade/after-sale/independent-after-sale/list?tabCode=waitProcess',
   pendingProcessAftersales: 'https://shop.jd.com/jdm/trade/after-sale/independent-after-sale/list?tabCode=waitProcess',
@@ -301,7 +315,7 @@ function openBackend(row, field) {
 
 function headerCellStyle({ column }) {
   const base = { background: '#f5f7fa', fontWeight: 600 }
-  const alertCols = ['超时订单', '待回复催单', '取消订单', '待审核售后', '待处理售后', '待回复纠纷', '待举证纠纷', '待处理警告', '待处理违规']
+  const alertCols = ['超时订单', '待回复催单', '物流异常', '消费者发票', '取消订单', '待审核售后', '待处理售后', '待回复纠纷', '待举证纠纷', '待处理警告', '待处理违规']
   if (alertCols.includes(column.label)) {
     base.background = '#fdf6ec'
   }
@@ -311,7 +325,9 @@ function headerCellStyle({ column }) {
 async function loadData() {
   loading.value = true
   try {
-    const params = {}
+    // This page is refreshed by live metric events. Avoid an HTTP cache entry
+    // returning the snapshot from immediately before the server-side update.
+    const params = { _ts: Date.now() }
     if (filterForm.storeId) params.store_id = filterForm.storeId
     const res = await fetchAftersaleMetrics(params)
     if (res) {
@@ -374,6 +390,9 @@ async function handleSyncAll() {
       const result = await window.electronAPI.invoke('fetch-aftersale-metrics', { storeId: store.id })
       if (result.success) {
         successCount++
+        // 单店数据已在主进程中上传成功，立即从服务器刷新当前页面，
+        // 不再等所有店铺同步完成后才统一展示。
+        await loadData()
       } else if (/Cookie|登录|未登录|过期/i.test(result.message || '')) {
         skipCount++
       } else {
@@ -388,8 +407,6 @@ async function handleSyncAll() {
 
   syncing.value = false
   syncProgress.value = ''
-
-  if (successCount > 0) await loadData()
 
   if (successCount > 0) {
     const parts = [`${successCount}个成功`]
@@ -473,6 +490,26 @@ onMounted(() => {
         ElMessage.warning(`自动同步完成：${result.skipCount || 0}个跳过，${result.failCount || 0}个失败`)
       }
     })
+    unsubscribeMetricUpdated = window.electronAPI.onUpdate('aftersale-metric-updated', event => {
+      if (event?.metric !== 'pending_violations') return
+      const storeId = Number(event.storeId)
+      const value = Number(event.value)
+      if (Number.isSafeInteger(storeId) && storeId > 0 && Number.isSafeInteger(value) && value >= 0) {
+        const row = tableData.value.find(item => Number(item.storeId) === storeId)
+        if (row) {
+          const previousValue = Number(row.pendingViolations) || 0
+          row.pendingViolations = value
+          row.updatedAt = new Date().toISOString()
+          summary.totalPendingViolations = Math.max(
+            0,
+            Number(summary.totalPendingViolations || 0) + value - previousValue
+          )
+          lastUpdateTime.value = new Date().toLocaleString('zh-CN')
+        }
+      }
+      clearTimeout(metricRefreshTimer)
+      metricRefreshTimer = setTimeout(() => { loadData() }, 300)
+    })
   }
   autoSyncClockTimer = setInterval(() => { autoSyncNow.value = Date.now() }, 30000)
   loadStoreOptions()
@@ -483,10 +520,14 @@ onMounted(() => {
 onUnmounted(() => {
   if (unsubscribeAutoSyncStart) unsubscribeAutoSyncStart()
   if (unsubscribeAutoSyncResult) unsubscribeAutoSyncResult()
+  if (unsubscribeMetricUpdated) unsubscribeMetricUpdated()
   if (autoSyncClockTimer) clearInterval(autoSyncClockTimer)
+  if (metricRefreshTimer) clearTimeout(metricRefreshTimer)
   unsubscribeAutoSyncStart = null
   unsubscribeAutoSyncResult = null
+  unsubscribeMetricUpdated = null
   autoSyncClockTimer = null
+  metricRefreshTimer = null
 })
 </script>
 

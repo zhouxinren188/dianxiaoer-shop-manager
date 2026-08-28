@@ -82,6 +82,10 @@ async function run() {
   const browser = opened.browser
   const rootTab = browser.activeTab()
   await waitFor(() => rootTab.view.webContents.getTitle() === '订单列表')
+  const rootBridgeReady = await rootTab.view.webContents.executeJavaScript(
+    "typeof window.dxeStoreBackendBridge?.requestOrderPurchaseAction === 'function'"
+  )
+  assert.strictEqual(rootBridgeReady, true, '普通标签页应加载店铺后台页面 preload')
   console.log('[store-backend-tabs-smoke] root-ready')
 
   rootTab.view.webContents.executeJavaScript("document.getElementById('detail').click()", true).catch(error => {
@@ -90,6 +94,10 @@ async function run() {
   await waitFor(() => browser.tabs.length === 2)
   const childTab = browser.activeTab()
   await waitFor(() => childTab.view.webContents.getTitle() === '物流详情')
+  const popupBridgeReady = await childTab.view.webContents.executeJavaScript(
+    "typeof window.dxeStoreBackendBridge?.requestOrderPurchaseAction === 'function'"
+  )
+  assert.strictEqual(popupBridgeReady, true, 'window.open 合并标签页也应加载店铺后台页面 preload')
   console.log('[store-backend-tabs-smoke] popup-merged')
 
   assert.strictEqual(BrowserWindow.getAllWindows().length, 1, '网页弹窗不应创建第二个 BrowserWindow')
@@ -113,6 +121,8 @@ async function run() {
     browserWindows: 1,
     tabsAfterPopup: 2,
     sessionSharedWithinStore: true,
+    rootBridgeReady,
+    popupBridgeReady,
     childSurvivedOpenerClose: true,
     resourcesReleased: true
   }))

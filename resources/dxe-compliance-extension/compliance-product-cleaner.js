@@ -619,7 +619,9 @@
   let jdAiAutoCloseRoute = "";
   let jdAiAutoCloseDeadline = 0;
   let jdAiAutoCloseDone = false;
-  const JD_AI_AUTO_POPUP_STORAGE_KEY = "ecommerceToolboxJdAiAutoPopupV1";
+  // V1 could be polluted by the automatically rendered JD switch state. Use a
+  // clean key so existing installations recover to the safe default (`off`).
+  const JD_AI_AUTO_POPUP_STORAGE_KEY = "ecommerceToolboxJdAiAutoPopupV2";
   let jdAiAutoPopupEnabled = false;
 
   function findJdAiPanelTitle() {
@@ -716,13 +718,6 @@
     diagnosticLog("jd_ai_auto_popup_preference_changed", {enabled, source});
   }
 
-  function observeJdAiAutoPopupSwitch(panel) {
-    const control = findJdAiAutoPopupSwitch(panel);
-    if (!control) return;
-    const current = jdAiSwitchEnabled(control);
-    if (typeof current === "boolean") saveJdAiAutoPopupPreference(current, "visible_switch");
-  }
-
   function jdAiSwitchFromEventTarget(target) {
     if (!(target instanceof Element)) return null;
     const control = target.closest('[role="switch"], input[type="checkbox"], [class*="switch"]');
@@ -738,12 +733,21 @@
   function handleJdAiAutoPopupSwitchInteraction(event) {
     const control = jdAiSwitchFromEventTarget(event.target);
     if (!control) return;
-    const syncAfterChange = () => setTimeout(() => {
-      const enabled = jdAiSwitchEnabled(control);
-      saveJdAiAutoPopupPreference(enabled, "switch_interaction");
-      scheduleEnsureUi();
-    }, 80);
-    syncAfterChange();
+    // Only a real user interaction may change our persisted preference. The
+    // switch rendered in an automatically opened JD panel can briefly report
+    // the default `on` state even when the user previously selected `off`.
+    // Reading that initial state used to overwrite the saved preference and
+    // made the panel reopen on every visit.
+    for (const delay of [80, 320]) {
+      setTimeout(() => {
+        const title = findJdAiPanelTitle();
+        const panel = title ? findJdAiPanelRoot(title) : null;
+        const latestControl = panel ? findJdAiAutoPopupSwitch(panel) : null;
+        const enabled = jdAiSwitchEnabled(latestControl || control);
+        saveJdAiAutoPopupPreference(enabled, "switch_interaction");
+        scheduleEnsureUi();
+      }, delay);
+    }
   }
 
   function suppressInitialJdAiPanel(complianceSection) {
@@ -756,7 +760,6 @@
     }
     const title = findJdAiPanelTitle();
     const panel = title ? findJdAiPanelRoot(title) : null;
-    if (panel) observeJdAiAutoPopupSwitch(panel);
     if (!route || Date.now() > jdAiAutoCloseDeadline) return;
     if (jdAiAutoPopupEnabled) {
       if (panel) jdAiAutoCloseDone = true;

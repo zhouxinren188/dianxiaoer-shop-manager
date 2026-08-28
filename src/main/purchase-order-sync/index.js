@@ -4,7 +4,7 @@
  */
 
 const { ipcMain } = require('./common')
-const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus, refineStatusByTracking, OVERALL_TIMEOUT } = require('./common')
+const { httpPostJson, BUSINESS_SERVER, activeSyncs, mapOrderStatus, refineStatusByTracking, normalizeTrackingItems, OVERALL_TIMEOUT } = require('./common')
 
 const taobao = require('./taobao')
 const alibaba = require('./alibaba')
@@ -60,6 +60,10 @@ async function syncSingleAndUpdate(platformModule, accountId, platformOrderNo, p
         }
       }
 
+      if (Array.isArray(mappedOrderInfo.logistics_tracking)) {
+        mappedOrderInfo.logistics_tracking = normalizeTrackingItems(mappedOrderInfo.logistics_tracking) || []
+      }
+
       // 根据物流轨迹修正状态：shipped/in_transit → received/rejected/in_transit
       if (['shipped', 'in_transit'].includes(mappedOrderInfo.status)) {
         const refined = refineStatusByTracking(
@@ -95,32 +99,35 @@ async function syncSingleAndUpdate(platformModule, accountId, platformOrderNo, p
   return result
 }
 
+async function syncSinglePurchaseOrderBrowser({ accountId, platformOrderNo, platform } = {}) {
+  if (!accountId || !platformOrderNo || !platform) {
+    return { success: false, message: 'accountId、platformOrderNo 和 platform 不能为空' }
+  }
+
+  const platformModule = PLATFORM_MODULES[platform]
+  if (!platformModule) {
+    return { success: false, message: `不支持的平台: ${platform}` }
+  }
+
+  try {
+    return await withTimeout(
+      syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform),
+      IPC_SYNC_TIMEOUT,
+      `同步超时（${Math.round(IPC_SYNC_TIMEOUT / 1000)}秒无响应），请重试`
+    )
+  } catch (e) {
+    console.error(`[PurchaseSync] 单个同步异常:`, e.message)
+    return { success: false, message: `同步失败: ${e.message}` }
+  }
+}
+
 // ============ IPC 注册 ============
 
 function registerPurchaseOrderSyncIpc(mainWindow) {
   // 单个订单同步
   ipcMain.handle('sync-purchase-order-browser', async (event, { accountId, platformOrderNo, platform }) => {
     console.log(`[PurchaseSync IPC] 收到单个同步请求: accountId=${accountId}, orderNo=${platformOrderNo}, platform=${platform}`)
-
-    if (!accountId || !platformOrderNo || !platform) {
-      return { success: false, message: 'accountId、platformOrderNo 和 platform 不能为空' }
-    }
-
-    const platformModule = PLATFORM_MODULES[platform]
-    if (!platformModule) {
-      return { success: false, message: `不支持的平台: ${platform}` }
-    }
-
-    try {
-      return await withTimeout(
-        syncSingleAndUpdate(platformModule, accountId, platformOrderNo, platform),
-        IPC_SYNC_TIMEOUT,
-        `同步超时（${Math.round(IPC_SYNC_TIMEOUT / 1000)}秒无响应），请重试`
-      )
-    } catch (e) {
-      console.error(`[PurchaseSync IPC] 单个同步异常:`, e.message)
-      return { success: false, message: `同步失败: ${e.message}` }
-    }
+    return syncSinglePurchaseOrderBrowser({ accountId, platformOrderNo, platform })
   })
 
   // 批量同步
@@ -217,4 +224,4 @@ function registerPurchaseOrderSyncIpc(mainWindow) {
   })
 }
 
-module.exports = { registerPurchaseOrderSyncIpc }
+module.exports = { registerPurchaseOrderSyncIpc, syncSinglePurchaseOrderBrowser }

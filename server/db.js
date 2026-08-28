@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise')
+const jwt = require('jsonwebtoken')
 
 const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
@@ -132,12 +133,46 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS user_tokens (
         id INT PRIMARY KEY AUTO_INCREMENT,
         user_id INT NOT NULL,
-        token VARCHAR(200) NOT NULL UNIQUE,
+        token VARCHAR(512) NOT NULL UNIQUE,
+        device VARCHAR(32) NOT NULL DEFAULT 'desktop',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         KEY idx_token (token),
-        KEY idx_user_id (user_id)
+        KEY idx_user_id (user_id),
+        UNIQUE KEY uk_user_device (user_id, device)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    // 多端登录兼容：旧 token 均来自桌面端；同一账号每种客户端类型只保留一个会话。
+    // 当前 JWT（包含 jti/device）长度超过 200，先扩容避免截断或写入失败。
+    await connection.execute(`ALTER TABLE user_tokens MODIFY COLUMN token VARCHAR(512) NOT NULL`)
+    try {
+      await connection.execute(`ALTER TABLE user_tokens ADD COLUMN device VARCHAR(32) NOT NULL DEFAULT 'desktop' AFTER token`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
+    // 根据历史 JWT 的签发方恢复客户端类型，尽量不让迁移本身造成一次互踢。
+    const [existingTokens] = await connection.execute(`SELECT id, token, device FROM user_tokens`)
+    for (const row of existingTokens) {
+      const decoded = jwt.decode(row.token) || {}
+      const migratedDevice = decoded.iss === 'dianxiaoer-server' ? 'miniprogram' : 'desktop'
+      if (row.device !== migratedDevice) {
+        await connection.execute(`UPDATE user_tokens SET device = ? WHERE id = ?`, [migratedDevice, row.id])
+      }
+    }
+    // 旧实现存在“先删后插”的并发窗口，极端情况下同一用户可能残留多条旧 token。
+    // 加唯一索引前仅保留同端最新一条，避免迁移因历史重复数据失败。
+    await connection.execute(`
+      DELETE older FROM user_tokens older
+      INNER JOIN user_tokens newer
+        ON newer.user_id = older.user_id
+       AND newer.device = older.device
+       AND newer.id > older.id
+    `)
+    try {
+      await connection.execute(`ALTER TABLE user_tokens ADD UNIQUE KEY uk_user_device (user_id, device)`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_KEYNAME') throw e
+    }
 
     // 兼容已存在的 users 表：添加 parent_id 字段（主账号为 NULL，子账号指向主账号 id）
     try {
@@ -567,11 +602,18 @@ async function initDB() {
         pending_violations INT DEFAULT 0,
         pending_industry_complaints INT DEFAULT 0,
         pending_task_orders INT DEFAULT 0,
+        pending_logistics_exceptions INT DEFAULT 0,
+        pending_consumer_invoices INT DEFAULT 0,
+        pending_invoices_json LONGTEXT,
         raw_data LONGTEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_store_platform (store_id, platform)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    // 兼容已存在的售后指标表：补充后续新增的京东首页待办字段。
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_logistics_exceptions INT DEFAULT 0 AFTER pending_task_orders') } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_consumer_invoices INT DEFAULT 0 AFTER pending_logistics_exceptions') } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_invoices_json LONGTEXT AFTER pending_consumer_invoices') } catch (e) { /* 字段已存在 */ }
 
     // ======== 采购相关索引优化 ========
     // purchase_orders 表缺少的关键索引（全表扫描是首页加载慢的主因）

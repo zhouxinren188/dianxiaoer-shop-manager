@@ -56,10 +56,12 @@ describe('店铺后台违规商品清理内置模块', () => {
   })
 
   it('京东 AI 自动弹出开关可按店铺持久切换，并且不影响手动打开', () => {
-    expect(cleaner).toContain('const JD_AI_AUTO_POPUP_STORAGE_KEY = "ecommerceToolboxJdAiAutoPopupV1"')
+    expect(cleaner).toContain('const JD_AI_AUTO_POPUP_STORAGE_KEY = "ecommerceToolboxJdAiAutoPopupV2"')
     expect(cleaner).toContain('function findJdAiAutoPopupSwitch(panel)')
     expect(cleaner).toContain('function jdAiSwitchEnabled(control)')
     expect(cleaner).toContain('saveJdAiAutoPopupPreference(enabled, "switch_interaction")')
+    expect(cleaner).not.toContain('saveJdAiAutoPopupPreference(current, "visible_switch")')
+    expect(cleaner).toContain('for (const delay of [80, 320])')
     expect(cleaner).toContain('[JD_AI_AUTO_POPUP_STORAGE_KEY]: {enabled, updatedAt: Date.now()}')
     expect(cleaner).toContain('function suppressInitialJdAiPanel(complianceSection)')
     expect(cleaner).toContain('Date.now() + 15000')

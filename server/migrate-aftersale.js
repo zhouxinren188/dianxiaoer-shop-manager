@@ -37,11 +37,18 @@ async function migrate() {
         pending_violations INT DEFAULT 0,
         pending_industry_complaints INT DEFAULT 0,
         pending_task_orders INT DEFAULT 0,
+        pending_logistics_exceptions INT DEFAULT 0,
+        pending_consumer_invoices INT DEFAULT 0,
+        pending_invoices_json LONGTEXT,
         raw_data LONGTEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_store_platform (store_id, platform)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_logistics_exceptions INT DEFAULT 0 AFTER pending_task_orders') } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_consumer_invoices INT DEFAULT 0 AFTER pending_logistics_exceptions') } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_invoices_json LONGTEXT AFTER pending_consumer_invoices') } catch (e) { /* 字段已存在 */ }
 
     console.log('[迁移] store_aftersale_metrics 表创建成功')
 

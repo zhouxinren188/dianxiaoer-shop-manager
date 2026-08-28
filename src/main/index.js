@@ -35,11 +35,16 @@ const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
 const {
   registerAftersaleFetchIpc,
+  registerStoreBackendMetricWebContents,
   updateAftersaleAutoSyncAuth,
   stopAftersaleAutoSync
 } = require('./aftersale-fetch')
 const { openStoreBackendBrowser, closeAllStoreBackendBrowsers } = require('./store-backend-browser')
 const { attachWarehouseRegionTool } = require('./store-backend-warehouse-tool')
+const {
+  attachOrderPurchasePanel,
+  registerOrderPurchasePanelIpc
+} = require('./store-backend-order-purchase-panel')
 const { ensureStoreBackendComplianceExtension } = require('./store-backend-compliance-extension')
 const {
   startHeartbeat,
@@ -325,8 +330,13 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
   }
 
   function attachBackendSessionRecovery(webContents) {
+    registerStoreBackendMetricWebContents(webContents, storeId)
     recoveryStates.set(webContents, { attempted: false, inProgress: false, finalFailureReported: false })
     attachWarehouseRegionTool(webContents, {
+      storeId,
+      runtimeLog
+    })
+    attachOrderPurchasePanel(webContents, {
       storeId,
       runtimeLog
     })
@@ -994,6 +1004,7 @@ ipcMain.handle('proxy-fetch', async (event, { url, method, headers, body }) => {
 
 // 注册抓包 IPC（使用 ipcMain.handle，需在 app.whenReady 前注册）
 registerPacketCaptureIpc()
+registerOrderPurchasePanelIpc(ipcMain)
 
 // 注册供销订单获取 IPC
 registerSupplyOrderIpc()

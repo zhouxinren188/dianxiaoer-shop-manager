@@ -95,7 +95,7 @@ app.whenReady().then(async () => {
             <div role="tab" aria-selected="true" style="width:80px;height:30px">预警单</div>
             <aside id="jd-ai-auto-panel" style="position:fixed;right:0;top:0;width:320px;height:600px;background:white">
               <strong>AI超级助手</strong><button type="button" aria-label="关闭" style="position:absolute;right:10px;top:10px" onclick="this.parentElement.remove()">×</button>
-              <label style="position:absolute;right:10px;top:70px">允许本页面自动弹出<button type="button" role="switch" aria-checked="false" onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'true' ? 'false' : 'true')">切换</button></label>
+              <label style="position:absolute;right:10px;top:70px">允许本页面自动弹出<button type="button" role="switch" aria-checked="true" onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked') === 'true' ? 'false' : 'true')">切换</button></label>
             </aside>
             <div role="grid" class="ag-root-wrapper">
               <div class="ag-header">
@@ -227,9 +227,9 @@ app.whenReady().then(async () => {
     })()`)
     await waitFor(async () => {
       const stored = await backgroundPage.executeJavaScript(
-        'chrome.storage.local.get("ecommerceToolboxJdAiAutoPopupV1")'
+        'chrome.storage.local.get("ecommerceToolboxJdAiAutoPopupV2")'
       )
-      return stored?.ecommerceToolboxJdAiAutoPopupV1?.enabled === true
+      return stored?.ecommerceToolboxJdAiAutoPopupV2?.enabled === true
     }, '开启京东 AI 自动弹出后没有保存店铺独立配置')
     const enabledAutoPanelStayedOpen = await complianceView.webContents.executeJavaScript(`(async () => {
       document.querySelector("#jd-ai-manual-panel")?.remove();
@@ -251,9 +251,9 @@ app.whenReady().then(async () => {
     })()`)
     await waitFor(async () => {
       const stored = await backgroundPage.executeJavaScript(
-        'chrome.storage.local.get("ecommerceToolboxJdAiAutoPopupV1")'
+        'chrome.storage.local.get("ecommerceToolboxJdAiAutoPopupV2")'
       )
-      return stored?.ecommerceToolboxJdAiAutoPopupV1?.enabled === false
+      return stored?.ecommerceToolboxJdAiAutoPopupV2?.enabled === false
     }, '关闭京东 AI 自动弹出后没有保存店铺独立配置')
     const disabledNextAutoPanelClosed = await complianceView.webContents.executeJavaScript(`(async () => {
       document.querySelector("#jd-ai-enabled-panel")?.remove();

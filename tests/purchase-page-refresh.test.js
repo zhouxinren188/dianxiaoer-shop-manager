@@ -16,6 +16,8 @@ describe('采购淘宝商品页手动刷新浮窗', () => {
     expect(overlaySource).toContain('var isTaobaoProductPage = !isCheckout')
     expect(runtimeOverlaySource).toContain('item\\.taobao\\.com\\/item\\.htm')
     expect(runtimeOverlaySource).toContain('detail\\.tmall\\.(com|hk)\\/item\\.htm')
+    expect(runtimeOverlaySource).toContain("return '[OVERLAY] skipped: payment page'")
+    expect(runtimeOverlaySource).toContain("return '[OVERLAY] Taobao skipped: not product or checkout page'")
     expect(overlaySource).toContain("refreshLabel.textContent = '\\u5237\\u65b0\\u9875\\u9762'")
     expect(overlaySource).toContain("refreshLabel.textContent = '\\u5237\\u65b0\\u4e2d...'" )
     expect(overlaySource).toContain('function placeLikeSameSourceControl()')

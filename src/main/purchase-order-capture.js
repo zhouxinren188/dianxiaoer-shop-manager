@@ -23,6 +23,14 @@ const {
   convertTaobaoRebateUrlDirect
 } = require('./taobao-rebate')
 const { createTaobaoRebatePrefetchCache } = require('./taobao-rebate-prefetch')
+const {
+  EXTRACT_ALIPAY_TAOBAO_ORDER_CANDIDATES,
+  REMOVE_BATCH_PAYMENT_NOTICE,
+  buildBatchPaymentManualBindingNoticeScript,
+  extractTrustedTaobaoOrderNoFromUrl,
+  isTaobaoBatchPaymentUrl,
+  selectSingleTaobaoOrderCandidate
+} = require('./taobao-batch-payment')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -537,6 +545,11 @@ const PRODUCT_INFO_OVERLAY = `
   if (!info) return '[OVERLAY] skipped: no __jdProductInfo';
 
   var url = (location.href || '').toLowerCase();
+  var host = (location.hostname || '').toLowerCase();
+  if (host === 'alipay.com' || /\.alipay\.com$/.test(host) ||
+      host === 'alipaydev.com' || /\.alipaydev\.com$/.test(host)) {
+    return '[OVERLAY] skipped: payment page';
+  }
 
   // === PDD 严格页面过滤（参考 dl：只在商品详情页创建浮层 DOM） ===
   var isPdd = (info.platform || '').indexOf('pinduoduo') >= 0;
@@ -567,6 +580,11 @@ const PRODUCT_INFO_OVERLAY = `
     /h5\\.m\\.taobao\\.com\\/awp\\/core\\/detail\\.htm/.test(url) ||
     /main\\.m\\.taobao\\.com\\/security-h5-detail\\/home/.test(url)
   );
+
+  var isTaobaoFamily = (info.platform || '') === 'taobao' || (info.platform || '') === 'tmall';
+  if (isTaobaoFamily && !isCheckout && !isTaobaoProductPage) {
+    return '[OVERLAY] Taobao skipped: not product or checkout page';
+  }
 
   // === PDD结算页不显示浮层（PDD不是隐藏改地址，不需要核对地址） ===
   if (isPdd && isCheckout) return;
@@ -3235,6 +3253,14 @@ function extractOrderNoFromUrl(url, platform) {
     const host = urlObj.hostname.toLowerCase()
     const params = urlObj.searchParams
 
+    if (platform === 'taobao') {
+      const trustedOrderNo = extractTrustedTaobaoOrderNoFromUrl(url)
+      if (trustedOrderNo) {
+        console.log(`[PurchaseCapture] Order found in trusted Taobao order link: ${trustedOrderNo}`)
+        return trustedOrderNo
+      }
+    }
+
     // 排除商品详情页、搜索页等非订单页面（避免把商品ID误判为订单号）
     const NON_ORDER_HOSTS = ['item.taobao.com', 'detail.tmall.com', 'item.jd.com', 'detail.1688.com']
     if (NON_ORDER_HOSTS.some(h => host === h || host.endsWith('.' + h))) {
@@ -5401,6 +5427,11 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     let pddPayClicked = false     // PDD结算页是否已选择支付宝支付（防止dom-ready和did-navigate重复触发）
     let pddAddrAreaClicked = false // PDD结算页是否已点击地址区域（防止dom-ready和did-navigate重复触发）
     let pddCookieSaveTimer = null // PDD cookie 定期保存定时器
+    let taobaoBatchPaymentDetected = false
+    let taobaoBatchExtractionStarted = false
+    let taobaoBatchExtractionPromise = null
+    let taobaoBatchNoticeShown = false
+    const taobaoBatchTimers = new Set()
     const windowState = {
       win,
       pollTimer,
@@ -5414,6 +5445,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     function cleanup(reason = 'purchase_cleanup') {
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
       if (pddCookieSaveTimer) { clearInterval(pddCookieSaveTimer); pddCookieSaveTimer = null }
+      for (const timer of taobaoBatchTimers) clearTimeout(timer)
+      taobaoBatchTimers.clear()
       // 联动清理后台地址窗口
       if (backgroundAddrWin && !backgroundAddrWin.isDestroyed()) {
         runtimeLog.writeLog(
@@ -5434,6 +5467,98 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       } catch (e) {}
       windowState.pollTimer = null
       activePurchaseWindows.delete(purchaseNo)
+    }
+
+    function removeTaobaoBatchPaymentNotice() {
+      if (!win || win.isDestroyed()) return
+      win.webContents.executeJavaScript(REMOVE_BATCH_PAYMENT_NOTICE, true).catch(() => {})
+    }
+
+    function markTaobaoBatchPayment(url, source) {
+      if (platform !== 'taobao' || !isTaobaoBatchPaymentUrl(url)) return false
+      if (!taobaoBatchPaymentDetected) {
+        runtimeLog.writeLog('PurchaseBatchPayment', `检测到淘宝合并支付: purchaseNo=${purchaseNo}, source=${source}`)
+      }
+      taobaoBatchPaymentDetected = true
+      return true
+    }
+
+    function isTaobaoBatchAlipayPage(url) {
+      if (platform !== 'taobao' || !taobaoBatchPaymentDetected) return false
+      try {
+        const host = new URL(url).hostname.toLowerCase()
+        return host === 'alipay.com' || host.endsWith('.alipay.com') ||
+          host === 'alipaydev.com' || host.endsWith('.alipaydev.com')
+      } catch (_) {
+        return false
+      }
+    }
+
+    async function tryExtractTaobaoBatchPaymentOrder(source) {
+      if (resolved || !taobaoBatchPaymentDetected || !win || win.isDestroyed()) return false
+      if (taobaoBatchExtractionPromise) return taobaoBatchExtractionPromise
+
+      taobaoBatchExtractionPromise = (async () => {
+        const frameResults = []
+        const frames = getPurchaseWindowFrames(win)
+        for (const frame of frames) {
+          try {
+            const result = await frame.executeJavaScript(EXTRACT_ALIPAY_TAOBAO_ORDER_CANDIDATES, true)
+            if (result) frameResults.push(result)
+          } catch (_) {}
+        }
+
+        const selected = selectSingleTaobaoOrderCandidate(frameResults)
+        runtimeLog.writeLog(
+          'PurchaseBatchPayment',
+          `支付页订单号扫描: purchaseNo=${purchaseNo}, source=${source}, frames=${frames.length}, reason=${selected.reason}, candidates=${selected.candidates.join('|') || 'none'}`
+        )
+        if (!selected.orderNo || resolved) return false
+
+        console.log(`[PurchaseCapture] Batch payment order found: ${selected.orderNo}, source=${source}`)
+        onOrderCaptured(selected.orderNo)
+        return true
+      })().finally(() => {
+        taobaoBatchExtractionPromise = null
+      })
+
+      return taobaoBatchExtractionPromise
+    }
+
+    function showTaobaoBatchPaymentNotice() {
+      if (resolved || taobaoBatchNoticeShown || !win || win.isDestroyed()) return
+      taobaoBatchNoticeShown = true
+      const script = buildBatchPaymentManualBindingNoticeScript(purchaseNo)
+      win.webContents.executeJavaScript(script, true)
+        .then(result => {
+          runtimeLog.writeLog('PurchaseBatchPayment', `手动绑定提示: purchaseNo=${purchaseNo}, result=${result || 'unknown'}`)
+        })
+        .catch(error => {
+          taobaoBatchNoticeShown = false
+          runtimeLog.writeLog('PurchaseBatchPayment', `手动绑定提示失败: purchaseNo=${purchaseNo}, error=${error.message}`)
+        })
+    }
+
+    function startTaobaoBatchPaymentExtraction(url, source) {
+      if (resolved || platform !== 'taobao' || !win || win.isDestroyed()) return
+      markTaobaoBatchPayment(url, source)
+      if (!taobaoBatchPaymentDetected || taobaoBatchExtractionStarted) return
+
+      let currentHost = ''
+      try { currentHost = new URL(url).hostname.toLowerCase() } catch (_) {}
+      if (!currentHost.includes('alipay')) return
+
+      taobaoBatchExtractionStarted = true
+      const delays = [350, 1200, 2800, 5500]
+      delays.forEach((delay, index) => {
+        const timer = setTimeout(async () => {
+          taobaoBatchTimers.delete(timer)
+          if (resolved || !win || win.isDestroyed()) return
+          const found = await tryExtractTaobaoBatchPaymentOrder(`${source}:${index + 1}`)
+          if (!found && index === delays.length - 1 && !resolved) showTaobaoBatchPaymentNotice()
+        }, delay)
+        taobaoBatchTimers.add(timer)
+      })
     }
 
     // 保存采购窗口的Cookie到服务器（用户可能在窗口内登录了）
@@ -5481,6 +5606,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     function onOrderCaptured(platformOrderNo) {
       if (resolved) return
+      removeTaobaoBatchPaymentNotice()
       resolved = true
       windowState.resolved = true
       console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}`)
@@ -6551,6 +6677,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
         if (!isConfirmOrderPage && !isAlipayPage) return
 
+        // 合并支付可能包含多笔支付宝交易号，旧逻辑只取第一个会误绑。
+        // 此场景统一交给多 frame、多候选扫描器，只有唯一可信候选才自动绑定。
+        if (isAlipayPage && isTaobaoBatchAlipayPage(url)) {
+          startTaobaoBatchPaymentExtraction(url, 'page-extract')
+          return
+        }
+
         // 支付宝页面：先检查URL参数
         if (isAlipayPage) {
           const urlOrderNo = extractOrderNoFromUrl(url, platform)
@@ -6784,6 +6917,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
         runtimeLog.writeLog('PurchaseNav', `did-navigate: ${url.substring(0, 200)}`)
       }
+      startTaobaoBatchPaymentExtraction(url, 'did-navigate')
 
       // 尝试从新页面提取订单号（和 dl 一致）
       tryExtractOrderFromPage(url)
@@ -7036,35 +7170,40 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
         runtimeLog.writeLog('PurchaseNav', `will-navigate: ${url.substring(0, 200)}`)
       }
+      markTaobaoBatchPayment(url, 'will-navigate')
 
       // ★ 非电商平台页面（银行支付页等）跳过所有脚本执行，避免干扰页面交互
       const currentUrl = (win.webContents.getURL() || '').toLowerCase()
       if (isThirdPartyPage(currentUrl)) return
 
       if (platform === 'taobao' && !resolved) {
-        // 1. 尝试从当前页面HTML提取 b2c_orid
-        win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
-          .then(orderNo => {
-            if (orderNo && !resolved) {
-              console.log(`[PurchaseCapture] Order extracted before navigation (b2c_orid): ${orderNo}`)
-              onOrderCaptured(orderNo)
-            }
-          })
-          .catch(() => {})
-
-        // 2. 刷新已拦截的API响应（关键！页面跳转后JS上下文销毁，之前拦截的响应会丢失）
-        win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
-          .then(responses => {
-            if (responses && responses.length > 0 && !resolved) {
-              console.log(`[PurchaseCapture] Flushed ${responses.length} responses before navigation`)
-              const orderNo = detectTaobaoOrderFromResponses(responses)
-              if (orderNo) {
-                console.log(`[PurchaseCapture] Order found in flushed responses: ${orderNo}`)
+        if (isTaobaoBatchAlipayPage(currentUrl)) {
+          tryExtractTaobaoBatchPaymentOrder('will-navigate').catch(() => {})
+        } else {
+          // 1. 尝试从当前页面HTML提取 b2c_orid
+          win.webContents.executeJavaScript(EXTRACT_ORDER_FROM_PAGE)
+            .then(orderNo => {
+              if (orderNo && !resolved) {
+                console.log(`[PurchaseCapture] Order extracted before navigation (b2c_orid): ${orderNo}`)
                 onOrderCaptured(orderNo)
               }
-            }
-          })
-          .catch(() => {})
+            })
+            .catch(() => {})
+
+          // 2. 刷新已拦截的API响应（关键！页面跳转后JS上下文销毁，之前拦截的响应会丢失）
+          win.webContents.executeJavaScript(READ_CAPTURED_PURCHASES)
+            .then(responses => {
+              if (responses && responses.length > 0 && !resolved) {
+                console.log(`[PurchaseCapture] Flushed ${responses.length} responses before navigation`)
+                const orderNo = detectTaobaoOrderFromResponses(responses)
+                if (orderNo) {
+                  console.log(`[PurchaseCapture] Order found in flushed responses: ${orderNo}`)
+                  onOrderCaptured(orderNo)
+                }
+              }
+            })
+            .catch(() => {})
+        }
       }
 
       // 拼多多：页面跳转前刷新已拦截的API响应（PDD结算页→支付页跳转会销毁JS上下文）
@@ -7103,6 +7242,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
         runtimeLog.writeLog('PurchaseNav', `will-redirect: ${url.substring(0, 200)}`)
       }
+      markTaobaoBatchPayment(url, 'will-redirect')
 
       // PDD专用：支付回调重定向中可能带order_sn，支付宝页面重定向中可能带out_trade_no
       if (platform === 'pinduoduo') {
@@ -7116,11 +7256,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
 
       // 重定向URL中可能有订单号参数
-      const urlOrderNo = extractOrderNoFromUrl(url, platform)
-      if (urlOrderNo) {
-        // extractOrderNoFromUrl 已不再返回PDD的out_trade_no（XP格式），此处urlOrderNo一定是有效的order_sn
-        console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
-        onOrderCaptured(urlOrderNo)
+      if (!isTaobaoBatchAlipayPage(url)) {
+        const urlOrderNo = extractOrderNoFromUrl(url, platform)
+        if (urlOrderNo) {
+          // extractOrderNoFromUrl 已不再返回PDD的out_trade_no（XP格式），此处urlOrderNo一定是有效的order_sn
+          console.log(`[PurchaseCapture] Order found in redirect URL: ${urlOrderNo}`)
+          onOrderCaptured(urlOrderNo)
+        }
       }
 
       // 重定向到的新页面也可能是订单相关页面
@@ -7130,6 +7272,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     // 拦截新窗口打开 — 淘宝结算可能在新窗口中打开
     win.webContents.setWindowOpenHandler(({ url: openUrl }) => {
       console.log(`[PurchaseCapture] window-open: ${openUrl.substring(0, 120)}`)
+      if (platform === 'taobao' && !resolved) {
+        const linkedOrderNo = extractTrustedTaobaoOrderNoFromUrl(openUrl)
+        if (linkedOrderNo) {
+          runtimeLog.writeLog('PurchaseBatchPayment', `从查看订单链接取得订单号: purchaseNo=${purchaseNo}, orderNo=${linkedOrderNo}`)
+          onOrderCaptured(linkedOrderNo)
+        }
+      }
       // 在同一窗口中打开，而不是创建新窗口
       return { action: 'allow' }
     })
@@ -7173,6 +7322,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (urlLower.includes('alipay') || urlLower.includes('cashier') || urlLower.includes('pay')) {
         runtimeLog.writeLog('PurchaseDOM', `dom-ready: ${url.substring(0, 200)}`)
       }
+      startTaobaoBatchPaymentExtraction(url, 'dom-ready')
     })
 
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）

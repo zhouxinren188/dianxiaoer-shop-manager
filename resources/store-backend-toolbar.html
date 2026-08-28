@@ -6,43 +6,90 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>店铺后台</title>
   <style>
-    :root { color-scheme: light; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; }
+    :root {
+      color-scheme: light;
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      --chrome-bg: #e8edf5;
+      --chrome-surface: #ffffff;
+      --chrome-muted: #667085;
+      --chrome-text: #253044;
+      --chrome-border: #d8e0eb;
+      --chrome-hover: #dce4ef;
+      --chrome-primary: #3b73e8;
+    }
     * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #eef2f7; color: #303133; }
-    .toolbar { height: 84px; border-bottom: 1px solid #d8dee8; background: #f5f7fa; user-select: none; }
-    .tabs-row { height: 43px; display: flex; align-items: flex-end; gap: 2px; padding: 5px 142px 0 8px; background: #e8edf5; -webkit-app-region: drag; }
-    .store-label { flex: 0 0 auto; max-width: 180px; height: 32px; display: flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; color: #52606d; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .tabs { min-width: 0; flex: 1; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: thin; }
-    .tab { flex: 0 1 220px; min-width: 120px; max-width: 240px; height: 34px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; display: flex; align-items: center; gap: 7px; padding: 0 8px 0 11px; background: #dfe5ee; cursor: default; -webkit-app-region: no-drag; }
-    .tab:hover { background: #f0f3f8; }
-    .tab.active { background: #fff; border-color: #d8dee8; }
-    .tab-status { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: #a8b3c2; }
-    .tab.loading .tab-status { border: 2px solid #a9c7ff; border-top-color: #337ecc; background: transparent; animation: spin .8s linear infinite; }
-    .tab.crashed .tab-status { background: #f56c6c; }
-    .tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
-    .tab-close { flex: 0 0 20px; width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: #667085; font-size: 16px; line-height: 18px; cursor: pointer; }
-    .tab-close:hover { background: #d7dee9; color: #303133; }
-    .nav-row { height: 41px; display: flex; align-items: center; gap: 5px; padding: 5px 10px; background: #fff; }
-    .nav-button { width: 30px; height: 30px; border: 0; border-radius: 50%; background: transparent; color: #475467; cursor: pointer; font-size: 17px; }
-    .nav-button:hover:not(:disabled) { background: #edf1f6; }
-    .nav-button:disabled { color: #c4cad3; cursor: default; }
-    .address { flex: 1; min-width: 0; height: 30px; border: 1px solid transparent; border-radius: 16px; padding: 0 14px; outline: none; background: #f1f3f6; color: #344054; font-size: 12px; }
-    .address:focus { border-color: #79bbff; background: #fff; box-shadow: 0 0 0 2px rgba(64, 158, 255, .12); }
+    button, input { font: inherit; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--chrome-border); color: var(--chrome-text); }
+    .toolbar { height: 84px; border: 1px solid var(--chrome-border); border-bottom-color: var(--chrome-border); background: var(--chrome-surface); box-shadow: 0 1px 4px rgba(28, 39, 60, .08); user-select: none; }
+    .tabs-row { height: 43px; display: flex; align-items: flex-end; gap: 4px; padding: 5px 142px 0 8px; background: var(--chrome-bg); -webkit-app-region: drag; }
+    .store-label { position: relative; flex: 0 0 auto; max-width: 208px; height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 14px 0 5px; font-size: 12px; font-weight: 600; color: #344054; overflow: hidden; white-space: nowrap; }
+    .store-label::after { content: ""; position: absolute; right: 1px; top: 10px; width: 1px; height: 18px; background: rgba(116, 130, 153, .25); }
+    .store-logo { flex: 0 0 23px; width: 23px; height: 23px; object-fit: contain; border-radius: 6px; filter: drop-shadow(0 1px 1px rgba(31, 45, 68, .16)); }
+    .store-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .tabs { min-width: 0; flex: 1; display: flex; gap: 4px; padding-left: 5px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b8c3d3 transparent; }
+    .tabs::-webkit-scrollbar { height: 3px; }
+    .tabs::-webkit-scrollbar-thumb { border-radius: 3px; background: #b8c3d3; }
+    .tab { position: relative; flex: 0 1 220px; min-width: 116px; max-width: 240px; height: 34px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 10px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; background: rgba(210, 219, 232, .56); color: #475467; cursor: default; transition: background-color .15s ease, color .15s ease, box-shadow .15s ease, transform .12s ease; -webkit-app-region: no-drag; }
+    .tab:hover { background: rgba(247, 249, 252, .9); color: var(--chrome-text); }
+    .tab.active { z-index: 2; background: #fff; border-color: rgba(190, 201, 217, .42); box-shadow: 0 1px 3px rgba(45, 58, 79, .13); color: var(--chrome-text); }
+    .tab.active .tab-status { background: #8ea0b9; box-shadow: 0 0 0 3px rgba(142, 160, 185, .12); }
+    .tab-status { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: #aab5c5; }
+    .tab.loading .tab-status { border: 2px solid #b4ccff; border-top-color: var(--chrome-primary); background: transparent; box-shadow: none; animation: spin .8s linear infinite; }
+    .tab.crashed .tab-status { background: #f56c6c; box-shadow: 0 0 0 3px rgba(245, 108, 108, .12); }
+    .tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1; }
+    .tab-close { flex: 0 0 20px; width: 20px; height: 20px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0 0 2px; background: transparent; color: var(--chrome-muted); font-size: 16px; line-height: 1; cursor: pointer; transition: background-color .12s ease, color .12s ease; }
+    .tab-close:hover { background: #dce3ec; color: #1f2937; }
+    .tab-close:active { background: #cfd8e4; }
+    .nav-row { height: 41px; display: flex; align-items: center; gap: 3px; padding: 4px 11px 5px; background: #fff; box-shadow: inset 0 1px 0 rgba(215, 224, 235, .6); }
+    .nav-button { flex: 0 0 31px; width: 31px; height: 31px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0; background: transparent; color: #526176; cursor: pointer; transition: background-color .12s ease, color .12s ease, transform .08s ease; }
+    .nav-button svg { width: 16px; height: 16px; pointer-events: none; }
+    .nav-button:hover:not(:disabled) { background: #edf2f8; color: #1f2937; }
+    .nav-button:active:not(:disabled) { background: #e2e8f1; transform: scale(.94); }
+    .nav-button:focus-visible { outline: 2px solid rgba(59, 115, 232, .32); outline-offset: 1px; }
+    .nav-button:disabled { color: #c5ccd7; cursor: default; }
+    .address-shell { flex: 1; min-width: 0; height: 31px; margin-left: 4px; border: 1px solid transparent; border-radius: 17px; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: #f1f4f8; transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+    .address-shell:hover { background: #edf1f6; }
+    .address-shell:focus-within { border-color: #76a1f4; background: #fff; box-shadow: 0 0 0 2px rgba(59, 115, 232, .13); }
+    .address-icon { flex: 0 0 16px; width: 16px; height: 16px; display: grid; place-items: center; color: #667085; }
+    .address-icon svg { width: 16px; height: 16px; }
+    .address-shell.secure .address-icon { color: #4d7b63; }
+    .address { flex: 1; min-width: 0; height: 29px; border: 0; padding: 0; outline: none; background: transparent; color: #344054; font-size: 12px; }
+    .address::selection { background: #bcd2ff; color: #172033; }
+    @media (max-width: 1040px) {
+      .store-label { max-width: 168px; }
+      .tab { min-width: 104px; }
+    }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div class="toolbar">
     <div class="tabs-row">
-      <div id="storeLabel" class="store-label">店铺后台</div>
+      <div id="storeLabel" class="store-label">
+        <img class="store-logo" src="./icon.ico" alt="店小二" draggable="false">
+        <span id="storeName" class="store-name">店铺</span>
+      </div>
       <div id="tabs" class="tabs"></div>
     </div>
     <div class="nav-row">
-      <button id="back" class="nav-button" title="后退">‹</button>
-      <button id="forward" class="nav-button" title="前进">›</button>
-      <button id="reload" class="nav-button" title="刷新">↻</button>
-      <button id="home" class="nav-button" title="店铺首页">⌂</button>
-      <input id="address" class="address" aria-label="网址" autocomplete="off" spellcheck="false">
+      <button id="back" class="nav-button" title="后退" aria-label="后退">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/><path d="M9 12h10"/></svg>
+      </button>
+      <button id="forward" class="nav-button" title="前进" aria-label="前进">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/><path d="M15 12H5"/></svg>
+      </button>
+      <button id="reload" class="nav-button" title="刷新" aria-label="刷新">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6v5h-5"/><path d="M18.3 15a7 7 0 1 1-.4-6.5L20 11"/></svg>
+      </button>
+      <button id="home" class="nav-button" title="店铺首页" aria-label="店铺首页">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10.5L12 4l8 6.5"/><path d="M6.5 9.5V20h11V9.5"/><path d="M10 20v-6h4v6"/></svg>
+      </button>
+      <div id="addressShell" class="address-shell">
+        <span class="address-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 10.5v5" stroke-linecap="round"/><circle cx="12" cy="7.5" r=".8" fill="currentColor" stroke="none"/></svg>
+        </span>
+        <input id="address" class="address" aria-label="网址" autocomplete="off" spellcheck="false">
+      </div>
     </div>
   </div>
   <script>
@@ -50,6 +97,8 @@
       var api = window.storeBackendTabs;
       var tabsEl = document.getElementById('tabs');
       var storeLabel = document.getElementById('storeLabel');
+      var storeName = document.getElementById('storeName');
+      var addressShell = document.getElementById('addressShell');
       var address = document.getElementById('address');
       var back = document.getElementById('back');
       var forward = document.getElementById('forward');
@@ -60,9 +109,11 @@
 
       function render(state) {
         state = state || {};
-        storeLabel.textContent = state.baseTitle || '店铺后台';
-        storeLabel.title = state.baseTitle || '店铺后台';
+        var displayStoreName = String(state.baseTitle || '店铺').replace(/\s*-\s*店铺后台\s*$/, '') || '店铺';
+        storeName.textContent = displayStoreName;
+        storeLabel.title = displayStoreName;
         address.value = state.activeUrl || '';
+        addressShell.classList.toggle('secure', /^https:\/\//i.test(state.activeUrl || ''));
         back.disabled = !state.canGoBack;
         forward.disabled = !state.canGoForward;
         tabsEl.replaceChildren();

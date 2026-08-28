@@ -176,10 +176,52 @@
       <el-col :span="8">
         <div class="chart-card">
           <div class="chart-header">
-            <span class="chart-title">最新订单</span>
+            <div class="chart-header-left">
+              <span class="chart-title">待开发票（{{ pendingInvoiceTotal }}）</span>
+            </div>
           </div>
-          <div class="chart-body">
-            <el-empty description="后续完善" />
+          <div class="chart-body invoice-summary" v-loading="invoiceLoading">
+            <div v-if="pendingInvoices.length" class="invoice-list">
+              <article
+                v-for="invoice in pendingInvoices"
+                :key="`${invoice.storeId}-${invoice.orderId}`"
+                class="invoice-item"
+              >
+                <div class="invoice-item-top">
+                  <div class="invoice-order-wrap">
+                    <span class="invoice-inline-label">订单编号</span>
+                    <button class="invoice-order-link" type="button" @click="openInvoiceOrder(invoice)">
+                      {{ invoice.orderId }}
+                    </button>
+                  </div>
+                  <div class="invoice-top-status">
+                    <div class="invoice-amount-wrap">
+                      <span class="invoice-inline-label">开票金额</span>
+                      <span class="invoice-amount" aria-label="发票金额">¥{{ formatInvoiceAmount(invoice.invoiceAmount) }}</span>
+                    </div>
+                    <span class="invoice-countdown" aria-label="倒计时" :class="countdownClass(invoice.countdownEndTime)">
+                      {{ formatInvoiceCountdown(invoice.countdownEndTime) }}
+                    </span>
+                  </div>
+                </div>
+                <div class="invoice-details-line">
+                  <div class="invoice-company" :title="invoice.companyName || '-'">
+                    <span class="invoice-inline-label">开票主体</span>
+                    <span class="invoice-field-value">{{ invoice.companyName || '-' }}</span>
+                  </div>
+                  <div class="invoice-title" :title="invoice.invoiceTitle || '-'">
+                    <span class="invoice-inline-label">发票抬头</span>
+                    <span class="invoice-field-value">{{ invoice.invoiceTitle || '-' }}</span>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <div v-else-if="pendingInvoiceTotal > 0" class="invoice-waiting">
+              <strong>{{ pendingInvoiceTotal }}</strong>
+              <span>个待开发票订单</span>
+              <small>明细将在店铺下次同步后显示</small>
+            </div>
+            <el-empty v-else description="暂无待开发票" :image-size="72" />
           </div>
         </div>
       </el-col>
@@ -190,7 +232,9 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { UserFilled, ShoppingCart, DataLine, Top, Bottom } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
+import { fetchAftersaleMetrics } from '@/api/aftersale'
 
 const currentUser = localStorage.getItem('currentUser') || '管理员'
 
@@ -206,6 +250,9 @@ const greeting = computed(() => {
 // 使用天数：从注册日算起（优先从服务器获取）
 const usageDays = ref(1)
 let refreshTimer = null
+let countdownTimer = null
+let invoiceMetricRefreshTimer = null
+let unsubscribeMetricUpdated = null
 
 async function loadUserInfo() {
   try {
@@ -278,6 +325,80 @@ async function loadStats() {
     }
   } catch (err) {
     console.error('[HomePage] 加载统计失败:', err.message)
+  }
+}
+
+const pendingInvoiceTotal = ref(0)
+const pendingInvoices = ref([])
+const invoiceLoading = ref(false)
+const countdownNow = ref(Date.now())
+
+function formatInvoiceAmount(value) {
+  return Number(value || 0).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })
+}
+
+function getCountdownDiff(endTime) {
+  const end = Number(endTime)
+  return Number.isFinite(end) && end > 0 ? end - countdownNow.value : null
+}
+
+function formatInvoiceCountdown(endTime) {
+  const diff = getCountdownDiff(endTime)
+  if (diff === null) return '待同步'
+  const isOverdue = diff <= 0
+  const totalSeconds = Math.floor(Math.abs(diff) / 1000)
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const clock = [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':')
+  if (isOverdue) return `已超时 ${days}天 ${clock}`
+  return days > 0 ? `${days}天 ${clock}` : clock
+}
+
+function countdownClass(endTime) {
+  const diff = getCountdownDiff(endTime)
+  if (diff !== null && diff <= 0) return 'is-overdue'
+  if (diff !== null && diff < 3 * 24 * 60 * 60 * 1000) return 'is-urgent'
+  return ''
+}
+
+async function openInvoiceOrder(invoice) {
+  if (!invoice?.storeId || !/^\d{10,30}$/.test(String(invoice?.orderId || ''))) {
+    ElMessage.warning('订单信息不完整，请等待重新同步')
+    return
+  }
+  try {
+    const result = await window.electronAPI.invoke('open-store-backend-url', {
+      storeId: invoice.storeId,
+      url: 'https://shop.jd.com/jdm/finance/consumerInvoice/cinvoiceOrder',
+      title: `${invoice.storeName || '京东店铺'} - 店铺后台`,
+      focusExisting: false
+    })
+    if (result?.success === false) throw new Error(result.message || '打开失败')
+  } catch (err) {
+    ElMessage.error('打开发票页面失败: ' + err.message)
+  }
+}
+
+async function loadPendingInvoiceTotal() {
+  invoiceLoading.value = true
+  try {
+    const data = await fetchAftersaleMetrics({ _ts: Date.now() })
+    const invoiceList = Array.isArray(data?.pendingInvoices) ? data.pendingInvoices : []
+    const storeTotal = Array.isArray(data?.list)
+      ? data.list.reduce((total, store) => total + Number(store?.pendingConsumerInvoices || 0), 0)
+      : 0
+    const summaryTotal = Number(data?.summary?.totalPendingConsumerInvoices || 0)
+    pendingInvoiceTotal.value = Math.max(summaryTotal, storeTotal, invoiceList.length)
+    pendingInvoices.value = invoiceList
+  } catch (err) {
+    console.error('[HomePage] 加载待开发票总数失败:', err.message)
+  } finally {
+    invoiceLoading.value = false
   }
 }
 
@@ -406,17 +527,43 @@ onMounted(() => {
   loadUserInfo()
   loadStats()
   loadTrend()
+  loadPendingInvoiceTotal()
+  if (window.electronAPI?.onUpdate) {
+    unsubscribeMetricUpdated = window.electronAPI.onUpdate('aftersale-metric-updated', event => {
+      if (event?.metric !== 'pending_consumer_invoices') return
+      clearTimeout(invoiceMetricRefreshTimer)
+      invoiceMetricRefreshTimer = setTimeout(() => {
+        loadPendingInvoiceTotal()
+      }, 100)
+    })
+  }
+  countdownTimer = setInterval(() => {
+    countdownNow.value = Date.now()
+  }, 1000)
   // 每5分钟自动刷新统计数据
   refreshTimer = setInterval(() => {
     loadStats()
     loadTrend()
+    loadPendingInvoiceTotal()
   }, 5 * 60 * 1000)
 })
 
 onUnmounted(() => {
+  if (unsubscribeMetricUpdated) {
+    unsubscribeMetricUpdated()
+    unsubscribeMetricUpdated = null
+  }
+  if (invoiceMetricRefreshTimer) {
+    clearTimeout(invoiceMetricRefreshTimer)
+    invoiceMetricRefreshTimer = null
+  }
   if (refreshTimer) {
     clearInterval(refreshTimer)
     refreshTimer = null
+  }
+  if (countdownTimer) {
+    clearInterval(countdownTimer)
+    countdownTimer = null
   }
 })
 </script>
@@ -629,6 +776,163 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.invoice-summary {
+  display: block;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+.invoice-list {
+  width: 100%;
+  height: 295px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.invoice-item {
+  padding: 10px 12px;
+  border: 1px solid #e4eaf5;
+  border-radius: 8px;
+  background: #fafcff;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.invoice-item + .invoice-item {
+  margin-top: 8px;
+}
+
+.invoice-item:hover {
+  border-color: #cbd8fa;
+  background: #f7f9ff;
+}
+
+.invoice-item-top,
+.invoice-details-line,
+.invoice-order-wrap,
+.invoice-top-status,
+.invoice-amount-wrap,
+.invoice-title,
+.invoice-company {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.invoice-item-top,
+.invoice-details-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.invoice-top-status {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.invoice-amount-wrap {
+  gap: 6px;
+}
+
+.invoice-amount-wrap .invoice-inline-label {
+  margin-right: 0;
+}
+
+.invoice-details-line {
+  margin-top: 7px;
+}
+
+.invoice-order-wrap,
+.invoice-title,
+.invoice-company {
+  flex: 1;
+}
+
+.invoice-order-wrap {
+  flex: 0 1 auto;
+}
+
+.invoice-title,
+.invoice-company {
+  flex: 1 1 0;
+}
+
+.invoice-inline-label {
+  flex: 0 0 auto;
+  margin-right: 8px;
+  color: #8b95a7;
+  font-size: 12px;
+}
+
+.invoice-field-value {
+  min-width: 0;
+  color: #303744;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invoice-order-link {
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #2b5aed;
+  cursor: pointer;
+  font: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.invoice-order-link:hover {
+  text-decoration: underline;
+}
+
+.invoice-amount {
+  flex: 0 0 auto;
+  color: #f56c2d;
+  font-weight: 600;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.invoice-countdown {
+  flex: 0 0 auto;
+  color: #2b5aed;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.invoice-countdown.is-urgent,
+.invoice-countdown.is-overdue {
+  color: #e5484d;
+}
+
+.invoice-waiting {
+  height: 252px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #374151;
+}
+
+.invoice-waiting strong {
+  color: #2b5aed;
+  font-size: 48px;
+  line-height: 1;
+}
+
+.invoice-waiting small {
+  color: #9ca3af;
 }
 
 .trend-svg {
