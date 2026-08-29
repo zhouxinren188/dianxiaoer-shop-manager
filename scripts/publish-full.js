@@ -101,13 +101,94 @@ async function uploadFiles(files) {
   }
 }
 
+// 全量安装包体积较大，服务器仅保留当前版本和最近一个回退版本。
+// 清理发生在版本登记成功之后，且只匹配 updates 根目录中的标准安装包命名，
+// 不触碰 latest.yml、update-meta.json、热更新包或其他业务文件。
+async function cleanupOldFullUpdatePackages(currentVersion) {
+  const escapedRoot = REMOTE_UPDATE_DIR.replace(/'/g, "''")
+  const escapedVersion = String(currentVersion).replace(/'/g, "''")
+  const powershell = `
+$ErrorActionPreference = 'Stop'
+$root = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath '${escapedRoot}').Path).TrimEnd('\\')
+$packages = @()
+Get-ChildItem -LiteralPath $root -File -Filter 'dianxiaoer-setup-*.exe' | ForEach-Object {
+  if ($_.Name -match '^dianxiaoer-setup-(\\d+\\.\\d+\\.\\d+)\\.exe$') {
+    $versionText = $Matches[1]
+    $packages += [pscustomobject]@{
+      Version = $versionText
+      Parsed = [version]$versionText
+      Exe = $_
+    }
+  }
+}
+$keepVersions = @(
+  $packages |
+    Sort-Object Parsed -Descending |
+    Select-Object -First 2 |
+    ForEach-Object { $_.Version }
+)
+if ($keepVersions -notcontains '${escapedVersion}') {
+  throw "Current version ${escapedVersion} is not in the retained package set"
+}
+$targets = @()
+foreach ($package in $packages) {
+  if ($keepVersions -contains $package.Version) { continue }
+  $targets += $package.Exe
+  $blockmap = Join-Path $root ($package.Exe.Name + '.blockmap')
+  if (Test-Path -LiteralPath $blockmap) {
+    $targets += Get-Item -LiteralPath $blockmap
+  }
+}
+$rootPrefix = $root + '\\'
+foreach ($target in $targets) {
+  $fullPath = [IO.Path]::GetFullPath($target.FullName)
+  if (-not $fullPath.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to remove path outside update directory: $fullPath"
+  }
+}
+$freedBytes = [int64](($targets | Measure-Object -Property Length -Sum).Sum)
+foreach ($target in $targets) {
+  Remove-Item -LiteralPath $target.FullName -Force
+}
+[pscustomobject]@{
+  KeptVersions = $keepVersions
+  DeletedFiles = $targets.Count
+  FreedBytes = $freedBytes
+} | ConvertTo-Json -Compress
+`
+  const encoded = Buffer.from(powershell, 'utf16le').toString('base64')
+  const conn = await createConnection()
+  try {
+    const result = await execCmd(conn, `powershell -NoProfile -EncodedCommand ${encoded}`)
+    if (result.code !== 0) {
+      throw new Error(result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`)
+    }
+    const summary = JSON.parse(result.stdout.trim())
+    const keptVersions = Array.isArray(summary.KeptVersions)
+      ? summary.KeptVersions
+      : [summary.KeptVersions].filter(Boolean)
+    console.log(
+      `  历史全量包清理完成：保留 ${keptVersions.join(', ')}，` +
+      `删除 ${summary.DeletedFiles} 个文件，释放 ${(summary.FreedBytes / 1024 / 1024).toFixed(1)} MB`
+    )
+  } finally {
+    conn.end()
+  }
+}
+
 function getBusinessServerFiles() {
   return [
     { local: path.join(ROOT, 'server', 'index.js'), remote: `${BUSINESS_REMOTE_DIR}/index.js` },
     { local: path.join(ROOT, 'server', 'db.js'), remote: `${BUSINESS_REMOTE_DIR}/db.js` },
+    { local: path.join(ROOT, 'server', 'package.json'), remote: `${BUSINESS_REMOTE_DIR}/package.json` },
+    { local: path.join(ROOT, 'server', 'package-lock.json'), remote: `${BUSINESS_REMOTE_DIR}/package-lock.json` },
     { local: path.join(ROOT, 'server', 'routes', 'cloud-warehouse.js'), remote: `${BUSINESS_REMOTE_DIR}/routes/cloud-warehouse.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-api-client.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-api-client.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-third-party-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-third-party-service.js` },
+    { local: path.join(ROOT, 'server', 'services', 'inventory-identity.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-identity.js` },
+    { local: path.join(ROOT, 'server', 'services', 'inventory-image-storage.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-image-storage.js` },
+    { local: path.join(ROOT, 'server', 'services', 'inventory-product-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-product-input.js` },
+    { local: path.join(ROOT, 'server', 'services', 'sku-binding-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sku-binding-input.js` },
     { local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'store-cookie-policy.js'), remote: `${BUSINESS_REMOTE_DIR}/services/store-cookie-policy.js` },
@@ -124,6 +205,11 @@ async function deployBusinessServerOnly() {
 
   const conn = await createConnection()
   try {
+    console.log('[Server] 安装业务服务生产依赖...')
+    const install = await execCmd(conn, `cd /d "${BUSINESS_REMOTE_DIR}" && npm install --production`)
+    if (install.code !== 0) {
+      throw new Error(`业务服务依赖安装失败: ${install.stderr || install.stdout}`)
+    }
     console.log('[Server] 使用 stop/start 重启 dianxiaoer-server...')
     await execCmd(conn, `${NSSM} stop dianxiaoer-server`)
     await new Promise(resolve => setTimeout(resolve, 3000))
@@ -160,6 +246,11 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
   const [cloudIndexes] = await pool.execute('SHOW INDEX FROM cloud_order_process_logs');
   const [[cloudStats]] = await pool.execute('SELECT COUNT(*) AS total FROM cloud_order_process_logs');
   const [[commandStats]] = await pool.execute('SELECT COUNT(*) AS total FROM cloud_external_commands');
+  const [pendingBindingTables] = await pool.execute("SHOW TABLES LIKE 'pending_sku_bindings'");
+  if (!pendingBindingTables.length) throw new Error('pending_sku_bindings table missing');
+  const [pendingBindingColumns] = await pool.execute('SHOW COLUMNS FROM pending_sku_bindings');
+  const [pendingBindingIndexes] = await pool.execute('SHOW INDEX FROM pending_sku_bindings');
+  const [[pendingBindingStats]] = await pool.execute('SELECT COUNT(*) AS total FROM pending_sku_bindings');
   console.log('SHIPPING_VERIFY=' + JSON.stringify({
     table: true,
     columns: columns.map(row => row.Field),
@@ -174,6 +265,12 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
     processLogs: cloudStats,
     externalCommands: commandStats
   }));
+  console.log('SKU_BINDING_VERIFY=' + JSON.stringify({
+    table: true,
+    columns: pendingBindingColumns.map(row => row.Field),
+    indexes: [...new Set(pendingBindingIndexes.map(row => row.Key_name))],
+    pendingBindings: pendingBindingStats
+  }));
   await pool.end();
 })().catch(async error => {
   console.error('BUSINESS_VERIFY_ERROR=' + error.message);
@@ -185,7 +282,12 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
       conn,
       `cd /d "${BUSINESS_REMOTE_DIR}" && node -e "eval(Buffer.from('${verifyEncoded}','base64').toString('utf8'))"`
     )
-    if (verify.code !== 0 || !verify.stdout.includes('SHIPPING_VERIFY=') || !verify.stdout.includes('CLOUD_VERIFY=')) {
+    if (
+      verify.code !== 0 ||
+      !verify.stdout.includes('SHIPPING_VERIFY=') ||
+      !verify.stdout.includes('CLOUD_VERIFY=') ||
+      !verify.stdout.includes('SKU_BINDING_VERIFY=')
+    ) {
       throw new Error('业务数据表或回填验证失败: ' + (verify.stderr || verify.stdout))
     }
     console.log('[Server]', verify.stdout.trim())
@@ -329,6 +431,11 @@ async function main() {
     const health = await execCmd(conn3, 'curl -sk https://localhost:3001/api/health')
     console.log('  Health:', health.stdout.trim())
 
+    console.log('  安装业务服务依赖...')
+    const businessInstall = await execCmd(conn3, `cd /d "${BUSINESS_REMOTE_DIR}" && npm install --production`)
+    if (businessInstall.code !== 0) {
+      throw new Error(`业务服务依赖安装失败: ${businessInstall.stderr || businessInstall.stdout}`)
+    }
     console.log('  重启业务服务...')
     await execCmd(conn3, `${NSSM} stop dianxiaoer-server`)
     await new Promise(r => setTimeout(r, 3000))
@@ -386,6 +493,13 @@ async function main() {
     } finally {
       conn4.end()
     }
+  }
+
+  try {
+    await cleanupOldFullUpdatePackages(actualVersion)
+  } catch (e) {
+    // 清理失败不回滚已经成功发布的版本，但必须显式提示，便于人工处理磁盘空间。
+    console.warn('  警告：历史全量安装包自动清理失败：', e.message)
   }
 
   console.log('\n=== 全量发布完成 v' + version + ' ===')

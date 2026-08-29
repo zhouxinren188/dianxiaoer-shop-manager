@@ -1055,7 +1055,7 @@
           <span class="bind-keywords-label">关键词：</span>
           <el-tag v-for="kw in bindKeywords" :key="kw" size="small" type="info" effect="plain" class="bind-keyword-tag" @click="applyKeyword(kw)">{{ kw }}</el-tag>
         </div>
-        <el-input v-model="bindSearchKeyword" placeholder="输入SKU或商品名称搜索" clearable @keyup.enter="searchInventoryForBind" style="width: 300px">
+        <el-input v-model="bindSearchKeyword" placeholder="输入商品ID、名称或货位号搜索" clearable @keyup.enter="searchInventoryForBind" style="width: 300px">
           <template #append>
             <el-button @click="searchInventoryForBind" :loading="bindSearchLoading">
               <el-icon><Search /></el-icon>
@@ -1094,9 +1094,6 @@
             <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
             <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
           </el-form-item>
-          <el-form-item label="SKU">
-            <el-input :model-value="currentBindRow?.skuId" disabled />
-          </el-form-item>
           <el-form-item label="商品名称">
             <el-input :model-value="currentBindRow?.productName" disabled />
           </el-form-item>
@@ -1117,13 +1114,10 @@
     <!-- 编辑商品弹窗 -->
     <el-dialog v-model="editInvVisible" title="编辑商品" width="520px" align-center destroy-on-close :close-on-click-modal="false">
       <el-form :model="editInvForm" label-width="90px" v-loading="editInvLoading">
-        <el-form-item label="商品SKU">
-          <el-input :model-value="editInvForm.sku" disabled />
-        </el-form-item>
         <el-form-item label="商品名称">
           <el-input :model-value="editInvForm.product_name" disabled />
         </el-form-item>
-        <el-form-item label="商品售价">
+        <el-form-item label="商品成本价">
           <el-input-number v-model="editInvForm.price" :min="0" :precision="2" :step="1" style="width: 180px" />
         </el-form-item>
         <el-form-item label="所属仓库">
@@ -2439,7 +2433,7 @@ async function confirmCreateAndBind() {
   try {
     await quickCreateInventory({
       warehouse_id: bindNewForm.warehouseId,
-      sku: currentBindRow.value.skuId,
+      sku_id: currentBindRow.value.skuId,
       product_name: currentBindRow.value.productName,
       image: currentBindRow.value.productImage,
       store_id: currentBindRow.value.storeId,
@@ -2547,7 +2541,6 @@ const editInvLoading = ref(false)
 const editInvSubmitting = ref(false)
 const editInvForm = reactive({
   id: '',
-  sku: '',
   product_name: '',
   price: 0,
   warehouse_name: '',
@@ -2567,7 +2560,6 @@ async function openEditInventory(order, item) {
     const res = await fetchInventoryById(item.inventoryInfo.inventory_id)
     Object.assign(editInvForm, {
       id: res.id,
-      sku: res.sku,
       product_name: res.product_name,
       price: Number(res.price || 0),
       warehouse_name: res.warehouse_name,
@@ -3821,9 +3813,9 @@ function handleBindWarehouse(order, item, itemIdx) {
     storeId: order.storeId || item.storeId || '',
     orderItem: item
   }
-  bindSearchKeyword.value = item.skuId || item.name || ''
-  bindSearchResults.value = []
   bindKeywords.value = extractKeywords(item.name)
+  bindSearchKeyword.value = bindKeywords.value[0] || item.name || ''
+  bindSearchResults.value = []
   bindNewForm.warehouseId = ''
   bindNewForm.location = ''
   bindNewForm.batchNo = ''
@@ -3933,7 +3925,15 @@ function handleView(row) {
     ElMessage.warning('无法获取订单信息，请重试')
     return
   }
-  window.electronAPI.invoke('open-jd-order-detail', { storeId, orderId }).catch(err => {
+  const store = storeOptions.value.find(item => String(item.id) === String(storeId))
+  window.electronAPI.invoke('open-store-backend-url', {
+    storeId,
+    url: `https://shop.jd.com/jdm/trade/orders/order-details?orderId=${encodeURIComponent(orderId)}`,
+    title: `${store?.name || '京东店铺'} - 店铺后台`,
+    focusExisting: false
+  }).then(result => {
+    if (result?.success === false) throw new Error(result.message || '打开失败')
+  }).catch(err => {
     ElMessage.error('打开订单详情失败: ' + err.message)
   })
 }

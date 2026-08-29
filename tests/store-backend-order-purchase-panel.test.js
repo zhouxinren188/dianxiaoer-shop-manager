@@ -208,6 +208,32 @@ describe('京东订单详情采购信息区域', () => {
     expect(script).not.toContain('cookie')
   })
 
+  it('附加到已打开的详情页时无需等待后续导航也会主动加载采购信息', async () => {
+    vi.useFakeTimers()
+    try {
+      const webContents = new EventEmitter()
+      webContents.id = 700
+      webContents.isDestroyed = vi.fn(() => false)
+      webContents.getURL = vi.fn(() => 'https://shop.jd.com/jdm/trade/orders/order-details?orderId=3599471007575277')
+      webContents.executeJavaScript = vi.fn(() => Promise.resolve(true))
+      const fetchPurchaseOrders = vi.fn(() => Promise.resolve([{
+        id: 80,
+        purchaseNo: 'A8100',
+        purchaseTypeLabel: '仓库转发',
+        statusLabel: '已发货'
+      }]))
+
+      attachOrderPurchasePanel(webContents, { fetchPurchaseOrders })
+      await vi.advanceTimersByTimeAsync(1)
+      for (let index = 0; index < 20; index += 1) await Promise.resolve()
+
+      expect(fetchPurchaseOrders).toHaveBeenCalledWith('3599471007575277')
+      expect(webContents.executeJavaScript.mock.calls.some(call => call[0].includes('"state":"ready"'))).toBe(true)
+      webContents.emit('destroyed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('通过页面 preload 的正式 IPC 通道查询并回填物流轨迹', async () => {
     vi.useFakeTimers()
     try {

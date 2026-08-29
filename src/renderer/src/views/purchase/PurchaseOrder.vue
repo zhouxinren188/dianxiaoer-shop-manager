@@ -248,6 +248,14 @@
             <span v-if="row.store_name || row.sales_order_no || row.sales_order_status" class="footer-divider">|</span>
             <span v-if="row.store_name" class="store-name-text">{{ row.store_name }}</span>
             <span v-if="row.sales_order_no" class="sales-order-no">{{ row.sales_order_no }}</span>
+            <el-button
+              v-if="row.sales_order_no"
+              link
+              type="primary"
+              size="small"
+              class="sales-order-detail-link"
+              @click="handleSalesOrderDetail(row)"
+            >查看详情</el-button>
             <el-tag v-if="row.sales_order_status" :type="row.sales_order_status === '已取消' ? 'danger' : 'success'" size="small">{{ row.sales_order_status }}</el-tag>
           </div>
         </div>
@@ -590,7 +598,6 @@
       <div v-if="stockInForm.inventoryInfo" style="margin-bottom: 16px">
         <el-descriptions :column="2" border size="small">
           <el-descriptions-item label="商品名称">{{ stockInForm.inventoryInfo.productName }}</el-descriptions-item>
-          <el-descriptions-item label="SKU">{{ stockInForm.inventoryInfo.sku }}</el-descriptions-item>
           <el-descriptions-item label="仓库">{{ stockInForm.inventoryInfo.warehouseName }}</el-descriptions-item>
           <el-descriptions-item label="当前库存">{{ stockInForm.inventoryInfo.quantity }}</el-descriptions-item>
         </el-descriptions>
@@ -667,7 +674,7 @@
           <span class="bind-keywords-label">关键词：</span>
           <el-tag v-for="kw in bindKeywords" :key="kw" size="small" type="info" effect="plain" class="bind-keyword-tag" @click="applyKeyword(kw)">{{ kw }}</el-tag>
         </div>
-        <el-input v-model="bindSearchKeyword" placeholder="输入SKU或商品名称搜索" clearable @keyup.enter="searchInventoryForBind" style="width: 300px">
+        <el-input v-model="bindSearchKeyword" placeholder="输入商品ID、名称或货位号搜索" clearable @keyup.enter="searchInventoryForBind" style="width: 300px">
           <template #append>
             <el-button @click="searchInventoryForBind" :loading="bindSearchLoading">
               <el-icon><Search /></el-icon>
@@ -705,9 +712,6 @@
           <el-form-item label="包装规格">
             <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
             <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
-          </el-form-item>
-          <el-form-item label="SKU">
-            <el-input :model-value="currentBindRow?.skuId" disabled />
           </el-form-item>
           <el-form-item label="商品名称">
             <el-input :model-value="currentBindRow?.productName" disabled />
@@ -2505,6 +2509,46 @@ function handleDirectMarkAfterSale(row) {
   aftersaleDialogVisible.value = true
 }
 
+async function handleSalesOrderDetail(row) {
+  const fallbackOrderId = String(row?.sales_order_no || '').trim()
+  if (!row?.id || !/^\d{10,30}$/.test(fallbackOrderId)) {
+    ElMessage.warning('未找到有效的关联销售单号')
+    return
+  }
+  if (!window.electronAPI) {
+    ElMessage.warning('当前环境无法打开京东订单详情')
+    return
+  }
+
+  try {
+    const salesData = await fetchRelatedSales(row.id)
+    if (!salesData?.storeId) {
+      ElMessage.warning('未找到关联销售单的店铺信息')
+      return
+    }
+    if (salesData.storePlatform !== 'jd') {
+      ElMessage.warning('查看详情目前仅支持京东店铺')
+      return
+    }
+
+    const orderId = String(salesData.orderId || fallbackOrderId).trim()
+    if (!/^\d{10,30}$/.test(orderId)) {
+      ElMessage.warning('关联销售单号无效')
+      return
+    }
+
+    const result = await window.electronAPI.invoke('open-store-backend-url', {
+      storeId: salesData.storeId,
+      url: `https://shop.jd.com/jdm/trade/orders/order-details?orderId=${encodeURIComponent(orderId)}`,
+      title: `${salesData.storeName || '京东店铺'} - 店铺后台`,
+      focusExisting: false
+    })
+    if (result?.success === false) throw new Error(result.message || '打开失败')
+  } catch (err) {
+    ElMessage.error('打开销售订单详情失败: ' + (err.message || ''))
+  }
+}
+
 // 点击"店铺发货"按钮 — 用店铺cookie打开京东出库页面并自动点击出库按钮
 async function handleStoreShip() {
   const row = currentReceiveRow.value
@@ -2622,9 +2666,9 @@ async function handleStockIn() {
         storeId: res?.storeId || '',
         purchaseOrderId: row.id
       }
-      bindSearchKeyword.value = row.sku || ''
-      bindSearchResults.value = []
       bindKeywords.value = extractKeywords(currentBindRow.value.productName)
+      bindSearchKeyword.value = bindKeywords.value[0] || currentBindRow.value.productName || ''
+      bindSearchResults.value = []
       bindNewForm.warehouseId = ''
       bindNewForm.location = ''
       bindNewForm.batchNo = ''
@@ -2749,7 +2793,6 @@ async function confirmBindExisting(invRow) {
     // 绑定成功后自动打开入库对话框
     stockInForm.inventoryInfo = {
       productName: invRow.productName,
-      sku: invRow.sku,
       warehouseName: invRow.warehouseName,
       quantity: invRow.quantity
     }
@@ -2770,7 +2813,7 @@ async function confirmCreateAndBind() {
   try {
     const res = await quickCreateInventory({
       warehouse_id: bindNewForm.warehouseId,
-      sku: currentBindRow.value.skuId,
+      sku_id: currentBindRow.value.skuId,
       product_name: currentBindRow.value.productName,
       image: currentBindRow.value.productImage,
       store_id: currentBindRow.value.storeId,
@@ -2784,7 +2827,6 @@ async function confirmCreateAndBind() {
     // 新建绑定成功后自动打开入库对话框
     stockInForm.inventoryInfo = {
       productName: currentBindRow.value.productName,
-      sku: currentBindRow.value.skuId,
       warehouseName: warehouseOptions.value.find(w => w.id === bindNewForm.warehouseId)?.name || '',
       quantity: 0
     }
@@ -3930,6 +3972,12 @@ function handleImportDialogClose() {
 
 .card-footer .sales-order-no {
   color: #909399;
+}
+
+.card-footer .sales-order-detail-link {
+  height: auto;
+  padding: 0 2px;
+  font-size: 12px;
 }
 
 .card-footer .el-tag {

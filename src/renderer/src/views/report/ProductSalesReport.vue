@@ -216,7 +216,7 @@
         </div>
         <el-input
           v-model="bindSearchKeyword"
-          placeholder="输入SKU或商品名称搜索"
+          placeholder="输入商品ID、名称或货位号搜索"
           clearable
           @keyup.enter="searchInventoryForBind"
           style="width: 300px"
@@ -273,9 +273,6 @@
           <el-form-item label="包装规格">
             <el-input-number v-model="bindPackageNum" :min="1" :max="999" controls-position="right" style="width: 120px" />
             <span style="margin-left: 8px; color: #909399; font-size: 12px">每卖1个扣N个仓库库存</span>
-          </el-form-item>
-          <el-form-item label="SKU">
-            <el-input :model-value="currentBindRow?.skuId" disabled />
           </el-form-item>
           <el-form-item label="商品名称">
             <el-input :model-value="currentBindRow?.productName" disabled />
@@ -539,9 +536,9 @@ function extractKeywords(name) {
 
 function handleBind(row) {
   currentBindRow.value = row
-  bindSearchKeyword.value = row.skuId
-  bindSearchResults.value = []
   bindKeywords.value = extractKeywords(row.productName)
+  bindSearchKeyword.value = bindKeywords.value[0] || row.productName || ''
+  bindSearchResults.value = []
   bindNewForm.warehouseId = ''
   bindNewForm.location = ''
   bindNewForm.batchNo = ''
@@ -602,7 +599,7 @@ async function confirmCreateAndBind() {
   try {
     await quickCreateInventory({
       warehouse_id: bindNewForm.warehouseId,
-      sku: currentBindRow.value.skuId,
+      sku_id: currentBindRow.value.skuId,
       product_name: currentBindRow.value.productName,
       image: currentBindRow.value.productImage,
       store_id: currentBindRow.value.storeId,

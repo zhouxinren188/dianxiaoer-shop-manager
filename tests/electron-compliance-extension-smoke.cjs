@@ -210,6 +210,12 @@ app.whenReady().then(async () => {
     await waitFor(async () => complianceView.webContents.executeJavaScript(
       '!document.querySelector("#jd-ai-auto-panel")'
     ), '进入合规页面后没有关闭首次自动弹出的京东 AI')
+    await waitFor(async () => {
+      const stored = await backgroundPage.executeJavaScript(
+        'chrome.storage.local.get("ecommerceToolboxJdAiAutoPopupV2")'
+      )
+      return stored?.ecommerceToolboxJdAiAutoPopupV2?.enabled === false
+    }, '首次关闭京东 AI 自动弹出后没有保存关闭状态')
     const manualJdAiPanelStayedOpen = await complianceView.webContents.executeJavaScript(`(async () => {
       const panel = document.createElement("aside");
       panel.id = "jd-ai-manual-panel";

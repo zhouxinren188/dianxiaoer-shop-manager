@@ -617,8 +617,8 @@
   }
 
   let jdAiAutoCloseRoute = "";
-  let jdAiAutoCloseDeadline = 0;
   let jdAiAutoCloseDone = false;
+  let jdAiAutoClosePending = false;
   // V1 could be polluted by the automatically rendered JD switch state. Use a
   // clean key so existing installations recover to the safe default (`off`).
   const JD_AI_AUTO_POPUP_STORAGE_KEY = "ecommerceToolboxJdAiAutoPopupV2";
@@ -705,7 +705,8 @@
   }
 
   function saveJdAiAutoPopupPreference(enabled, source) {
-    if (typeof enabled !== "boolean" || enabled === jdAiAutoPopupEnabled) return;
+    if (typeof enabled !== "boolean") return;
+    const changed = enabled !== jdAiAutoPopupEnabled;
     jdAiAutoPopupEnabled = enabled;
     try {
       const result = chrome.storage.local.set({
@@ -715,7 +716,7 @@
     } catch (_error) {
       // The in-memory preference still applies for the current page.
     }
-    diagnosticLog("jd_ai_auto_popup_preference_changed", {enabled, source});
+    diagnosticLog(changed ? "jd_ai_auto_popup_preference_changed" : "jd_ai_auto_popup_preference_confirmed", {enabled, source});
   }
 
   function jdAiSwitchFromEventTarget(target) {
@@ -755,19 +756,44 @@
     const route = complianceSection ? `${location.pathname}${location.search}` : "";
     if (route !== jdAiAutoCloseRoute) {
       jdAiAutoCloseRoute = route;
-      jdAiAutoCloseDeadline = route ? Date.now() + 15000 : 0;
       jdAiAutoCloseDone = false;
+      jdAiAutoClosePending = false;
     }
     const title = findJdAiPanelTitle();
     const panel = title ? findJdAiPanelRoot(title) : null;
-    if (!route || Date.now() > jdAiAutoCloseDeadline) return;
+    if (!route) return;
     if (jdAiAutoPopupEnabled) {
       if (panel) jdAiAutoCloseDone = true;
       return;
     }
-    if (jdAiAutoCloseDone) return;
+    if (jdAiAutoCloseDone || jdAiAutoClosePending || !panel) return;
+    const autoPopupSwitch = findJdAiAutoPopupSwitch(panel);
+    const switchEnabled = autoPopupSwitch ? jdAiSwitchEnabled(autoPopupSwitch) : null;
+    if (switchEnabled === true) {
+      jdAiAutoClosePending = true;
+      autoPopupSwitch.click();
+      diagnosticLog("jd_ai_site_preference_restore_started", {route});
+      setTimeout(() => {
+        const latestTitle = findJdAiPanelTitle();
+        const latestPanel = latestTitle ? findJdAiPanelRoot(latestTitle) : null;
+        const latestSwitch = latestPanel ? findJdAiAutoPopupSwitch(latestPanel) : null;
+        const restoredState = latestSwitch ? jdAiSwitchEnabled(latestSwitch) : null;
+        saveJdAiAutoPopupPreference(false, "site_preference_restore");
+        const closeButton = latestPanel ? findJdAiPanelCloseButton(latestPanel) : null;
+        if (closeButton) closeButton.click();
+        jdAiAutoClosePending = false;
+        jdAiAutoCloseDone = true;
+        diagnosticLog("jd_ai_site_preference_restored", {
+          route,
+          switchEnabled: restoredState,
+          panelClosed: Boolean(closeButton)
+        });
+      }, 420);
+      return;
+    }
     const closeButton = panel ? findJdAiPanelCloseButton(panel) : null;
     if (!closeButton) return;
+    saveJdAiAutoPopupPreference(false, "visible_switch_off");
     jdAiAutoCloseDone = true;
     closeButton.click();
     diagnosticLog("jd_ai_initial_panel_closed", {route});

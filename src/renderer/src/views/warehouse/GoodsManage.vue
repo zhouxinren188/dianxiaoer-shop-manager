@@ -8,7 +8,7 @@
         </div>
         <div class="header-info">
           <h2 class="header-title">仓库商品管理</h2>
-          <p class="header-desc">管理所有仓库的商品库存、售价、货位及销售情况</p>
+          <p class="header-desc">管理所有仓库的商品库存、成本价、货位及销售情况</p>
         </div>
       </div>
     </div>
@@ -95,7 +95,7 @@
                     </div>
                   </div>
                   <div class="product-card-info">
-                    <div class="product-card-name">{{ bp.product_name || '--' }}</div>
+                    <div class="product-card-name">{{ bp.product_name || '待首次销售后补齐' }}</div>
                     <div class="product-card-meta">
                       <span class="meta-store">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
@@ -109,7 +109,7 @@
                   </div>
                   <div class="product-card-stats">
                     <div class="stat-item">
-                      <span class="stat-label">售价</span>
+                      <span class="stat-label">平均售价</span>
                       <span class="stat-value price">¥{{ Number(bp.avg_unit_price || 0).toFixed(2) }}</span>
                     </div>
                     <div class="stat-item">
@@ -159,7 +159,7 @@
 
         <el-table-column prop="product_name" label="商品名称" min-width="180" show-overflow-tooltip />
 
-        <el-table-column prop="price" label="售价" width="100" align="right">
+        <el-table-column prop="price" label="成本价" width="100" align="right">
           <template #default="{ row }">
             <span style="color: #f56c6c; font-weight: 600">¥{{ Number(row.price || 0).toFixed(2) }}</span>
           </template>
@@ -259,13 +259,10 @@
         :rules="editRules"
         label-width="100px"
       >
-        <el-form-item label="商品SKU" prop="sku">
-          <el-input v-model="editForm.sku" placeholder="请输入SKU编号" :disabled="isEditMode" />
-        </el-form-item>
         <el-form-item label="商品名称" prop="product_name">
           <el-input v-model="editForm.product_name" placeholder="请输入商品名称" maxlength="100" show-word-limit />
         </el-form-item>
-        <el-form-item label="商品售价" prop="price">
+        <el-form-item label="商品成本价" prop="price">
           <el-input-number v-model="editForm.price" :min="0" :precision="2" :step="1" style="width: 200px" />
         </el-form-item>
         <el-form-item label="所属仓库" prop="warehouse_id">
@@ -296,26 +293,41 @@
     <el-dialog
       v-model="bindVisible"
       title="绑定商品"
-      width="720px"
+      width="820px"
       align-center
       destroy-on-close
     >
       <div v-if="currentRow" style="margin-bottom: 16px">
         <el-descriptions :column="2" border size="small">
           <el-descriptions-item label="商品名称">{{ currentRow.product_name }}</el-descriptions-item>
-          <el-descriptions-item label="SKU">{{ currentRow.sku }}</el-descriptions-item>
+          <el-descriptions-item label="商品ID">{{ currentRow.id }}</el-descriptions-item>
           <el-descriptions-item label="所属仓库">{{ currentRow.warehouse_name }}</el-descriptions-item>
           <el-descriptions-item label="已绑定数">{{ currentRow.bound_count || 0 }} 个销售商品</el-descriptions-item>
         </el-descriptions>
       </div>
 
       <!-- 已绑定商品列表 -->
-      <div v-if="bindCurrentList.length" style="margin-bottom: 16px">
+      <div style="margin-bottom: 16px">
         <h4 style="margin: 0 0 8px; font-size: 14px; color: #303133">已绑定的销售商品</h4>
-        <el-table :data="bindCurrentList" size="small" border max-height="200">
+        <el-table v-loading="bindCurrentLoading" :data="bindCurrentList" size="small" border max-height="200" empty-text="暂无绑定的销售商品">
           <el-table-column prop="store_name" label="店铺" width="140" />
-          <el-table-column prop="sku_id" label="SKU" width="120" />
-          <el-table-column prop="product_name" label="商品名称" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="sku_id" label="销售SKU" width="120" />
+          <el-table-column label="主图" width="58" align="center">
+            <template #default="{ row }">
+              <el-image
+                v-if="row.product_image"
+                :src="row.product_image"
+                fit="cover"
+                class="bind-product-image"
+                :preview-src-list="[row.product_image]"
+                :preview-teleported="true"
+              />
+              <div v-else class="bind-product-placeholder"><el-icon><Box /></el-icon></div>
+            </template>
+          </el-table-column>
+          <el-table-column label="商品名称" min-width="170" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.product_name || '待首次销售后补齐' }}</template>
+          </el-table-column>
           <el-table-column prop="total_quantity" label="数量" width="70" align="center" />
           <el-table-column label="操作" width="70" align="center">
             <template #default="{ row }">
@@ -325,16 +337,23 @@
         </el-table>
       </div>
 
+      <div class="bind-mode-switch">
+        <el-radio-group v-model="bindMode" size="small">
+          <el-radio-button label="search">从销售记录选择</el-radio-button>
+          <el-radio-button label="manual">手动输入销售SKU</el-radio-button>
+        </el-radio-group>
+      </div>
+
       <!-- 搜索未绑定销售SKU -->
-      <div>
+      <div v-if="bindMode === 'search'">
         <h4 style="margin: 0 0 8px; font-size: 14px; color: #303133">搜索销售商品进行绑定</h4>
         <div style="display: flex; gap: 8px; margin-bottom: 10px">
-          <el-input v-model="bindSearchKeyword" placeholder="输入商品名称或SKU搜索" clearable style="flex: 1" @keyup.enter="searchUnboundSkus" />
+          <el-input v-model="bindSearchKeyword" placeholder="输入商品名称或销售SKU搜索" clearable style="flex: 1" @keyup.enter="searchUnboundSkus" />
           <el-button type="primary" @click="searchUnboundSkus" :loading="bindSearching">搜索</el-button>
         </div>
         <el-table v-if="bindSearchResults.length" :data="bindSearchResults" size="small" border max-height="250">
           <el-table-column prop="store_name" label="店铺" width="140" />
-          <el-table-column prop="sku_id" label="SKU" width="120" />
+          <el-table-column prop="sku_id" label="销售SKU" width="120" />
           <el-table-column prop="product_name" label="商品名称" min-width="160" show-overflow-tooltip />
           <el-table-column label="主图" width="60" align="center">
             <template #default="{ row }">
@@ -350,6 +369,42 @@
           </el-table-column>
         </el-table>
         <div v-if="bindSearched && !bindSearchResults.length" style="text-align: center; color: #909399; padding: 16px">未找到未绑定的销售商品</div>
+      </div>
+
+      <!-- 尚未产生销售记录的 SKU 也可以预先绑定 -->
+      <div v-else class="manual-bind-panel">
+        <el-alert
+          title="尚未销售的商品可先绑定；首次销售并同步订单后，商品标题、主图和销售数量会自动补齐。"
+          type="info"
+          :closable="false"
+          show-icon
+          class="manual-bind-alert"
+        />
+        <el-form :model="manualBindForm" label-width="86px">
+          <el-form-item label="销售SKU" required>
+            <el-input
+              v-model="manualBindForm.sku_id"
+              placeholder="请输入店铺商品的销售SKU"
+              maxlength="100"
+              clearable
+              @keyup.enter="handleManualBind"
+            />
+          </el-form-item>
+          <el-form-item label="包装规格">
+            <div class="manual-bind-package">
+              <el-input-number v-model="manualBindForm.package_num" :min="1" :max="9999" :step="1" />
+              <span>每销售 1 件，扣减对应数量的仓库库存</span>
+            </div>
+          </el-form-item>
+          <el-form-item>
+            <el-button
+              type="primary"
+              :loading="bindSubmitting"
+              :disabled="!manualBindForm.sku_id.trim()"
+              @click="handleManualBind"
+            >立即绑定</el-button>
+          </el-form-item>
+        </el-form>
       </div>
     </el-dialog>
 
@@ -514,10 +569,9 @@
                 <span class="product-initial">{{ (purchaseInfo.goodsName || '?').charAt(0) }}</span>
               </div>
               <h4 class="product-name" style="text-align:center;">{{ purchaseInfo.goodsName }}</h4>
-              <p v-if="purchaseInfo.sku" class="product-sku" style="text-align:center;">SKU: {{ purchaseInfo.sku }}</p>
               <div class="product-meta-grid">
                 <div class="meta-item meta-price">
-                  <span class="meta-label">单价</span>
+                  <span class="meta-label">成本价</span>
                   <span class="meta-value">¥{{ purchaseInfo.price.toFixed(2) }}</span>
                 </div>
                 <div class="meta-item meta-qty">
@@ -593,7 +647,6 @@
           </div>
           <div style="min-width:0;">
             <p style="margin:0 0 4px;font-size:14px;font-weight:600;color:#1f2937;line-height:1.4;">{{ purchaseInfo.goodsName }}</p>
-            <p v-if="purchaseInfo.sku" style="margin:0;font-size:12px;color:#9ca3af;">{{ purchaseInfo.sku }}</p>
             <p style="margin:4px 0 0;font-size:12px;color:#606266;">采购数量：{{ purchaseInfo.quantity }}</p>
           </div>
         </div>
@@ -812,7 +865,6 @@ const isEditMode = ref(false)
 const editSubmitting = ref(false)
 const editForm = reactive({
   id: '',
-  sku: '',
   product_name: '',
   price: 0,
   warehouse_id: '',
@@ -823,9 +875,8 @@ const editForm = reactive({
 })
 
 const editRules = {
-  sku: [{ required: true, message: '请输入SKU编号', trigger: 'blur' }],
   product_name: [{ required: true, message: '请输入商品名称', trigger: 'blur' }],
-  price: [{ required: true, message: '请输入售价', trigger: 'blur' }],
+  price: [{ required: true, message: '请输入成本价', trigger: 'blur' }],
   warehouse_id: [{ required: true, message: '请选择仓库', trigger: 'change' }],
   warn_quantity: [{ required: true, message: '请输入预警值', trigger: 'blur' }],
   quantity: [{ required: true, message: '请输入当前库存', trigger: 'blur' }]
@@ -835,7 +886,7 @@ function handleAdd() {
   isEditMode.value = false
   editTitle.value = '新增商品'
   Object.assign(editForm, {
-    id: '', sku: '', product_name: '', price: 0,
+    id: '', product_name: '', price: 0,
     warehouse_id: '', location: '', warn_quantity: 10, quantity: 0, image: ''
   })
   editVisible.value = true
@@ -846,7 +897,6 @@ function handleEdit(row) {
   editTitle.value = '编辑商品'
   Object.assign(editForm, {
     id: row.id,
-    sku: row.sku,
     product_name: row.product_name,
     price: Number(row.price || 0),
     warehouse_id: row.warehouse_id,
@@ -873,13 +923,11 @@ async function handleEditSubmit() {
         location: editForm.location,
         warn_quantity: editForm.warn_quantity,
         quantity: editForm.quantity,
-        image: editForm.image,
-        sku: editForm.sku
+        image: editForm.image
       })
       ElMessage.success('修改成功')
     } else {
       await createInventory({
-        sku: editForm.sku,
         product_name: editForm.product_name,
         price: editForm.price,
         warehouse_id: editForm.warehouse_id,
@@ -908,23 +956,42 @@ const bindSearchResults = ref([])
 const bindSearched = ref(false)
 const bindSearching = ref(false)
 const bindSubmitting = ref(false)
+const bindCurrentLoading = ref(false)
+const bindMode = ref('search')
+const manualBindForm = reactive({
+  sku_id: '',
+  package_num: 1
+})
+
+async function refreshCurrentBindings() {
+  if (!currentRow.value) return
+  const inventoryId = currentRow.value.id
+  const data = await fetchBoundProducts(inventoryId)
+  bindCurrentList.value = data || []
+  boundProductsMap[inventoryId] = bindCurrentList.value
+  currentRow.value.bound_count = bindCurrentList.value.length
+}
 
 async function handleBindProduct(row) {
   currentRow.value = row
+  bindMode.value = 'search'
   bindSearchKeyword.value = ''
   bindSearchResults.value = []
   bindSearched.value = false
   bindSearching.value = false
+  Object.assign(manualBindForm, { sku_id: '', package_num: 1 })
+  bindCurrentList.value = []
+  bindVisible.value = true
 
-  // 加载已绑定列表
+  bindCurrentLoading.value = true
   try {
-    const data = await fetchBoundProducts(row.id)
-    bindCurrentList.value = data || []
+    await refreshCurrentBindings()
   } catch (e) {
     bindCurrentList.value = []
+    ElMessage.error('加载绑定信息失败: ' + e.message)
+  } finally {
+    bindCurrentLoading.value = false
   }
-
-  bindVisible.value = true
 }
 
 async function searchUnboundSkus() {
@@ -944,7 +1011,7 @@ async function searchUnboundSkus() {
   }
 }
 
-async function handleBindSku(skuRow) {
+async function submitSkuBinding(skuRow) {
   if (!currentRow.value) return
   bindSubmitting.value = true
   try {
@@ -952,7 +1019,8 @@ async function handleBindSku(skuRow) {
       store_id: skuRow.store_id,
       sku_id: skuRow.sku_id,
       inventory_id: currentRow.value.id,
-      warehouse_id: currentRow.value.warehouse_id
+      warehouse_id: currentRow.value.warehouse_id,
+      package_num: skuRow.package_num || 1
     })
     ElMessage.success('绑定成功')
     // 从搜索结果中移除
@@ -960,13 +1028,35 @@ async function handleBindSku(skuRow) {
       r => !(r.store_id === skuRow.store_id && r.sku_id === skuRow.sku_id)
     )
     // 刷新已绑定列表
-    const data = await fetchBoundProducts(currentRow.value.id)
-    bindCurrentList.value = data || []
-    loadData()
+    await refreshCurrentBindings()
+    await loadData()
+    return true
   } catch (e) {
     ElMessage.error('绑定失败: ' + e.message)
+    return false
   } finally {
     bindSubmitting.value = false
+  }
+}
+
+async function handleBindSku(skuRow) {
+  await submitSkuBinding(skuRow)
+}
+
+async function handleManualBind() {
+  const skuId = manualBindForm.sku_id.trim()
+  if (!skuId) {
+    ElMessage.warning('请输入销售SKU')
+    return
+  }
+
+  const success = await submitSkuBinding({
+    sku_id: skuId,
+    package_num: manualBindForm.package_num
+  })
+  if (success) {
+    manualBindForm.sku_id = ''
+    manualBindForm.package_num = 1
   }
 }
 
@@ -977,8 +1067,7 @@ async function handleUnbindFromDialog(bp) {
     ElMessage.success('解绑成功')
     // 刷新已绑定列表
     if (currentRow.value) {
-      const data = await fetchBoundProducts(currentRow.value.id)
-      bindCurrentList.value = data || []
+      await refreshCurrentBindings()
     }
     loadData()
   } catch (e) {
@@ -1146,7 +1235,7 @@ async function handlePurchase(row) {
   purchaseInfo.purchaseNo = ''
   purchaseInfo.inventoryId = row.id
   purchaseInfo.goodsName = row.product_name || ''
-  purchaseInfo.sku = row.sku || ''
+  purchaseInfo.sku = ''
   purchaseInfo.skuId = row.sku || ''
   purchaseInfo.quantity = row.unpurchased_qty > 0 ? row.unpurchased_qty : 1
   purchaseInfo.price = Number(row.price || 0)
@@ -2050,6 +2139,42 @@ onUnmounted(() => {
   margin-left: 8px;
   padding-left: 16px;
   border-left: 1px solid #f0f2f5;
+}
+
+.bind-product-image,
+.bind-product-placeholder {
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+}
+
+.bind-product-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #b7bdc8;
+  background: #f3f5f8;
+  border: 1px solid #e4e7ed;
+}
+
+.bind-mode-switch {
+  margin-bottom: 14px;
+}
+
+.manual-bind-panel {
+  padding: 2px 0 0;
+}
+
+.manual-bind-alert {
+  margin-bottom: 16px;
+}
+
+.manual-bind-package {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #909399;
+  font-size: 12px;
 }
 
 /* ========== 采购下单弹窗样式 ========== */

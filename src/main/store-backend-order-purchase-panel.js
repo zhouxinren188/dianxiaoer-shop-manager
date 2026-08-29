@@ -1371,9 +1371,22 @@ function attachOrderPurchasePanel(webContents, options = {}) {
     }
   }
 
+  webContents.on('dom-ready', () => {
+    scheduleRefresh('dom-ready', 0)
+    scheduleAfterSaleDiscovery('dom-ready')
+  })
   webContents.on('did-finish-load', () => {
     scheduleRefresh('did-finish-load')
     scheduleAfterSaleDiscovery('did-finish-load')
+  })
+  webContents.on('did-navigate', (_event, url) => {
+    requestSequence += 1
+    const serviceId = getJdAftersaleServiceId(url)
+    if (serviceId && serviceId !== resolvedAfterSale.serviceId) resolvedAfterSale = { serviceId: '', orderId: '' }
+    if (getPurchasePanelPageKey(url)) {
+      scheduleRefresh('did-navigate')
+      if (serviceId) scheduleAfterSaleDiscovery('did-navigate')
+    } else remove()
   })
   webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
     if (isMainFrame === false) return
@@ -1392,6 +1405,9 @@ function attachOrderPurchasePanel(webContents, options = {}) {
     if (serviceId && serviceId !== resolvedAfterSale.serviceId) resolvedAfterSale = { serviceId: '', orderId: '' }
     if (!getPurchasePanelPageKey(url)) remove()
   })
+  scheduleRefresh('attached', 0)
+  scheduleAfterSaleDiscovery('attached')
+
   webContents.once('destroyed', () => {
     requestSequence += 1
     if (refreshTimer) clearTimeout(refreshTimer)

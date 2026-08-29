@@ -467,6 +467,8 @@ async function initDB() {
         warehouse_id INT NOT NULL,
         sku VARCHAR(100) NOT NULL,
         product_name VARCHAR(300) NOT NULL DEFAULT '',
+        price DECIMAL(12,2) NOT NULL DEFAULT 0,
+        image VARCHAR(2000) NOT NULL DEFAULT '',
         quantity INT NOT NULL DEFAULT 0,
         warn_quantity INT NOT NULL DEFAULT 10,
         batch_no VARCHAR(50) DEFAULT '',
@@ -480,6 +482,17 @@ async function initDB() {
         KEY idx_owner (owner_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    // 兼容旧库存表：仓库商品现使用成本价和图片 URL。
+    try {
+      await connection.execute(`ALTER TABLE inventory ADD COLUMN price DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER product_name`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
+    try {
+      await connection.execute(`ALTER TABLE inventory ADD COLUMN image VARCHAR(2000) NOT NULL DEFAULT '' AFTER price`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
 
     // 入库记录表
     await connection.execute(`
@@ -581,6 +594,23 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sku_bindings ADD COLUMN package_num INT NOT NULL DEFAULT 1 COMMENT '包装规格：1个店铺SKU对应多少个仓库SKU'`)
     } catch (e) { /* 字段已存在 */ }
+
+    // 尚未产生销售记录的京东 SKU 预绑定。首次同步到订单后会转为正式 sku_bindings。
+    // 单独建表可避免放宽旧表 store_id 约束，也不会影响既有店铺绑定。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS pending_sku_bindings (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        sku_id VARCHAR(100) NOT NULL,
+        inventory_id INT NOT NULL,
+        warehouse_id INT NOT NULL,
+        package_num INT NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_pending_owner_sku (owner_id, sku_id),
+        KEY idx_pending_inventory (inventory_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
 
     // 售后纠纷指标表（按店铺存储各平台运营待办数据）
     await connection.execute(`
