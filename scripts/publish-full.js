@@ -12,7 +12,7 @@
  */
 const { execSync } = require('child_process')
 const { Client } = require('ssh2')
-const https = require('https')
+const http = require('http')
 const path = require('path')
 const fs = require('fs')
 
@@ -27,7 +27,8 @@ const REMOTE_DIR = 'C:/dianxiaoer-api'
 const REMOTE_UPDATE_DIR = `${REMOTE_DIR}/updates`
 const BUSINESS_REMOTE_DIR = 'C:/dianxiaoer-server'
 const NSSM = 'C:/nssm/nssm.exe'
-const UPDATE_SERVER = 'https://150.158.54.108:3001'
+const PM2 = 'C:/Users/Administrator/AppData/Roaming/npm/pm2.cmd'
+const UPDATE_SERVER = 'http://150.158.54.108:3001'
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Dxe@2026!Admin'
 
 // SSH 连接配置
@@ -300,12 +301,11 @@ function notifyServer(ver) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ version: ver, changelog: `全量更新 v${ver}` })
     const url = new URL(`${UPDATE_SERVER}/api/update/notify-full`)
-    const req = https.request({
+    const req = http.request({
       hostname: url.hostname,
       port: url.port,
       path: url.pathname,
       method: 'POST',
-      rejectUnauthorized: false,
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
@@ -421,15 +421,38 @@ async function main() {
   console.log('  安装依赖并重启服务...')
   const conn3 = await createConnection()
   try {
-    await execCmd(conn3, `cd /d "${REMOTE_DIR}" && npm install --production`)
-    console.log('  重启服务...')
-    // nssm restart 会挂起 SSH 会话，改用 stop + start
+    const authInstall = await execCmd(conn3, `cd /d "${REMOTE_DIR}" && npm install --production`)
+    if (authInstall.code !== 0) {
+      throw new Error(`认证服务依赖安装失败: ${authInstall.stderr || authInstall.stdout}`)
+    }
+    console.log('  使用 PM2 重建并重启认证/更新服务...')
+    // 3001 实际由 PM2 承载。旧 NSSM 服务曾处于暂停状态且指向同一端口，先确保它停止，
+    // 再显式重建 PM2 进程，避免发布完成后仍运行旧的 C:/dianxiaoer-server/server.js。
     await execCmd(conn3, `${NSSM} stop dianxiaoer-api`)
-    await new Promise(r => setTimeout(r, 3000))
-    await execCmd(conn3, `${NSSM} start dianxiaoer-api`)
-    await new Promise(r => setTimeout(r, 5000))
-    const health = await execCmd(conn3, 'curl -sk https://localhost:3001/api/health')
-    console.log('  Health:', health.stdout.trim())
+    await execCmd(conn3, `"${PM2}" delete dianxiaoer-update`)
+    const authStarted = await execCmd(
+      conn3,
+      `"${PM2}" start "${REMOTE_DIR}/update-server.js" --name dianxiaoer-update --cwd "${REMOTE_DIR}" --update-env`
+    )
+    if (authStarted.code !== 0) {
+      throw new Error(`认证/更新服务启动失败: ${authStarted.stderr || authStarted.stdout}`)
+    }
+    const pm2Saved = await execCmd(conn3, `"${PM2}" save`)
+    if (pm2Saved.code !== 0) {
+      throw new Error(`PM2 进程清单保存失败: ${pm2Saved.stderr || pm2Saved.stdout}`)
+    }
+
+    let health = { code: 1, stdout: '', stderr: '' }
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      await new Promise(r => setTimeout(r, attempt === 1 ? 5000 : 3000))
+      health = await execCmd(conn3, 'curl.exe -s --max-time 10 http://localhost:3001/api/health')
+      if (health.code === 0 && health.stdout.includes('"status":"ok"')) break
+      console.log(`  Auth health 第 ${attempt} 次尚未就绪，继续等待...`)
+    }
+    if (health.code !== 0 || !health.stdout.includes('"status":"ok"')) {
+      throw new Error(`认证/更新服务健康检查失败: ${health.stderr || health.stdout}`)
+    }
+    console.log('  Auth health:', health.stdout.trim())
 
     console.log('  安装业务服务依赖...')
     const businessInstall = await execCmd(conn3, `cd /d "${BUSINESS_REMOTE_DIR}" && npm install --production`)
@@ -439,9 +462,20 @@ async function main() {
     console.log('  重启业务服务...')
     await execCmd(conn3, `${NSSM} stop dianxiaoer-server`)
     await new Promise(r => setTimeout(r, 3000))
-    await execCmd(conn3, `${NSSM} start dianxiaoer-server`)
-    await new Promise(r => setTimeout(r, 5000))
-    const businessHealth = await execCmd(conn3, 'curl -s http://localhost:3002/health')
+    const businessStarted = await execCmd(conn3, `${NSSM} start dianxiaoer-server`)
+    if (businessStarted.code !== 0) {
+      throw new Error(`业务服务启动失败: ${businessStarted.stderr || businessStarted.stdout}`)
+    }
+    let businessHealth = { code: 1, stdout: '', stderr: '' }
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      await new Promise(r => setTimeout(r, attempt === 1 ? 5000 : 3000))
+      businessHealth = await execCmd(conn3, 'curl.exe -s --max-time 10 http://localhost:3002/health')
+      if (businessHealth.code === 0 && businessHealth.stdout.includes('"status":"ok"')) break
+      console.log(`  Business health 第 ${attempt} 次尚未就绪，继续等待...`)
+    }
+    if (businessHealth.code !== 0 || !businessHealth.stdout.includes('"status":"ok"')) {
+      throw new Error(`业务服务健康检查失败: ${businessHealth.stderr || businessHealth.stdout}`)
+    }
     console.log('  Business health:', businessHealth.stdout.trim())
   } finally {
     conn3.end()
@@ -453,7 +487,7 @@ async function main() {
     const result = await notifyServer(version)
     console.log('  服务器响应:', result)
   } catch (e) {
-    console.log('  通知服务器失败（SSL 错误），使用 SSH 手动更新 update-meta.json...')
+    console.log('  通知服务器失败，使用 SSH 手动更新 update-meta.json...')
 
     // 读取当前 meta 并更新 fullUpdate
     const metaFile = path.join(ROOT, 'server-api', 'updates', 'update-meta.json')
@@ -471,6 +505,7 @@ async function main() {
       size: exeSize,
       changelog: `全量更新 v${version}`
     }
+    meta.full = meta.fullUpdate
     meta.latestVersion = version
     meta.releaseDate = new Date().toISOString()
 
