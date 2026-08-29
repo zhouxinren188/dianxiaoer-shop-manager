@@ -92,7 +92,7 @@ function httpRequest(url, options = {}) {
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
       headers,
-      timeout: REQUEST_TIMEOUT,
+      timeout: Number.isFinite(options.timeoutMs) ? options.timeoutMs : REQUEST_TIMEOUT,
       rejectUnauthorized: false
     }
 
@@ -119,8 +119,8 @@ function cookiesToHeader(cookies) {
   }
 }
 
-async function getServerCookieSnapshot(storeId, context = 'read') {
-  const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies/${storeId}`)
+async function getServerCookieSnapshot(storeId, context = 'read', { timeoutMs } = {}) {
+  const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies/${storeId}`, { timeoutMs })
   if (res.statusCode !== 200) {
     writeCookieDiagnostic(storeId, context, `server_read=failed http=${res.statusCode}`)
     return null
@@ -210,9 +210,9 @@ async function restoreCookiesFromDB(storeId, { skipFlush = false, context = 'res
 }
 
 // 同步前只在服务器版本明确更新时替换本地 Cookie；版本未知且内容不同时保留本地，交由真实请求验证。
-async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, context = 'precheck' } = {}) {
+async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, context = 'precheck', timeoutMs } = {}) {
   try {
-    const snapshot = await getServerCookieSnapshot(storeId, context)
+    const snapshot = await getServerCookieSnapshot(storeId, context, { timeoutMs })
     if (!snapshot) return { success: false, action: 'server_unavailable' }
 
     const ses = session.fromPartition(`persist:platform-${storeId}`)

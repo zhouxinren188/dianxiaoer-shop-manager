@@ -52,6 +52,7 @@ const {
   refreshCookiesFromServerIfNewer,
   reportStoreDeviceStatus
 } = require('./cookie-heartbeat')
+const { getBackendRecoveryDisposition } = require('./store-backend-session-recovery')
 const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
@@ -268,13 +269,19 @@ async function updateStoreOnlineStatus(storeId, online, reason, verified = false
 }
 
 // 用店铺cookie打开京东后台指定页面（售后/纠纷/合规等）
+const BACKEND_PRECHECK_TIMEOUT_MS = 2000
+
 ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, focusExisting }) => {
   if (!url || !storeId) return { success: false, message: '参数不完整' }
+  const openStartedAt = Date.now()
+  runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=open_requested target_host=${new URL(url).hostname}`)
   const partitionName = `persist:platform-${storeId}`
-  await refreshCookiesFromServerIfNewer(storeId, {
+  const precheckResult = await refreshCookiesFromServerIfNewer(storeId, {
     skipFlush: true,
-    context: 'backend_window_precheck'
+    context: 'backend_window_precheck',
+    timeoutMs: BACKEND_PRECHECK_TIMEOUT_MS
   })
+  runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=precheck result=${precheckResult.action || 'unknown'} elapsed_ms=${Date.now() - openStartedAt}`)
   try {
     await ensureStoreBackendComplianceExtension(partitionName, { runtimeLog })
   } catch (error) {
@@ -296,6 +303,24 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
     }
   }
 
+  function setRecoveryOverlay(webContents, visible) {
+    if (webContents.isDestroyed()) return
+    const script = visible
+      ? `(() => {
+          const overlayId = 'dxe-store-session-recovery-overlay'
+          document.getElementById(overlayId)?.remove()
+          const overlay = document.createElement('div')
+          overlay.id = overlayId
+          overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:#f5f7fa;color:#303133;font:15px/1.6 Microsoft YaHei,sans-serif;'
+          overlay.innerHTML = '<div style="padding:24px 32px;border:1px solid #dcdfe6;border-radius:12px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.10);text-align:center"><div style="width:28px;height:28px;margin:0 auto 14px;border:3px solid #d9e5ff;border-top-color:#409eff;border-radius:50%;animation:dxeRecoverySpin .8s linear infinite"></div><style>@keyframes dxeRecoverySpin{to{transform:rotate(360deg)}}</style><strong>正在恢复店铺登录状态</strong><div style="margin-top:6px;color:#909399;font-size:13px">请稍候，无需重新输入账号密码</div></div>'
+          ;(document.body || document.documentElement).appendChild(overlay)
+        })()`
+      : `document.getElementById('dxe-store-session-recovery-overlay')?.remove()`
+    webContents.executeJavaScript(script, true).catch(error => {
+      runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery_overlay result=failed reason=${error.message}`)
+    })
+  }
+
   async function handleLoginRedirect(webContents, navUrl, navigationType) {
     if (!isJdLoginUrl(navUrl) || webContents.isDestroyed()) return
     let recoveryState = recoveryStates.get(webContents)
@@ -309,22 +334,28 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
     if (!recoveryState.attempted) {
       recoveryState.attempted = true
       recoveryState.inProgress = true
+      const recoveryStartedAt = Date.now()
+      setRecoveryOverlay(webContents, true)
       const recovered = await recoverStoreSessionFromServer(storeId, 'jd')
       recoveryState.inProgress = false
-      if (recovered !== false && !webContents.isDestroyed()) {
-        runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=${recovered === true ? 'verified' : 'check_uncertain'} action=reload_original_url`)
-        if (recovered === true) {
+      const disposition = getBackendRecoveryDisposition(recovered, webContents.isDestroyed())
+      if (disposition.succeeded) {
+        runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=${recovered === true ? 'verified' : 'check_uncertain'} action=${disposition.action} elapsed_ms=${Date.now() - recoveryStartedAt}`)
+        if (disposition.reportOnline) {
           await updateStoreOnlineStatus(storeId, true, 'backend_cookie_recovered', true)
         }
-        const recoveryUrl = webContents.__storeBackendRequestedUrl || url
-        webContents.loadURL(recoveryUrl).catch(error => {
-          runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=reload result=failed reason=${error.message}`)
-        })
+        if (disposition.reloadOriginalUrl) {
+          const recoveryUrl = webContents.__storeBackendRequestedUrl || url
+          webContents.loadURL(recoveryUrl).catch(error => {
+            runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=reload result=failed reason=${error.message}`)
+          })
+        }
         return
       }
     }
 
     recoveryState.finalFailureReported = true
+    setRecoveryOverlay(webContents, false)
     runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=recovery result=failed final=device_offline`)
     await updateStoreOnlineStatus(storeId, false, 'backend_login_redirect_after_recovery', false)
   }
@@ -361,6 +392,7 @@ ipcMain.handle('open-store-backend-url', async (event, { storeId, url, title, fo
     onWebContentsCreated: attachBackendSessionRecovery,
     runtimeLog
   })
+  runtimeLog.writeLog('BACKEND', `store_id=${storeId} phase=window_opened reused=${opened.reused} elapsed_ms=${Date.now() - openStartedAt}`)
   return {
     success: true,
     reused: opened.reused,
