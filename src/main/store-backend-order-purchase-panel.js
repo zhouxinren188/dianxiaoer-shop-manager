@@ -1,6 +1,8 @@
 'use strict'
 
 const http = require('http')
+const fs = require('fs')
+const path = require('path')
 const { getAuthToken } = require('./auth-store')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
@@ -9,9 +11,12 @@ const JD_ORDER_DETAILS_PATH = '/jdm/trade/orders/order-details'
 const JD_AFTERSALE_DETAILS_PATH = '/jdm/trade/after-sale/independent-after-sale/detail'
 const LOGISTICS_ACTION_PREFIX = '[DXE_ORDER_PURCHASE_LOGISTICS]'
 const ORDER_PURCHASE_ACTION_CHANNEL = 'store-backend-order-purchase-action'
+const ORDER_PURCHASE_RUNTIME_SOURCE_FILE = 'store-backend-order-purchase-panel-runtime.json'
 
 const panelActionHandlers = new Map()
 let panelIpcRegistered = false
+let runtimeSourceCache = null
+let runtimeSourceCachePath = ''
 
 function registerOrderPurchasePanelIpc(ipcMain) {
   if (panelIpcRegistered) return
@@ -277,8 +282,10 @@ async function fetchPurchaseOrdersBySalesOrder(orderId, options = {}) {
   const request = typeof options.request === 'function' ? options.request : requestJson
   const exactUrl = `${BUSINESS_SERVER}/api/purchase-orders/by-sales-order/${encodeURIComponent(normalizedOrderId)}`
   let response = null
+  let exactEndpointAvailable = false
   try {
     response = await request(exactUrl)
+    exactEndpointAvailable = true
   } catch (error) {
     if (Number(error?.statusCode) !== 404) throw error
   }
@@ -292,7 +299,7 @@ async function fetchPurchaseOrdersBySalesOrder(orderId, options = {}) {
     const linkedSalesOrderNo = String(row?.linked_sales_order_no || '').trim()
     return salesOrderNo === normalizedOrderId || linkedSalesOrderNo === normalizedOrderId
   })
-  if (exactMatches.length) return exactMatches.map(normalizePurchaseOrder)
+  if (exactEndpointAvailable) return exactMatches.map(normalizePurchaseOrder)
 
   // 兼容尚未部署精确接口、以及历史采购单只保存 sales_order_id 的情况。
   // 先走现有销售单号筛选；仍为空时再读取销售订单内部 ID，并有限分页匹配采购单。
@@ -360,6 +367,52 @@ function serializeForJavaScript(value) {
     .replace(/&/g, '\\u0026')
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029')
+}
+
+function getOrderPurchaseRuntimeSourcePath() {
+  const explicitPath = String(process.env.DXE_ORDER_PURCHASE_RUNTIME_SOURCE || '').trim()
+  if (explicitPath) return explicitPath
+  if (!process.resourcesPath) {
+    return path.join(__dirname, '..', '..', 'resources', ORDER_PURCHASE_RUNTIME_SOURCE_FILE)
+  }
+  return path.join(
+    process.resourcesPath,
+    'app.asar',
+    'resources',
+    ORDER_PURCHASE_RUNTIME_SOURCE_FILE
+  )
+}
+
+function loadOrderPurchaseRuntimeSources() {
+  const runtimeSourcePath = getOrderPurchaseRuntimeSourcePath()
+  if (runtimeSourceCache && runtimeSourceCachePath === runtimeSourcePath) return runtimeSourceCache
+  const parsed = JSON.parse(fs.readFileSync(runtimeSourcePath, 'utf8'))
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Invalid order purchase panel runtime source resource')
+  }
+  runtimeSourceCache = parsed
+  runtimeSourceCachePath = runtimeSourcePath
+  return runtimeSourceCache
+}
+
+function resetOrderPurchaseRuntimeSourceCache() {
+  runtimeSourceCache = null
+  runtimeSourceCachePath = ''
+}
+
+function getOrderPurchaseRuntimeFunctionSource(name, fallbackFunction) {
+  const inlineSource = Function.prototype.toString.call(fallbackFunction)
+  const requiresExternalSource =
+    process.env.DXE_MAIN_BYTECODE === '1' ||
+    inlineSource.includes('[native code]')
+  if (!requiresExternalSource) return inlineSource
+
+  const runtimeSources = loadOrderPurchaseRuntimeSources()
+  const externalSource = String(runtimeSources[name] || '').trim()
+  if (!externalSource || externalSource.includes('[native code]')) {
+    throw new Error(`Missing order purchase panel runtime function source: ${name}`)
+  }
+  return externalSource
 }
 
 function renderOrderPurchasePanel(model) {
@@ -1012,19 +1065,19 @@ function discoverAfterSaleSalesOrder(serviceId) {
 }
 
 function buildOrderPurchasePanelScript(model) {
-  return `(${renderOrderPurchasePanel.toString()})(${serializeForJavaScript(model)})`
+  return `(${getOrderPurchaseRuntimeFunctionSource('renderOrderPurchasePanel', renderOrderPurchasePanel)})(${serializeForJavaScript(model)})`
 }
 
 function buildOrderPurchaseLogisticsScript(model) {
-  return `(${renderOrderPurchaseLogisticsResult.toString()})(${serializeForJavaScript(model)})`
+  return `(${getOrderPurchaseRuntimeFunctionSource('renderOrderPurchaseLogisticsResult', renderOrderPurchaseLogisticsResult)})(${serializeForJavaScript(model)})`
 }
 
 function buildOrderPurchaseSyncStateScript(model) {
-  return `(${renderOrderPurchaseSyncState.toString()})(${serializeForJavaScript(model)})`
+  return `(${getOrderPurchaseRuntimeFunctionSource('renderOrderPurchaseSyncState', renderOrderPurchaseSyncState)})(${serializeForJavaScript(model)})`
 }
 
 function buildAfterSaleOrderDiscoveryScript(serviceId) {
-  return `(${discoverAfterSaleSalesOrder.toString()})(${serializeForJavaScript(serviceId)})`
+  return `(${getOrderPurchaseRuntimeFunctionSource('discoverAfterSaleSalesOrder', discoverAfterSaleSalesOrder)})(${serializeForJavaScript(serviceId)})`
 }
 
 const REMOVE_PANEL_SCRIPT = `(() => {
@@ -1425,6 +1478,7 @@ function attachOrderPurchasePanel(webContents, options = {}) {
 module.exports = {
   BUSINESS_SERVER,
   ORDER_PURCHASE_ACTION_CHANNEL,
+  ORDER_PURCHASE_RUNTIME_SOURCE_FILE,
   JD_ORDER_DETAILS_HOST,
   JD_ORDER_DETAILS_PATH,
   JD_AFTERSALE_DETAILS_PATH,
@@ -1440,6 +1494,12 @@ module.exports = {
   fetchPurchaseAccounts,
   fetchPurchaseOrderLogistics,
   updatePurchaseOrderAftersale,
+  renderOrderPurchasePanel,
+  renderOrderPurchaseLogisticsResult,
+  renderOrderPurchaseSyncState,
+  discoverAfterSaleSalesOrder,
+  getOrderPurchaseRuntimeFunctionSource,
+  resetOrderPurchaseRuntimeSourceCache,
   buildOrderPurchasePanelScript,
   buildOrderPurchaseLogisticsScript,
   buildOrderPurchaseSyncStateScript,

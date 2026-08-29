@@ -21,6 +21,13 @@
             <el-option v-for="wh in warehouseOptions" :key="wh.id" :label="wh.name" :value="wh.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="商品状态">
+          <el-select v-model="filterForm.status" style="width: 110px">
+            <el-option label="在用" value="active" />
+            <el-option label="已停用" value="inactive" />
+            <el-option label="全部" value="all" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="商品名称">
           <el-input v-model="filterForm.product_name" placeholder="请输入商品名称" clearable style="width: 180px" />
         </el-form-item>
@@ -165,6 +172,13 @@
           </template>
         </el-table-column>
 
+        <el-table-column label="商品状态" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="isInventoryActive(row) ? 'success' : 'info'" size="small" effect="light">
+              {{ isInventoryActive(row) ? '在用' : '已停用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="库存预警" width="110" align="center">
           <template #default="{ row }">
             <el-tag
@@ -213,19 +227,27 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="260" align="center" fixed="right">
+        <el-table-column label="操作" width="330" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click.stop="handleBindProduct(row)">
+            <el-button v-if="isInventoryActive(row)" link type="primary" size="small" @click.stop="handleBindProduct(row)">
               <el-icon><Link /></el-icon>
               绑定商品
             </el-button>
-            <el-button link type="success" size="small" @click.stop="handlePurchase(row)">
+            <el-button v-if="isInventoryActive(row)" link type="success" size="small" @click.stop="handlePurchase(row)">
               <el-icon><ShoppingCart /></el-icon>
               采购下单
             </el-button>
             <el-button link type="primary" size="small" @click.stop="handleEdit(row)">
               <el-icon><Edit /></el-icon>
               编辑
+            </el-button>
+            <el-button
+              link
+              :type="isInventoryActive(row) ? 'warning' : 'success'"
+              size="small"
+              @click.stop="handleToggleStatus(row)"
+            >
+              {{ isInventoryActive(row) ? '停用' : '重新启用' }}
             </el-button>
           </template>
         </el-table-column>
@@ -721,7 +743,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  fetchInventoryList, createInventory, updateInventory,
+  fetchInventoryList, createInventory, updateInventory, updateInventoryStatus,
   fetchBoundProducts, searchUnboundSalesSkus,
   fetchWarehouses, createSkuBinding, deleteSkuBinding
 } from '@/api/warehouse'
@@ -737,6 +759,7 @@ const filterForm = reactive({
   warehouse_id: '',
   product_name: '',
   location: '',
+  status: 'active',
   warning_only: false
 })
 
@@ -749,6 +772,10 @@ const pageInfo = reactive({
 
 // 数据
 const tableData = ref([])
+
+function isInventoryActive(row) {
+  return row.is_active === undefined || Number(row.is_active) === 1
+}
 
 // 判断是否触发预警
 function isWarning(row) {
@@ -766,6 +793,7 @@ async function loadData() {
     if (filterForm.warehouse_id) params.warehouse_id = filterForm.warehouse_id
     if (filterForm.product_name) params.product_name = filterForm.product_name
     if (filterForm.location) params.location = filterForm.location
+    params.status = filterForm.status
     if (filterForm.warning_only) params.warning_only = 'true'
 
     const data = await fetchInventoryList(params)
@@ -843,6 +871,7 @@ function handleReset() {
   filterForm.warehouse_id = ''
   filterForm.product_name = ''
   filterForm.location = ''
+  filterForm.status = 'active'
   filterForm.warning_only = false
   pageInfo.page = 1
   loadData()
@@ -855,6 +884,22 @@ function handleSizeChange() {
 
 function handlePageChange() {
   loadData()
+}
+
+async function handleToggleStatus(row) {
+  const active = isInventoryActive(row)
+  const action = active ? '停用' : '重新启用'
+  const tip = active
+    ? '停用后不会删除库存、SKU绑定和历史记录，但不能再新绑定或发起采购。'
+    : '重新启用后，该商品会恢复出现在绑定搜索和采购入口中。'
+  try {
+    await ElMessageBox.confirm(`确定${action}「${row.product_name}」？${tip}`, `${action}商品`, { type: 'warning' })
+    await updateInventoryStatus(row.id, !active)
+    ElMessage.success(`${action}成功`)
+    loadData()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(`${action}失败: ${e.message || e}`)
+  }
 }
 
 // ============ 编辑/新增商品 ============

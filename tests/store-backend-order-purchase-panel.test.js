@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
 import { EventEmitter } from 'node:events'
 import purchasePanel from '../src/main/store-backend-order-purchase-panel.js'
 
@@ -15,6 +16,8 @@ const {
   fetchPurchaseAccounts,
   fetchPurchaseOrderLogistics,
   updatePurchaseOrderAftersale,
+  getOrderPurchaseRuntimeFunctionSource,
+  resetOrderPurchaseRuntimeSourceCache,
   buildOrderPurchasePanelScript,
   buildOrderPurchaseLogisticsScript,
   buildOrderPurchaseSyncStateScript,
@@ -101,6 +104,47 @@ describe('京东订单详情采购信息区域', () => {
     expect(result[0]).toMatchObject({ purchaseNo: 'A1', purchaseTypeLabel: '三方代发', statusLabel: '待发货' })
   })
 
+  it('精确接口明确返回空列表时立即结束，不再执行历史分页回退', async () => {
+    const request = vi.fn().mockResolvedValue({ code: 0, data: { list: [], total: 0 } })
+
+    const result = await fetchPurchaseOrdersBySalesOrder('3579222002237877', { request })
+
+    expect(result).toEqual([])
+    expect(request).toHaveBeenCalledOnce()
+    expect(request.mock.calls[0][0]).toContain('/api/purchase-orders/by-sales-order/3579222002237877')
+  })
+
+  it('正式字节码模式从打包资源读取可执行注入源码', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dxe-order-panel-runtime-'))
+    const runtimePath = path.join(tempDir, 'runtime.json')
+    const previousBytecode = process.env.DXE_MAIN_BYTECODE
+    const previousRuntimePath = process.env.DXE_ORDER_PURCHASE_RUNTIME_SOURCE
+    try {
+      fs.writeFileSync(runtimePath, JSON.stringify({
+        renderOrderPurchasePanel: "function renderOrderPurchasePanel(model) { return { source: 'external-runtime', model } }"
+      }))
+      process.env.DXE_MAIN_BYTECODE = '1'
+      process.env.DXE_ORDER_PURCHASE_RUNTIME_SOURCE = runtimePath
+      resetOrderPurchaseRuntimeSourceCache()
+
+      const source = getOrderPurchaseRuntimeFunctionSource('renderOrderPurchasePanel', () => 'inline')
+      const script = buildOrderPurchasePanelScript({ state: 'ready', orderId: '3579222002237877' })
+
+      expect(source).toContain('external-runtime')
+      expect(Function('return ' + script)()).toEqual({
+        source: 'external-runtime',
+        model: { state: 'ready', orderId: '3579222002237877' }
+      })
+    } finally {
+      if (previousBytecode == null) delete process.env.DXE_MAIN_BYTECODE
+      else process.env.DXE_MAIN_BYTECODE = previousBytecode
+      if (previousRuntimePath == null) delete process.env.DXE_ORDER_PURCHASE_RUNTIME_SOURCE
+      else process.env.DXE_ORDER_PURCHASE_RUNTIME_SOURCE = previousRuntimePath
+      resetOrderPurchaseRuntimeSourceCache()
+      fs.rmSync(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('新精确接口尚未部署时回退现有列表接口，保证本地开发版可测试', async () => {
     const notFound = Object.assign(new Error('not found'), { statusCode: 404 })
     const request = vi.fn()
@@ -120,7 +164,7 @@ describe('京东订单详情采购信息区域', () => {
 
   it('兼容历史采购单只保存销售订单内部 ID 的情况', async () => {
     const request = vi.fn()
-      .mockResolvedValueOnce({ code: 0, data: { list: [] } })
+      .mockRejectedValueOnce(Object.assign(new Error('not found'), { statusCode: 404 }))
       .mockResolvedValueOnce({ code: 0, data: { list: [], total: 0 } })
       .mockResolvedValueOnce({
         code: 0,

@@ -13,3 +13,4 @@ server/.env
 server/.env.sms
 server/.env.rebate
 server-api/.env
+resources/store-backend-order-purchase-panel-runtime.json

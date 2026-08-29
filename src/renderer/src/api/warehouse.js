@@ -35,6 +35,11 @@ export function updateInventory(id, data) {
   return put(`/api/inventory/${id}`, data)
 }
 
+// 停用/启用库存项（保留库存、绑定及历史）
+export function updateInventoryStatus(id, isActive) {
+  return put(`/api/inventory/${id}/status`, { is_active: Boolean(isActive) })
+}
+
 // 获取单个库存项详情
 export function fetchInventoryById(id) {
   return get(`/api/inventory/${id}`)

@@ -469,6 +469,8 @@ async function initDB() {
         product_name VARCHAR(300) NOT NULL DEFAULT '',
         price DECIMAL(12,2) NOT NULL DEFAULT 0,
         image VARCHAR(2000) NOT NULL DEFAULT '',
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        disabled_at DATETIME DEFAULT NULL,
         quantity INT NOT NULL DEFAULT 0,
         warn_quantity INT NOT NULL DEFAULT 10,
         batch_no VARCHAR(50) DEFAULT '',
@@ -479,7 +481,8 @@ async function initDB() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_wh_sku (warehouse_id, sku),
         KEY idx_warehouse (warehouse_id),
-        KEY idx_owner (owner_id)
+        KEY idx_owner (owner_id),
+        KEY idx_owner_active (owner_id, is_active)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
     // 兼容旧库存表：仓库商品现使用成本价和图片 URL。
@@ -494,6 +497,21 @@ async function initDB() {
       if (e.code !== 'ER_DUP_FIELDNAME') throw e
     }
 
+    try {
+      await connection.execute(`ALTER TABLE inventory ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER image`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
+    try {
+      await connection.execute(`ALTER TABLE inventory ADD COLUMN disabled_at DATETIME DEFAULT NULL AFTER is_active`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_FIELDNAME') throw e
+    }
+    try {
+      await connection.execute(`ALTER TABLE inventory ADD KEY idx_owner_active (owner_id, is_active)`)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_KEYNAME') throw e
+    }
     // 入库记录表
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS stock_in_records (

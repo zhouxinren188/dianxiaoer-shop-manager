@@ -48,13 +48,13 @@ module.exports = function(pool) {
 
       // SKU数
       const [skuRows] = await pool.execute(
-        `SELECT COUNT(*) as total FROM inventory ${where}`,
+        `SELECT COUNT(*) as total FROM inventory ${where} AND is_active = 1`,
         params
       )
 
       // 低库存数
       const [lowRows] = await pool.execute(
-        `SELECT COUNT(*) as total FROM inventory ${where} AND quantity <= warn_quantity`,
+        `SELECT COUNT(*) as total FROM inventory ${where} AND is_active = 1 AND quantity <= warn_quantity`,
         params
       )
 
@@ -297,7 +297,7 @@ module.exports = function(pool) {
   router.get('/inventory', async (req, res) => {
     try {
       const ownerId = getOwnerId(req.user)
-      const { warehouse_id, keyword, sku, low_stock, out_of_stock, page = 1, pageSize = 20 } = req.query
+      const { warehouse_id, keyword, sku, low_stock, out_of_stock, status = 'active', page = 1, pageSize = 20 } = req.query
 
       let where = 'WHERE i.owner_id = ?'
       const params = [ownerId]
@@ -320,6 +320,8 @@ module.exports = function(pool) {
       if (out_of_stock === '1' || out_of_stock === 1) {
         where += ' AND i.quantity <= 0'
       }
+      if (status === 'inactive') where += ' AND i.is_active = 0'
+      else if (status !== 'all') where += ' AND i.is_active = 1'
 
       const countSql = `SELECT COUNT(*) as total FROM inventory i ${where}`
       const [[{ total }]] = await pool.execute(countSql, params)
@@ -331,7 +333,7 @@ module.exports = function(pool) {
         lowWhere += ' AND i.warehouse_id = ?'
         lowParams.push(warehouse_id)
       }
-      lowWhere += ' AND i.quantity <= i.warn_quantity'
+      lowWhere += ' AND i.is_active = 1 AND i.quantity <= i.warn_quantity'
       const [[{ lowStockCount }]] = await pool.execute(
         `SELECT COUNT(*) as lowStockCount FROM inventory i ${lowWhere}`,
         lowParams

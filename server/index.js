@@ -3647,7 +3647,7 @@ app.get('/api/inventory', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     if (!ownerId) return res.json(ok({ list: [], total: 0 }))
-    const { page = 1, pageSize = 20, warehouse_id, product_name, sku, location, warning_only } = req.query
+    const { page = 1, pageSize = 20, warehouse_id, product_name, sku, location, warning_only, status = 'active' } = req.query
     const limitVal = parseInt(pageSize) || 20
     const offsetVal = (parseInt(page) - 1) * limitVal
 
@@ -3659,6 +3659,8 @@ app.get('/api/inventory', async (req, res) => {
     if (sku) { where += ' AND i.sku LIKE ?'; params.push(`%${sku}%`) }
     if (location) { where += ' AND i.location LIKE ?'; params.push(`%${location}%`) }
     if (warning_only === 'true' || warning_only === '1') { where += ' AND i.quantity <= i.warn_quantity' }
+    if (status === 'inactive') where += ' AND i.is_active = 0'
+    else if (status !== 'all') where += ' AND i.is_active = 1'
 
     const countParams = [...params]
     const [[countRow]] = await pool.query(
@@ -3799,6 +3801,30 @@ app.put('/api/inventory/:id', async (req, res) => {
   }
 })
 
+// 停用/启用仓库商品。只改变可用状态，库存、绑定和全部历史记录均保留。
+app.put('/api/inventory/:id/status', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const rawStatus = req.body?.is_active
+    if (![true, false, 1, 0, '1', '0'].includes(rawStatus)) {
+      return res.status(400).json(fail('商品状态无效'))
+    }
+    const isActive = rawStatus === true || rawStatus === 1 || rawStatus === '1'
+    const [result] = await pool.execute(
+      `UPDATE inventory
+       SET is_active = ?, disabled_at = IF(?, NULL, NOW()), updated_at = NOW()
+       WHERE id = ? AND owner_id = ?`,
+      [isActive ? 1 : 0, isActive ? 1 : 0, req.params.id, ownerId]
+    )
+    if (result.affectedRows === 0) {
+      return res.status(404).json(fail('仓库商品不存在'))
+    }
+    res.json(ok({ success: true, is_active: isActive ? 1 : 0 }))
+  } catch (err) {
+    console.error('[Inventory] 更新商品状态失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
 // 获取库存项绑定的销售商品
 app.get('/api/inventory/:id/bound-products', async (req, res) => {
   try {
@@ -3818,7 +3844,7 @@ app.get('/api/inventory/:id/bound-products', async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT sb.store_id, sb.sku_id, s.name AS store_name,
+      `SELECT MAX(sb.id) AS binding_id, sb.store_id, sb.sku_id, s.name AS store_name,
         COALESCE(NULLIF(MAX(so.product_name), ''), '待首次销售后补齐') AS product_name,
         COALESCE(MAX(NULLIF(so.product_image, '')), '') AS product_image,
         ROUND(COALESCE(AVG(so.unit_price), 0), 2) AS avg_unit_price,
@@ -3836,7 +3862,7 @@ app.get('/api/inventory/:id/bound-products', async (req, res) => {
     )
 
     const [pendingRows] = await pool.execute(
-      `SELECT NULL AS store_id, psb.sku_id, '待首次销售后补齐' AS store_name,
+      `SELECT psb.id AS binding_id, NULL AS store_id, psb.sku_id, '待首次销售后补齐' AS store_name,
               '待首次销售后补齐' AS product_name, '' AS product_image,
               0 AS avg_unit_price, 0 AS total_quantity, 0 AS unpurchased_qty,
               0 AS sales_record_count, psb.package_num, 'pending' AS binding_state
@@ -3913,14 +3939,14 @@ app.get('/api/inventory/search', async (req, res) => {
     let sql = `SELECT i.id, i.product_name, i.warehouse_id, w.name AS warehouseName, i.quantity, i.image, i.location
                FROM inventory i
                INNER JOIN warehouses w ON i.warehouse_id = w.id
-               WHERE i.owner_id = ? AND (i.product_name LIKE ? OR i.location LIKE ?)`
+               WHERE i.owner_id = ? AND i.is_active = 1 AND (i.product_name LIKE ? OR i.location LIKE ?)`
     const params = [ownerId, likeKeyword, likeKeyword]
 
     if (/^\d+$/.test(normalizedKeyword)) {
       sql = `SELECT i.id, i.product_name, i.warehouse_id, w.name AS warehouseName, i.quantity, i.image, i.location
              FROM inventory i
              INNER JOIN warehouses w ON i.warehouse_id = w.id
-             WHERE i.owner_id = ? AND (i.product_name LIKE ? OR i.location LIKE ? OR i.id = ?)`
+             WHERE i.owner_id = ? AND i.is_active = 1 AND (i.product_name LIKE ? OR i.location LIKE ? OR i.id = ?)`
       params.push(Number(normalizedKeyword))
     }
 
@@ -3952,7 +3978,7 @@ app.get('/api/inventory/:id', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
     const [rows] = await pool.execute(
-      `SELECT i.id, i.product_name, i.price, i.image, i.warn_quantity,
+      `SELECT i.id, i.product_name, i.price, i.image, i.is_active, i.disabled_at, i.warn_quantity,
               i.quantity, i.location, i.batch_no, i.supplier,
               i.warehouse_id, i.created_at, i.updated_at, w.name AS warehouse_name
        FROM inventory i
@@ -3965,6 +3991,7 @@ app.get('/api/inventory/:id', async (req, res) => {
     res.json(ok({
       id: r.id, product_name: r.product_name,
       price: Number(r.price || 0), image: r.image,
+      is_active: Number(r.is_active) === 1 ? 1 : 0, disabled_at: r.disabled_at,
       warn_quantity: r.warn_quantity, quantity: r.quantity,
       location: r.location || '', batch_no: r.batch_no || '', supplier: r.supplier || '',
       warehouse_id: r.warehouse_id, warehouse_name: r.warehouse_name,
@@ -3999,17 +4026,6 @@ app.delete('/api/inventory/:id', async (req, res) => {
       return res.status(409).json(fail('当前库存不为0，不能删除商品'))
     }
 
-    const [[bindingUsage]] = await connection.execute(
-      `SELECT
-         (SELECT COUNT(*) FROM sku_bindings WHERE inventory_id = ? AND owner_id = ?) +
-         (SELECT COUNT(*) FROM pending_sku_bindings WHERE inventory_id = ? AND owner_id = ?) AS total`,
-      [req.params.id, ownerId, req.params.id, ownerId]
-    )
-    if (Number(bindingUsage.total) > 0) {
-      await connection.rollback()
-      return res.status(409).json(fail('商品仍绑定销售商品，请先解除绑定'))
-    }
-
     const [[purchaseUsage]] = await connection.execute(
       'SELECT COUNT(*) AS total FROM purchase_orders WHERE inventory_id = ? AND owner_id = ?',
       [req.params.id, ownerId]
@@ -4031,6 +4047,15 @@ app.delete('/api/inventory/:id', async (req, res) => {
       return res.status(409).json(fail('商品已有盘点记录，为保留历史不能删除'))
     }
 
+    // 删除商品与解绑必须原子完成，避免残留“商品已删除但 SKU 仍占用”的孤儿绑定。
+    const [formalUnbindResult] = await connection.execute(
+      'DELETE FROM sku_bindings WHERE inventory_id = ? AND owner_id = ?',
+      [req.params.id, ownerId]
+    )
+    const [pendingUnbindResult] = await connection.execute(
+      'DELETE FROM pending_sku_bindings WHERE inventory_id = ? AND owner_id = ?',
+      [req.params.id, ownerId]
+    )
     await connection.execute(
       'DELETE FROM inventory WHERE id = ? AND owner_id = ?',
       [req.params.id, ownerId]
@@ -4039,7 +4064,10 @@ app.delete('/api/inventory/:id', async (req, res) => {
     await connection.commit()
 
     await removeManagedInventoryImageIfUnused(deletedImage, ownerId)
-    res.json(ok({ success: true }))
+    res.json(ok({
+      success: true,
+      unbound_count: Number(formalUnbindResult.affectedRows || 0) + Number(pendingUnbindResult.affectedRows || 0)
+    }))
   } catch (err) {
     if (connection) {
       try { await connection.rollback() } catch (_) {}
@@ -4065,12 +4093,30 @@ app.post('/api/sku-bindings', async (req, res) => {
 
     // 验证 inventory 存在
     const [invRows] = await pool.execute(
-      'SELECT id, warehouse_id FROM inventory WHERE id = ? AND owner_id = ?',
+      'SELECT id, warehouse_id, is_active FROM inventory WHERE id = ? AND owner_id = ?',
       [input.inventoryId, ownerId]
     )
     if (invRows.length === 0) {
       return res.status(404).json(fail('库存记录不存在'))
     }
+
+    if (Number(invRows[0].is_active) !== 1) {
+      return res.status(409).json(fail('该仓库商品已停用，请先重新启用'))
+    }
+
+    // 清理旧版本可能遗留的孤儿绑定，避免已删除商品继续占用销售 SKU。
+    await pool.execute(
+      `DELETE sb FROM sku_bindings sb
+       LEFT JOIN inventory i ON i.id = sb.inventory_id AND i.owner_id = sb.owner_id
+       WHERE sb.owner_id = ? AND sb.sku_id = ? AND i.id IS NULL`,
+      [ownerId, input.skuId]
+    )
+    await pool.execute(
+      `DELETE psb FROM pending_sku_bindings psb
+       LEFT JOIN inventory i ON i.id = psb.inventory_id AND i.owner_id = psb.owner_id
+       WHERE psb.owner_id = ? AND psb.sku_id = ? AND i.id IS NULL`,
+      [ownerId, input.skuId]
+    )
 
     // 京东销售 SKU 在平台内唯一，同一账号下不能同时绑定到不同仓库商品。
     const [existingRows] = await pool.execute(
@@ -4184,6 +4230,34 @@ app.put('/api/sku-bindings/package-num', async (req, res) => {
   }
 })
 
+// 按绑定记录 ID 显式解绑，供小程序详情页使用；inventory_id 用于防止误解绑其他商品。
+app.delete('/api/sku-bindings/:id', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const bindingId = Number.parseInt(req.params.id, 10)
+    const inventoryId = Number.parseInt(req.query.inventory_id, 10)
+    const bindingState = String(req.query.binding_state || '')
+    if (!Number.isInteger(bindingId) || bindingId <= 0 || !Number.isInteger(inventoryId) || inventoryId <= 0) {
+      return res.status(400).json(fail('绑定记录参数无效'))
+    }
+    if (!['resolved', 'pending'].includes(bindingState)) {
+      return res.status(400).json(fail('绑定记录类型无效'))
+    }
+
+    const table = bindingState === 'pending' ? 'pending_sku_bindings' : 'sku_bindings'
+    const [result] = await pool.execute(
+      `DELETE FROM ${table} WHERE id = ? AND inventory_id = ? AND owner_id = ?`,
+      [bindingId, inventoryId, ownerId]
+    )
+    if (result.affectedRows === 0) {
+      return res.status(404).json(fail('绑定记录不存在或已解绑'))
+    }
+    res.json(ok({ message: '解绑成功' }))
+  } catch (err) {
+    console.error('[SKU解绑] 按记录解绑失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
 app.delete('/api/sku-bindings', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
@@ -4292,7 +4366,7 @@ app.post('/api/inventory/quick-create', async (req, res) => {
     // external sales SKU as the warehouse-product identity.
     const [existingBindings] = store_id
       ? await pool.execute(
-        `SELECT sb.inventory_id, i.warehouse_id
+        `SELECT sb.inventory_id, i.warehouse_id, i.is_active
          FROM sku_bindings sb
          INNER JOIN inventory i ON i.id = sb.inventory_id
          WHERE sb.store_id = ? AND sb.sku_id = ? AND sb.owner_id = ? AND i.owner_id = ?
@@ -4303,6 +4377,9 @@ app.post('/api/inventory/quick-create', async (req, res) => {
 
     let bindingWarehouseId = warehouse_id
     if (existingBindings.length > 0) {
+      if (Number(existingBindings[0].is_active) !== 1) {
+        return res.status(409).json(fail('该仓库商品已停用，请先重新启用'))
+      }
       inventoryId = existingBindings[0].inventory_id
       bindingWarehouseId = existingBindings[0].warehouse_id
       await pool.execute(

@@ -24,6 +24,45 @@ const fs = require('fs')
 
 const ROOT = path.resolve(__dirname, '..')
 
+const ORDER_PURCHASE_RUNTIME_MODULE = path.join(ROOT, 'src', 'main', 'store-backend-order-purchase-panel.js')
+const ORDER_PURCHASE_RUNTIME_RESOURCE = path.join(
+  ROOT,
+  'resources',
+  'store-backend-order-purchase-panel-runtime.json'
+)
+const ORDER_PURCHASE_RUNTIME_FUNCTIONS = [
+  'renderOrderPurchasePanel',
+  'renderOrderPurchaseLogisticsResult',
+  'renderOrderPurchaseSyncState',
+  'discoverAfterSaleSalesOrder'
+]
+
+function generateOrderPurchasePanelRuntimeSource() {
+  delete require.cache[require.resolve(ORDER_PURCHASE_RUNTIME_MODULE)]
+  const panelModule = require(ORDER_PURCHASE_RUNTIME_MODULE)
+  const runtimeSources = {}
+  for (const functionName of ORDER_PURCHASE_RUNTIME_FUNCTIONS) {
+    const runtimeFunction = panelModule[functionName]
+    if (typeof runtimeFunction !== 'function') {
+      throw new Error(`Missing order purchase panel runtime function: ${functionName}`)
+    }
+    const source = Function.prototype.toString.call(runtimeFunction)
+    if (!source || source.includes('[native code]')) {
+      throw new Error(`Invalid order purchase panel runtime function source: ${functionName}`)
+    }
+    runtimeSources[functionName] = source
+  }
+  fs.mkdirSync(path.dirname(ORDER_PURCHASE_RUNTIME_RESOURCE), { recursive: true })
+  fs.writeFileSync(
+    ORDER_PURCHASE_RUNTIME_RESOURCE,
+    `${JSON.stringify(runtimeSources, null, 2)}\n`,
+    'utf8'
+  )
+  console.log(
+    `[compile-bytecode] ✓ ${path.relative(ROOT, ORDER_PURCHASE_RUNTIME_RESOURCE)} runtime source generated`
+  )
+}
+
 const COMPILE_TARGETS = [
   {
     src: path.join(ROOT, 'out', 'main', 'index.js'),
@@ -50,6 +89,8 @@ async function main() {
       process.exit(1)
     }
   }
+
+  generateOrderPurchasePanelRuntimeSource()
 
   // 2. 复制 purchase-preload.js 到输出目录
   // 修复预存 bug: 该文件在 out/ 目录中不存在，但运行时被引用
@@ -126,6 +167,7 @@ async function main() {
 function generateBootstrapCode() {
   return `// 引导加载器 — 由 compile-bytecode.js 自动生成
 // 热更新仅支持 renderer，主进程始终加载内置 index.jsc
+process.env.DXE_MAIN_BYTECODE = '1'
 const { app } = require('electron')
 
 if (!app.isPackaged) {
