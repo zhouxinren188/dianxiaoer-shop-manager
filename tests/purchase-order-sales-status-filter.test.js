@@ -59,7 +59,7 @@ describe('采购订单关联销售交易状态筛选', () => {
     expect(rendererSource).not.toContain("const salesOrderStatusOptions = ['待付款'")
     expect(rendererSource).toContain('params.salesOrderStatus = filterForm.salesOrderStatus')
 
-    expect(serverSource).toContain('salesOrderNo, salesOrderStatus, purchaseType')
+    expect(serverSource).toContain('salesOrderNo, salesOrderLogisticsNo, salesOrderReturnLogisticsNo, salesOrderStatus, purchaseType')
     expect(serverSource).toContain('sql += salesStatusFilter.sql')
     expect(serverSource).toContain('countSql += salesStatusFilter.sql')
     expect(serverSource).toContain('countByStatusSql += salesStatusFilter.sql')

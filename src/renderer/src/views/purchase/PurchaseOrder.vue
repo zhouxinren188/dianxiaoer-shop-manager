@@ -67,6 +67,12 @@
         <el-form-item label="关联销售单号">
           <el-input v-model="filterForm.salesOrderNo" placeholder="请输入销售单号" clearable style="width: 160px" @keyup.enter="handleSearch" />
         </el-form-item>
+        <el-form-item label="关联销售单物流">
+          <el-input v-model="filterForm.salesOrderLogisticsNo" placeholder="请输入发货物流单号" clearable style="width: 180px" @keyup.enter="handleSearch" />
+        </el-form-item>
+        <el-form-item label="关联销售单退货物流">
+          <el-input v-model="filterForm.salesOrderReturnLogisticsNo" placeholder="请输入退货物流单号" clearable style="width: 180px" @keyup.enter="handleSearch" />
+        </el-form-item>
         <el-form-item label="销售交易状态">
           <el-select v-model="filterForm.salesOrderStatus" placeholder="全部" clearable style="width: 130px">
             <el-option v-for="status in salesOrderStatusOptions" :key="status" :label="status" :value="status" />
@@ -2137,6 +2143,8 @@ const filterForm = reactive({
   logisticsNo: '',
   platformOrderNo: '',
   salesOrderNo: '',
+  salesOrderLogisticsNo: '',
+  salesOrderReturnLogisticsNo: '',
   salesOrderStatus: '',
   platform: '',
   purchaseType: '',
@@ -2252,6 +2260,8 @@ function handleReset() {
   filterForm.logisticsNo = ''
   filterForm.platformOrderNo = ''
   filterForm.salesOrderNo = ''
+  filterForm.salesOrderLogisticsNo = ''
+  filterForm.salesOrderReturnLogisticsNo = ''
   filterForm.salesOrderStatus = ''
   filterForm.platform = ''
   filterForm.purchaseType = ''
@@ -2288,6 +2298,8 @@ async function loadData({ checkCancelAlert = false } = {}) {
     if (filterForm.logisticsNo) params.logisticsNo = filterForm.logisticsNo
     if (filterForm.platformOrderNo) params.platformOrderNo = filterForm.platformOrderNo
     if (filterForm.salesOrderNo) params.salesOrderNo = filterForm.salesOrderNo
+    if (filterForm.salesOrderLogisticsNo) params.salesOrderLogisticsNo = filterForm.salesOrderLogisticsNo
+    if (filterForm.salesOrderReturnLogisticsNo) params.salesOrderReturnLogisticsNo = filterForm.salesOrderReturnLogisticsNo
     if (filterForm.salesOrderStatus) params.salesOrderStatus = filterForm.salesOrderStatus
     if (filterForm.purchaseType) params.purchaseType = filterForm.purchaseType
     if (filterForm.accountId) params.accountId = filterForm.accountId

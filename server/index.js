@@ -51,9 +51,12 @@ const {
 const { normalizeSkuBindingInput } = require('./services/sku-binding-input')
 const {
   STATUS_ALIAS_MAP,
+  buildPurchaseOrderSalesLogisticsFilter,
+  buildPurchaseOrderSalesReturnLogisticsFilter,
   buildPurchaseOrderSalesStatusFilter,
   normalizeStatusText
 } = require('./services/purchase-order-sales-status-filter')
+const { buildReturnPackageLookup } = require('./services/return-package-purchase-matcher')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -2806,6 +2809,125 @@ app.post('/api/sales-return-logistics/:storeId/batch', async (req, res) => {
   }
 })
 
+// 仓库按消费者退货物流单号反查采购单。先用销售订单号 + 京东 SKU 精确匹配，
+// 无法唯一匹配时返回该销售单下的候选采购单并明确要求人工核对。
+app.get('/api/purchase-orders/by-return-logistics/:logisticsNo', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const logisticsNo = String(req.params.logisticsNo || '').trim()
+    if (!logisticsNo || logisticsNo.length > 100 || /[\u0000-\u001f\u007f]/.test(logisticsNo)) {
+      return res.status(400).json(fail('退货物流单号无效'))
+    }
+
+    const accessibleStoreIds = await getAccessibleStoreIds(req.user)
+    if (accessibleStoreIds.length === 0) {
+      return res.json(ok({
+        logistics_no: logisticsNo,
+        packages: [],
+        package_count: 0,
+        matched_purchase_count: 0,
+        needs_manual_review: false
+      }))
+    }
+
+    const storePlaceholders = accessibleStoreIds.map(() => '?').join(',')
+    const [returnRows] = await pool.execute(
+      `SELECT srl.store_id, s.name AS store_name, srl.sales_order_no, srl.jd_sku,
+              srl.afs_service_id, srl.logistics_no, srl.logistics_company, srl.captured_at
+       FROM sales_return_logistics srl
+       INNER JOIN stores s ON s.id = srl.store_id AND s.owner_id = srl.owner_id
+       WHERE srl.owner_id = ? AND srl.logistics_no = ?
+         AND srl.store_id IN (${storePlaceholders})
+       ORDER BY srl.id ASC
+       LIMIT 200`,
+      [ownerId, logisticsNo, ...accessibleStoreIds]
+    )
+
+    if (returnRows.length === 0) {
+      return res.json(ok({
+        logistics_no: logisticsNo,
+        packages: [],
+        package_count: 0,
+        matched_purchase_count: 0,
+        needs_manual_review: false
+      }))
+    }
+
+    const salesOrderNos = [...new Set(returnRows.map((row) => String(row.sales_order_no || '').trim()).filter(Boolean))]
+    const returnStoreIds = [...new Set(returnRows.map((row) => Number(row.store_id)).filter(Number.isInteger))]
+    const salesOrderPlaceholders = salesOrderNos.map(() => '?').join(',')
+    const returnStorePlaceholders = returnStoreIds.map(() => '?').join(',')
+    const [linkedSalesOrders] = await pool.execute(
+      `SELECT so.id, so.store_id, so.order_id, so.sku_id
+       FROM sales_orders so
+       WHERE so.store_id IN (${returnStorePlaceholders})
+         AND so.order_id IN (${salesOrderPlaceholders})`,
+      [...returnStoreIds, ...salesOrderNos]
+    )
+
+    const purchaseFields = `po.id, po.purchase_no, po.sales_order_id, po.sales_order_no,
+      po.goods_name, po.goods_image, po.sku, po.quantity, po.actual_quantity,
+      po.platform, po.purchase_price, po.total_amount, po.shipping_fee, po.purchase_type,
+      po.account_id, po.status, po.platform_order_no, po.logistics_no, po.logistics_company,
+      po.aftersale_status, po.aftersale_remark, po.created_at, po.updated_at,
+      pa.account AS account_name`
+    const queryPurchaseRows = async (condition, conditionParams) => {
+      const isSubAccount = req.user.user_type === 'sub'
+      const accountJoin = isSubAccount
+        ? 'LEFT JOIN user_purchase_accounts upa ON po.account_id = upa.account_id AND upa.user_id = ?'
+        : ''
+      const accountFilter = isSubAccount
+        ? 'AND (upa.user_id IS NOT NULL OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL)))'
+        : ''
+      const params = isSubAccount
+        ? [req.user.id, ownerId, ...conditionParams, req.user.id]
+        : [ownerId, ...conditionParams]
+      const [rows] = await pool.execute(
+        `SELECT ${purchaseFields}
+         FROM purchase_orders po
+         LEFT JOIN purchase_accounts pa ON pa.id = po.account_id
+         ${accountJoin}
+         WHERE po.owner_id = ? AND ${condition}
+         ${accountFilter}
+         ORDER BY po.id ASC
+         LIMIT 500`,
+        params
+      )
+      return rows
+    }
+
+    const directRows = salesOrderNos.length > 0
+      ? await queryPurchaseRows(`po.sales_order_no IN (${salesOrderPlaceholders})`, salesOrderNos)
+      : []
+    const linkedSalesOrderIds = [...new Set(
+      linkedSalesOrders.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0)
+    )]
+    const legacyRows = linkedSalesOrderIds.length > 0
+      ? await queryPurchaseRows(
+          `po.sales_order_id IN (${linkedSalesOrderIds.map(() => '?').join(',')})`,
+          linkedSalesOrderIds
+        )
+      : []
+    const linkedSalesNoById = new Map(
+      linkedSalesOrders.map((row) => [String(row.id), String(row.order_id || '').trim()])
+    )
+    const purchaseRows = [...new Map(
+      [...directRows, ...legacyRows].map((row) => [String(row.id), {
+        ...row,
+        linked_sales_order_no: String(row.sales_order_no || '').trim()
+          || linkedSalesNoById.get(String(row.sales_order_id || ''))
+          || ''
+      }])
+    ).values()]
+
+    const lookup = buildReturnPackageLookup(returnRows, purchaseRows)
+    res.json(ok({ logistics_no: logisticsNo, ...lookup }))
+  } catch (err) {
+    console.error('[ReturnPackageLookup] query failed:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 分页查询销售订单（权限过滤）
 app.get('/api/sales-orders', async (req, res) => {
   try {
@@ -4019,6 +4141,71 @@ app.get('/api/inventory/:id/bound-products', async (req, res) => {
     res.json(ok([...rows, ...pendingRows]))
   } catch (err) {
     console.error('[Inventory] 获取绑定商品失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// Return paginated sales records for one inventory product, plus all-time summary values.
+app.get('/api/inventory/:id/sales-records', async (req, res) => {
+  try {
+    const ownerId = getOwnerId(req.user)
+    const inventoryId = Number.parseInt(req.params.id, 10)
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1)
+    const pageSize = Math.min(100, Math.max(1, Number.parseInt(req.query.pageSize, 10) || 30))
+    const offset = (page - 1) * pageSize
+
+    if (!Number.isInteger(inventoryId) || inventoryId <= 0) {
+      return res.status(400).json(fail('\u4ed3\u5e93\u5546\u54c1\u65e0\u6548'))
+    }
+
+    const [inventoryRows] = await pool.execute(
+      'SELECT id FROM inventory WHERE id = ? AND owner_id = ? LIMIT 1',
+      [inventoryId, ownerId]
+    )
+    if (inventoryRows.length === 0) {
+      return res.status(404).json(fail('\u4ed3\u5e93\u5546\u54c1\u4e0d\u5b58\u5728'))
+    }
+
+    const excludedStatuses = ['\u5f85\u4ed8\u6b3e', '\u7b49\u5f85\u4ed8\u6b3e', '\u5df2\u53d6\u6d88']
+    const validSalesWhere = `sb.inventory_id = ? AND sb.owner_id = ?
+      AND s.owner_id = ? AND COALESCE(so.status_text, '') NOT IN (?, ?, ?)`
+    const filterParams = [inventoryId, ownerId, ownerId, ...excludedStatuses]
+
+    const [[summary]] = await pool.execute(
+      `SELECT COUNT(*) AS total, COALESCE(SUM(so.quantity), 0) AS total_quantity
+       FROM sku_bindings sb
+       INNER JOIN stores s ON s.id = sb.store_id
+       INNER JOIN sales_orders so ON so.store_id = sb.store_id AND so.sku_id = sb.sku_id
+       WHERE ${validSalesWhere}`,
+      filterParams
+    )
+
+    const [rows] = await pool.execute(
+      `SELECT so.order_id, so.sku_id, s.name AS store_name,
+              so.product_name, so.product_image, so.quantity, so.unit_price,
+              so.status_text, so.purchase_status, so.order_time
+       FROM sku_bindings sb
+       INNER JOIN stores s ON s.id = sb.store_id
+       INNER JOIN sales_orders so ON so.store_id = sb.store_id AND so.sku_id = sb.sku_id
+       WHERE ${validSalesWhere}
+       ORDER BY so.order_time DESC, so.id DESC
+       LIMIT ${pageSize} OFFSET ${offset}`,
+      filterParams
+    )
+
+    res.json(ok({
+      list: rows.map(row => ({
+        ...row,
+        quantity: Number(row.quantity || 0),
+        unit_price: Number(row.unit_price || 0)
+      })),
+      total: Number(summary?.total || 0),
+      total_quantity: Number(summary?.total_quantity || 0),
+      page,
+      page_size: pageSize
+    }))
+  } catch (err) {
+    console.error('[Inventory] sales records query failed:', err.message)
     res.status(500).json(fail(err.message))
   }
 })
@@ -5400,7 +5587,7 @@ app.get('/api/purchase-orders/by-sales-order/:orderNo', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, salesOrderStatus, purchaseType, accountId, aftersaleStatus } = req.query
+    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, salesOrderLogisticsNo, salesOrderReturnLogisticsNo, salesOrderStatus, purchaseType, accountId, aftersaleStatus } = req.query
     let sql, countSql, params
 
     // ★ 列表查询：排除 logistics_tracking 等大字段（详情页单独获取），减少数据传输量
@@ -5463,6 +5650,18 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (logisticsNo) { sql += ' AND po.logistics_no LIKE ?'; countSql += ' AND po.logistics_no LIKE ?'; params.push(`%${logisticsNo}%`) }
     if (platformOrderNo) { sql += ' AND po.platform_order_no LIKE ?'; countSql += ' AND po.platform_order_no LIKE ?'; params.push(`%${platformOrderNo}%`) }
     if (salesOrderNo) { sql += ' AND po.sales_order_no LIKE ?'; countSql += ' AND po.sales_order_no LIKE ?'; params.push(`%${salesOrderNo}%`) }
+    if (salesOrderLogisticsNo) {
+      const salesLogisticsFilter = buildPurchaseOrderSalesLogisticsFilter({ logisticsNo: salesOrderLogisticsNo, ownerId })
+      sql += salesLogisticsFilter.sql
+      countSql += salesLogisticsFilter.sql
+      params.push(...salesLogisticsFilter.params)
+    }
+    if (salesOrderReturnLogisticsNo) {
+      const salesReturnLogisticsFilter = buildPurchaseOrderSalesReturnLogisticsFilter({ logisticsNo: salesOrderReturnLogisticsNo, ownerId })
+      sql += salesReturnLogisticsFilter.sql
+      countSql += salesReturnLogisticsFilter.sql
+      params.push(...salesReturnLogisticsFilter.params)
+    }
     if (purchaseType) { sql += ' AND po.purchase_type=?'; countSql += ' AND po.purchase_type=?'; params.push(purchaseType) }
     if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
     if (aftersaleStatus) { sql += ' AND po.aftersale_status=?'; countSql += ' AND po.aftersale_status=?'; params.push(aftersaleStatus) }
@@ -5558,6 +5757,16 @@ app.get('/api/purchase-orders', async (req, res) => {
       if (logisticsNo) { countByStatusSql += ' AND po.logistics_no LIKE ?'; countByStatusParams.push(`%${logisticsNo}%`) }
       if (platformOrderNo) { countByStatusSql += ' AND po.platform_order_no LIKE ?'; countByStatusParams.push(`%${platformOrderNo}%`) }
       if (salesOrderNo) { countByStatusSql += ' AND po.sales_order_no LIKE ?'; countByStatusParams.push(`%${salesOrderNo}%`) }
+      if (salesOrderLogisticsNo) {
+        const salesLogisticsFilter = buildPurchaseOrderSalesLogisticsFilter({ logisticsNo: salesOrderLogisticsNo, ownerId })
+        countByStatusSql += salesLogisticsFilter.sql
+        countByStatusParams.push(...salesLogisticsFilter.params)
+      }
+      if (salesOrderReturnLogisticsNo) {
+        const salesReturnLogisticsFilter = buildPurchaseOrderSalesReturnLogisticsFilter({ logisticsNo: salesOrderReturnLogisticsNo, ownerId })
+        countByStatusSql += salesReturnLogisticsFilter.sql
+        countByStatusParams.push(...salesReturnLogisticsFilter.params)
+      }
       if (purchaseType) { countByStatusSql += ' AND po.purchase_type=?'; countByStatusParams.push(purchaseType) }
       if (accountId) { countByStatusSql += ' AND po.account_id=?'; countByStatusParams.push(parseInt(accountId)) }
       if (aftersaleStatus) { countByStatusSql += ' AND po.aftersale_status=?'; countByStatusParams.push(aftersaleStatus) }

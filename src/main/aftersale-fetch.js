@@ -20,6 +20,7 @@ const {
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const JD_HOME_URL = 'https://shop.jd.com/jdm/home'
+const JD_PENDING_INVOICE_PAGE_URL = 'https://shop.jd.com/jdm/finance/consumerInvoice/cinvoiceOrder'
 const JD_PENDING_INVOICE_API = 'dsm.pop.finance.vendor.spi.cinvoice.ApplyOrderDsmProvider.queryPendingReviewApplyOrderList'
 const JD_PENDING_INVOICE_APP_ID = 'QDWB4GJVETRIFPT7RHSL'
 const OVERALL_TIMEOUT = 60000
@@ -288,7 +289,21 @@ function buildPendingInvoiceDirectQueryScript() {
     }
   }
 
-  return `(${queryPendingInvoices.toString()})(${JSON.stringify(JD_PENDING_INVOICE_API)}, ${JSON.stringify(JD_PENDING_INVOICE_APP_ID)})`
+  return `(async function() {
+    try {
+      var response = await (${queryPendingInvoices.toString()})(${JSON.stringify(JD_PENDING_INVOICE_API)}, ${JSON.stringify(JD_PENDING_INVOICE_APP_ID)});
+      return { ok: true, response: response };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          name: String(error && error.name || 'Error'),
+          message: String(error && error.message || error || 'unknown error'),
+          stack: String(error && error.stack || '')
+        }
+      };
+    }
+  })()`
 }
 
 function isLoginPage(url) {
@@ -571,8 +586,28 @@ async function fetchAftersaleMetricsOnce(storeId) {
           Number(metrics.pending_consumer_invoices || 0)
         )
         try {
-          const response = await win.webContents.executeJavaScript(buildPendingInvoiceDirectQueryScript())
-          const snapshot = extractPendingInvoices(response)
+          runtimeLog.writeLog(
+            'AFTERSALE_SYNC',
+            `store_id=${storeId} phase=invoice_page action=load url=${JD_PENDING_INVOICE_PAGE_URL}`
+          )
+          await win.loadURL(JD_PENDING_INVOICE_PAGE_URL)
+          if (resolved || !win || win.isDestroyed()) return null
+          const loadedUrl = String(win.webContents.getURL() || '')
+          if (isLoginPage(loadedUrl)) {
+            throw new Error('京东登录已过期')
+          }
+          runtimeLog.writeLog(
+            'AFTERSALE_SYNC',
+            `store_id=${storeId} phase=invoice_page result=loaded url=${loadedUrl.slice(0, 160)}`
+          )
+
+          const execution = await win.webContents.executeJavaScript(buildPendingInvoiceDirectQueryScript())
+          if (!execution || execution.ok !== true) {
+            const detail = execution?.error || {}
+            const message = [detail.name, detail.message].filter(Boolean).join(': ')
+            throw new Error(message || '发票接口注入脚本未返回结果')
+          }
+          const snapshot = extractPendingInvoices(execution.response)
           console.log('[AftersaleFetch] pending invoice API returned:', snapshot.items.length, '/', snapshot.total)
           runtimeLog.writeLog(
             'AFTERSALE_SYNC',

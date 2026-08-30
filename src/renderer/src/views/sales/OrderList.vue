@@ -1485,7 +1485,7 @@ function getOrderLogisticsGroups(order) {
       }])
     },
     { key: 'return', label: '退货物流', items: order.returnLogistics || [] }
-  ]
+  ].filter(group => group.key !== 'return' || group.items.length > 0)
 }
 
 function formatOrderLogistics(item) {
