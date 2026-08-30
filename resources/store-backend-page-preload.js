@@ -7,6 +7,8 @@ const PENDING_METRIC_CHANNEL = 'store-backend-pending-metric-observed'
 const PENDING_METRIC_MESSAGE_SOURCE = 'DXE_PENDING_METRIC_CAPTURE_V1'
 const AFTERSALE_ORDER_MESSAGE_SOURCE = 'DXE_AFTERSALE_ORDER_CAPTURE_V1'
 const AFTERSALE_ORDER_CAPTURE_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+const AFTERSALE_RETURN_LOGISTICS_MESSAGE_SOURCE = 'DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_V1'
+const AFTERSALE_RETURN_LOGISTICS_CAPTURE_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
 // 售后详情 URL 只有 afsServiceId。这里在 document_start 观察京东自己的详情接口响应，
 // 只把响应中明确命名的销售订单号回传给主进程，不读取或传递 Cookie、请求头和售后内容。
@@ -114,6 +116,181 @@ try {
   })
 } catch (error) {
   console.error('[DXE_AFTERSALE_ORDER_PRELOAD] ' + String(error?.message || error))
+}
+
+// Capture only non-sensitive return-logistics linkage fields from JD's own
+// after-sale list response. Cookies, headers, addresses and customer data are never forwarded.
+try {
+  window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin) return
+    const message = event.data
+    if (!message ||
+        message.source !== AFTERSALE_RETURN_LOGISTICS_MESSAGE_SOURCE ||
+        message.nonce !== AFTERSALE_RETURN_LOGISTICS_CAPTURE_NONCE) return
+    const records = Array.isArray(message.records) ? message.records.slice(0, 200) : []
+    if (!records.length) return
+    ipcRenderer.invoke(ORDER_PURCHASE_ACTION_CHANNEL, {
+      action: 'capture-return-logistics',
+      records
+    }).catch(() => {})
+  })
+
+  contextBridge.executeInMainWorld({
+    func: (messageSource, captureNonce) => {
+      if (location.hostname.toLowerCase() !== 'shop.jd.com'
+        || !location.pathname.startsWith('/jdm/trade/after-sale/independent-after-sale/list')
+        || window.__DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_INSTALLED__) {
+        return false
+      }
+      window.__DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_INSTALLED__ = true
+
+      const targetApi = 'dsm.seller.afs.bff.serviceOrderQueryDsmService.page'
+
+      function safeDigits(value, minLength, maxLength) {
+        if (typeof value === 'number' && !Number.isSafeInteger(value)) return ''
+        const text = String(value == null ? '' : value).trim()
+        const pattern = new RegExp(`^\\d{${minLength},${maxLength}}$`)
+        return pattern.test(text) ? text : ''
+      }
+
+      function isTargetRequest(urlValue) {
+        try {
+          const url = new URL(String(urlValue || ''), location.href)
+          return url.hostname.toLowerCase() === 'sff.jd.com'
+            && url.searchParams.get('api') === targetApi
+        } catch {
+          return false
+        }
+      }
+
+      function collectServiceRows(value) {
+        const rows = []
+        const visited = new WeakSet()
+        let visitedCount = 0
+        function visit(node, depth) {
+          if (!node || typeof node !== 'object' || depth > 10 || visited.has(node) || visitedCount > 5000) return
+          visited.add(node)
+          visitedCount += 1
+          const pickList = node?.pickWareFacetDTO?.pickWareLogisticsFacetDTOList
+          const orderId = node?.relationFacetDTO?.orderId || node?.orderId
+          if (Array.isArray(pickList) && orderId) rows.push(node)
+          if (Array.isArray(node)) {
+            node.forEach(child => visit(child, depth + 1))
+          } else {
+            Object.values(node).forEach(child => visit(child, depth + 1))
+          }
+        }
+        visit(value, 0)
+        return rows
+      }
+
+      function extractRecords(value) {
+        const records = []
+        const seen = new Set()
+        for (const row of collectServiceRows(value)) {
+          const salesOrderNo = safeDigits(row?.relationFacetDTO?.orderId || row?.orderId, 10, 30)
+          const fallbackAfsServiceId = safeDigits(
+            row?.relationFacetDTO?.afsServiceId || row?.mainWareFacetDTO?.afsServiceId,
+            6,
+            30
+          )
+          if (!salesOrderNo || !fallbackAfsServiceId) continue
+
+          const warePairs = []
+          const mainWare = row?.mainWareFacetDTO
+          const mainSku = safeDigits(mainWare?.wareId, 5, 30)
+          if (mainSku) {
+            warePairs.push({
+              jd_sku: mainSku,
+              afs_service_id: safeDigits(mainWare?.afsServiceId, 6, 30) || fallbackAfsServiceId
+            })
+          }
+          if (Array.isArray(row?.wareFacetDTOList)) {
+            for (const ware of row.wareFacetDTOList) {
+              const jdSku = safeDigits(ware?.wareId, 5, 30)
+              if (!jdSku) continue
+              warePairs.push({
+                jd_sku: jdSku,
+                afs_service_id: safeDigits(ware?.afsServiceId, 6, 30) || fallbackAfsServiceId
+              })
+            }
+          }
+          if (!warePairs.length) {
+            warePairs.push({ jd_sku: '', afs_service_id: fallbackAfsServiceId })
+          }
+
+          const logisticsList = row?.pickWareFacetDTO?.pickWareLogisticsFacetDTOList
+          for (const logistics of logisticsList) {
+            const logisticsNo = String(logistics?.waybillCode || '').trim()
+            const logisticsCompany = String(logistics?.providerName || '').trim()
+            if (!logisticsNo || logisticsNo.length > 100 || logisticsCompany.length > 100) continue
+            for (const ware of warePairs) {
+              const key = [salesOrderNo, ware.jd_sku, ware.afs_service_id, logisticsNo].join(':')
+              if (seen.has(key)) continue
+              seen.add(key)
+              records.push({
+                sales_order_no: salesOrderNo,
+                jd_sku: ware.jd_sku,
+                afs_service_id: ware.afs_service_id,
+                logistics_no: logisticsNo,
+                logistics_company: logisticsCompany
+              })
+              if (records.length >= 200) return records
+            }
+          }
+        }
+        return records
+      }
+
+      function inspectResponse(value) {
+        const records = extractRecords(value)
+        if (!records.length) return
+        window.postMessage({
+          source: messageSource,
+          nonce: captureNonce,
+          records
+        }, location.origin)
+      }
+
+      const originalFetch = window.fetch
+      if (typeof originalFetch === 'function') {
+        window.fetch = function(input) {
+          const responseUrl = typeof input === 'string' ? input : input?.url || ''
+          return originalFetch.apply(this, arguments).then(response => {
+            if (isTargetRequest(responseUrl || response.url)) {
+              response.clone().json().then(inspectResponse).catch(() => {})
+            }
+            return response
+          })
+        }
+      }
+
+      const originalOpen = XMLHttpRequest.prototype.open
+      const originalSend = XMLHttpRequest.prototype.send
+      XMLHttpRequest.prototype.open = function(method, url) {
+        this.__dxeReturnLogisticsTarget = isTargetRequest(url)
+        return originalOpen.apply(this, arguments)
+      }
+      XMLHttpRequest.prototype.send = function() {
+        const xhr = this
+        if (xhr.__dxeReturnLogisticsTarget) {
+          xhr.addEventListener('load', () => {
+            try {
+              const data = xhr.responseType === 'json'
+                ? xhr.response
+                : (!xhr.responseType || xhr.responseType === 'text' ? JSON.parse(xhr.responseText || 'null') : null)
+              inspectResponse(data)
+            } catch (_) {}
+          })
+        }
+        return originalSend.apply(this, arguments)
+      }
+      return true
+    },
+    args: [AFTERSALE_RETURN_LOGISTICS_MESSAGE_SOURCE, AFTERSALE_RETURN_LOGISTICS_CAPTURE_NONCE]
+  })
+} catch (error) {
+  console.error('[DXE_AFTERSALE_RETURN_LOGISTICS_PRELOAD] ' + String(error?.message || error))
 }
 
 // After a JD compliance business request completes, query the exact "pending

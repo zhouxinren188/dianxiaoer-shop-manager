@@ -346,6 +346,27 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // JD after-sale return logistics; only non-sensitive linkage metadata is stored.
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS sales_return_logistics (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        owner_id INT NOT NULL,
+        store_id INT NOT NULL,
+        sales_order_no VARCHAR(50) NOT NULL,
+        jd_sku VARCHAR(50) DEFAULT '',
+        afs_service_id VARCHAR(50) NOT NULL,
+        logistics_no VARCHAR(100) NOT NULL,
+        logistics_company VARCHAR(100) DEFAULT '',
+        captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_return_waybill (owner_id, store_id, afs_service_id, jd_sku, logistics_no),
+        KEY idx_return_sales_order (owner_id, store_id, sales_order_no),
+        KEY idx_return_logistics_no (owner_id, logistics_no),
+        KEY idx_return_afs_service (owner_id, store_id, afs_service_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 兼容已存在的 sales_orders 表：添加买家留言字段
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN buyer_message TEXT DEFAULT NULL COMMENT '买家留言（从平台同步）' AFTER raw_data`)

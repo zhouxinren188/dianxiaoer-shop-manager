@@ -2735,6 +2735,76 @@ app.delete('/api/sales-orders/:orderId/purchase-lock', async (req, res) => {
   }
 })
 
+// 接收店铺后台售后列表中已返回的退货物流，仅保存安全的订单关联字段。
+app.post('/api/sales-return-logistics/:storeId/batch', async (req, res) => {
+  try {
+    const storeId = Number(req.params.storeId)
+    if (!Number.isInteger(storeId) || storeId <= 0) {
+      return res.status(400).json(fail('店铺参数无效'))
+    }
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(storeId)) {
+      return res.status(403).json(fail('无权操作该店铺'))
+    }
+
+    const records = Array.isArray(req.body?.records) ? req.body.records : []
+    if (records.length > 200) {
+      return res.status(400).json(fail('单次最多接收 200 条退货物流'))
+    }
+
+    const ownerId = getOwnerId(req.user)
+    const controlChars = /[\u0000-\u001f\u007f]/
+    const normalized = []
+    const seen = new Set()
+    for (const record of records) {
+      const salesOrderNo = String(record?.sales_order_no || '').trim()
+      const jdSku = String(record?.jd_sku || '').trim()
+      const afsServiceId = String(record?.afs_service_id || '').trim()
+      const logisticsNo = String(record?.logistics_no || '').trim()
+      const logisticsCompany = String(record?.logistics_company || '').trim()
+      if (!/^\d{10,30}$/.test(salesOrderNo)) continue
+      if (jdSku && !/^\d{5,30}$/.test(jdSku)) continue
+      if (!/^\d{6,30}$/.test(afsServiceId)) continue
+      if (!logisticsNo || logisticsNo.length > 100 || controlChars.test(logisticsNo)) continue
+      if (logisticsCompany.length > 100 || controlChars.test(logisticsCompany)) continue
+      const key = [salesOrderNo, jdSku, afsServiceId, logisticsNo].join(':')
+      if (seen.has(key)) continue
+      seen.add(key)
+      normalized.push({ salesOrderNo, jdSku, afsServiceId, logisticsNo, logisticsCompany })
+    }
+
+    if (normalized.length === 0) {
+      return res.json(ok({ received: records.length, saved: 0 }))
+    }
+
+    const valueSql = normalized.map(() => '(?,?,?,?,?,?,?)').join(',')
+    const params = normalized.flatMap((record) => [
+      ownerId,
+      storeId,
+      record.salesOrderNo,
+      record.jdSku,
+      record.afsServiceId,
+      record.logisticsNo,
+      record.logisticsCompany
+    ])
+    await pool.execute(
+      `INSERT INTO sales_return_logistics
+        (owner_id, store_id, sales_order_no, jd_sku, afs_service_id, logistics_no, logistics_company)
+       VALUES ${valueSql}
+       ON DUPLICATE KEY UPDATE
+         logistics_company=VALUES(logistics_company),
+         captured_at=NOW(),
+         updated_at=NOW()`,
+      params
+    )
+
+    res.json(ok({ received: records.length, saved: normalized.length }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 分页查询销售订单（权限过滤）
 app.get('/api/sales-orders', async (req, res) => {
   try {
@@ -2869,6 +2939,86 @@ app.get('/api/sales-orders', async (req, res) => {
         rows.forEach(row => { row.has_inventory = false })
       }
     }
+    // 当前页一次性聚合采购、发货和退货物流，避免逐单查询拖慢列表。
+    if (rows.length > 0) {
+      rows.forEach((row) => {
+        row.purchase_logistics = []
+        row.return_logistics = []
+      })
+      const ownerId = getOwnerId(req.user)
+      const orderNos = [...new Set(rows.map((row) => String(row.order_id || '').trim()).filter(Boolean))]
+      const salesOrderIdMap = new Map(rows.map((row) => [String(row.id || ''), String(row.order_id || '')]))
+      const salesOrderIds = [...salesOrderIdMap.keys()].filter(Boolean)
+      if (orderNos.length > 0) {
+        const orderPlaceholders = orderNos.map(() => '?').join(',')
+        try {
+          const [purchaseLogisticsRows] = await pool.execute(
+            `SELECT sales_order_id, sales_order_no, purchase_no, logistics_no, logistics_company
+             FROM purchase_orders
+             WHERE owner_id = ?
+               AND (sales_order_no IN (${orderPlaceholders})
+                 ${salesOrderIds.length > 0 ? `OR sales_order_id IN (${salesOrderIds.map(() => '?').join(',')})` : ''})
+               AND logistics_no IS NOT NULL
+               AND TRIM(logistics_no) <> ''
+             ORDER BY id DESC`,
+            [ownerId, ...orderNos, ...salesOrderIds]
+          )
+          const purchaseMap = new Map()
+          for (const logistics of purchaseLogisticsRows) {
+            const directOrderNo = String(logistics.sales_order_no || '').trim()
+            const key = directOrderNo || salesOrderIdMap.get(String(logistics.sales_order_id || '')) || ''
+            if (!key) continue
+            if (!purchaseMap.has(key)) purchaseMap.set(key, [])
+            const list = purchaseMap.get(key)
+            const item = {
+              no: String(logistics.logistics_no || '').trim(),
+              company: String(logistics.logistics_company || '').trim(),
+              purchase_no: String(logistics.purchase_no || '').trim()
+            }
+            if (!list.some((existing) => existing.no === item.no && existing.company === item.company)) {
+              list.push(item)
+            }
+          }
+          rows.forEach((row) => {
+            row.purchase_logistics = purchaseMap.get(String(row.order_id || '')) || []
+          })
+        } catch (error) {
+          console.warn('[SalesOrders] aggregate purchase logistics failed:', error.message)
+        }
+
+        try {
+          const [returnLogisticsRows] = await pool.execute(
+            `SELECT store_id, sales_order_no, jd_sku, afs_service_id, logistics_no, logistics_company
+             FROM sales_return_logistics
+             WHERE owner_id = ?
+               AND sales_order_no IN (${orderPlaceholders})
+             ORDER BY captured_at DESC, id DESC`,
+            [ownerId, ...orderNos]
+          )
+          const returnMap = new Map()
+          for (const logistics of returnLogisticsRows) {
+            const key = `${logistics.store_id}:${logistics.sales_order_no}`
+            if (!returnMap.has(key)) returnMap.set(key, [])
+            const list = returnMap.get(key)
+            const item = {
+              no: String(logistics.logistics_no || '').trim(),
+              company: String(logistics.logistics_company || '').trim(),
+              jd_sku: String(logistics.jd_sku || '').trim(),
+              afs_service_id: String(logistics.afs_service_id || '').trim()
+            }
+            if (!list.some((existing) => existing.no === item.no && existing.company === item.company)) {
+              list.push(item)
+            }
+          }
+          rows.forEach((row) => {
+            row.return_logistics = returnMap.get(`${row.store_id}:${row.order_id}`) || []
+          })
+        } catch (error) {
+          console.warn('[SalesOrders] aggregate return logistics failed:', error.message)
+        }
+      }
+    }
+
 
     // 为采购锁定的订单附加锁定用户名
     if (rows.length > 0) {

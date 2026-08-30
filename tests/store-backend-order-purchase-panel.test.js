@@ -11,6 +11,7 @@ const {
   getJdAftersaleServiceId,
   getPurchasePanelPageKey,
   normalizePurchaseOrder,
+  normalizeReturnLogisticsRecords,
   normalizeLogisticsTracking,
   fetchPurchaseOrdersBySalesOrder,
   fetchPurchaseAccounts,
@@ -84,6 +85,53 @@ describe('京东订单详情采购信息区域', () => {
       updatedAt: '2026-08-28 11:20:00',
       logisticsLabel: '中通快递 · ZT123'
     })
+  })
+
+  it('normalizes and deduplicates only safe return-logistics linkage fields', () => {
+    expect(normalizeReturnLogisticsRecords([
+      {
+        sales_order_no: '3599471007575277',
+        jd_sku: '10213098975565',
+        afs_service_id: '44521493693',
+        logistics_no: 'SF1234567890',
+        logistics_company: 'SF Express',
+        buyer_phone: 'should-not-be-forwarded'
+      },
+      {
+        salesOrderNo: '3599471007575277',
+        jdSku: '10213098975565',
+        afsServiceId: '44521493693',
+        waybillCode: 'SF1234567890',
+        providerName: 'SF Express'
+      },
+      {
+        sales_order_no: 'not-an-order',
+        afs_service_id: '44521493693',
+        logistics_no: 'BAD'
+      },
+      {
+        sales_order_no: '3599471007575278',
+        afs_service_id: '44521493694',
+        logistics_no: 'BAD\nCONTROL'
+      }
+    ])).toEqual([
+      {
+        sales_order_no: '3599471007575277',
+        jd_sku: '10213098975565',
+        afs_service_id: '44521493693',
+        logistics_no: 'SF1234567890',
+        logistics_company: 'SF Express'
+      }
+    ])
+  })
+
+  it('caps return-logistics capture to the requested bounded page size', () => {
+    const records = Array.from({ length: 8 }, (_, index) => ({
+      sales_order_no: String(3599471007575277n + BigInt(index)),
+      afs_service_id: String(44521493693n + BigInt(index)),
+      logistics_no: `TRACK-${index}`
+    }))
+    expect(normalizeReturnLogisticsRecords(records, 3)).toHaveLength(3)
   })
 
   it('使用精确接口并只保留完全匹配当前销售订单的采购单', async () => {
@@ -447,6 +495,7 @@ describe('京东订单详情采购信息区域', () => {
     })
     const indexSource = fs.readFileSync(path.resolve('src/main/index.js'), 'utf8')
     const serverSource = fs.readFileSync(path.resolve('server/index.js'), 'utf8')
+    const dbSource = fs.readFileSync(path.resolve('server/db.js'), 'utf8')
     const pagePreloadSource = fs.readFileSync(path.resolve('resources/store-backend-page-preload.js'), 'utf8')
 
     expect(script).toContain("findMarkerCard(['订单信息'])")
@@ -487,6 +536,14 @@ describe('京东订单详情采购信息区域', () => {
     expect(pagePreloadSource).toContain('aftersaleStatus: String(payload.aftersaleStatus')
     expect(pagePreloadSource).toContain('aftersaleRemark: String(payload.aftersaleRemark')
     expect(pagePreloadSource).toContain('DXE_AFTERSALE_ORDER_CAPTURE_V1')
+    expect(pagePreloadSource).toContain('DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_V1')
+    expect(pagePreloadSource).toContain('dsm.seller.afs.bff.serviceOrderQueryDsmService.page')
+    expect(pagePreloadSource).toContain("action: 'capture-return-logistics'")
+    expect(serverSource).toContain("app.post('/api/sales-return-logistics/:storeId/batch'")
+    expect(serverSource.indexOf("app.post('/api/sales-return-logistics/:storeId/batch'")).toBeLessThan(
+      serverSource.indexOf("app.get('/api/sales-orders'")
+    )
+    expect(dbSource).toContain('CREATE TABLE IF NOT EXISTS sales_return_logistics')
     expect(fs.readFileSync(path.resolve('src/main/store-backend-order-purchase-panel.js'), 'utf8')).toContain("webContents.on('console-message', onConsoleMessage)")
     const routeStart = serverSource.indexOf("app.get('/api/purchase-orders/by-sales-order/:orderNo'")
     const routeEnd = serverSource.indexOf("app.get('/api/purchase-orders'", routeStart + 1)

@@ -9,6 +9,7 @@ const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const JD_ORDER_DETAILS_HOST = 'shop.jd.com'
 const JD_ORDER_DETAILS_PATH = '/jdm/trade/orders/order-details'
 const JD_AFTERSALE_DETAILS_PATH = '/jdm/trade/after-sale/independent-after-sale/detail'
+const JD_AFTERSALE_LIST_PATH = '/jdm/trade/after-sale/independent-after-sale/list'
 const LOGISTICS_ACTION_PREFIX = '[DXE_ORDER_PURCHASE_LOGISTICS]'
 const ORDER_PURCHASE_ACTION_CHANNEL = 'store-backend-order-purchase-action'
 const ORDER_PURCHASE_RUNTIME_SOURCE_FILE = 'store-backend-order-purchase-panel-runtime.json'
@@ -214,6 +215,37 @@ function requestBusinessJson(url, options = {}) {
     req.on('timeout', () => req.destroy(new Error('采购信息请求超时')))
     req.end(requestBody)
   })
+}
+
+function normalizeReturnLogisticsRecords(records, maxRecords = 200) {
+  if (!Array.isArray(records)) return []
+  const limit = Math.max(1, Math.min(200, Number(maxRecords) || 200))
+  const controlChars = /[\u0000-\u001f\u007f]/
+  const seen = new Set()
+  const normalized = []
+  for (const record of records.slice(0, limit)) {
+    const salesOrderNo = String(record?.sales_order_no || record?.salesOrderNo || '').trim()
+    const jdSku = String(record?.jd_sku || record?.jdSku || '').trim()
+    const afsServiceId = String(record?.afs_service_id || record?.afsServiceId || '').trim()
+    const logisticsNo = String(record?.logistics_no || record?.logisticsNo || record?.waybillCode || '').trim()
+    const logisticsCompany = String(record?.logistics_company || record?.logisticsCompany || record?.providerName || '').trim()
+    if (!/^\d{10,30}$/.test(salesOrderNo)) continue
+    if (jdSku && !/^\d{5,30}$/.test(jdSku)) continue
+    if (!/^\d{6,30}$/.test(afsServiceId)) continue
+    if (!logisticsNo || logisticsNo.length > 100 || controlChars.test(logisticsNo)) continue
+    if (logisticsCompany.length > 100 || controlChars.test(logisticsCompany)) continue
+    const key = [salesOrderNo, jdSku, afsServiceId, logisticsNo].join(':')
+    if (seen.has(key)) continue
+    seen.add(key)
+    normalized.push({
+      sales_order_no: salesOrderNo,
+      jd_sku: jdSku,
+      afs_service_id: afsServiceId,
+      logistics_no: logisticsNo,
+      logistics_company: logisticsCompany
+    })
+  }
+  return normalized
 }
 
 function normalizeLogisticsTracking(data = {}) {
@@ -1108,6 +1140,12 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   const updateAftersale = typeof options.updatePurchaseAftersale === 'function'
     ? options.updatePurchaseAftersale
     : updatePurchaseOrderAftersale
+  const persistReturnLogistics = typeof options.persistReturnLogistics === 'function'
+    ? options.persistReturnLogistics
+    : records => requestBusinessJson(
+        `${BUSINESS_SERVER}/api/sales-return-logistics/${encodeURIComponent(storeId)}/batch`,
+        { method: 'POST', body: { records }, timeoutMs: 15000 }
+      )
   const actionNonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
   let refreshTimer = null
   let requestSequence = 0
@@ -1289,6 +1327,31 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   }
 
   const handlePageAction = async payload => {
+    if (payload?.action === 'capture-return-logistics') {
+      let currentUrl
+      try {
+        currentUrl = new URL(webContents.getURL())
+      } catch {
+        throw new Error('退货物流页面校验失败')
+      }
+      if (currentUrl.protocol !== 'https:' ||
+          currentUrl.hostname.toLowerCase() !== JD_ORDER_DETAILS_HOST ||
+          !currentUrl.pathname.startsWith(JD_AFTERSALE_LIST_PATH)) {
+        throw new Error('当前页面不允许保存退货物流')
+      }
+      const records = normalizeReturnLogisticsRecords(payload?.records)
+      if (records.length === 0) {
+        return { action: 'capture-return-logistics', saved: 0 }
+      }
+      const response = await persistReturnLogistics(records)
+      if (!response || Number(response.code) !== 0) {
+        throw new Error(response?.message || '保存退货物流失败')
+      }
+      const saved = Math.max(0, Number(response?.data?.saved) || 0)
+      log(`phase=capture-return-logistics result=success received_count=${records.length} saved_count=${saved}`)
+      return { action: 'capture-return-logistics', saved }
+    }
+
     if (payload?.action === 'resolve-aftersale-order') {
       const serviceId = getJdAftersaleServiceId(webContents.getURL())
       const payloadServiceId = String(payload?.afsServiceId || '').trim()
@@ -1482,6 +1545,7 @@ module.exports = {
   JD_ORDER_DETAILS_HOST,
   JD_ORDER_DETAILS_PATH,
   JD_AFTERSALE_DETAILS_PATH,
+  JD_AFTERSALE_LIST_PATH,
   PURCHASE_TYPE_LABELS,
   PURCHASE_STATUS_LABELS,
   PURCHASE_AFTERSALE_STATUS_LABELS,
@@ -1489,6 +1553,7 @@ module.exports = {
   getJdAftersaleServiceId,
   getPurchasePanelPageKey,
   normalizePurchaseOrder,
+  normalizeReturnLogisticsRecords,
   normalizeLogisticsTracking,
   fetchPurchaseOrdersBySalesOrder,
   fetchPurchaseAccounts,

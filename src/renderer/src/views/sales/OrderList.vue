@@ -348,11 +348,21 @@
               </div>
 
               <div class="ot-col ot-col-logistics">
-                <template v-if="order.logisticsCompany">
-                  <p class="logistics-company">{{ order.logisticsCompany }}</p>
-                  <p class="logistics-no">{{ order.logisticsNo }}</p>
-                </template>
-                <span v-else class="text-muted">--</span>
+                <div class="order-logistics-groups">
+                  <div v-for="group in getOrderLogisticsGroups(order)" :key="group.key" class="order-logistics-group">
+                    <span class="order-logistics-label">{{ group.label }}</span>
+                    <div class="order-logistics-values">
+                      <span v-if="group.items.length === 0" class="order-logistics-empty">--</span>
+                      <span
+                        v-for="(item, logisticsIndex) in group.items"
+                        v-else
+                        :key="`${group.key}-${item.company}-${item.no}-${logisticsIndex}`"
+                        class="order-logistics-value"
+                        :title="formatOrderLogistics(item)"
+                      >{{ formatOrderLogistics(item) }}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <div class="ot-col ot-col-remark">
                 <div class="remark-cell">
@@ -1433,6 +1443,55 @@ function getOriginalImg(url) {
   return url.replace(/\/n\d\//, '/n0/')
 }
 
+function normalizeOrderLogistics(value) {
+  let source = value
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source || '[]')
+    } catch {
+      source = []
+    }
+  }
+  if (!Array.isArray(source)) source = []
+  const seen = new Set()
+  const result = []
+  for (const row of source) {
+    const company = String(row?.company || row?.logistics_company || '').trim()
+    const no = String(row?.no || row?.logistics_no || row?.logisticsNo || '').trim()
+    if (!company && !no) continue
+    const key = `${company}:${no}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push({
+      company,
+      no,
+      purchaseNo: String(row?.purchase_no || '').trim(),
+      jdSku: String(row?.jd_sku || '').trim(),
+      afsServiceId: String(row?.afs_service_id || '').trim()
+    })
+  }
+  return result
+}
+
+function getOrderLogisticsGroups(order) {
+  return [
+    { key: 'purchase', label: '采购物流', items: order.purchaseLogistics || [] },
+    {
+      key: 'outbound',
+      label: '发货物流',
+      items: normalizeOrderLogistics([{
+        company: order.logisticsCompany,
+        no: order.logisticsNo
+      }])
+    },
+    { key: 'return', label: '退货物流', items: order.returnLogistics || [] }
+  ]
+}
+
+function formatOrderLogistics(item) {
+  return [item?.company, item?.no].filter(Boolean).join(' · ') || '--'
+}
+
 function mapServerOrder(row) {
   let items = []
   try {
@@ -1493,6 +1552,8 @@ function mapServerOrder(row) {
     buyerAccount,
     address: row.buyer_address || '',
     logisticsCompany: row.logistics_company || '',
+    purchaseLogistics: normalizeOrderLogistics(row.purchase_logistics),
+    returnLogistics: normalizeOrderLogistics(row.return_logistics),
     logisticsNo: row.logistics_no || '',
     outboundNo: row.logistics_no || '',
     warehouseName: row.warehouse_name || '',
@@ -4784,7 +4845,7 @@ onUnmounted(() => {
 }
 
 .ot-col-logistics {
-  width: 140px;
+  width: 230px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -5399,6 +5460,54 @@ onUnmounted(() => {
 
 .logistics-no:hover {
   text-decoration: underline;
+}
+
+.order-body-right .ot-col-logistics {
+  align-items: stretch;
+  text-align: left;
+}
+
+.order-logistics-groups {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.order-logistics-group {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: start;
+  gap: 4px;
+  line-height: 1.35;
+}
+
+.order-logistics-label {
+  color: #6b7280;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.order-logistics-values {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.order-logistics-value {
+  color: #2b5aed;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  cursor: text;
+}
+
+.order-logistics-empty {
+  color: #d1d5db;
+  font-size: 11px;
 }
 
 .text-muted {
