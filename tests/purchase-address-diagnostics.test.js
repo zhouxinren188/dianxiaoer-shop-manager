@@ -18,7 +18,7 @@ describe('采购地址诊断日志', () => {
   })
 
   it('记录结算页地址刷新是否执行以及候选项数量', () => {
-    expect(source).toContain("runtimeLog.writeLog(\n          'PurchaseAddressRefresh'")
+    expect(source).toMatch(/runtimeLog\.writeLog\(\r?\n\s*'PurchaseAddressRefresh'/)
     expect(source).toContain("diagnostics.action = 'clicked-last-candidate'")
     expect(source).toContain("diagnostics.action = 'clicked-address-selector'")
     expect(source).toContain("console.log('[AddressRefresh] RESULT page='")
