@@ -4,6 +4,8 @@ const fs = require('fs')
 const { getAuthToken } = require('./auth-store')
 const { getDeviceId, getShortDeviceId } = require('./device-identity')
 const runtimeLog = require('./runtime-logger')
+const { extractJdSalesOrderLogistics } = require('./jd-sales-order-logistics')
+const { extractJdSalesOrderSkuSpec } = require('./jd-sales-order-item')
 
 const DEBUG_LOG_PATH = path.join(
   app.isPackaged ? path.dirname(process.execPath) : process.cwd(),
@@ -878,18 +880,21 @@ function fetchSalesOrdersAttempt(storeId, options = {}) {
 
         // 物流信息（JD queryOrderPage 响应中物流字段嵌套位置多样，需逐层尝试）
         const extInfo = raw.extendInfo || {}
+        const latestShipping = extractJdSalesOrderLogistics(raw)
         const logisticsInfo = raw.logistics || raw.orderLogisticsInfo || {}
         // logisticsInfoList: queryOrderPage 返回的物流列表，可能包含 carrier + carriageId
         const logisticsList = raw.logisticsInfoList || []
         const firstLogistics = logisticsList.length > 0 ? logisticsList[0] : {}
         order.logisticsCompany =
           raw.logisticsCompany ||
+          latestShipping.logisticsCompany ||
           firstLogistics.carrier || firstLogistics.expressCompany || firstLogistics.logisticsCompany ||
           logisticsInfo.expressCompany || logisticsInfo.logisticsCompany || logisticsInfo.companyName ||
           extInfo.expressCompany || extInfo.logisticsCompany ||
           ''
         order.logisticsNo =
           raw.logisticsNo || raw.waybillCode ||
+          latestShipping.logisticsNo ||
           firstLogistics.carriageId || firstLogistics.mailNo || firstLogistics.waybillCode ||
           logisticsInfo.mailNo || logisticsInfo.logisticsNo || logisticsInfo.waybillCode ||
           extInfo.mailNo || extInfo.logisticsNo ||
@@ -921,8 +926,7 @@ function fetchSalesOrdersAttempt(storeId, options = {}) {
           order.allItems = items.map(item => ({
             skuId: String(item.skuId || ''),
             name: item.skuName || item.itemName || '',
-            skuSpec: [item.skuSpec, item.specName, item.skuText, item.specification, item.variantName]
-              .find(value => typeof value === 'string' && value.trim()) || '',
+            skuSpec: extractJdSalesOrderSkuSpec(item),
             price: parseFloat(item.jdPrice || item.price || 0) || 0,
             quantity: item.num || item.quantity || 0,
             image: normalizeImgUrl(item.imgUrl || item.image)

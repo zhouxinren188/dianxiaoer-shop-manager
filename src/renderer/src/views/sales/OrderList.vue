@@ -1895,27 +1895,9 @@ function extractSalesSkuSpec(item = {}) {
   ]
   for (const candidate of explicitCandidates) {
     const value = String(candidate || '').replace(/\s+/g, ' ').trim()
-    if (value && value !== item.name && !/^(?:SKU\s*[:：]?\s*)?\d+$/i.test(value)) return value.slice(0, 160)
+    if (value && value !== item.name && !/^(?:SKU\s*[:\uFF1A]?\s*)?\d+$/i.test(value)) return value.slice(0, 160)
   }
-
-  const name = String(item.name || '').replace(/\s+/g, ' ').trim()
-  if (!name) return ''
-  const matches = []
-  const addMatch = value => {
-    const cleaned = String(value || '').replace(/\s+/g, '').replace(/^[,，、/|]+|[,，、/|]+$/g, '')
-    if (cleaned && !matches.includes(cleaned)) matches.push(cleaned)
-  }
-  const patterns = [
-    /\d+(?:\.\d+)?\s*(?:毫升|千克|公斤|厘米|毫米|ml|mL|ML|kg|KG|Kg|cm|CM|mm|MM|oz|OZ|升|克|斤|两|L|l|g|G|米)(?:\s*[×xX*]\s*\d+\s*(?:个|只|瓶|包|盒|罐|袋|支|件|套|箱|张|片|卷|双|条|块|粒|颗|贴)?)?/g,
-    /\d+\s*(?:个|只|瓶|包|盒|罐|袋|支|件|套|箱|张|片|卷|双|条|块|粒|颗|贴)(?:装|套装)?/g,
-    /(?:透明|黑|白|红|橙|黄|绿|青|蓝|紫|粉|灰|银|金|咖啡|棕)(?:色|款)/g,
-    /(?:特大号|加大号|大号|中号|小号|均码|\d{2,4}码|[SMLX]{1,4}码?)/gi
-  ]
-  for (const pattern of patterns) {
-    let matched
-    while ((matched = pattern.exec(name)) !== null && matches.length < 8) addMatch(matched[0])
-  }
-  return matches.slice(0, 6).join(' / ')
+  return ''
 }
 
 async function handlePurchase(order, item, itemIdx) {
