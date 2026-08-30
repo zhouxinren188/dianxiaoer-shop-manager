@@ -67,6 +67,11 @@
         <el-form-item label="关联销售单号">
           <el-input v-model="filterForm.salesOrderNo" placeholder="请输入销售单号" clearable style="width: 160px" @keyup.enter="handleSearch" />
         </el-form-item>
+        <el-form-item label="销售交易状态">
+          <el-select v-model="filterForm.salesOrderStatus" placeholder="全部" clearable style="width: 130px">
+            <el-option v-for="status in salesOrderStatusOptions" :key="status" :label="status" :value="status" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="采购平台">
           <el-select v-model="filterForm.platform" placeholder="全部" clearable style="width: 130px">
             <el-option label="淘宝/天猫" value="taobao" />
@@ -1242,6 +1247,8 @@ const statusOptions = [
   { label: '已取消', value: 'cancelled' }
 ]
 
+const salesOrderStatusOptions = ['待出库', '暂停订单', '已出库', '已完成', '已取消']
+
 // 批量导入 — 模版列定义
 const importTemplateFields = [
   { header: '采购编号', required: false, desc: '采购编号，不填则系统自动生成' },
@@ -2130,6 +2137,7 @@ const filterForm = reactive({
   logisticsNo: '',
   platformOrderNo: '',
   salesOrderNo: '',
+  salesOrderStatus: '',
   platform: '',
   purchaseType: '',
   status: '',
@@ -2244,6 +2252,7 @@ function handleReset() {
   filterForm.logisticsNo = ''
   filterForm.platformOrderNo = ''
   filterForm.salesOrderNo = ''
+  filterForm.salesOrderStatus = ''
   filterForm.platform = ''
   filterForm.purchaseType = ''
   filterForm.status = ''
@@ -2279,6 +2288,7 @@ async function loadData({ checkCancelAlert = false } = {}) {
     if (filterForm.logisticsNo) params.logisticsNo = filterForm.logisticsNo
     if (filterForm.platformOrderNo) params.platformOrderNo = filterForm.platformOrderNo
     if (filterForm.salesOrderNo) params.salesOrderNo = filterForm.salesOrderNo
+    if (filterForm.salesOrderStatus) params.salesOrderStatus = filterForm.salesOrderStatus
     if (filterForm.purchaseType) params.purchaseType = filterForm.purchaseType
     if (filterForm.accountId) params.accountId = filterForm.accountId
     if (filterForm.aftersaleStatus) params.aftersaleStatus = filterForm.aftersaleStatus

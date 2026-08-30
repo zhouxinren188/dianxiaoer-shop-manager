@@ -49,6 +49,11 @@ const {
   normalizeInventoryUpdateInput
 } = require('./services/inventory-product-input')
 const { normalizeSkuBindingInput } = require('./services/sku-binding-input')
+const {
+  STATUS_ALIAS_MAP,
+  buildPurchaseOrderSalesStatusFilter,
+  normalizeStatusText
+} = require('./services/purchase-order-sales-status-filter')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -372,18 +377,6 @@ app.get('/api/sync-lock/:storeId', async (req, res) => {
 
 // ============ 辅助函数 ============
 
-// 状态名称标准化映射（JD API 返回值 → 前端标准名称）
-const STATUS_ALIAS_MAP = {
-  '等待付款': '待付款',
-  '等待出库': '待出库',
-  '锁定': '暂停订单',
-  '暂停': '暂停订单',
-  '已发货': '已出库',
-}
-
-function normalizeStatusText(statusText) {
-  return STATUS_ALIAS_MAP[statusText] || statusText
-}
 
 // 获取当前用户对应的主账号 ID（master 就是自己，sub 取 parent_id）
 function getOwnerId(user) {
@@ -5256,7 +5249,7 @@ app.get('/api/purchase-orders/by-sales-order/:orderNo', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, purchaseType, accountId, aftersaleStatus } = req.query
+    const { page=1, pageSize=20, status, platform, purchaseNo, logisticsNo, platformOrderNo, salesOrderNo, salesOrderStatus, purchaseType, accountId, aftersaleStatus } = req.query
     let sql, countSql, params
 
     // ★ 列表查询：排除 logistics_tracking 等大字段（详情页单独获取），减少数据传输量
@@ -5322,6 +5315,12 @@ app.get('/api/purchase-orders', async (req, res) => {
     if (purchaseType) { sql += ' AND po.purchase_type=?'; countSql += ' AND po.purchase_type=?'; params.push(purchaseType) }
     if (accountId) { sql += ' AND po.account_id=?'; countSql += ' AND po.account_id=?'; params.push(parseInt(accountId)) }
     if (aftersaleStatus) { sql += ' AND po.aftersale_status=?'; countSql += ' AND po.aftersale_status=?'; params.push(aftersaleStatus) }
+    if (salesOrderStatus) {
+      const salesStatusFilter = buildPurchaseOrderSalesStatusFilter({ status: salesOrderStatus, ownerId })
+      sql += salesStatusFilter.sql
+      countSql += salesStatusFilter.sql
+      params.push(...salesStatusFilter.params)
+    }
 
     const [[{ total }]] = await pool.execute(countSql, params)
     const limit = Math.min(100, Math.max(1, parseInt(pageSize,10)||20))
@@ -5367,7 +5366,7 @@ app.get('/api/purchase-orders', async (req, res) => {
           if (row.sales_order_id) { so = soByIdMap[String(row.sales_order_id)] }
           if (!so && row.sales_order_no) { so = soByOrderNoMap[row.sales_order_no] }
           if (so) {
-            row.sales_order_status = so.status_text
+            row.sales_order_status = normalizeStatusText(so.status_text)
             row.sales_warehouse_name = so.warehouse_name
             row.sales_remark = so.remark
             row.store_name = so.store_id ? (storeNameMap[so.store_id] || null) : null
@@ -5411,6 +5410,11 @@ app.get('/api/purchase-orders', async (req, res) => {
       if (purchaseType) { countByStatusSql += ' AND po.purchase_type=?'; countByStatusParams.push(purchaseType) }
       if (accountId) { countByStatusSql += ' AND po.account_id=?'; countByStatusParams.push(parseInt(accountId)) }
       if (aftersaleStatus) { countByStatusSql += ' AND po.aftersale_status=?'; countByStatusParams.push(aftersaleStatus) }
+      if (salesOrderStatus) {
+        const salesStatusFilter = buildPurchaseOrderSalesStatusFilter({ status: salesOrderStatus, ownerId })
+        countByStatusSql += salesStatusFilter.sql
+        countByStatusParams.push(...salesStatusFilter.params)
+      }
       countByStatusSql += ' GROUP BY po.status'
       const [countRows] = await pool.execute(countByStatusSql, countByStatusParams)
       for (const row of countRows) {

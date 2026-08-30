@@ -189,6 +189,7 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'services', 'inventory-identity.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-identity.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-image-storage.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-image-storage.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-product-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-product-input.js` },
+    { local: path.join(ROOT, 'server', 'services', 'purchase-order-sales-status-filter.js'), remote: `${BUSINESS_REMOTE_DIR}/services/purchase-order-sales-status-filter.js` },
     { local: path.join(ROOT, 'server', 'services', 'sku-binding-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sku-binding-input.js` },
     { local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'taobao-rebate-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/taobao-rebate-service.js` },
