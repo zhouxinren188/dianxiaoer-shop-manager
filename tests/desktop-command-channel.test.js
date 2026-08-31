@@ -7,6 +7,7 @@ const {
   PROTOCOL_VERSION,
   normalizeCapabilities,
   normalizeCreateTaskRequest,
+  normalizeExceptionCheckResult,
   normalizeHeartbeatRequest,
   normalizeResultRequest,
   redactMessage
@@ -23,7 +24,8 @@ const {
 const {
   createProxyHandler,
   isAllowedRequest,
-  requireHttps
+  requireHttps,
+  resolveUpstreamPath
 } = require('../server-api/desktop-command-proxy')
 
 const DEVICE_ID = 'device_12345678'
@@ -43,8 +45,12 @@ function heartbeatBody(overrides = {}) {
 }
 
 describe('desktop command protocol', () => {
-  it('starts with only the diagnostic ping command enabled', () => {
-    expect(ENABLED_DESKTOP_COMMANDS).toEqual(['system.ping'])
+  it('enables only the diagnostic and two fixed purchase exception commands', () => {
+    expect(ENABLED_DESKTOP_COMMANDS).toEqual([
+      'system.ping',
+      'purchase.exception.check',
+      'purchase.exception.resolve'
+    ])
     expect(normalizeCreateTaskRequest({ command: 'system.ping', payload: {} })).toMatchObject({
       command: 'system.ping',
       payload: {},
@@ -61,11 +67,17 @@ describe('desktop command protocol', () => {
       command: 'system.ping',
       payload: { shell: 'whoami' }
     })).toThrowError(/unknown field/i)
+    expect(() => normalizeCreateTaskRequest({
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 12, confirmed: false }
+    })).toThrowError(/confirmed/i)
   })
 
   it('normalizes capabilities and rejects unknown heartbeat fields', () => {
     expect(normalizeCapabilities({ 'system.ping': true, 'future.command': true })).toEqual({
-      'system.ping': true
+      'system.ping': true,
+      'purchase.exception.check': false,
+      'purchase.exception.resolve': false
     })
     expect(() => normalizeHeartbeatRequest(heartbeatBody({ token: 'must-not-be-here' })))
       .toThrowError(/unknown field/i)
@@ -89,12 +101,56 @@ describe('desktop command protocol', () => {
     expect(() => normalizeResultRequest(base, 'system.ping')).toThrowError(/claiming device/i)
   })
 
+  it('binds a business result to the purchase order in the original task payload', () => {
+    const body = {
+      device_id: DEVICE_ID,
+      instance_id: INSTANCE_ID,
+      lease_id: 'lease_12345678',
+      fencing_token: 1,
+      status: 'succeeded',
+      result: {
+        purchase_order_id: 13,
+        state: 'exception_clear',
+        exception_count: 0,
+        message: '暂无异常',
+        checked_at: '2026-08-31T01:00:01.000Z'
+      },
+      completed_at: '2026-08-31T01:00:01.000Z'
+    }
+    expect(() => normalizeResultRequest(
+      body,
+      'purchase.exception.check',
+      { purchase_order_id: 12 }
+    )).toThrowError(/does not match/i)
+  })
+
   it('redacts credentials before an error can be persisted', () => {
     const redacted = redactMessage('Authorization=secret Bearer abc.def Cookie=session Password=hunter2')
     expect(redacted).not.toContain('secret')
     expect(redacted).not.toContain('abc.def')
     expect(redacted).not.toContain('session')
     expect(redacted).not.toContain('hunter2')
+  })
+
+  it('validates the compact exception query result shape', () => {
+    expect(normalizeExceptionCheckResult({
+      purchase_order_id: 12,
+      state: 'exception_found',
+      exception_count: 2,
+      message: '发现异常',
+      checked_at: '2026-08-31T01:00:01.000Z'
+    })).toMatchObject({
+      purchase_order_id: 12,
+      state: 'exception_found',
+      exception_count: 2
+    })
+    expect(() => normalizeExceptionCheckResult({
+      purchase_order_id: 12,
+      state: 'exception_clear',
+      exception_count: 1,
+      message: '',
+      checked_at: '2026-08-31T01:00:01.000Z'
+    })).toThrowError(/does not match/i)
   })
 })
 
@@ -274,11 +330,41 @@ describe('desktop command HTTPS boundary', () => {
     expect(isAllowedRequest('GET', '/api/desktop-channel/tasks/desktop_task_12345678')).toBe(true)
     expect(isAllowedRequest('POST', '/api/desktop-channel/admin/execute')).toBe(false)
     expect(isAllowedRequest('DELETE', '/api/desktop-channel/tasks/desktop_task_12345678')).toBe(false)
+    expect(isAllowedRequest(
+      'POST',
+      '/api/desktop-channel/business/purchase-orders/12/exception/resolve'
+    )).toBe(true)
+    expect(isAllowedRequest(
+      'POST',
+      '/api/desktop-channel/business/purchase-orders/12/delete'
+    )).toBe(false)
+    expect(resolveUpstreamPath(
+      'POST',
+      '/api/desktop-channel/business/purchase-orders/12/exception/resolve'
+    )).toBe('/api/cloud-warehouse/orders/12/exception/resolve')
+    expect(resolveUpstreamPath(
+      'GET',
+      '/api/desktop-channel/business/purchase-orders/12/related-sales'
+    )).toBe('/api/purchase-orders/12/related-sales')
   })
 
   it('cannot be configured as an arbitrary upstream proxy', () => {
     expect(() => createProxyHandler({ upstreamHost: 'example.com', upstreamPort: 443 }))
       .toThrowError(/fixed to loopback/i)
+  })
+
+  it('rejects mini-program access to desktop-only business support routes', () => {
+    const status = vi.fn().mockReturnThis()
+    const json = vi.fn().mockReturnThis()
+    createProxyHandler()({
+      method: 'GET',
+      originalUrl: '/api/desktop-channel/business/purchase-orders/12',
+      authDevice: 'miniprogram'
+    }, { status, json })
+    expect(status).toHaveBeenCalledWith(403)
+    expect(json).toHaveBeenCalledWith(expect.objectContaining({
+      error_code: 'desktop_device_required'
+    }))
   })
 
   it('rejects plaintext requests before authentication or proxying', () => {

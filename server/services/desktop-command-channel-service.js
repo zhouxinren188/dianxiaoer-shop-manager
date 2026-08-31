@@ -366,7 +366,7 @@ async function recordTaskResult(pool, auth, taskId, body, now = new Date()) {
     )
     if (!rows.length) throw protocolError('task_not_found', 'Desktop task not found')
     const task = rows[0]
-    const input = normalizeResultRequest(body, task.command)
+    const input = normalizeResultRequest(body, task.command, parseJsonObject(task.payload_json))
     const normalizedResult = {
       status: input.status,
       result: input.result,

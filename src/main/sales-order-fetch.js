@@ -7,6 +7,15 @@ const runtimeLog = require('./runtime-logger')
 const { extractJdSalesOrderLogistics } = require('./jd-sales-order-logistics')
 const { extractJdSalesOrderSkuSpec } = require('./jd-sales-order-item')
 
+let submitVendorRemarkImplementation = null
+
+async function submitVendorRemark(input) {
+  if (typeof submitVendorRemarkImplementation !== 'function') {
+    return { success: false, message: '京东备注能力尚未初始化' }
+  }
+  return submitVendorRemarkImplementation(input || {})
+}
+
 const DEBUG_LOG_PATH = path.join(
   app.isPackaged ? path.dirname(process.execPath) : process.cwd(),
   'sales-debug.json'
@@ -2987,7 +2996,7 @@ function registerSalesOrderIpc(mainWindow) {
     }
   })
   // ============ 提交商家备注到京东 ============
-  ipcMain.handle('submit-vendor-remark', async (event, { storeId, orderId, remark }) => {
+  submitVendorRemarkImplementation = async ({ storeId, orderId, remark }) => {
     console.log('[VendorRemark] 提交商家备注: storeId=' + storeId + ', orderId=' + orderId + ', remark=' + remark)
     if (!storeId || !orderId) return { success: false, message: '缺少参数' }
 
@@ -3102,7 +3111,8 @@ function registerSalesOrderIpc(mainWindow) {
         tempWin.destroy()
       }
     }
-  })
+  }
+  ipcMain.handle('submit-vendor-remark', (event, input) => submitVendorRemark(input))
 
   // 注入SFF请求头拦截器：拦截XMLHttpRequest和fetch的sff.jd.com请求，捕获安全头（dsm-eid等）
   async function _injectSffHeaderInterceptor(win) {
@@ -3933,4 +3943,10 @@ function stopAutoSync() {
   }
 }
 
-module.exports = { registerSalesOrderIpc, startAutoSync, startAutoSyncNow, stopAutoSync }
+module.exports = {
+  registerSalesOrderIpc,
+  startAutoSync,
+  startAutoSyncNow,
+  stopAutoSync,
+  submitVendorRemark
+}

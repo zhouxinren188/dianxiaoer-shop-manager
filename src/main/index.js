@@ -55,7 +55,10 @@ const {
 const { getBackendRecoveryDisposition } = require('./store-backend-session-recovery')
 const { startServer } = require('./server')
 const { setAuthToken, getAuthToken } = require('./auth-store')
+const { createMainDesktopCommandChannel } = require('./desktop-command-channel')
 const runtimeLog = require('./runtime-logger')
+
+let desktopCommandChannel = null
 
 // Packaged builds share the same electron-updater cache directory. Running two
 // packaged instances at once can make one updater delete the other updater's
@@ -992,6 +995,7 @@ ipcMain.handle('window-set-main-size', (event) => {
 ipcMain.handle('set-auth-token', (event, token) => {
   setAuthToken(token || null)
   updateAftersaleAutoSyncAuth(token || null)
+  desktopCommandChannel?.notifyAuthChanged()
   console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')
 })
 
@@ -1152,6 +1156,16 @@ app.whenReady().then(async () => {
   // 启动心跳检测
   startHeartbeat(mainWindow)
 
+  // 启动受限的桌面远程任务通道。未登录时只在本地等待，不会发起鉴权请求；
+  // 登录 token 同步到主进程后自动上线并领取白名单任务。
+  try {
+    desktopCommandChannel = createMainDesktopCommandChannel(app)
+    desktopCommandChannel.start()
+    runtimeLog.writeLog('REMOTE_TASK', 'channel_started')
+  } catch (error) {
+    runtimeLog.writeLog('REMOTE_TASK', 'channel_start_failed message=' + error.message)
+  }
+
   // 启动订单自动同步（每10分钟，多店铺逐个执行）
   // startAutoSync(mainWindow) // 已取消全局自动同步，改为用户手动控制
 
@@ -1175,6 +1189,7 @@ app.on('before-quit', () => {
   // BrowserWindow's close event. Mark this as an intentional shutdown so the
   // normal user-facing close confirmation cannot block updater installation.
   isQuitting = true
+  desktopCommandChannel?.stop()
   stopAftersaleAutoSync()
   closeAllStoreBackendBrowsers()
   try {

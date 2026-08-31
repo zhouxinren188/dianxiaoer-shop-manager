@@ -14,13 +14,48 @@ const ALLOWED_ROUTES = Object.freeze([
   ['POST', /^\/api\/desktop-channel\/tasks\/claim$/],
   ['POST', /^\/api\/desktop-channel\/tasks\/[a-zA-Z0-9_-]{8,120}\/status$/],
   ['POST', /^\/api\/desktop-channel\/tasks\/[a-zA-Z0-9_-]{8,120}\/lease\/renew$/],
-  ['POST', /^\/api\/desktop-channel\/tasks\/[a-zA-Z0-9_-]{8,120}\/result$/]
+  ['POST', /^\/api\/desktop-channel\/tasks\/[a-zA-Z0-9_-]{8,120}\/result$/],
+  ['GET', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*$/],
+  ['GET', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*\/related-sales$/],
+  ['GET', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*\/cloud-configuration$/],
+  ['POST', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*\/exception\/check$/],
+  ['POST', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*\/exception\/resolve$/],
+  ['POST', /^\/api\/desktop-channel\/business\/purchase-orders\/[1-9][0-9]*\/auto-remark-log$/],
+  ['PUT', /^\/api\/desktop-channel\/business\/sales-orders\/[1-9][0-9]*\/order-remark$/]
 ])
 
 function isAllowedRequest(method, pathname) {
   return ALLOWED_ROUTES.some(([allowedMethod, pattern]) => (
     method === allowedMethod && pattern.test(pathname)
   ))
+}
+
+function resolveUpstreamPath(method, pathname) {
+  if (!isAllowedRequest(method, pathname)) return ''
+  let match
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/purchase-orders\/([1-9][0-9]*)$/))) {
+    return '/api/purchase-orders/' + match[1]
+  }
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/purchase-orders\/([1-9][0-9]*)\/related-sales$/))) {
+    return '/api/purchase-orders/' + match[1] + '/related-sales'
+  }
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/purchase-orders\/([1-9][0-9]*)\/cloud-configuration$/))) {
+    return '/api/cloud-warehouse/orders/' + match[1] + '/configuration'
+  }
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/purchase-orders\/([1-9][0-9]*)\/exception\/(check|resolve)$/))) {
+    return '/api/cloud-warehouse/orders/' + match[1] + '/exception/' + match[2]
+  }
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/purchase-orders\/([1-9][0-9]*)\/auto-remark-log$/))) {
+    return '/api/cloud-warehouse/orders/' + match[1] + '/process-logs/auto-remark'
+  }
+  if ((match = pathname.match(/^\/api\/desktop-channel\/business\/sales-orders\/([1-9][0-9]*)\/order-remark$/))) {
+    return '/api/sales-orders/' + match[1] + '/order-remark'
+  }
+  return pathname
+}
+
+function isDesktopBusinessRequest(pathname) {
+  return pathname.startsWith('/api/desktop-channel/business/')
 }
 
 function requireHttps(req, res, next) {
@@ -39,11 +74,19 @@ function createProxyHandler({ upstreamHost = '127.0.0.1', upstreamPort = 3002 } 
 
   return function proxyDesktopCommand(req, res) {
     const pathname = req.originalUrl.split('?')[0]
-    if (!isAllowedRequest(req.method, pathname)) {
+    const upstreamPath = resolveUpstreamPath(req.method, pathname)
+    if (!upstreamPath) {
       return res.status(404).json({
         code: 1,
         message: 'Desktop command channel route not found',
         error_code: 'route_not_allowed'
+      })
+    }
+    if (isDesktopBusinessRequest(pathname) && req.authDevice !== 'desktop') {
+      return res.status(403).json({
+        code: 1,
+        message: 'Desktop business support routes require a desktop login',
+        error_code: 'desktop_device_required'
       })
     }
 
@@ -61,7 +104,7 @@ function createProxyHandler({ upstreamHost = '127.0.0.1', upstreamPort = 3002 } 
       hostname: upstreamHost,
       port: upstreamPort,
       method: req.method,
-      path: req.originalUrl,
+      path: upstreamPath,
       timeout: UPSTREAM_TIMEOUT_MS,
       headers: {
         Authorization: req.headers.authorization,
@@ -129,4 +172,6 @@ module.exports = createDesktopCommandProxy
 module.exports.ALLOWED_ROUTES = ALLOWED_ROUTES
 module.exports.createProxyHandler = createProxyHandler
 module.exports.isAllowedRequest = isAllowedRequest
+module.exports.isDesktopBusinessRequest = isDesktopBusinessRequest
 module.exports.requireHttps = requireHttps
+module.exports.resolveUpstreamPath = resolveUpstreamPath

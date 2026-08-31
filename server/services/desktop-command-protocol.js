@@ -1,5 +1,9 @@
 const PROTOCOL_VERSION = '1.0'
-const ENABLED_DESKTOP_COMMANDS = Object.freeze(['system.ping'])
+const ENABLED_DESKTOP_COMMANDS = Object.freeze([
+  'system.ping',
+  'purchase.exception.check',
+  'purchase.exception.resolve'
+])
 const ENABLED_COMMAND_SET = new Set(ENABLED_DESKTOP_COMMANDS)
 
 function protocolError(code, message) {
@@ -66,6 +70,30 @@ function normalizeCommandPayload(command, payload) {
     assertExactKeys(payload, [], 'payload')
     return {}
   }
+  if (command === 'purchase.exception.check') {
+    assertExactKeys(payload, ['purchase_order_id'], 'payload', ['purchase_order_id'])
+    const purchaseOrderId = Number(payload.purchase_order_id)
+    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+      throw protocolError('invalid_request', 'payload.purchase_order_id is invalid')
+    }
+    return { purchase_order_id: purchaseOrderId }
+  }
+  if (command === 'purchase.exception.resolve') {
+    assertExactKeys(
+      payload,
+      ['purchase_order_id', 'confirmed'],
+      'payload',
+      ['purchase_order_id', 'confirmed']
+    )
+    const purchaseOrderId = Number(payload.purchase_order_id)
+    if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+      throw protocolError('invalid_request', 'payload.purchase_order_id is invalid')
+    }
+    if (payload.confirmed !== true) {
+      throw protocolError('confirmation_required', 'payload.confirmed must be true')
+    }
+    return { purchase_order_id: purchaseOrderId, confirmed: true }
+  }
   throw protocolError('command_not_allowed', 'The command is not enabled for the desktop channel')
 }
 
@@ -87,7 +115,9 @@ function normalizeCreateTaskRequest(body) {
   const targetDeviceId = String(body.target_device_id || '').trim()
   if (targetDeviceId) normalizeDeviceId(targetDeviceId)
   const expiresInSeconds = body.expires_in_seconds === undefined
-    ? 120
+    ? (command === 'purchase.exception.resolve'
+        ? 600
+        : (command === 'purchase.exception.check' ? 300 : 120))
     : Number(body.expires_in_seconds)
   if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 30 || expiresInSeconds > 600) {
     throw protocolError('invalid_request', 'expires_in_seconds must be between 30 and 600')
@@ -179,7 +209,84 @@ function redactMessage(value, maxLength = 500) {
     .slice(0, maxLength)
 }
 
-function normalizeResultRequest(body, command) {
+function normalizeExceptionState(value, field) {
+  const state = String(value || '')
+  if (!['exception_found', 'exception_clear'].includes(state)) {
+    throw protocolError('invalid_result', field + ' is invalid')
+  }
+  return state
+}
+
+function normalizeExceptionCount(value, field, state) {
+  const count = Number(value)
+  if (!Number.isInteger(count) || count < 0 || count > 100) {
+    throw protocolError('invalid_result', field + ' is invalid')
+  }
+  if ((state === 'exception_clear' && count !== 0) || (state === 'exception_found' && count < 1)) {
+    throw protocolError('invalid_result', field + ' does not match the exception state')
+  }
+  return count
+}
+
+function normalizeExceptionCheckResult(result) {
+  assertExactKeys(
+    result,
+    ['purchase_order_id', 'state', 'exception_count', 'message', 'checked_at'],
+    'result',
+    ['purchase_order_id', 'state', 'exception_count', 'message', 'checked_at']
+  )
+  const purchaseOrderId = Number(result.purchase_order_id)
+  if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+    throw protocolError('invalid_result', 'result.purchase_order_id is invalid')
+  }
+  const state = normalizeExceptionState(result.state, 'result.state')
+  return {
+    purchase_order_id: purchaseOrderId,
+    state,
+    exception_count: normalizeExceptionCount(result.exception_count, 'result.exception_count', state),
+    message: redactMessage(result.message),
+    checked_at: normalizeIsoTime(result.checked_at, 'result.checked_at')
+  }
+}
+
+function normalizeExceptionResolveResult(result) {
+  assertExactKeys(
+    result,
+    [
+      'purchase_order_id', 'remark_succeeded', 'remark_message', 'resolve_state',
+      'verification_state', 'remaining_exception_count', 'message', 'verified_at'
+    ],
+    'result',
+    [
+      'purchase_order_id', 'remark_succeeded', 'remark_message', 'resolve_state',
+      'verification_state', 'remaining_exception_count', 'message', 'verified_at'
+    ]
+  )
+  const purchaseOrderId = Number(result.purchase_order_id)
+  if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+    throw protocolError('invalid_result', 'result.purchase_order_id is invalid')
+  }
+  if (typeof result.remark_succeeded !== 'boolean' || result.resolve_state !== 'succeeded') {
+    throw protocolError('invalid_result', 'result resolve or remark state is invalid')
+  }
+  const verificationState = normalizeExceptionState(result.verification_state, 'result.verification_state')
+  return {
+    purchase_order_id: purchaseOrderId,
+    remark_succeeded: result.remark_succeeded,
+    remark_message: redactMessage(result.remark_message),
+    resolve_state: 'succeeded',
+    verification_state: verificationState,
+    remaining_exception_count: normalizeExceptionCount(
+      result.remaining_exception_count,
+      'result.remaining_exception_count',
+      verificationState
+    ),
+    message: redactMessage(result.message),
+    verified_at: normalizeIsoTime(result.verified_at, 'result.verified_at')
+  }
+}
+
+function normalizeResultRequest(body, command, commandPayload = {}) {
   assertExactKeys(
     body,
     ['device_id', 'instance_id', 'lease_id', 'fencing_token', 'status', 'result', 'error_code', 'error_message', 'completed_at'],
@@ -198,16 +305,30 @@ function normalizeResultRequest(body, command) {
   }
   assertPlainObject(body.result, 'result')
   let result = {}
-  if (status === 'succeeded' && command === 'system.ping') {
-    assertExactKeys(body.result, ['pong', 'device_id', 'app_version', 'handled_at'], 'result', ['pong', 'device_id', 'app_version', 'handled_at'])
-    if (body.result.pong !== true || normalizeDeviceId(body.result.device_id) !== lease.deviceId) {
-      throw protocolError('invalid_result', 'The ping result does not match the claiming device')
+  if (status === 'succeeded') {
+    if (command === 'system.ping') {
+      assertExactKeys(body.result, ['pong', 'device_id', 'app_version', 'handled_at'], 'result', ['pong', 'device_id', 'app_version', 'handled_at'])
+      if (body.result.pong !== true || normalizeDeviceId(body.result.device_id) !== lease.deviceId) {
+        throw protocolError('invalid_result', 'The ping result does not match the claiming device')
+      }
+      result = {
+        pong: true,
+        device_id: lease.deviceId,
+        app_version: String(body.result.app_version || '').trim().slice(0, 40),
+        handled_at: normalizeIsoTime(body.result.handled_at, 'result.handled_at')
+      }
+    } else if (command === 'purchase.exception.check') {
+      result = normalizeExceptionCheckResult(body.result)
+    } else if (command === 'purchase.exception.resolve') {
+      result = normalizeExceptionResolveResult(body.result)
+    } else {
+      throw protocolError('command_not_allowed', 'The command result is not enabled')
     }
-    result = {
-      pong: true,
-      device_id: lease.deviceId,
-      app_version: String(body.result.app_version || '').trim().slice(0, 40),
-      handled_at: normalizeIsoTime(body.result.handled_at, 'result.handled_at')
+    if (
+      command.startsWith('purchase.exception.') &&
+      Number(result.purchase_order_id) !== Number(commandPayload.purchase_order_id)
+    ) {
+      throw protocolError('invalid_result', 'The result purchase order does not match the task payload')
     }
   } else {
     assertExactKeys(body.result, [], 'result')
@@ -238,6 +359,8 @@ module.exports = {
   normalizeCreateTaskRequest,
   normalizeHeartbeatRequest,
   normalizeLeaseRequest,
+  normalizeExceptionCheckResult,
+  normalizeExceptionResolveResult,
   normalizeResultRequest,
   protocolError,
   redactMessage
