@@ -14,8 +14,6 @@ const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock()
 const { initializeStorage, confirmStorageAndCleanup } = require('./storage-manager')
 const storageContext = hasSingleInstanceLock ? initializeStorage(app) : null
 
-const QRCode = require('qrcode')
-
 // 防止 EPIPE broken pipe 错误弹窗（stdout/stderr 管道断开时忽略）
 process.stdout?.on?.('error', () => {})
 process.stderr?.on?.('error', () => {})
@@ -1006,6 +1004,8 @@ ipcMain.handle('set-auth-token', (event, token) => {
 const httpProxy = require('http')
 // 生成二维码（用于微信支付扫码）
 ipcMain.handle('generate-qrcode', async (event, text) => {
+  // 支付二维码属于按需功能，避免可选页面的依赖异常阻断整个主进程启动。
+  const QRCode = require('qrcode')
   return QRCode.toDataURL(text, { width: 280, margin: 2 })
 })
 
