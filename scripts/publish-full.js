@@ -34,14 +34,49 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Dxe@2026!Admin'
 // SSH 连接配置
 const SSH_CONFIG = { host: HOST, port: SSH_PORT, username: USERNAME, password: PASSWORD, readyTimeout: 60000, keepaliveInterval: 10000 }
 
-// 创建新的 SSH 连接
-function createConnection() {
+const SSH_CONNECT_MAX_ATTEMPTS = 5
+const SSH_CONNECT_RETRY_BASE_DELAY_MS = 5000
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function isRetryableSshConnectionError(error) {
+  const message = String(error?.message || error || '')
+  return /before handshake|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH/i.test(message)
+}
+
+// 创建单次 SSH 连接
+function createConnectionOnce() {
   return new Promise((resolve, reject) => {
     const conn = new Client()
     conn.on('ready', () => resolve(conn))
     conn.on('error', reject)
     conn.connect({ ...SSH_CONFIG })
   })
+}
+
+// 腾讯云主机偶尔会在短时间内连续连接时于握手前断开。
+// 仅对明确的瞬时网络错误做有限重试，认证失败等配置错误仍立即抛出。
+async function createConnection() {
+  let lastError = null
+  for (let attempt = 1; attempt <= SSH_CONNECT_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await createConnectionOnce()
+    } catch (error) {
+      lastError = error
+      if (attempt >= SSH_CONNECT_MAX_ATTEMPTS || !isRetryableSshConnectionError(error)) {
+        throw error
+      }
+      const delayMs = SSH_CONNECT_RETRY_BASE_DELAY_MS * attempt
+      console.warn(
+        `[Deploy] SSH 连接失败（第 ${attempt}/${SSH_CONNECT_MAX_ATTEMPTS} 次）：${error.message}，` +
+        `${Math.round(delayMs / 1000)} 秒后重试...`
+      )
+      await wait(delayMs)
+    }
+  }
+  throw lastError
 }
 
 // 通过 SSH 执行命令
