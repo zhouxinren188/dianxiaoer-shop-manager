@@ -875,6 +875,61 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // Reliable desktop command channel. Only allow-listed diagnostics are enabled initially.
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS desktop_command_devices (
+        user_id INT NOT NULL,
+        device_id VARCHAR(100) NOT NULL,
+        instance_id VARCHAR(110) NOT NULL,
+        protocol_version VARCHAR(20) NOT NULL,
+        app_version VARCHAR(40) DEFAULT '',
+        status VARCHAR(20) NOT NULL DEFAULT 'online',
+        capabilities_json JSON NOT NULL,
+        active_task_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
+        last_heartbeat_at DATETIME(3) NOT NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        PRIMARY KEY (user_id, device_id),
+        KEY idx_desktop_command_device_heartbeat (user_id, last_heartbeat_at),
+        CONSTRAINT fk_desktop_command_device_user FOREIGN KEY (user_id)
+          REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS desktop_command_tasks (
+        task_id VARCHAR(120) PRIMARY KEY,
+        user_id INT NOT NULL,
+        requested_by_user_id INT NOT NULL,
+        command VARCHAR(80) NOT NULL,
+        payload_json JSON NOT NULL,
+        idempotency_key VARCHAR(120) NOT NULL,
+        target_device_id VARCHAR(100) DEFAULT '',
+        status VARCHAR(20) NOT NULL DEFAULT 'queued',
+        progress_json JSON DEFAULT NULL,
+        result_json JSON DEFAULT NULL,
+        result_hash CHAR(64) DEFAULT '',
+        error_code VARCHAR(80) DEFAULT '',
+        error_message VARCHAR(500) DEFAULT '',
+        claimed_device_id VARCHAR(100) DEFAULT '',
+        claimed_instance_id VARCHAR(110) DEFAULT '',
+        lease_id VARCHAR(120) DEFAULT '',
+        fencing_token BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        lease_expires_at DATETIME(3) DEFAULT NULL,
+        attempt_count TINYINT UNSIGNED NOT NULL DEFAULT 0,
+        created_at DATETIME(3) NOT NULL,
+        expires_at DATETIME(3) NOT NULL,
+        started_at DATETIME(3) DEFAULT NULL,
+        completed_at DATETIME(3) DEFAULT NULL,
+        updated_at DATETIME(3) NOT NULL,
+        UNIQUE KEY uk_desktop_command_idempotency (user_id, idempotency_key),
+        KEY idx_desktop_command_claim (user_id, status, expires_at, created_at),
+        KEY idx_desktop_command_lease (user_id, lease_expires_at),
+        CONSTRAINT fk_desktop_command_task_user FOREIGN KEY (user_id)
+          REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 云仓助手运行状态。机器码只负责路由，执行器使用独立凭据认证。
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS cloud_executor_machines (

@@ -184,6 +184,9 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'package.json'), remote: `${BUSINESS_REMOTE_DIR}/package.json` },
     { local: path.join(ROOT, 'server', 'package-lock.json'), remote: `${BUSINESS_REMOTE_DIR}/package-lock.json` },
     { local: path.join(ROOT, 'server', 'routes', 'cloud-warehouse.js'), remote: `${BUSINESS_REMOTE_DIR}/routes/cloud-warehouse.js` },
+    { local: path.join(ROOT, 'server', 'routes', 'desktop-command-channel.js'), remote: `${BUSINESS_REMOTE_DIR}/routes/desktop-command-channel.js` },
+    { local: path.join(ROOT, 'server', 'services', 'desktop-command-channel-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-channel-service.js` },
+    { local: path.join(ROOT, 'server', 'services', 'desktop-command-protocol.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-protocol.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-api-client.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-api-client.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-third-party-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-third-party-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-identity.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-identity.js` },
@@ -397,10 +400,12 @@ async function main() {
   const localServerFile = path.join(ROOT, 'server-api', 'index.js')
   const localPkgFile = path.join(ROOT, 'server-api', 'package.json')
   const localAdminFile = path.join(ROOT, 'server-api', 'public', 'admin', 'index.html')
+  const localDesktopCommandProxyFile = path.join(ROOT, 'server-api', 'desktop-command-proxy.js')
   smallFiles.push({ local: localServerFile, remote: `${REMOTE_DIR}/index.js` })
   smallFiles.push({ local: localServerFile, remote: `${REMOTE_DIR}/update-server.js` })
   smallFiles.push({ local: localPkgFile, remote: `${REMOTE_DIR}/package.json` })
   smallFiles.push({ local: localAdminFile, remote: `${REMOTE_DIR}/public/admin/index.html` })
+  smallFiles.push({ local: localDesktopCommandProxyFile, remote: `${REMOTE_DIR}/desktop-command-proxy.js` })
 
   // 业务服务与客户端功能必须同步发布，避免客户端已出现入口而 3002 API 仍为旧版。
   smallFiles.push(...getBusinessServerFiles())

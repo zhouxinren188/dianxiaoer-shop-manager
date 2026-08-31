@@ -192,11 +192,12 @@ app.use(async (req, res, next) => {
 
   try {
     let user = null
+    let authDevice = ''
 
     if (token.startsWith('token_')) {
       // 自定义 token 校验（兼容旧方式）
       const [rows] = await pool.execute(
-        `SELECT ut.user_id, u.id, u.username, u.real_name, u.phone,
+        `SELECT ut.user_id, ut.device AS auth_device, u.id, u.username, u.real_name, u.phone,
                 u.user_type, u.role, u.parent_id, u.status
          FROM user_tokens ut
          INNER JOIN users u ON ut.user_id = u.id
@@ -204,6 +205,10 @@ app.use(async (req, res, next) => {
         [token]
       )
       user = rows[0] || null
+      if (user) {
+        authDevice = String(user.auth_device || 'desktop')
+        delete user.auth_device
+      }
     } else {
       // JWT 校验（来自 3001 dianxiaoer-api）
       try {
@@ -221,12 +226,13 @@ app.use(async (req, res, next) => {
             // 校验 token 是否仍在 user_tokens 表中；同一用户允许不同客户端类型同时在线，
             // 但同类型再次登录会替换旧 token。
             const [tokenRows] = await pool.execute(
-              'SELECT 1 FROM user_tokens WHERE token = ? LIMIT 1',
+              'SELECT device FROM user_tokens WHERE token = ? LIMIT 1',
               [token]
             )
             if (tokenRows.length === 0) {
               return res.status(401).json({ code: 1, message: '当前端登录已失效，请重新登录', needsRelogin: true })
             }
+            authDevice = String(tokenRows[0].device || decoded.device || 'desktop')
             user = rows[0]
             user.user_id = user.id
           }
@@ -241,6 +247,7 @@ app.use(async (req, res, next) => {
     }
 
     req.user = user
+    req.authDevice = authDevice || 'desktop'
     next()
   } catch (err) {
     console.error('[Auth] 认证失败:', err.message)
@@ -8588,6 +8595,10 @@ app.use('/api/warehouse', warehouseRouter)
 // 店小二只保存主账号体系的机器码绑定；云仓助手执行器控制面由第三方服务自行提供。
 const cloudWarehouseRouter = require('./routes/cloud-warehouse')(pool)
 app.use('/api/cloud-warehouse', cloudWarehouseRouter)
+
+// ============ Desktop remote command channel ============
+const desktopCommandChannelRouter = require('./routes/desktop-command-channel')(pool)
+app.use('/api/desktop-channel', desktopCommandChannelRouter)
 
 // ============ 健康检查 ============
 

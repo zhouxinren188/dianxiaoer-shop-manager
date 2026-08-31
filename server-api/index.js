@@ -348,6 +348,9 @@ async function authMiddleware(req, res, next) {
   }
 }
 
+const createDesktopCommandProxy = require('./desktop-command-proxy')
+app.use('/api/desktop-channel', createDesktopCommandProxy({ authMiddleware }))
+
 // ========== API 路由 ==========
 
 // 注册
