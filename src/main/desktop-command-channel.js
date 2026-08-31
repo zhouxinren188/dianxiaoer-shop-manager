@@ -429,14 +429,15 @@ class DesktopCommandChannelClient {
     return { task, lease }
   }
 
-  leaseBody(active, progress = active.progress || {}) {
-    return {
+  leaseBody(active, progress) {
+    const body = {
       device_id: this.deviceId,
       instance_id: this.instanceId,
       lease_id: active.lease.lease_id,
-      fencing_token: Number(active.lease.fencing_token),
-      progress
+      fencing_token: Number(active.lease.fencing_token)
     }
+    if (progress !== undefined) body.progress = progress
+    return body
   }
 
   async updateProgress(active, progress) {

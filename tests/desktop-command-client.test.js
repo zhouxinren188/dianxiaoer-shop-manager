@@ -96,6 +96,7 @@ describe('desktop command channel client', () => {
     ])
     expect(requests[0].body.capabilities).toEqual({ 'system.ping': true })
     expect(requests[0].body.active_task_count).toBe(0)
+    expect(requests[2].body.progress).toEqual({ phase: 'executing' })
     expect(requests[3].body).toMatchObject({
       device_id: DEVICE_ID,
       instance_id: INSTANCE_ID,
@@ -104,6 +105,7 @@ describe('desktop command channel client', () => {
       status: 'succeeded',
       result: { pong: true, device_id: DEVICE_ID }
     })
+    expect(requests[3].body).not.toHaveProperty('progress')
     expect(pingHandler).toHaveBeenCalledOnce()
     expect(journal.markStarted).toHaveBeenCalledOnce()
     expect(journal.record).toHaveBeenCalledOnce()
