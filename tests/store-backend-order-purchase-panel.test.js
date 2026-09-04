@@ -326,6 +326,30 @@ describe('京东订单详情采购信息区域', () => {
       vi.useRealTimers()
     }
   })
+
+  it('普通京麦页面不反复执行无效的浮层清理脚本', async () => {
+    vi.useFakeTimers()
+    try {
+      const webContents = new EventEmitter()
+      webContents.id = 702
+      webContents.isDestroyed = vi.fn(() => false)
+      webContents.getURL = vi.fn(() => 'https://shop.jd.com/')
+      webContents.executeJavaScript = vi.fn(() => Promise.resolve(true))
+
+      attachOrderPurchasePanel(webContents)
+      webContents.emit('did-start-navigation', 'https://shop.jd.com/', false, true)
+      webContents.emit('did-navigate', {}, 'https://shop.jd.com/')
+      webContents.emit('dom-ready')
+      webContents.emit('did-finish-load')
+      await vi.advanceTimersByTimeAsync(9000)
+
+      expect(webContents.executeJavaScript).not.toHaveBeenCalled()
+      webContents.emit('destroyed')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('通过页面 preload 的正式 IPC 通道查询并回填物流轨迹', async () => {
     vi.useFakeTimers()
     try {

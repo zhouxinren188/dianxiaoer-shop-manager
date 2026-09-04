@@ -62,6 +62,12 @@ const routes = [
         meta: { title: '设置仓库' }
       },
       {
+        path: '/operations/jd-express',
+        name: 'JdExpress',
+        component: () => import('@/views/operations/JdExpress.vue'),
+        meta: { title: '京东快车' }
+      },
+      {
         path: '/tasks/todo',
         name: 'TasksTodo',
         component: () => import('@/views/tasks/TodoTask.vue'),

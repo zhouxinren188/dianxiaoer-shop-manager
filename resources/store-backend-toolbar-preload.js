@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 const allowedActions = new Set([
   'activate',
+  'new',
   'close',
   'back',
   'forward',
@@ -24,5 +25,9 @@ contextBridge.exposeInMainWorld('storeBackendTabs', {
   onState(callback) {
     if (typeof callback !== 'function') return
     ipcRenderer.on('store-backend-tabs-state', (_event, state) => callback(state))
+  },
+  onFocusAddress(callback) {
+    if (typeof callback !== 'function') return
+    ipcRenderer.on('store-backend-focus-address', () => callback())
   }
 })

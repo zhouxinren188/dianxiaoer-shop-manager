@@ -100,6 +100,24 @@ describe('店铺后台多标签浏览器', () => {
     expect(toolbar).toContain("action('navigate'")
   })
 
+  it('通过加号或 Ctrl+T 新建同一店铺会话标签，并默认打开京麦工作台', () => {
+    const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
+    const toolbar = fs.readFileSync(path.resolve('resources/store-backend-toolbar.html'), 'utf8')
+    const preload = fs.readFileSync(path.resolve('resources/store-backend-toolbar-preload.js'), 'utf8')
+
+    expect(toolbar).toContain('id="newTab"')
+    expect(toolbar).toContain("action('new')")
+    expect(toolbar).toContain("event.ctrlKey && String(event.key || '').toLowerCase() === 't'")
+    expect(preload).toContain("'new'")
+    expect(preload).toContain('store-backend-focus-address')
+    expect(source).toContain("const DEFAULT_NEW_TAB_URL = 'https://shop.jd.com/'")
+    expect(source).toContain('createNewTab()')
+    expect(source).toContain('url: DEFAULT_NEW_TAB_URL')
+    expect(source).toContain("case 'new':")
+    expect(source).toContain("input.control && key === 't'")
+    expect(source).toContain('session: this.platformSession')
+  })
+
   it('像普通浏览器一样处理网页离开确认，允许用户决定重载或保留编辑内容', () => {
     const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
 

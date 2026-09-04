@@ -16,6 +16,7 @@ const {
 const TOOLBAR_HEIGHT = 84
 const WINDOW_BORDER_SIZE = 1
 const DEFAULT_MAX_TABS = 10
+const DEFAULT_NEW_TAB_URL = 'https://shop.jd.com/'
 const backendBrowsers = new Map()
 const toolbarOwners = new Map()
 let tabSequence = 0
@@ -473,6 +474,9 @@ class StoreBackendBrowser {
     if (input.control && key === 'w') {
       event.preventDefault()
       this.closeTab(this.activeTabId)
+    } else if (input.control && key === 't') {
+      event.preventDefault()
+      this.createNewTab()
     } else if (input.control && key === 'tab') {
       event.preventDefault()
       this.activateRelativeTab(input.shift ? -1 : 1)
@@ -505,6 +509,20 @@ class StoreBackendBrowser {
     const currentIndex = Math.max(0, this.tabs.findIndex(tab => tab.id === this.activeTabId))
     const nextIndex = (currentIndex + direction + this.tabs.length) % this.tabs.length
     this.activateTab(this.tabs[nextIndex].id)
+  }
+
+  createNewTab() {
+    const tab = this.createTab({
+      url: DEFAULT_NEW_TAB_URL,
+      title: '京麦工作台',
+      activate: true,
+      autoLoad: true
+    })
+    if (!this.isDestroyed()) {
+      this.window.webContents.focus()
+      this.window.webContents.send('store-backend-focus-address')
+    }
+    return tab
   }
 
   activateTab(tabId) {
@@ -618,6 +636,9 @@ class StoreBackendBrowser {
     switch (payload.action) {
       case 'activate':
         this.activateTab(payload.tabId)
+        break
+      case 'new':
+        this.createNewTab()
         break
       case 'close':
         this.closeTab(payload.tabId)

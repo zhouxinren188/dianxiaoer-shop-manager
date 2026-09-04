@@ -1,7 +1,7 @@
 // 注意：不再全局禁用 TLS 证书验证（process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'）
 // 改为仅对特定自签名服务器在请求级别设置 rejectUnauthorized: false
 
-const { app, BrowserWindow, Menu, session, ipcMain } = require('electron')
+const { app, BrowserWindow, Menu, session, ipcMain, dialog } = require('electron')
 const path = require('path')
 
 // 开发 worktree 的隔离目录必须先于任何 Session 和存储迁移初始化。
@@ -28,6 +28,7 @@ const { registerPlatformWindowIpc, registerPurchaseAccountIpc } = require('./pla
 const { registerPurchaseOrderCaptureIpc } = require('./purchase-order-capture')
 const { registerTaobaoSameSearchIpc } = require('./taobao-same-search')
 const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync')
+const { closeAllJdExpressWindows, registerJdExpressIpc } = require('./jd-express')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
 const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
@@ -76,6 +77,93 @@ if (!hasSingleInstanceLock) {
 
 // 退出确认标志 — 防止 close 事件循环
 let isQuitting = false
+let quitRequestInFlight = false
+let quitPromptInFlight = false
+let forcedExitTimer = null
+
+function collectOpenWindowSessions() {
+  const sessions = new Set([session.defaultSession])
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      const targetSession = win.webContents?.session
+      if (targetSession) sessions.add(targetSession)
+    } catch {
+      // 窗口可能已在退出过程中销毁。
+    }
+  }
+  return [...sessions]
+}
+
+async function flushOpenWindowSessions(timeoutMs = 1200) {
+  const flushTask = Promise.allSettled(collectOpenWindowSessions().map(async (targetSession) => {
+    try {
+      await targetSession.flushStorageData()
+    } catch {
+      // 单个 Session 刷盘失败不能阻塞整个应用退出。
+    }
+  }))
+  await Promise.race([
+    flushTask,
+    new Promise((resolve) => setTimeout(resolve, timeoutMs))
+  ])
+}
+
+function destroyAllApplicationWindows() {
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      if (!win.isDestroyed()) win.destroy()
+    } catch {
+      // 强制退出阶段继续处理其他窗口。
+    }
+  }
+}
+
+function requestApplicationQuit(source = 'user') {
+  if (quitRequestInFlight) return
+  quitRequestInFlight = true
+  isQuitting = true
+  runtimeLog.writeLog('APP_EXIT', `requested source=${source}`)
+
+  desktopCommandChannel?.stop()
+  stopAftersaleAutoSync()
+  closeAllJdExpressWindows()
+
+  // 某些登录/采购窗口会用 preventDefault() 等待异步保存，网络异常时可能
+  // 永久拦住 app.quit()。给 Session 一次有界刷盘机会，再发起正常退出。
+  void flushOpenWindowSessions().finally(() => {
+    try {
+      app.quit()
+    } catch (error) {
+      runtimeLog.writeLog('APP_EXIT', `normal_quit_failed message=${error.message}`)
+    }
+  })
+
+  // 正常退出未完成时必须有硬兜底；destroy() 不触发各窗口的 close 拦截器。
+  forcedExitTimer = setTimeout(() => {
+    runtimeLog.writeLog('APP_EXIT', 'forced_exit reason=window_close_timeout')
+    destroyAllApplicationWindows()
+    app.exit(0)
+  }, 5000)
+}
+
+async function confirmApplicationQuit(mainWindow) {
+  if (quitPromptInFlight || isQuitting || mainWindow.isDestroyed()) return
+  quitPromptInFlight = true
+  try {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '退出确认',
+      message: '确定要退出店小二网店管家吗？',
+      buttons: ['退出', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    })
+    if (result.response === 0) requestApplicationQuit('native_window_close')
+  } finally {
+    quitPromptInFlight = false
+  }
+}
 
 // 允许自签名证书（仅用于连接内部服务器API）
 app.on('certificate-error', (event, webContents, url, error, certificate, callback) => {
@@ -168,7 +256,7 @@ function createWindow() {
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
-      mainWindow.webContents.send('app-close-requested')
+      void confirmApplicationQuit(mainWindow)
     }
   })
 
@@ -184,8 +272,8 @@ ipcMain.handle('window-maximize', (event) => {
   if (win) win.isMaximized() ? win.unmaximize() : win.maximize()
 })
 ipcMain.handle('window-close', (event) => {
-  isQuitting = true
-  BrowserWindow.fromWebContents(event.sender)?.close()
+  requestApplicationQuit('renderer_confirmed')
+  return { success: true }
 })
 ipcMain.handle('get-app-version', () => getCurrentVersion())
 ipcMain.handle('open-log-file', () => {
@@ -1153,6 +1241,11 @@ app.whenReady().then(async () => {
   // 注册采购订单浏览器同步 IPC
   registerPurchaseOrderSyncIpc(mainWindow)
 
+  // 注册京东快车工具 IPC（复用每个店铺独立的登录 Session）
+  registerJdExpressIpc(ipcMain, {
+    refreshCookies: refreshCookiesFromServerIfNewer
+  })
+
   // 启动心跳检测
   startHeartbeat(mainWindow)
 
@@ -1191,6 +1284,7 @@ app.on('before-quit', () => {
   isQuitting = true
   desktopCommandChannel?.stop()
   stopAftersaleAutoSync()
+  closeAllJdExpressWindows()
   closeAllStoreBackendBrowsers()
   try {
     // 扫描所有 partition session 并 flush（Electron 的 session API 不提供列举方法，
@@ -1200,5 +1294,12 @@ app.on('before-quit', () => {
     })
   } catch (e) {
     // 忽略刷盘失败
+  }
+})
+
+app.on('will-quit', () => {
+  if (forcedExitTimer) {
+    clearTimeout(forcedExitTimer)
+    forcedExitTimer = null
   }
 })

@@ -26,10 +26,10 @@
     .store-label::after { content: ""; position: absolute; right: 1px; top: 10px; width: 1px; height: 18px; background: rgba(116, 130, 153, .25); }
     .store-logo { flex: 0 0 23px; width: 23px; height: 23px; object-fit: contain; border-radius: 6px; filter: drop-shadow(0 1px 1px rgba(31, 45, 68, .16)); }
     .store-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .tabs { min-width: 0; flex: 1; display: flex; gap: 4px; padding-left: 5px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b8c3d3 transparent; }
+    .tabs { min-width: 0; flex: 0 1 auto; max-width: calc(100% - 300px); display: flex; gap: 4px; padding-left: 5px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; scrollbar-color: #b8c3d3 transparent; }
     .tabs::-webkit-scrollbar { height: 3px; }
     .tabs::-webkit-scrollbar-thumb { border-radius: 3px; background: #b8c3d3; }
-    .tab { position: relative; flex: 0 1 220px; min-width: 116px; max-width: 240px; height: 34px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 10px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; background: rgba(210, 219, 232, .56); color: #475467; cursor: default; transition: background-color .15s ease, color .15s ease, box-shadow .15s ease, transform .12s ease; -webkit-app-region: no-drag; }
+    .tab { position: relative; flex: 0 0 220px; min-width: 116px; max-width: 240px; height: 34px; margin-bottom: 3px; border: 1px solid transparent; border-radius: 10px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px; background: rgba(210, 219, 232, .56); color: #475467; cursor: default; transition: background-color .15s ease, color .15s ease, box-shadow .15s ease, transform .12s ease; -webkit-app-region: no-drag; }
     .tab:hover { background: rgba(247, 249, 252, .9); color: var(--chrome-text); }
     .tab.active { z-index: 2; background: #fff; border-color: rgba(190, 201, 217, .42); box-shadow: 0 1px 3px rgba(45, 58, 79, .13); color: var(--chrome-text); }
     .tab.active .tab-status { background: #8ea0b9; box-shadow: 0 0 0 3px rgba(142, 160, 185, .12); }
@@ -40,6 +40,11 @@
     .tab-close { flex: 0 0 20px; width: 20px; height: 20px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0 0 2px; background: transparent; color: var(--chrome-muted); font-size: 16px; line-height: 1; cursor: pointer; transition: background-color .12s ease, color .12s ease; }
     .tab-close:hover { background: #dce3ec; color: #1f2937; }
     .tab-close:active { background: #cfd8e4; }
+    .new-tab { flex: 0 0 32px; width: 32px; height: 32px; margin: 0 0 4px 1px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0 0 2px; background: transparent; color: #475467; font-size: 24px; font-weight: 300; line-height: 1; cursor: pointer; transition: background-color .12s ease, color .12s ease, transform .08s ease; -webkit-app-region: no-drag; }
+    .new-tab:hover { background: #dbe3ee; color: #1f2937; }
+    .new-tab:active { background: #cfd9e6; transform: scale(.94); }
+    .new-tab:focus-visible { outline: 2px solid rgba(59, 115, 232, .32); outline-offset: 1px; }
+    .tabs-drag-space { min-width: 24px; flex: 1; align-self: stretch; -webkit-app-region: drag; }
     .nav-row { height: 41px; display: flex; align-items: center; gap: 3px; padding: 4px 11px 5px; background: #fff; box-shadow: inset 0 1px 0 rgba(215, 224, 235, .6); }
     .nav-button { flex: 0 0 31px; width: 31px; height: 31px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0; background: transparent; color: #526176; cursor: pointer; transition: background-color .12s ease, color .12s ease, transform .08s ease; }
     .nav-button svg { width: 16px; height: 16px; pointer-events: none; }
@@ -70,6 +75,8 @@
         <span id="storeName" class="store-name">店铺</span>
       </div>
       <div id="tabs" class="tabs"></div>
+      <button id="newTab" class="new-tab" title="新建标签页 (Ctrl+T)" aria-label="新建标签页">+</button>
+      <div class="tabs-drag-space" aria-hidden="true"></div>
     </div>
     <div class="nav-row">
       <button id="back" class="nav-button" title="后退" aria-label="后退">
@@ -102,6 +109,7 @@
       var address = document.getElementById('address');
       var back = document.getElementById('back');
       var forward = document.getElementById('forward');
+      var newTab = document.getElementById('newTab');
 
       function action(name, payload) {
         if (api) api.action(name, payload || {});
@@ -152,6 +160,7 @@
       document.getElementById('forward').addEventListener('click', function() { action('forward'); });
       document.getElementById('reload').addEventListener('click', function() { action('reload'); });
       document.getElementById('home').addEventListener('click', function() { action('home'); });
+      newTab.addEventListener('click', function() { action('new'); });
       address.addEventListener('keydown', function(event) {
         if (event.key !== 'Enter') return;
         var url = address.value.trim();
@@ -160,7 +169,20 @@
         address.blur();
       });
 
-      if (api) api.onState(render);
+      document.addEventListener('keydown', function(event) {
+        if (event.ctrlKey && String(event.key || '').toLowerCase() === 't') {
+          event.preventDefault();
+          action('new');
+        }
+      });
+
+      if (api) {
+        api.onState(render);
+        api.onFocusAddress(function() {
+          address.focus();
+          address.select();
+        });
+      }
     })();
   </script>
 </body>

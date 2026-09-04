@@ -51,6 +51,13 @@
         <span>供店发货</span>
       </el-menu-item>
 
+      <!-- 店铺运营 分组 -->
+      <div class="menu-group-title">店铺运营</div>
+      <el-menu-item index="/operations/jd-express">
+        <el-icon><Promotion /></el-icon>
+        <span>京东快车</span>
+      </el-menu-item>
+
       <!-- 报表 分组 -->
       <div class="menu-group-title">报表</div>
       <el-sub-menu index="store-report">
@@ -122,7 +129,8 @@ import {
   OfficeBuilding,
   Setting,
   TrendCharts,
-  Money
+  Money,
+  Promotion
 } from '@element-plus/icons-vue'
 
 const route = useRoute()

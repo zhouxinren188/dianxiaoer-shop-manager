@@ -55,7 +55,18 @@ const validInvokeChannels = [
   'submit-vendor-remark',
   'open-purchase-url',
   'open-log-file',
-  'generate-qrcode'
+  'generate-qrcode',
+  'jd-express-preflight',
+  'jd-express-delete-preview',
+  'jd-express-delete-all',
+  'jd-express-products',
+  'jd-express-all-products',
+  'jd-express-retry-pages',
+  'jd-express-areas',
+  'jd-express-signing-probe',
+  'jd-express-prepare-creation',
+  'jd-express-create-single-test',
+  'jd-express-create-full'
 ]
 
 const validOnChannels = [
@@ -84,7 +95,10 @@ const validOnChannels = [
   'batch-sync-progress',
   'pdd-product-link-update',
   'taobao-same-source-selected',
-  'app-close-requested'
+  'app-close-requested',
+  'jd-express-products-progress',
+  'jd-express-creation-progress',
+  'jd-express-verification-result'
 ]
 
 contextBridge.exposeInMainWorld('electronAPI', {

@@ -806,6 +806,30 @@ function getStoragePaths() {
   }
 }
 
+function getManagedTempDirectory(...segments) {
+  const paths = getStoragePaths()
+  let tempRoot = paths?.tempDir
+  if (!tempRoot) {
+    try {
+      const { app } = require('electron')
+      const dataRoot = app.isPackaged
+        ? resolveInstallDataRoot(process.execPath)
+        : path.resolve(process.cwd(), '.dianxiaoer-data')
+      tempRoot = path.join(dataRoot, STORAGE_ROOT_NAME, 'temp')
+    } catch {
+      tempRoot = path.resolve(process.cwd(), '.dianxiaoer-data', STORAGE_ROOT_NAME, 'temp')
+    }
+  }
+
+  const resolvedRoot = path.resolve(tempRoot)
+  const target = path.resolve(resolvedRoot, ...segments.map((segment) => String(segment || '')))
+  if (!isSamePath(target, resolvedRoot) && !isPathInside(resolvedRoot, target)) {
+    throw new Error('Managed temp path must stay inside the managed temp directory')
+  }
+  fs.mkdirSync(target, { recursive: true })
+  return target
+}
+
 function getStorageContext() {
   return activeContext
 }
@@ -825,6 +849,7 @@ module.exports = {
   confirmStorageAndCleanup,
   discoverCacheDirectories,
   getStorageContext,
+  getManagedTempDirectory,
   getStoragePaths,
   initializeStorage,
   isPathInside,

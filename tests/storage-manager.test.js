@@ -7,6 +7,7 @@ import updaterModule from '../src/main/updater.js'
 
 const {
   confirmStorageAndCleanup,
+  getManagedTempDirectory,
   initializeStorage,
   resetStorageContextForTests,
   resolveInstallDataRoot,
@@ -362,6 +363,24 @@ describe('安装盘会话数据迁移', () => {
 })
 
 describe('缓存规范防回归', () => {
+  it('耗时任务缓存固定写入受管临时目录并拒绝越界路径', () => {
+    const root = makeTemporaryRoot()
+    const userData = path.join(root, 'roaming', 'dianxiaoer-shop-manager')
+    const localAppData = path.join(root, 'local')
+    fs.mkdirSync(userData, { recursive: true })
+    const context = initializeStorage(createFakeApp(userData), {
+      isPackaged: true,
+      dataRoot: path.join(root, 'install-parent', 'dianxiaoer-data'),
+      localAppDataPath: localAppData,
+      skipMaintenance: true
+    })
+
+    const taskCache = getManagedTempDirectory('jd-express-prepared')
+    expect(taskCache).toBe(path.join(context.paths.tempDir, 'jd-express-prepared'))
+    expect(fs.statSync(taskCache).isDirectory()).toBe(true)
+    expect(() => getManagedTempDirectory('..', 'outside')).toThrow(/must stay inside/)
+  })
+
   it('将 electron-updater 安装包缓存基目录切换到受管安装盘目录', () => {
     const root = makeTemporaryRoot()
     const cacheBase = path.join(root, 'install-parent', 'dianxiaoer-data', 'storage-v1', 'update-cache')

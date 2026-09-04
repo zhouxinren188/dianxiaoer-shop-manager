@@ -1150,6 +1150,7 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   const actionNonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
   let refreshTimer = null
   let requestSequence = 0
+  let panelMayExist = false
   let allowedPurchases = new Map()
   let syncRunning = false
   let resolvedAfterSale = { serviceId: '', orderId: '' }
@@ -1179,6 +1180,7 @@ function attachOrderPurchasePanel(webContents, options = {}) {
 
   const inject = async model => {
     if (webContents.isDestroyed()) return false
+    panelMayExist = true
     return webContents.executeJavaScript(buildOrderPurchasePanelScript({
       actionPrefix: LOGISTICS_ACTION_PREFIX,
       actionNonce,
@@ -1197,7 +1199,8 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   }
 
   const remove = () => {
-    if (webContents.isDestroyed()) return
+    if (webContents.isDestroyed() || !panelMayExist) return
+    panelMayExist = false
     webContents.executeJavaScript(REMOVE_PANEL_SCRIPT, true).catch(() => {})
   }
 
