@@ -6,7 +6,9 @@ const runtimeLog = require('./runtime-logger')
 const { getDeviceId, getShortDeviceId } = require('./device-identity')
 const { getCookieRevision, setCookieRevision } = require('./cookie-revision-store')
 const {
+  buildDeviceCookieSnapshotUrl,
   fingerprintCookies,
+  hasLocalJdCookies,
   isJdCookie,
   parseCookieData,
   shortFingerprint
@@ -120,7 +122,8 @@ function cookiesToHeader(cookies) {
 }
 
 async function getServerCookieSnapshot(storeId, context = 'read', { timeoutMs } = {}) {
-  const res = await httpRequest(`${BUSINESS_SERVER}/api/cookies/${storeId}`, { timeoutMs })
+  const cookieUrl = buildDeviceCookieSnapshotUrl(BUSINESS_SERVER, storeId, getDeviceId())
+  const res = await httpRequest(cookieUrl, { timeoutMs })
   if (res.statusCode !== 200) {
     writeCookieDiagnostic(storeId, context, `server_read=failed http=${res.statusCode}`)
     return null
@@ -209,40 +212,30 @@ async function restoreCookiesFromDB(storeId, { skipFlush = false, context = 'res
   }
 }
 
-// 同步前只在服务器版本明确更新时替换本地 Cookie；版本未知且内容不同时保留本地，交由真实请求验证。
+// 本机 Cookie 永远优先：只要本地还有京东 Cookie，查询/心跳前就不从服务器覆盖。
+// 仅当本地完全没有京东 Cookie 时，才恢复当前设备自己的服务器备份；
+// 本地被真实请求明确判定失效后的强制恢复由 clearAndRetryWithFreshCookies 处理。
 async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, context = 'precheck', timeoutMs } = {}) {
   try {
-    const snapshot = await getServerCookieSnapshot(storeId, context, { timeoutMs })
-    if (!snapshot) return { success: false, action: 'server_unavailable' }
-
     const ses = session.fromPartition(`persist:platform-${storeId}`)
     const localCookies = await ses.cookies.get({})
     const localJdCount = localCookies.filter(isJdCookie).length
     const localFingerprint = fingerprintCookies(localCookies)
     const localRevision = getCookieRevision(storeId)
 
-    if (localJdCount === 0) {
-      const restored = await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
-      return { success: restored, action: 'restored_empty_local', serverRevision: snapshot.revision }
+    if (hasLocalJdCookies(localCookies)) {
+      writeCookieDiagnostic(
+        storeId,
+        context,
+        `action=keep_local local_rev=${localRevision} fp=${shortFingerprint(localFingerprint)} jd_count=${localJdCount}`
+      )
+      return { success: true, action: 'kept_local', serverRevision: 0 }
     }
 
-    if (localFingerprint === snapshot.fingerprint) {
-      if (snapshot.revision > 0) setCookieRevision(storeId, snapshot.revision)
-      writeCookieDiagnostic(storeId, context, `action=already_current local_rev=${localRevision} server_rev=${snapshot.revision || 0} fp=${shortFingerprint(localFingerprint)} jd_count=${localJdCount}`)
-      return { success: true, action: 'already_current', serverRevision: snapshot.revision }
-    }
-
-    if (localRevision > 0 && snapshot.revision > localRevision) {
-      const restored = await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
-      return { success: restored, action: 'restored_newer_server', serverRevision: snapshot.revision }
-    }
-
-    writeCookieDiagnostic(
-      storeId,
-      context,
-      `action=keep_local_divergence local_rev=${localRevision} server_rev=${snapshot.revision || 0} local_fp=${shortFingerprint(localFingerprint)} server_fp=${shortFingerprint(snapshot.fingerprint)} jd_count=${localJdCount}`
-    )
-    return { success: true, action: 'kept_local_divergence', serverRevision: snapshot.revision }
+    const snapshot = await getServerCookieSnapshot(storeId, context, { timeoutMs })
+    if (!snapshot) return { success: false, action: 'server_unavailable' }
+    const restored = await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
+    return { success: restored, action: 'restored_empty_local', serverRevision: snapshot.revision }
   } catch (error) {
     writeCookieDiagnostic(storeId, context, `refresh=failed reason=${error.message}`)
     return { success: false, action: 'error' }
@@ -449,13 +442,15 @@ async function uploadCookiesToServer(storeId, platform, cookies, {
         writeCookieDiagnostic(storeId, context, `action=skip_same_server server_rev=${snapshot.revision || 0} fp=${shortFingerprint(localFingerprint)}`)
         return { success: true, updated: false, revision: snapshot.revision || 0 }
       }
-      // 数据库迁移后的 legacy 基线没有设备版本关系；允许首台真实验证成功的新版客户端接管一次。
-      if (snapshot?.sourceType === 'legacy' && snapshot.revision > 0) {
+      // 服务端读取已按设备隔离；本机 Cookie 通过真实接口验证后，可以安全地
+      // 以本设备当前版本为基线更新，不会覆盖其他电脑。
+      if (snapshot?.revision > 0) {
         baseRevision = snapshot.revision
-        writeCookieDiagnostic(storeId, context, `action=adopt_legacy_base server_rev=${snapshot.revision} local_fp=${shortFingerprint(localFingerprint)} server_fp=${shortFingerprint(snapshot.fingerprint)}`)
+        writeCookieDiagnostic(storeId, context, `action=adopt_device_base server_rev=${snapshot.revision} local_fp=${shortFingerprint(localFingerprint)} server_fp=${shortFingerprint(snapshot.fingerprint)}`)
       } else {
-        writeCookieDiagnostic(storeId, context, `action=skip_unknown_base server_rev=${snapshot?.revision || 0} source=${snapshot?.sourceType || 'none'} local_fp=${shortFingerprint(localFingerprint)} server_fp=${shortFingerprint(snapshot?.fingerprint)}`)
-        return { success: false, skipped: true, reason: 'unknown_base_revision' }
+        // 本设备尚无备份时以 0 创建首个版本；并发情况下服务端会用 409 拒绝旧基线。
+        baseRevision = 0
+        writeCookieDiagnostic(storeId, context, `action=create_device_base local_fp=${shortFingerprint(localFingerprint)}`)
       }
     }
 
@@ -484,8 +479,10 @@ async function uploadCookiesToServer(storeId, platform, cookies, {
     }
 
     if (response.statusCode === 409) {
-      writeCookieDiagnostic(storeId, context, `upload=rejected_stale source=${sourceType} base_rev=${baseRevision} server_rev=${Number(body?.data?.current_revision || 0)} count=${cookies.length} fp=${shortFingerprint(localFingerprint)}`)
-      return { success: false, conflict: true, currentRevision: Number(body?.data?.current_revision || 0) }
+      const currentRevision = Number(body?.data?.current_revision || 0)
+      if (currentRevision > 0) setCookieRevision(storeId, currentRevision)
+      writeCookieDiagnostic(storeId, context, `upload=rejected_stale source=${sourceType} base_rev=${baseRevision} server_rev=${currentRevision} count=${cookies.length} fp=${shortFingerprint(localFingerprint)}`)
+      return { success: false, conflict: true, currentRevision }
     }
 
     // 兼容尚未部署版本接口的旧服务端：200 且 code=0 已在上方处理，data 可能只是 true。

@@ -5,6 +5,7 @@ const http = require('http')
 const https = require('https')
 const { getAuthToken } = require('./auth-store')
 const { getDeviceId } = require('./device-identity')
+const { setCookieRevision } = require('./cookie-revision-store')
 const runtimeLog = require('./runtime-logger')
 const {
   invalidateTaobaoAccountValidation,
@@ -97,6 +98,40 @@ async function restoreOriginalCookies(storeId) {
   runtimeLog.writeLog('STORE_LOGIN', `store_id=${storeId} phase=cancel_restore restored=${restored}/${originalCookies.length}`)
 }
 
+// 明确登录成功并归并到已有店铺时，将刚捕获的 Cookie 同步到目标店铺的
+// 本机 partition。该操作只发生在当前设备，不会触碰其他电脑的会话。
+async function replaceLocalStoreCookies(storeId, cookies) {
+  const ses = session.fromPartition(`persist:platform-${storeId}`)
+  await ses.clearStorageData({ storages: ['cookies'] })
+  let restored = 0
+  for (const cookie of cookies) {
+    try {
+      const details = {
+        url: cookieUrl(cookie),
+        name: cookie.name,
+        value: cookie.value || '',
+        domain: cookie.domain,
+        path: cookie.path || '/',
+        secure: cookie.secure !== false,
+        httpOnly: !!cookie.httpOnly
+      }
+      if (cookie.expirationDate) details.expirationDate = cookie.expirationDate
+      if (cookie.sameSite && ['no_restriction', 'lax', 'strict', 'unspecified'].includes(cookie.sameSite)) {
+        details.sameSite = cookie.sameSite
+      }
+      await ses.cookies.set(details)
+      restored++
+    } catch (error) {
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} phase=merge_local_cookie result=single_failed name=${cookie?.name || ''} reason=${error.message}`
+      )
+    }
+  }
+  await ses.flushStorageData()
+  return restored
+}
+
 function parseBusinessResponse(response, fallbackMessage) {
   let body = null
   try { body = JSON.parse(response?.data || '{}') } catch { /* ignore */ }
@@ -104,10 +139,16 @@ function parseBusinessResponse(response, fallbackMessage) {
     return {
       success: false,
       statusCode: Number(response?.statusCode || 0),
-      message: body?.message || fallbackMessage
+      message: body?.message || body?.msg || fallbackMessage
     }
   }
   return { success: true, statusCode: response.statusCode, data: body.data }
+}
+
+function requireBusinessResponse(response, fallbackMessage) {
+  const result = parseBusinessResponse(response, fallbackMessage)
+  if (!result.success) throw new Error(result.message)
+  return result.data
 }
 
 function httpRequest(url, options = {}) {
@@ -663,10 +704,7 @@ function registerPlatformWindowIpc(mainWindow) {
 
         try {
           const ses = session.fromPartition(`persist:platform-${storeId}`)
-          await Promise.race([
-            new Promise(resolve => ses.flushStorageData(resolve)),
-            new Promise(resolve => setTimeout(resolve, 5000))
-          ])
+          ses.flushStorageData()
         } catch (error) {
           console.error('[PlatformWindow] Session刷盘失败:', error.message)
         }
@@ -827,6 +865,15 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
 
     const targetStoreId = Number(finalized.data?.store_id || storeId)
     let cookieRevision = Number(finalized.data?.cookie_revision || 0)
+    if (targetStoreId !== Number(storeId)) {
+      const restored = await replaceLocalStoreCookies(targetStoreId, cookies)
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} target_store_id=${targetStoreId} phase=merge_local_cookie restored=${restored}/${cookies.length}`
+      )
+    }
+    if (cookieRevision > 0) setCookieRevision(targetStoreId, cookieRevision)
+
     // 兼容旧服务端：旧接口只完成资料归并，Cookie 仍走原版本化接口。
     if (finalized.data?.cookie_saved !== true) {
       const cookieResult = await uploadCookiesToServer(targetStoreId, platform, cookies, {
@@ -846,10 +893,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
       reason: 'platform_login_capture',
       context: 'platform_login_status'
     })
-    await Promise.race([
-      new Promise(resolve => ses.flushStorageData(resolve)),
-      new Promise(resolve => setTimeout(resolve, 5000))
-    ])
+    ses.flushStorageData()
 
     runtimeLog.writeLog(
       'STORE_LOGIN',
@@ -998,9 +1042,8 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
             }
           }
           // 非阻塞刷盘（不 await，与 purchase-order-capture 一致）
-          ses.flushStorageData(() => {
-            console.log(`[PurchaseWindow] 后台刷盘完成, accountId=${accountId}`)
-          })
+          ses.flushStorageData()
+          console.log(`[PurchaseWindow] 后台刷盘已触发, accountId=${accountId}`)
           console.log(`[PurchaseWindow] 后台恢复写入: ${setOk} 成功, accountId=${accountId}`)
 
           // 恢复成功后：如果窗口还显示登录页，刷新到后台页面
@@ -1230,11 +1273,12 @@ function registerPurchaseAccountIpc(mainWindow) {
         if (cookies && cookies.length > 0) {
           cookies = normalizePddCookieDomain(cookies)
           let hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
-          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+          const saveResponse = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
           })
+          requireBusinessResponse(saveResponse, '保存采购账号 Cookie 失败')
           console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
 
           if (platform === 'taobao') {
@@ -1370,6 +1414,7 @@ function registerPurchaseAccountIpc(mainWindow) {
 
       // 1. 提取 Cookie（同步完成，窗口已隐藏）
       let cookies = []
+      let persistenceFailed = false
       try {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
@@ -1379,7 +1424,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       }
 
       // 2. 关键 cookie 缺失时延迟重读（等待 JS 异步设置）
-      if (cookies && cookies.length > 0) {
+      if (loginDetected && cookies && cookies.length > 0) {
         try {
           const criticalNames = PLATFORM_CRITICAL_COOKIES[platform] || []
           const cookieNames = new Set(cookies.map(c => c.name))
@@ -1402,11 +1447,12 @@ function registerPurchaseAccountIpc(mainWindow) {
           // 保存 Cookie 到服务器
           cookies = normalizePddCookieDomain(cookies)
           const cookieData = JSON.stringify(cookies)
-          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+          const saveResponse = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cookie_data: cookieData, platform })
           })
+          requireBusinessResponse(saveResponse, '保存采购账号 Cookie 失败')
           console.log('[PurchaseWindow] Cookie 已保存，共', cookies.length, '条')
 
           if (platform === 'taobao') {
@@ -1416,31 +1462,39 @@ function registerPurchaseAccountIpc(mainWindow) {
             if (validation.cookieChanged) cookies = await validationSession.cookies.get({})
           }
         } catch (e) {
+          persistenceFailed = true
           console.error('[PurchaseWindow] 保存 Cookie 失败:', e.message)
         }
       }
 
-      // 3. 更新账号信息
-      const updateBody = { platform }
-      if (capturedAccount) updateBody.account = capturedAccount
-      if (capturedPassword) updateBody.password = capturedPassword
-      if (loginDetected || (cookies && cookies.length > 0)) {
-        updateBody.online = true
-      }
+      // 3. 只有 Cookie 已成功持久化，才允许把本次登录视为完整的新会话。
+      // 保存失败时不更新捕获到的账号/密码，避免账号元数据与旧 Cookie 串用。
+      const sessionReplaced = loginDetected && !persistenceFailed && cookies.length > 0
+      const updateBody = { platform, session_replaced: sessionReplaced }
+      if (sessionReplaced && capturedAccount) updateBody.account = capturedAccount
+      if (sessionReplaced && capturedPassword) updateBody.password = capturedPassword
 
       try {
-        await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
+        const updateResponse = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updateBody)
         })
+        requireBusinessResponse(updateResponse, '更新采购账号失败')
         console.log('[PurchaseWindow] 已更新采购账号:', updateBody)
+        // 账号身份变化会清空旧淘宝身份；更新后重新校验一次，确保最终在线状态
+        // 来自当前 Cookie，而不是“保存成功”这一中间步骤。
+        if (sessionReplaced && platform === 'taobao') {
+          const validationSession = session.fromPartition(partitionName)
+          await validateTaobaoPurchaseAccount({ accountId, ses: validationSession, force: true })
+        }
       } catch (e) {
+        persistenceFailed = true
         console.error('[PurchaseWindow] 更新采购账号失败:', e.message)
       }
 
-      // 4. 通知前端刷新
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      // 4. 仅在服务器保存成功且确实取得 Cookie 时通知前端成功
+      if (mainWindow && !mainWindow.isDestroyed() && loginDetected && !persistenceFailed && cookies.length > 0) {
         mainWindow.webContents.send('purchase-account-login-success', { accountId, account: capturedAccount, platform })
       }
 
@@ -1449,10 +1503,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       // 5. 刷盘确保 persist:partition 数据持久化到磁盘（关键！否则重启后cookie丢失）
       try {
         const purchaseSes = session.fromPartition(partitionName)
-        await Promise.race([
-          new Promise(resolve => purchaseSes.flushStorageData(resolve)),
-          new Promise(resolve => setTimeout(resolve, 5000))
-        ])
+        purchaseSes.flushStorageData()
         console.log('[PurchaseWindow] Purchase partition数据已刷盘 accountId=', accountId)
       } catch (e) {
         console.error('[PurchaseWindow] Purchase partition刷盘失败:', e.message)
@@ -1491,6 +1542,40 @@ function registerPurchaseAccountIpc(mainWindow) {
     }
   })
 
+  async function clearPurchaseAccountSession(accountId) {
+    const normalizedAccountId = String(accountId)
+    const win = purchaseWindows.get(normalizedAccountId) || purchaseWindows.get(accountId)
+    if (win && !win.isDestroyed()) win.destroy()
+    purchaseWindows.delete(normalizedAccountId)
+    purchaseWindows.delete(accountId)
+
+    const partitionName = `persist:purchase-${normalizedAccountId}`
+    const ses = session.fromPartition(partitionName)
+    await ses.clearStorageData()
+    ses.flushStorageData()
+    invalidateTaobaoAccountValidation(normalizedAccountId)
+    console.log(`[PurchaseWindow] 已清除账号 ${normalizedAccountId} 的完整本地会话`)
+    return { success: true }
+  }
+
+  ipcMain.handle('reset-purchase-account-session', async (event, { accountId }) => {
+    try {
+      return await clearPurchaseAccountSession(accountId)
+    } catch (err) {
+      console.error('[PurchaseWindow] 重置本地会话失败:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
+  ipcMain.handle('remove-purchase-account-session', async (event, { accountId }) => {
+    try {
+      return await clearPurchaseAccountSession(accountId)
+    } catch (err) {
+      console.error('[PurchaseWindow] 删除本地会话失败:', err.message)
+      return { success: false, error: err.message }
+    }
+  })
+
   ipcMain.handle('refresh-purchase-cookies', async (event, { accountId, platform }) => {
     try {
       const partitionName = `persist:purchase-${accountId}`
@@ -1498,11 +1583,12 @@ function registerPurchaseAccountIpc(mainWindow) {
       let cookies = await ses.cookies.get({})
       if (cookies && cookies.length > 0) {
         if (platform === 'pinduoduo') cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
-        await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+        const saveResponse = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
         })
+        requireBusinessResponse(saveResponse, '刷新采购账号 Cookie 失败')
         // 检查是否有 _m_h5_tk（淘宝 H5 API 签名所需）
         let hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
         console.log(`[PurchaseWindow] 刷新 cookies 到服务器: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
@@ -1714,10 +1800,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       }
 
       // 刷盘确保持久化（5秒超时防止卡死）
-      await Promise.race([
-        new Promise(resolve => ses.flushStorageData(resolve)),
-        new Promise(resolve => setTimeout(resolve, 5000))
-      ])
+      ses.flushStorageData()
 
       // 同步保存到服务器数据库
       try {
@@ -1725,11 +1808,12 @@ function registerPurchaseAccountIpc(mainWindow) {
         if (allCookies.length > 0) {
           // PDD domain 规范化
           if (platform === 'pinduoduo') allCookies = allCookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
-          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+          const saveResponse = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ cookie_data: JSON.stringify(allCookies), platform })
           })
+          requireBusinessResponse(saveResponse, '导入 Cookie 后同步服务器失败')
           console.log(`[PurchaseWindow] Cookie已同步到服务器: ${allCookies.length}条`)
           if (platform === 'taobao') {
             const validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
@@ -1738,6 +1822,7 @@ function registerPurchaseAccountIpc(mainWindow) {
         }
       } catch (e) {
         console.warn('[PurchaseWindow] Cookie同步到服务器失败:', e.message)
+        return { success: false, error: e.message, count: setOk, failed: setFail }
       }
 
       console.log(`[PurchaseWindow] Cookie已导入: ${setOk}成功, ${setFail}失败`)

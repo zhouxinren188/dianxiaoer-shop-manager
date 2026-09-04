@@ -1,6 +1,6 @@
 # 云仓助手异常订单流程接手说明
 
-更新时间：2026-08-15
+更新时间：2026-09-02
 
 当前专项分支：`codex/cloud-warehouse-assistant`
 
@@ -16,14 +16,15 @@
 4. 保存第三方任务及脱敏回执，向页面展示结果；
 5. 在页面内完成店小二自己的自动备注、状态展示、手工兜底等交互。
 
-第一阶段只启用：
+当前已启用：
 
 - `exception.order.check`
 - `exception.order.resolve`
+- `warehouse.order.check`（全量查询，不传订单号；详见
+  [云仓订单全量查询与待打印核验契约](./cloud-warehouse-order-query-contract.md)）
 
 以下命令继续禁用，不得提前接入：
 
-- `warehouse.order.check`
 - `warehouse.order.print`
 - `warehouse.order.outbound`
 
@@ -259,7 +260,8 @@ git diff --check
 9. 第三方错误体为对象时显示可读文本；
 10. 指令成功后的配置刷新失败只能提示状态刷新问题；
 11. “我已转发”仍可独立使用且不会调用云仓助手；
-12. `warehouse.order.check/print/outbound` 仍未启用。
+12. `warehouse.order.check` 已改为用户主动触发的全量查询；
+    `warehouse.order.print/outbound` 仍未启用。
 
 本轮提交前验收结果：
 

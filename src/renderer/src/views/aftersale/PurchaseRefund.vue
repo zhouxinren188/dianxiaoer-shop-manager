@@ -292,7 +292,7 @@ const aftersaleStatusOptions = [
 // 订单状态映射
 const orderStatusMap = {
   ordered: '已下单', pending: '待发货', shipped: '已发货', in_transit: '运输中',
-  received: '已签收', forwarded: '已转发', stocked: '已入库', completed: '已完成',
+  received: '已签收', pending_print: '待打印', forwarded: '已转发', stocked: '已入库', completed: '已完成',
   rejected: '已拒收', cancelled: '已取消'
 }
 const orderStatusTagMap = {

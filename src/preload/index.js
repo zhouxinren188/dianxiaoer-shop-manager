@@ -36,6 +36,8 @@ const validInvokeChannels = [
   'fetch-buyer-sensitive-info',
   'save-buyer-info-to-server',
   'clear-purchase-cookies',
+  'reset-purchase-account-session',
+  'remove-purchase-account-session',
   'toggle-jd-auto-sync',
   'jd-auto-sync-status',
   'open-pdd-browsing-window',

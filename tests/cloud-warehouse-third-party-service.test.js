@@ -3,13 +3,17 @@ import service from '../server/services/cloud-warehouse-third-party-service.js'
 
 const {
   attachExternalCommands,
+  applyConfirmedExceptionResolutionStatus,
   buildCommandPayload,
+  buildWarehouseOrderCheckPayload,
   exceptionFromCommand,
   normalizeCommandResponse,
   normalizeMachineStatus,
   queryMachineStatus,
   recordAutomaticRemarkLog,
-  refreshCommandResult
+  refreshCommandResult,
+  submitWarehouseOrderCheck,
+  warehouseOrdersFromCommand
 } = service
 
 describe('云仓助手在线状态', () => {
@@ -23,6 +27,7 @@ describe('云仓助手在线状态', () => {
         capabilities: {
           'exception.order.check': true,
           'exception.order.resolve': true,
+          'warehouse.order.check': true,
           'warehouse.order.print': true
         },
         active_request_id: null,
@@ -35,7 +40,8 @@ describe('云仓助手在线状态', () => {
       status: 'idle',
       capabilities: {
         'exception.order.check': true,
-        'exception.order.resolve': true
+        'exception.order.resolve': true,
+        'warehouse.order.check': true
       },
       activeRequestId: null,
       checkedAt: '2026-08-14T08:00:00.000Z'
@@ -75,6 +81,157 @@ describe('云仓助手在线状态', () => {
     )
 
     expect(getMachineStatus).toHaveBeenCalledWith('YC-EX8W-9TED')
+  })
+})
+
+describe('云仓订单全量查询协议', () => {
+  it('查询命令不携带订单号、年份或订单数组', () => {
+    expect(buildWarehouseOrderCheckPayload({
+      requestId: 'warehouse-query-001',
+      machineCode: 'YC-7F3K-92MX'
+    })).toEqual({
+      request_id: 'warehouse-query-001',
+      machine_code: 'YC-7F3K-92MX',
+      command: 'warehouse.order.check'
+    })
+  })
+
+  it('按销售订单号解析状态和运单号，并只开放待打印订单', () => {
+    expect(warehouseOrdersFromCommand({
+      requestId: 'warehouse-query-001',
+      command: 'warehouse.order.check',
+      status: 'completed',
+      executionStatus: 'succeeded',
+      final: true,
+      completedAt: '2026-09-02T08:00:00.000Z',
+      result: {
+        queried_at: '2026-09-02T08:00:00.000Z',
+        orders: [{
+          order_no: '3589471019934064',
+          status: 'pending_print',
+          logistics_no: 'JT1234567890'
+        }, {
+          sales_order_no: '3589471019934065',
+          order_status: 'waiting_arrival',
+          waybill_no: 'JT1234567891'
+        }, {
+          order_no: '3589471019934066',
+          status: 'custom_status',
+          printable: true
+        }]
+      }
+    })).toMatchObject({
+      resultShapeValid: true,
+      orders: [{
+        orderNo: '3589471019934064',
+        status: 'pending_print',
+        logisticsNo: 'JT1234567890',
+        printable: true
+      }, {
+        orderNo: '3589471019934065',
+        status: 'waiting_arrival',
+        logisticsNo: 'JT1234567891',
+        printable: false
+      }, {
+        orderNo: '3589471019934066',
+        printable: true
+      }]
+    })
+  })
+
+  it('实际提交时只发送一次全量查询命令并保存结果', async () => {
+    let storedResponse = null
+    let storedStatus = 'submitting'
+    let storedHttpStatus = null
+    const execute = vi.fn(async (sql, params) => {
+      if (sql.includes('FROM cloud_machine_bindings')) {
+        return [[{ machine_code: 'YC-7F3K-92MX' }]]
+      }
+      if (sql.includes('purchase_order_id IS NULL') && sql.includes('SELECT request_id')) {
+        return [[]]
+      }
+      if (sql.includes('INSERT INTO cloud_external_commands')) {
+        expect(params).toHaveLength(4)
+        return [{ affectedRows: 1 }]
+      }
+      if (sql.includes('SET transport_status = ?')) {
+        storedStatus = params[0]
+        storedHttpStatus = params[1]
+        storedResponse = params[4]
+        return [{ affectedRows: 1 }]
+      }
+      if (sql.includes('WHERE owner_id = ? AND request_id = ?') && sql.includes('SELECT request_id')) {
+        return [[{
+          request_id: params[1],
+          purchase_order_id: null,
+          machine_code: 'YC-7F3K-92MX',
+          command: 'warehouse.order.check',
+          order_no: '',
+          order_year: null,
+          transport_status: storedStatus,
+          http_status: storedHttpStatus,
+          reason: 'query_completed',
+          message_redacted: '查询完成',
+          response_json: storedResponse,
+          created_at: '2026-09-02 08:00:00',
+          updated_at: '2026-09-02 08:00:01',
+          completed_at: '2026-09-02 08:00:01'
+        }]]
+      }
+      throw new Error(`unexpected_sql:${sql.replace(/\s+/g, ' ').trim()}`)
+    })
+    const submitCommand = vi.fn(async payload => ({
+      httpStatus: 200,
+      body: {
+        request_id: payload.request_id,
+        command: 'warehouse.order.check',
+        status: 'completed',
+        response: {
+          status: 'succeeded',
+          reason: 'query_completed',
+          message: '查询完成',
+          result: {
+            orders: [{
+              order_no: '3589471019934064',
+              status: 'pending_print',
+              logistics_no: 'JT1234567890'
+            }]
+          }
+        }
+      }
+    }))
+
+    const result = await submitWarehouseOrderCheck(
+      { execute },
+      {
+        getMachineStatus: vi.fn(async () => ({
+          httpStatus: 200,
+          body: {
+            machine_code: 'YC-7F3K-92MX',
+            online: true,
+            state: 'idle',
+            capabilities: { 'warehouse.order.check': true }
+          }
+        })),
+        submitCommand
+      },
+      { user: { id: 18, user_type: 'master' } }
+    )
+
+    expect(submitCommand).toHaveBeenCalledWith({
+      request_id: expect.any(String),
+      machine_code: 'YC-7F3K-92MX',
+      command: 'warehouse.order.check'
+    })
+    expect(result).toMatchObject({
+      final: true,
+      resultShapeValid: true,
+      orders: [{
+        orderNo: '3589471019934064',
+        logisticsNo: 'JT1234567890',
+        printable: true
+      }]
+    })
   })
 })
 
@@ -319,6 +476,7 @@ describe('异常处理后的复查结果', () => {
       execute: vi.fn()
         .mockResolvedValueOnce([rows])
         .mockResolvedValueOnce([[]])
+        .mockResolvedValueOnce([{ affectedRows: 1 }])
     }
 
     const config = await attachExternalCommands(
@@ -331,6 +489,34 @@ describe('异常处理后的复查结果', () => {
     expect(config.workflow.state).toBe('exception_found')
     expect(config.exception.resultRecordedAt).toBe('2026-08-15 16:20:01')
     expect(config.exceptionResolution.resultRecordedAt).toBe('2026-08-15 16:19:01')
+    expect(pool.execute).toHaveBeenLastCalledWith(
+      expect.stringContaining("SET status = 'pending_print'"),
+      [99, 18, 'shipped', 'in_transit', 'received']
+    )
+  })
+
+  it('only a confirmed successful exception resolution advances the order to pending print', async () => {
+    const execute = vi.fn().mockResolvedValue([{ affectedRows: 1 }])
+    await expect(applyConfirmedExceptionResolutionStatus({ execute }, 18, 99, {
+      command: 'exception.order.resolve',
+      status: 'completed',
+      executionStatus: 'succeeded'
+    })).resolves.toBe(true)
+    await expect(applyConfirmedExceptionResolutionStatus({ execute }, 18, 99, {
+      command: 'exception.order.resolve',
+      status: 'accepted',
+      executionStatus: ''
+    })).resolves.toBe(false)
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a confirmed cloud result authoritative when the local status projection needs retry', async () => {
+    const execute = vi.fn().mockRejectedValue(new Error('temporary database failure'))
+    await expect(applyConfirmedExceptionResolutionStatus({ execute }, 18, 99, {
+      command: 'exception.order.resolve',
+      status: 'completed',
+      executionStatus: 'succeeded'
+    })).resolves.toBe(false)
   })
 
   it('自动备注结果按主账号体系和实际操作人持久化为脱敏日志', async () => {

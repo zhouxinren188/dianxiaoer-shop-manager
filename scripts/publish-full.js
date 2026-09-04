@@ -227,7 +227,9 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'services', 'inventory-identity.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-identity.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-image-storage.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-image-storage.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-product-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-product-input.js` },
+    { local: path.join(ROOT, 'server', 'services', 'purchase-account-policy.js'), remote: `${BUSINESS_REMOTE_DIR}/services/purchase-account-policy.js` },
     { local: path.join(ROOT, 'server', 'services', 'purchase-order-sales-status-filter.js'), remote: `${BUSINESS_REMOTE_DIR}/services/purchase-order-sales-status-filter.js` },
+    { local: path.join(ROOT, 'server', 'services', 'purchase-order-status-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/purchase-order-status-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'return-package-purchase-matcher.js'), remote: `${BUSINESS_REMOTE_DIR}/services/return-package-purchase-matcher.js` },
     { local: path.join(ROOT, 'server', 'services', 'sku-binding-input.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sku-binding-input.js` },
     { local: path.join(ROOT, 'server', 'services', 'sms-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/sms-service.js` },
@@ -292,6 +294,14 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
   const [pendingBindingColumns] = await pool.execute('SHOW COLUMNS FROM pending_sku_bindings');
   const [pendingBindingIndexes] = await pool.execute('SHOW INDEX FROM pending_sku_bindings');
   const [[pendingBindingStats]] = await pool.execute('SELECT COUNT(*) AS total FROM pending_sku_bindings');
+  const [cookieIndexes] = await pool.execute('SHOW INDEX FROM cookies');
+  const cookieDeviceIndex = cookieIndexes
+    .filter(row => row.Key_name === 'uk_store_device')
+    .sort((left, right) => Number(left.Seq_in_index) - Number(right.Seq_in_index))
+    .map(row => row.Column_name);
+  if (cookieDeviceIndex.join(',') !== 'store_id,source_device_id') {
+    throw new Error('cookies device unique index missing');
+  }
   console.log('SHIPPING_VERIFY=' + JSON.stringify({
     table: true,
     columns: columns.map(row => row.Field),
@@ -312,6 +322,9 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
     indexes: [...new Set(pendingBindingIndexes.map(row => row.Key_name))],
     pendingBindings: pendingBindingStats
   }));
+  console.log('COOKIE_DEVICE_VERIFY=' + JSON.stringify({
+    uniqueIndex: cookieDeviceIndex
+  }));
   await pool.end();
 })().catch(async error => {
   console.error('BUSINESS_VERIFY_ERROR=' + error.message);
@@ -327,7 +340,8 @@ const { backfillRecentObservations } = require('./services/shipping-timeliness-s
       verify.code !== 0 ||
       !verify.stdout.includes('SHIPPING_VERIFY=') ||
       !verify.stdout.includes('CLOUD_VERIFY=') ||
-      !verify.stdout.includes('SKU_BINDING_VERIFY=')
+      !verify.stdout.includes('SKU_BINDING_VERIFY=') ||
+      !verify.stdout.includes('COOKIE_DEVICE_VERIFY=')
     ) {
       throw new Error('业务数据表或回填验证失败: ' + (verify.stderr || verify.stdout))
     }

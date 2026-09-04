@@ -116,7 +116,7 @@
           </el-select>
         </el-form-item>
         <el-form-item class="filter-actions">
-          <el-button type="primary" @click="handleSearch">
+          <el-button type="primary" :loading="loading || cloudWarehouseOrderCheckLoading" @click="handleSearch">
             <el-icon><Search /></el-icon>
             查询
           </el-button>
@@ -194,9 +194,19 @@
                 <span class="item-value">{{ formatTime(row.created_at) }}</span>
               </span>
               <span class="header-divider">|</span>
-              <span class="header-item">
-                <el-tag :type="orderStatusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
-              </span>
+               <span class="header-item">
+                 <el-tag :type="orderStatusTagType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+                 <el-tag
+                   v-if="row.status === 'pending_print'"
+                   :type="row.cloud_print_ready ? 'success' : 'info'"
+                   size="small"
+                   style="margin-left: 6px"
+                 >
+                   {{ row.cloud_print_ready
+                     ? '云仓可打印'
+                     : (cloudWarehouseOrderCheckLoading ? '云仓核验中' : (row.cloud_print_checked ? '云仓未就绪' : '待云仓核验')) }}
+                 </el-tag>
+               </span>
             </div>
 
           </div>
@@ -243,7 +253,7 @@
               <div class="action-buttons">
                 <el-button type="success" size="small" @click="handleSyncSingle(row)">同步订单</el-button>
                 <el-button v-if="row.status === 'shipped'" type="primary" size="small" @click="handleConfirmReceive(row)">确认签收</el-button>
-                <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
+                <el-button v-if="['in_transit', 'received', 'pending_print'].includes(row.status) && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" type="warning" size="small" @click="handleComplete(row)">订单确认</el-button>
                 <el-button v-if="row.status === 'stocked'" type="warning" size="small" @click="handleOutbound(row)">出库</el-button>
                 <el-button v-if="row.status !== 'cancelled'" type="danger" size="small" @click="handleDirectMarkAfterSale(row)">标记售后</el-button>
@@ -822,13 +832,11 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="password" label="密码" width="140">
+        <el-table-column label="密码" width="100" align="center">
           <template #default="{ row }">
-            <span v-if="row.showPwd">{{ row.password }}</span>
-            <span v-else>******</span>
-            <el-button link size="small" @click="row.showPwd = !row.showPwd" style="margin-left: 4px">
-              {{ row.showPwd ? '隐藏' : '查看' }}
-            </el-button>
+            <el-tag :type="row.has_password ? 'success' : 'info'" size="small" effect="plain">
+              {{ row.has_password ? '已保存' : '未设置' }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="platform" label="平台" width="110" align="center">
@@ -860,7 +868,7 @@
             <el-button link type="info" size="small" @click="handleExportCookies(row)">导出Cookie</el-button>
             <el-button link type="info" size="small" @click="handleImportCookies(row)">导入Cookie</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="handleDeleteAccount(row)">删除</el-button>
+            <el-button v-if="row.can_delete" link type="danger" size="small" @click="handleDeleteAccount(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -954,7 +962,7 @@
           <el-input v-model="editAccountForm.username" placeholder="请输入账号" />
         </el-form-item>
         <el-form-item label="密码">
-          <el-input v-model="editAccountForm.password" placeholder="请输入密码" show-password />
+          <el-input v-model="editAccountForm.password" placeholder="留空则不修改原密码" show-password />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -1233,8 +1241,10 @@ import {
   bindCloudMachine,
   unbindCloudMachine,
   fetchCloudOrderConfiguration,
+  fetchCloudWarehouseOrderCheck,
   startCloudExceptionCheck,
   startCloudExceptionResolve,
+  startCloudWarehouseOrderCheck,
   recordCloudAutomaticRemark
 } from '@/api/cloudWarehouse'
 
@@ -1246,6 +1256,7 @@ const statusOptions = [
   { label: '已发货', value: 'shipped' },
   { label: '运输中', value: 'in_transit' },
   { label: '已签收', value: 'received' },
+  { label: '待打印', value: 'pending_print' },
   { label: '已转发', value: 'forwarded' },
   { label: '已入库', value: 'stocked' },
   { label: '已完成', value: 'completed' },
@@ -1382,6 +1393,7 @@ const cloudOrderConfig = ref(null)
 const cloudLocalProcessLogs = ref([])
 const cloudTaskActionLoading = ref(false)
 const cloudTaskActionKind = ref('')
+const cloudWarehouseOrderCheckLoading = ref(false)
 let cloudOrderPollTimer = null
 let cloudLastNotifiedState = ''
 const cloudTaskActive = computed(() => !!cloudOrderConfig.value?.workflow?.currentTask)
@@ -1468,8 +1480,7 @@ async function loadAccounts() {
       ...a,
       username: a.account || a.username || '',
       status: a.online ? 'online' : 'offline',
-      validatingCookie: false,
-      showPwd: false
+      validatingCookie: false
     }))
     // 默认选中"全部账号"
     if (!selectedAccount.value) {
@@ -1538,8 +1549,7 @@ function handleLoginAccount(row) {
     window.electronAPI.invoke('open-purchase-login-window', {
       accountId: String(row.id),
       platform: row.platform,
-      account: row.username,
-      password: row.password
+      account: row.username
     })
     ElMessage.info('已打开登录窗口')
   } else {
@@ -1599,6 +1609,7 @@ function purchaseAccountCookieStatusReason(row) {
     missing_login_cookie: '缺少有效的淘宝登录 Cookie',
     session_expired: '淘宝明确返回登录会话已过期',
     account_identity_mismatch: '当前分区登录账号与该采购账号原绑定身份不一致',
+    account_metadata_changed: '账号或平台已修改，旧登录会话已安全清除',
     security_verification: '淘宝要求完成安全验证，暂不判定失效',
     taobao_busy: '淘宝接口繁忙，暂不判定失效',
     token_refresh_failed: '淘宝 Token 初始化未完成，暂不判定失效',
@@ -1686,7 +1697,7 @@ function handleEditAccount(row) {
   editAccountForm.id = row.id
   editAccountForm.platform = row.platform
   editAccountForm.username = row.username
-  editAccountForm.password = row.password
+  editAccountForm.password = ''
   editAccountVisible.value = true
 }
 
@@ -1694,31 +1705,59 @@ async function handleEditAccountSubmit() {
   try {
     const submitData = {
       platform: editAccountForm.platform,
-      account: editAccountForm.username,
-      password: editAccountForm.password
+      account: editAccountForm.username
     }
-    await updatePurchaseAccount(editAccountForm.id, submitData)
+    if (editAccountForm.password) submitData.password = editAccountForm.password
+    const result = await updatePurchaseAccount(editAccountForm.id, submitData)
+    let localSessionWarning = ''
+    if (result?.session_reset_required && window.electronAPI) {
+      try {
+        const resetResult = await window.electronAPI.invoke('reset-purchase-account-session', {
+          accountId: String(editAccountForm.id)
+        })
+        if (!resetResult?.success) localSessionWarning = resetResult?.error || '本地登录会话清理失败'
+      } catch (error) {
+        localSessionWarning = error?.message || '本地登录会话清理失败'
+      }
+    }
     editAccountVisible.value = false
-    ElMessage.success('账号信息已更新')
     await loadAccounts()
+    if (localSessionWarning) {
+      ElMessage.warning('账号信息已更新，但本地登录会话清理失败，请重启软件后重新登录：' + localSessionWarning)
+    } else {
+      ElMessage.success('账号信息已更新')
+    }
   } catch (err) {
     ElMessage.error('更新失败: ' + err.message)
   }
 }
-
 async function handleDeleteAccount(row) {
   try {
     await ElMessageBox.confirm(`确定删除账号 ${row.username}？`, '删除确认', { type: 'warning' })
     await deletePurchaseAccount(row.id)
-    ElMessage.success('已删除')
+    let localSessionWarning = ''
+    if (window.electronAPI) {
+      try {
+        const removeResult = await window.electronAPI.invoke('remove-purchase-account-session', {
+          accountId: String(row.id)
+        })
+        if (!removeResult?.success) localSessionWarning = removeResult?.error || '本地登录会话清理失败'
+      } catch (error) {
+        localSessionWarning = error?.message || '本地登录会话清理失败'
+      }
+    }
     await loadAccounts()
+    if (localSessionWarning) {
+      ElMessage.warning('账号已删除，但本地登录会话清理失败，请重启软件后再检查：' + localSessionWarning)
+    } else {
+      ElMessage.success('已删除')
+    }
   } catch (err) {
     if (err !== 'cancel') {
       ElMessage.error('删除失败: ' + (err.message || ''))
     }
   }
 }
-
 function applyCloudBinding(data) {
   cloudBinding.bound = data?.bound === true
   cloudBinding.machineCode = data?.machineCode || ''
@@ -2177,7 +2216,7 @@ function statusLabel(val) {
 }
 
 function orderStatusTagType(val) {
-  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', forwarded: 'primary', stocked: 'success', completed: 'success', rejected: 'danger', cancelled: 'danger' }
+  const map = { ordered: '', pending: 'info', shipped: '', in_transit: 'warning', received: 'success', pending_print: 'warning', forwarded: 'primary', stocked: 'success', completed: 'success', rejected: 'danger', cancelled: 'danger' }
   return map[val] || 'info'
 }
 
@@ -2250,9 +2289,66 @@ watch(selectedAccount, (val) => {
   loadData()
 })
 
-function handleSearch() {
+function applyCloudWarehouseOrderCheck(result) {
+  const cloudOrders = Array.isArray(result?.orders) ? result.orders : []
+  const orderMap = new Map(cloudOrders.map(order => [String(order?.orderNo || '').trim(), order]))
+  tableData.value = tableData.value.map(row => {
+    if (row.status !== 'pending_print') return row
+    const matched = orderMap.get(String(row.sales_order_no || '').trim())
+    return {
+      ...row,
+      cloud_print_checked: result?.final === true,
+      cloud_print_ready: matched?.printable === true,
+      cloud_order_status: matched?.status || '',
+      cloud_logistics_no: matched?.logisticsNo || '',
+      cloud_logistics_company: matched?.logisticsCompany || ''
+    }
+  })
+}
+
+async function checkCloudWarehouseOrdersForCurrentPage() {
+  if (filterForm.status !== 'pending_print' || tableData.value.length === 0) return
+  cloudWarehouseOrderCheckLoading.value = true
+  tableData.value = tableData.value.map(row => ({
+    ...row,
+    cloud_print_checked: false,
+    cloud_print_ready: false
+  }))
+  try {
+    let result = await startCloudWarehouseOrderCheck()
+    const activeStatuses = new Set(['submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing'])
+    // 这里只轮询同一个 requestId 的执行结果，不会再次创建云仓查询指令。
+    for (let attempt = 0; attempt < 20 && result?.requestId && !result?.final &&
+      activeStatuses.has(String(result?.transportStatus || '').toLowerCase()); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 750))
+      result = await fetchCloudWarehouseOrderCheck(result.requestId)
+    }
+    applyCloudWarehouseOrderCheck(result)
+    if (!result?.final) {
+      ElMessage.info('云仓订单查询已提交，稍后可再次点击查询读取结果')
+      return
+    }
+    if (!result?.resultShapeValid) {
+      ElMessage.warning(result?.message || '云仓助手未返回有效的订单列表')
+      return
+    }
+    const readyCount = tableData.value.filter(row => row.status === 'pending_print' && row.cloud_print_ready).length
+    if (readyCount > 0) {
+      ElMessage.success(`云仓查询完成：当前页 ${readyCount} 个订单可打印`)
+    } else {
+      ElMessage.info('云仓查询完成，当前页暂无可打印订单')
+    }
+  } catch (error) {
+    ElMessage.warning(error?.message || '云仓订单查询失败')
+  } finally {
+    cloudWarehouseOrderCheckLoading.value = false
+  }
+}
+
+async function handleSearch() {
   pageInfo.page = 1
-  loadData({ checkCancelAlert: true })
+  await loadData({ checkCancelAlert: true })
+  await checkCloudWarehouseOrdersForCurrentPage()
 }
 
 function handleReset() {

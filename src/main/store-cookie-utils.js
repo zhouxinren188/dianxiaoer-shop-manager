@@ -46,12 +46,24 @@ function isJdCookie(cookie) {
   return domain.includes('jd.com') || domain.includes('jd.hk')
 }
 
+function hasLocalJdCookies(cookies) {
+  return Array.isArray(cookies) && cookies.some(isJdCookie)
+}
+
+function buildDeviceCookieSnapshotUrl(baseUrl, storeId, deviceId) {
+  const base = String(baseUrl || '').replace(/\/+$/, '')
+  return base + '/api/cookies/' + encodeURIComponent(String(storeId))
+    + '?device_id=' + encodeURIComponent(String(deviceId || ''))
+}
+
 function shortFingerprint(fingerprint) {
   return fingerprint ? String(fingerprint).slice(0, 12) : 'none'
 }
 
 module.exports = {
+  buildDeviceCookieSnapshotUrl,
   fingerprintCookies,
+  hasLocalJdCookies,
   isJdCookie,
   normalizeCookiesForFingerprint,
   parseCookieData,

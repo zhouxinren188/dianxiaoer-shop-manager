@@ -2,6 +2,16 @@ const crypto = require('crypto')
 
 const PROMOTED_SOURCE_TYPES = new Set(['login_capture', 'manual_import'])
 const VERSIONED_SOURCE_TYPES = new Set(['heartbeat', 'recovery_verified'])
+const DEVICE_ID_PATTERN = /^device_[a-zA-Z0-9-]{16,80}$/
+
+function normalizeCookieDeviceId(value) {
+  return String(value || '').trim().slice(0, 100)
+}
+
+function isAllowedCookieDeviceId(value) {
+  const normalized = normalizeCookieDeviceId(value)
+  return normalized === '' || DEVICE_ID_PATTERN.test(normalized)
+}
 
 function normalizeCookieForFingerprint(cookie) {
   return {
@@ -71,6 +81,8 @@ function decideCookieUpdate({ currentRevision, currentFingerprint, incomingFinge
 module.exports = {
   decideCookieUpdate,
   fingerprintCookieData,
+  isAllowedCookieDeviceId,
+  normalizeCookieDeviceId,
   normalizeSourceType,
   parseCookieData
 }

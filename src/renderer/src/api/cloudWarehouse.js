@@ -24,6 +24,14 @@ export function startCloudExceptionResolve(purchaseOrderId) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/exception/resolve`, {})
 }
 
+export function startCloudWarehouseOrderCheck() {
+  return post('/api/cloud-warehouse/warehouse-orders/check', {})
+}
+
+export function fetchCloudWarehouseOrderCheck(requestId) {
+  return get(`/api/cloud-warehouse/warehouse-orders/check/${encodeURIComponent(requestId)}`)
+}
+
 export function recordCloudAutomaticRemark(purchaseOrderId, result) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/process-logs/auto-remark`, {
     success: result?.success === true,

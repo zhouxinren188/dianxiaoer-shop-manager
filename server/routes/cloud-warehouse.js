@@ -13,7 +13,9 @@ const {
   queryMachineStatus,
   recordAutomaticRemarkLog,
   refreshCommandResult,
-  submitOrderCommand
+  refreshWarehouseOrderCheck,
+  submitOrderCommand,
+  submitWarehouseOrderCheck
 } = require('../services/cloud-warehouse-third-party-service')
 
 function ok(data) {
@@ -27,7 +29,7 @@ function fail(message, reason) {
 }
 
 function statusForError(error) {
-  if (['purchase_order_not_found'].includes(error?.code)) return 404
+  if (['purchase_order_not_found', 'cloud_command_not_found'].includes(error?.code)) return 404
   if (['machine_binding_forbidden'].includes(error?.code)) return 403
   if (['machine_code_in_use', 'workflow_task_active', 'precondition_not_met',
     'machine_binding_changed', 'order_locator_changed', 'machine_busy'].includes(error?.code)) return 409
@@ -288,6 +290,35 @@ module.exports = function createCloudWarehouseRouter(pool, options = {}) {
     } catch (error) {
       console.error('[CloudWarehouse] 查询订单云仓配置失败:', error.message)
       res.status(statusForError(error)).json(fail(error.message || '查询订单云仓配置失败', error.code))
+    }
+  })
+
+  // 主动查询云仓当前订单列表。请求不携带任何订单号，云仓助手返回后由调用端
+  // 使用关联销售订单号匹配当前待打印采购单。
+  router.post('/warehouse-orders/check', async (req, res) => {
+    try {
+      assertEmptyBody(req.body || {})
+      res.json(ok(await submitWarehouseOrderCheck(pool, getApiClient(), {
+        user: req.user
+      })))
+    } catch (error) {
+      console.error('[CloudWarehouse] 发送云仓订单查询指令失败:', error.code || error.message)
+      res.status(statusForError(error)).json(fail(error.message || '发送云仓订单查询指令失败', error.code))
+    }
+  })
+
+  // 只读取同一个查询指令的执行结果，不会再次创建 warehouse.order.check。
+  router.get('/warehouse-orders/check/:requestId', async (req, res) => {
+    try {
+      res.json(ok(await refreshWarehouseOrderCheck(
+        pool,
+        getApiClient(),
+        req.user,
+        req.params.requestId
+      )))
+    } catch (error) {
+      console.error('[CloudWarehouse] 刷新云仓订单查询结果失败:', error.code || error.message)
+      res.status(statusForError(error)).json(fail(error.message || '刷新云仓订单查询结果失败', error.code))
     }
   })
 

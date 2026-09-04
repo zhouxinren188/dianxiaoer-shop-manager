@@ -5478,7 +5478,7 @@ onUnmounted(() => {
 }
 
 .order-logistics-value {
-  color: #2b5aed;
+  color: #303133;
   font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;

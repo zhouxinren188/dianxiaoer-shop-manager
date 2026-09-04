@@ -1,10 +1,22 @@
 const crypto = require('crypto')
 const { assertMachineCode, getTenantOwnerId } = require('./cloud-warehouse-protocol')
 const { normalizeOrderYear, readAccessiblePurchaseOrder, readRelatedSalesLocator } = require('./cloud-warehouse-order-service')
+const { markPendingPrintAfterExceptionResolution } = require('./purchase-order-status-service')
 
-const ENABLED_COMMANDS = Object.freeze(['exception.order.check', 'exception.order.resolve'])
+const ENABLED_COMMANDS = Object.freeze([
+  'exception.order.check',
+  'exception.order.resolve',
+  'warehouse.order.check'
+])
 const ACTIVE_STATUSES = new Set(['submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing'])
 const SENSITIVE_KEY_PATTERN = /(authorization|api[_-]?key|cookie|token|password|secret|credential)/i
+const PRINT_READY_STATUSES = new Set([
+  'pending_print',
+  'waiting_print',
+  'ready_to_print',
+  '待打印',
+  '待打单'
+])
 
 function serviceError(code, message, details = {}) {
   const error = new Error(message)
@@ -16,7 +28,7 @@ function serviceError(code, message, details = {}) {
 function assertEnabledCommand(value) {
   const command = String(value || '').trim()
   if (!ENABLED_COMMANDS.includes(command)) {
-    throw serviceError('command_not_allowed', '第一阶段只允许异常查询和异常处理命令')
+    throw serviceError('command_not_allowed', '该云仓助手命令尚未在店小二启用')
   }
   return command
 }
@@ -28,7 +40,7 @@ function unwrapData(value) {
 
 function sanitizeExternalValue(value, depth = 0) {
   if (depth > 6) return '[已省略]'
-  if (Array.isArray(value)) return value.slice(0, 100).map(item => sanitizeExternalValue(item, depth + 1))
+  if (Array.isArray(value)) return value.slice(0, 500).map(item => sanitizeExternalValue(item, depth + 1))
   if (!value || typeof value !== 'object') {
     if (typeof value === 'string') return value.slice(0, 1000)
     if (typeof value === 'number' || typeof value === 'boolean' || value === null) return value
@@ -252,12 +264,153 @@ async function persistCommandResponse(pool, ownerId, normalized) {
   )
 }
 
+async function applyConfirmedExceptionResolutionStatus(pool, ownerId, purchaseOrderId, command) {
+  if (command?.command !== 'exception.order.resolve' ||
+      command.status !== 'completed' || command.executionStatus !== 'succeeded') {
+    return false
+  }
+  try {
+    return await markPendingPrintAfterExceptionResolution(pool, { ownerId, purchaseOrderId })
+  } catch (error) {
+    // 云仓权威回执已经成功时不能因本地状态投影失败把指令误写回“提交未知”；
+    // 配置读取会继续幂等补偿该状态。
+    console.error('[CloudWarehouse] 异常处理成功后更新待打印状态失败:', error.message)
+    return false
+  }
+}
+
+function buildWarehouseOrderCheckPayload({ requestId, machineCode }) {
+  return {
+    request_id: String(requestId),
+    machine_code: assertMachineCode(machineCode),
+    command: assertEnabledCommand('warehouse.order.check')
+  }
+}
+
 async function queryMachineStatus(pool, apiClient, user) {
   const ownerId = getTenantOwnerId(user)
   const binding = await readBinding(pool, ownerId)
   if (!binding) throw serviceError('machine_binding_missing', '请先绑定云仓助手机器码')
   const machineCode = assertMachineCode(binding.machine_code)
   return normalizeMachineStatus(await apiClient.getMachineStatus(machineCode), machineCode)
+}
+
+function normalizeWarehouseOrderStatus(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function normalizeWarehouseOrderItem(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+  const orderNo = String(
+    item.order_no || item.orderNo || item.sales_order_no || item.salesOrderNo || ''
+  ).trim()
+  if (!orderNo || orderNo.length > 100) return null
+  const status = String(
+    item.status || item.order_status || item.orderStatus || item.state || item.observed_status || ''
+  ).trim()
+  const normalizedStatus = normalizeWarehouseOrderStatus(status)
+  const explicitlyPrintable = typeof item.printable === 'boolean' ? item.printable : null
+  return {
+    orderNo,
+    status: status.slice(0, 80),
+    logisticsNo: String(
+      item.logistics_no || item.logisticsNo || item.tracking_no || item.trackingNo ||
+      item.waybill_no || item.waybillNo || ''
+    ).trim().slice(0, 100),
+    logisticsCompany: String(
+      item.logistics_company || item.logisticsCompany || item.carrier || ''
+    ).trim().slice(0, 100),
+    printable: explicitlyPrintable === null
+      ? PRINT_READY_STATUSES.has(normalizedStatus)
+      : explicitlyPrintable
+  }
+}
+
+function warehouseOrdersFromCommand(command) {
+  if (!command || command.command !== 'warehouse.order.check') return null
+  const result = command.result && typeof command.result === 'object' ? command.result : {}
+  const rawOrders = Array.isArray(result.orders)
+    ? result.orders
+    : (Array.isArray(result.order_list) ? result.order_list : null)
+  const success = command.status === 'completed' && command.executionStatus === 'succeeded'
+  const orders = (rawOrders || []).map(normalizeWarehouseOrderItem).filter(Boolean)
+  return {
+    requestId: command.requestId,
+    transportStatus: command.status,
+    status: command.executionStatus || command.status,
+    final: command.final === true,
+    reason: command.reason,
+    message: command.message,
+    resultShapeValid: success && Array.isArray(rawOrders),
+    queriedAt: result.queried_at || command.completedAt || null,
+    orders
+  }
+}
+
+async function submitWarehouseOrderCheck(pool, apiClient, { user }) {
+  const command = assertEnabledCommand('warehouse.order.check')
+  const ownerId = getTenantOwnerId(user)
+  const binding = await readBinding(pool, ownerId)
+  if (!binding) throw serviceError('machine_binding_missing', '请先绑定云仓助手机器码')
+  const machineCode = assertMachineCode(binding.machine_code)
+  const machine = normalizeMachineStatus(await apiClient.getMachineStatus(machineCode), machineCode)
+  if (!machine.online) throw serviceError('machine_offline', '绑定的云仓助手当前离线')
+  if (machine.busy) throw serviceError('machine_busy', '绑定的云仓助手当前忙碌，请稍后再试')
+  if (machine.capabilities[command] !== true) {
+    throw serviceError('capability_unavailable', '绑定的云仓助手尚未启用云仓订单查询')
+  }
+
+  const [activeRows] = await pool.execute(
+    `SELECT request_id FROM cloud_external_commands
+      WHERE owner_id = ? AND purchase_order_id IS NULL AND command = 'warehouse.order.check'
+        AND transport_status IN ('submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing')
+      ORDER BY created_at DESC LIMIT 1`,
+    [ownerId]
+  )
+  if (activeRows.length) {
+    return warehouseOrdersFromCommand(await refreshCommandResult(
+      pool,
+      apiClient,
+      user,
+      activeRows[0].request_id
+    ))
+  }
+
+  const requestId = createRequestId()
+  const payload = buildWarehouseOrderCheckPayload({ requestId, machineCode })
+  await pool.execute(
+    `INSERT INTO cloud_external_commands
+       (request_id, owner_id, purchase_order_id, requested_by_user_id, machine_code,
+        command, order_no, order_year, transport_status)
+     VALUES (?, ?, NULL, ?, ?, 'warehouse.order.check', '', NULL, 'submitting')`,
+    [requestId, ownerId, Number(user.id), machineCode]
+  )
+  try {
+    const normalized = normalizeCommandResponse(await apiClient.submitCommand(payload), requestId, command)
+    await persistCommandResponse(pool, ownerId, normalized)
+    return warehouseOrdersFromCommand(commandRowSummary(await readCommand(pool, ownerId, requestId)))
+  } catch (error) {
+    if (isRemoteCommandMissingError(error)) {
+      await persistTerminalCommandFailure(pool, ownerId, requestId, error)
+    } else {
+      await pool.execute(
+        `UPDATE cloud_external_commands
+            SET transport_status = 'submission_unknown', reason = ?, message_redacted = ?, updated_at = NOW(3)
+          WHERE owner_id = ? AND request_id = ?`,
+        [String(error.code || 'cloud_api_error').slice(0, 100), String(error.message || '').slice(0, 500), ownerId, requestId]
+      )
+    }
+    error.requestId = requestId
+    throw error
+  }
+}
+
+async function refreshWarehouseOrderCheck(pool, apiClient, user, requestId) {
+  const command = await refreshCommandResult(pool, apiClient, user, requestId)
+  if (command?.command !== 'warehouse.order.check') {
+    throw serviceError('cloud_command_mismatch', '该 requestId 不是云仓订单查询指令')
+  }
+  return warehouseOrdersFromCommand(command)
 }
 
 async function recordAutomaticRemarkLog(pool, user, purchaseOrderId, result) {
@@ -342,7 +495,9 @@ async function submitOrderCommand(pool, apiClient, { user, purchaseOrderId, comm
   try {
     const normalized = normalizeCommandResponse(await apiClient.submitCommand(payload), requestId, normalizedCommand)
     await persistCommandResponse(pool, ownerId, normalized)
-    return commandRowSummary(await readCommand(pool, ownerId, requestId))
+    const commandSummary = commandRowSummary(await readCommand(pool, ownerId, requestId))
+    await applyConfirmedExceptionResolutionStatus(pool, ownerId, order.id, commandSummary)
+    return commandSummary
   } catch (error) {
     if (isRemoteCommandMissingError(error)) {
       await persistTerminalCommandFailure(pool, ownerId, requestId, error)
@@ -363,7 +518,11 @@ async function refreshCommandResult(pool, apiClient, user, requestId) {
   const ownerId = getTenantOwnerId(user)
   const row = await readCommand(pool, ownerId, requestId)
   if (!row) throw serviceError('cloud_command_not_found', '云仓指令不存在或当前账号无权查看')
-  if (!ACTIVE_STATUSES.has(String(row.transport_status || '').toLowerCase())) return commandRowSummary(row)
+  if (!ACTIVE_STATUSES.has(String(row.transport_status || '').toLowerCase())) {
+    const commandSummary = commandRowSummary(row)
+    await applyConfirmedExceptionResolutionStatus(pool, ownerId, row.purchase_order_id, commandSummary)
+    return commandSummary
+  }
   try {
     const normalized = normalizeCommandResponse(await apiClient.getCommandResult(requestId), requestId, row.command)
     await persistCommandResponse(pool, ownerId, normalized)
@@ -371,7 +530,9 @@ async function refreshCommandResult(pool, apiClient, user, requestId) {
     if (!isRemoteCommandMissingError(error)) throw error
     await persistTerminalCommandFailure(pool, ownerId, requestId, error)
   }
-  return commandRowSummary(await readCommand(pool, ownerId, requestId))
+  const commandSummary = commandRowSummary(await readCommand(pool, ownerId, requestId))
+  await applyConfirmedExceptionResolutionStatus(pool, ownerId, row.purchase_order_id, commandSummary)
+  return commandSummary
 }
 
 function exceptionFromCommand(command) {
@@ -442,6 +603,7 @@ async function attachExternalCommands(pool, user, purchaseOrderId, configuration
   const active = rows.find(row => ACTIVE_STATUSES.has(String(row.transport_status || '').toLowerCase()))
   const checkSummary = commandRowSummary(check)
   const resolveSummary = commandRowSummary(resolve)
+  await applyConfirmedExceptionResolutionStatus(pool, ownerId, purchaseOrderId, resolveSummary)
   const exception = exceptionFromCommand(checkSummary)
   const exceptionResolution = resolutionFromCommand(resolveSummary)
   const checkIsLatest = !!check && (!resolve || rows.indexOf(check) < rows.indexOf(resolve))
@@ -492,9 +654,11 @@ async function attachExternalCommands(pool, user, purchaseOrderId, configuration
 module.exports = {
   ACTIVE_STATUSES,
   ENABLED_COMMANDS,
+  applyConfirmedExceptionResolutionStatus,
   assertEnabledCommand,
   attachExternalCommands,
   buildCommandPayload,
+  buildWarehouseOrderCheckPayload,
   commandRowSummary,
   commandProcessLog,
   createRequestId,
@@ -505,7 +669,10 @@ module.exports = {
   queryMachineStatus,
   recordAutomaticRemarkLog,
   refreshCommandResult,
+  refreshWarehouseOrderCheck,
   resolutionFromCommand,
   sanitizeExternalValue,
-  submitOrderCommand
+  submitOrderCommand,
+  submitWarehouseOrderCheck,
+  warehouseOrdersFromCommand
 }

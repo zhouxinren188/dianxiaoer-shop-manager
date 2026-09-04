@@ -25,6 +25,8 @@ const {
 const {
   decideCookieUpdate,
   fingerprintCookieData,
+  isAllowedCookieDeviceId,
+  normalizeCookieDeviceId,
   normalizeSourceType,
   parseCookieData
 } = require('./services/store-cookie-policy')
@@ -56,7 +58,13 @@ const {
   buildPurchaseOrderSalesStatusFilter,
   normalizeStatusText
 } = require('./services/purchase-order-sales-status-filter')
+const {
+  hasValidPlatformCookies,
+  sanitizePurchaseAccountRow,
+  purchaseAccountMetadataChanged
+} = require('./services/purchase-account-policy')
 const { buildReturnPackageLookup } = require('./services/return-package-purchase-matcher')
+const { mergePurchaseOrderStatus } = require('./services/purchase-order-status-service')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -391,6 +399,38 @@ app.get('/api/sync-lock/:storeId', async (req, res) => {
 // 获取当前用户对应的主账号 ID（master 就是自己，sub 取 parent_id）
 function getOwnerId(user) {
   return user.user_type === 'master' ? user.id : user.parent_id
+}
+
+async function getAccessiblePurchaseAccount(user, accountId) {
+  const normalizedAccountId = Number(accountId)
+  if (!Number.isInteger(normalizedAccountId) || normalizedAccountId <= 0) return null
+  const ownerId = getOwnerId(user)
+
+  if (user.user_type === 'sub') {
+    const [rows] = await pool.execute(
+      `SELECT pa.* FROM purchase_accounts pa
+       INNER JOIN user_purchase_accounts upa ON upa.account_id = pa.id
+       WHERE pa.id = ? AND pa.owner_id = ? AND upa.user_id = ?
+       LIMIT 1`,
+      [normalizedAccountId, ownerId, user.id]
+    )
+    return rows[0] || null
+  }
+
+  const [rows] = await pool.execute(
+    'SELECT * FROM purchase_accounts WHERE id = ? AND owner_id = ? LIMIT 1',
+    [normalizedAccountId, ownerId]
+  )
+  return rows[0] || null
+}
+
+async function requireAccessiblePurchaseAccount(req, res) {
+  const account = await getAccessiblePurchaseAccount(req.user, req.params.id)
+  if (!account) {
+    res.status(403).json(fail('无权操作此采购账号'))
+    return null
+  }
+  return account
 }
 
 // 获取当前用户可访问的店铺 ID 列表
@@ -1372,12 +1412,12 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
     const merchantId = String(req.body?.merchant_id || '').trim().slice(0, 50)
     const shopId = String(req.body?.shop_id || '').trim().slice(0, 50)
     const cookieDomain = String(req.body?.domain || '').trim().slice(0, 50)
-    const sourceDeviceId = String(req.body?.device_id || '').trim().slice(0, 100)
+    const sourceDeviceId = normalizeCookieDeviceId(req.body?.device_id)
     const parsedCookies = parseCookieData(req.body?.cookie_data)
     if (!parsedCookies.length) {
       return res.status(400).json(fail('未获取到有效Cookie，请确认登录完成后重试'))
     }
-    if (sourceDeviceId && !/^device_[a-zA-Z0-9-]{16,80}$/.test(sourceDeviceId)) {
+    if (!isAllowedCookieDeviceId(sourceDeviceId)) {
       return res.status(400).json(fail('device_id 无效'))
     }
     if (cookieDomain === 'jd') {
@@ -1461,8 +1501,8 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
     )
 
     const [cookieRows] = await connection.execute(
-      'SELECT * FROM cookies WHERE store_id = ? FOR UPDATE',
-      [targetStoreId]
+      'SELECT * FROM cookies WHERE store_id = ? AND source_device_id = ? FOR UPDATE',
+      [targetStoreId, sourceDeviceId]
     )
     const currentCookie = cookieRows[0] || null
     const currentFingerprint = currentCookie
@@ -1709,7 +1749,8 @@ app.delete('/api/warehouses/:id', async (req, res) => {
 
 // ============ Cookie 接口 ============
 
-// 获取所有可访问店铺的 Cookie
+// 获取所有可访问店铺的 Cookie。传 device_id 时只返回当前设备的备份；
+// 未传时保留管理/诊断接口原有语义，返回所有设备记录。
 app.get('/api/cookies', async (req, res) => {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -1717,16 +1758,23 @@ app.get('/api/cookies', async (req, res) => {
       return res.json(ok({ list: [], total: 0 }))
     }
 
+    const normalizedDeviceId = normalizeCookieDeviceId(req.query?.device_id)
+    if (!isAllowedCookieDeviceId(normalizedDeviceId)) {
+      return res.status(400).json(fail('device_id 无效'))
+    }
+
     const placeholders = storeIds.map(() => '?').join(',')
+    const deviceFilter = normalizedDeviceId ? ' AND c.source_device_id = ?' : ''
+    const queryValues = normalizedDeviceId ? [...storeIds, normalizedDeviceId] : storeIds
     const [rows] = await pool.execute(
       `SELECT c.id, c.store_id, c.cookie_data, c.domain, c.revision,
               c.source_device_id, c.source_type, c.fingerprint, c.last_verified_at, c.saved_at,
               s.name AS store_name, s.platform, s.account
        FROM cookies c
        LEFT JOIN stores s ON c.store_id = s.id
-       WHERE c.store_id IN (${placeholders})
+       WHERE c.store_id IN (${placeholders})${deviceFilter}
        ORDER BY c.saved_at DESC`,
-      storeIds
+      queryValues
     )
     res.json(ok({ list: rows, total: rows.length }))
   } catch (err) {
@@ -1734,7 +1782,8 @@ app.get('/api/cookies', async (req, res) => {
   }
 })
 
-// 获取指定店铺的 Cookie（权限校验）
+// 获取指定店铺、指定设备的 Cookie（权限校验）。新版客户端必须传 device_id，
+// 未传时只读取 legacy 槽位，绝不随机拿另一台电脑的会话。
 app.get('/api/cookies/:storeId', async (req, res) => {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -1743,8 +1792,14 @@ app.get('/api/cookies/:storeId', async (req, res) => {
       return res.status(403).json(fail('无权访问此店铺 Cookie'))
     }
 
+    const normalizedDeviceId = normalizeCookieDeviceId(req.query?.device_id)
+    if (!isAllowedCookieDeviceId(normalizedDeviceId)) {
+      return res.status(400).json(fail('device_id 无效'))
+    }
+
     const [rows] = await pool.execute(
-      'SELECT * FROM cookies WHERE store_id = ?', [storeId]
+      'SELECT * FROM cookies WHERE store_id = ? AND source_device_id = ?',
+      [storeId, normalizedDeviceId]
     )
     if (!rows.length) return res.status(404).json(fail('该店铺无 Cookie 数据'))
     res.json(ok(rows[0]))
@@ -1775,8 +1830,8 @@ app.post('/api/cookies', async (req, res) => {
 
     const normalizedSource = normalizeSourceType(source_type)
     const normalizedDomain = String(domain || '').trim().slice(0, 50)
-    const normalizedDeviceId = String(device_id || '').trim().slice(0, 100)
-    if (normalizedDeviceId && !/^device_[a-zA-Z0-9-]{16,80}$/.test(normalizedDeviceId)) {
+    const normalizedDeviceId = normalizeCookieDeviceId(device_id)
+    if (!isAllowedCookieDeviceId(normalizedDeviceId)) {
       return res.status(400).json(fail('device_id 无效'))
     }
 
@@ -1794,8 +1849,8 @@ app.post('/api/cookies', async (req, res) => {
     await connection.beginTransaction()
 
     const [rows] = await connection.execute(
-      'SELECT * FROM cookies WHERE store_id = ? FOR UPDATE',
-      [+store_id]
+      'SELECT * FROM cookies WHERE store_id = ? AND source_device_id = ? FOR UPDATE',
+      [+store_id, normalizedDeviceId]
     )
     const current = rows[0] || null
     const currentFingerprint = current
@@ -1834,19 +1889,20 @@ app.post('/api/cookies', async (req, res) => {
     } else if (decision.contentChanged) {
       await connection.execute(
         `UPDATE cookies
-         SET cookie_data = ?, domain = ?, revision = ?, source_device_id = ?, source_type = ?,
+         SET cookie_data = ?, domain = ?, revision = ?, source_type = ?,
              fingerprint = ?, last_verified_at = IF(? = 1, NOW(), last_verified_at), saved_at = NOW()
-         WHERE store_id = ?`,
-        [serializedCookieData, normalizedDomain, decision.nextRevision, normalizedDeviceId,
-          normalizedSource, incomingFingerprint, verified === true ? 1 : 0, +store_id]
+         WHERE store_id = ? AND source_device_id = ?`,
+        [serializedCookieData, normalizedDomain, decision.nextRevision,
+          normalizedSource, incomingFingerprint, verified === true ? 1 : 0,
+          +store_id, normalizedDeviceId]
       )
     } else {
       await connection.execute(
         `UPDATE cookies
          SET fingerprint = IF(fingerprint = '' OR fingerprint IS NULL, ?, fingerprint),
              last_verified_at = IF(? = 1, NOW(), last_verified_at)
-         WHERE store_id = ?`,
-        [incomingFingerprint, verified === true ? 1 : 0, +store_id]
+         WHERE store_id = ? AND source_device_id = ?`,
+        [incomingFingerprint, verified === true ? 1 : 0, +store_id, normalizedDeviceId]
       )
     }
 
@@ -4847,62 +4903,41 @@ app.post('/api/shipping-timeliness/recommend', async (req, res) => {
 
 app.get('/api/purchase-accounts', async (req, res) => {
   try {
-    // 用 LEFT JOIN 一次性查出账号+cookie有效性，避免 N+1 查询
     let rows
     if (req.user.user_type === 'sub') {
-      const [r] = await pool.execute(
+      const [result] = await pool.execute(
         `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online,
                 pa.cookie_status, pa.cookie_status_reason, pa.cookie_checked_at,
                 pa.taobao_user_id, pa.taobao_nick, pa.created_at, pa.updated_at,
-                CASE
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status = 'valid' THEN 1
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status IN ('invalid','mismatch') THEN 0
-                  ELSE CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END
-                END AS cookie_valid,
-                CASE
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_checked_at IS NOT NULL
-                    THEN pa.cookie_status
-                  WHEN pc.id IS NOT NULL THEN 'stored'
-                  ELSE 'missing'
-                END AS effective_cookie_status
+                pc.cookie_data
          FROM purchase_accounts pa
          INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
          LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
-         WHERE upa.user_id = ?
-         ORDER BY pa.id DESC`, [req.user.id]
+         WHERE upa.user_id = ? AND pa.owner_id = ?
+         ORDER BY pa.id DESC`,
+        [req.user.id, getOwnerId(req.user)]
       )
-      rows = r
+      rows = result
     } else {
-      const ownerId = getOwnerId(req.user)
-      const [r] = await pool.execute(
+      const [result] = await pool.execute(
         `SELECT pa.id, pa.account, pa.password, pa.platform, pa.online,
                 pa.cookie_status, pa.cookie_status_reason, pa.cookie_checked_at,
                 pa.taobao_user_id, pa.taobao_nick, pa.created_at, pa.updated_at,
-                CASE
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status = 'valid' THEN 1
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_status IN ('invalid','mismatch') THEN 0
-                  ELSE CASE WHEN pc.id IS NOT NULL THEN 1 ELSE 0 END
-                END AS cookie_valid,
-                CASE
-                  WHEN pa.platform IN ('taobao','tmall') AND pa.cookie_checked_at IS NOT NULL
-                    THEN pa.cookie_status
-                  WHEN pc.id IS NOT NULL THEN 'stored'
-                  ELSE 'missing'
-                END AS effective_cookie_status
+                pc.cookie_data
          FROM purchase_accounts pa
          LEFT JOIN purchase_cookies pc ON pa.id = pc.account_id
-         WHERE pa.owner_id=?
+         WHERE pa.owner_id = ?
          ORDER BY pa.id DESC`,
-        [ownerId]
+        [getOwnerId(req.user)]
       )
-      rows = r
+      rows = result
     }
 
+    const canDelete = req.user.user_type !== 'sub'
     const accountList = rows.map(row => ({
-      ...row,
-      cookie_valid: !!row.cookie_valid
+      ...sanitizePurchaseAccountRow(row),
+      can_delete: canDelete
     }))
-
     res.json(ok({ list: accountList, total: accountList.length }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -4910,131 +4945,209 @@ app.get('/api/purchase-accounts', async (req, res) => {
 app.post('/api/purchase-accounts', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)
-    const { account, password, platform } = req.body
+    const account = String(req.body?.account || '').trim()
+    const password = String(req.body?.password || '')
+    const platform = String(req.body?.platform || '').trim().toLowerCase()
     if (!platform) return res.json(fail('platform 不能为空'))
     if (!account) return res.json(fail('账号不能为空'))
-    // upsert：同 account+platform+owner_id 存在则更新，不存在则插入
-    const [result] = await pool.execute(
-      `INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)
-       ON DUPLICATE KEY UPDATE password=VALUES(password), online=0`,
-      [account, password||'', platform, ownerId]
-    )
-    // insertId 在 ON DUPLICATE KEY UPDATE 时可能不可靠，用 SELECT 确保获取正确的 ID
-    const [rows] = await pool.execute(
-      'SELECT id FROM purchase_accounts WHERE account = ? AND platform = ? AND owner_id = ?',
+
+    const [existingRows] = await pool.execute(
+      'SELECT * FROM purchase_accounts WHERE account = ? AND platform = ? AND owner_id = ? LIMIT 1',
       [account, platform, ownerId]
     )
-    const accountId = rows[0]?.id
-    if (!accountId) return res.status(500).json(fail('账号创建/更新失败'))
-    const isUpdate = result.affectedRows >= 2
-    // 自动分配给创建者
+    const existing = existingRows[0]
+    let accountId
+    let updated = false
+
+    if (existing) {
+      if (req.user.user_type === 'sub' && !await getAccessiblePurchaseAccount(req.user, existing.id)) {
+        return res.status(403).json(fail('该采购账号已存在，但未分配给当前子账号'))
+      }
+      accountId = existing.id
+      updated = true
+      if (password) {
+        await pool.execute('UPDATE purchase_accounts SET password = ? WHERE id = ?', [password, accountId])
+      }
+    } else {
+      const [result] = await pool.execute(
+        'INSERT INTO purchase_accounts (account, password, platform, online, owner_id) VALUES (?,?,?,0,?)',
+        [account, password, platform, ownerId]
+      )
+      accountId = result.insertId
+    }
+
     await pool.execute(
       'INSERT IGNORE INTO user_purchase_accounts (user_id, account_id) VALUES (?, ?)',
       [req.user.id, accountId]
     )
-    res.json(ok({ id: accountId, updated: isUpdate }))
+    res.json(ok({ id: accountId, updated }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 app.put('/api/purchase-accounts/:id', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const { account, password, platform } = req.body
-    const fields = []; const values = []
-    if (account !== undefined) { fields.push('account=?'); values.push(account) }
-    if (password !== undefined) { fields.push('password=?'); values.push(password) }
-    if (platform !== undefined) { fields.push('platform=?'); values.push(platform) }
+    const current = await requireAccessiblePurchaseAccount(req, res)
+    if (!current) return
+    const { account, password, platform } = req.body || {}
+    const sessionReplaced = req.body?.session_replaced === true
+    const normalizedUpdates = {
+      ...(account !== undefined ? { account: String(account).trim() } : {}),
+      ...(platform !== undefined ? { platform: String(platform).trim().toLowerCase() } : {})
+    }
+    const metadataChanged = purchaseAccountMetadataChanged(current, normalizedUpdates)
+    const fields = []
+    const values = []
+
+    if (account !== undefined) {
+      if (!normalizedUpdates.account) return res.json(fail('账号不能为空'))
+      fields.push('account = ?')
+      values.push(normalizedUpdates.account)
+    }
+    if (password !== undefined && String(password) !== '') {
+      fields.push('password = ?')
+      values.push(String(password))
+    }
+    if (platform !== undefined) {
+      if (!normalizedUpdates.platform) return res.json(fail('platform 不能为空'))
+      fields.push('platform = ?')
+      values.push(normalizedUpdates.platform)
+    }
     if (!fields.length) return res.json(fail('没有要修改的字段'))
-    values.push(req.params.id, ownerId)
-    await pool.execute('UPDATE purchase_accounts SET ' + fields.join(',') + ' WHERE id=? AND owner_id=?', values)
-    res.json(ok(true))
+
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      values.push(current.id)
+      await connection.execute(`UPDATE purchase_accounts SET ${fields.join(', ')} WHERE id = ?`, values)
+      if (metadataChanged) {
+        if (!sessionReplaced) {
+          await connection.execute('DELETE FROM purchase_cookies WHERE account_id = ?', [current.id])
+          await connection.execute(
+            `UPDATE purchase_accounts
+             SET online = 0, cookie_status = 'unknown', cookie_status_reason = 'account_metadata_changed',
+                 cookie_checked_at = NULL, taobao_user_id = NULL, taobao_nick = NULL
+             WHERE id = ?`,
+            [current.id]
+          )
+        } else {
+          // Cookie 保存接口已经按实际 Cookie 更新 online；这里不能再次强制标记在线。
+          await connection.execute(
+            `UPDATE purchase_accounts
+             SET cookie_status = 'unknown', cookie_status_reason = 'login_session_replaced',
+                 cookie_checked_at = NULL, taobao_user_id = NULL, taobao_nick = NULL
+             WHERE id = ?`,
+            [current.id]
+          )
+        }
+      }
+      await connection.commit()
+    } catch (err) {
+      await connection.rollback()
+      throw err
+    } finally {
+      connection.release()
+    }
+    res.json(ok({
+      updated: true,
+      session_reset_required: metadataChanged && !sessionReplaced
+    }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 app.delete('/api/purchase-accounts/:id', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    // 先验证所有权
-    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
-    if (!check.length) return res.status(403).json(fail('无权删除此账号'))
-    await pool.execute('DELETE FROM user_purchase_accounts WHERE account_id=?', [req.params.id])
-    await pool.execute('DELETE FROM purchase_cookies WHERE account_id=?', [req.params.id])
-    await pool.execute('DELETE FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
+    if (req.user.user_type === 'sub') return res.status(403).json(fail('子账号不能删除共享采购账号'))
+    const account = await requireAccessiblePurchaseAccount(req, res)
+    if (!account) return
+    const connection = await pool.getConnection()
+    try {
+      await connection.beginTransaction()
+      await connection.execute('DELETE FROM user_purchase_accounts WHERE account_id = ?', [account.id])
+      await connection.execute('DELETE FROM purchase_cookies WHERE account_id = ?', [account.id])
+      await connection.execute('DELETE FROM purchase_accounts WHERE id = ?', [account.id])
+      await connection.commit()
+    } catch (err) {
+      await connection.rollback()
+      throw err
+    } finally {
+      connection.release()
+    }
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const accountId = req.params.id
-    const { cookie_data, platform } = req.body
-    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [accountId, ownerId])
-    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
+    const accountRecord = await requireAccessiblePurchaseAccount(req, res)
+    if (!accountRecord) return
+    const accountId = accountRecord.id
+    const normalizedPlatform = String(req.body?.platform || accountRecord.platform || '').toLowerCase()
+    if (normalizedPlatform !== String(accountRecord.platform || '').toLowerCase()) {
+      return res.status(400).json(fail('Cookie 平台与采购账号平台不一致'))
+    }
 
-    // 解析并规范化 cookie 数据
-    let newCookies = typeof cookie_data === 'string' ? JSON.parse(cookie_data || '[]') : (cookie_data || [])
+    let newCookies = typeof req.body?.cookie_data === 'string'
+      ? JSON.parse(req.body.cookie_data || '[]')
+      : (req.body?.cookie_data || [])
+    if (!Array.isArray(newCookies)) return res.status(400).json(fail('cookie_data 格式错误'))
 
-    // PDD domain 规范化：mobile.yangkeduo.com（hostOnly）必须加前导点变为 .mobile.yangkeduo.com（非hostOnly）
-    // 否则其他电脑恢复后 cookie 不跨子域共享，PDD 无法识别登录状态
-    if (platform === 'pinduoduo' && Array.isArray(newCookies)) {
-      let normCount = 0
-      newCookies = newCookies.map(c => {
-        if (c.domain === 'mobile.yangkeduo.com' && c.hostOnly) {
-          normCount++
-          return { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false }
+    if (normalizedPlatform === 'pinduoduo') {
+      let normalizedCount = 0
+      newCookies = newCookies.map(cookie => {
+        if (cookie.domain === 'mobile.yangkeduo.com' && cookie.hostOnly) {
+          normalizedCount++
+          return { ...cookie, domain: '.mobile.yangkeduo.com', hostOnly: false }
         }
-        return c
+        return cookie
       })
-      if (normCount > 0) console.log(`[CookieSave] PDD domain 规范化: account=${accountId}, ${normCount} 条 cookie 加前导点`)
-    }
-
-    if (Array.isArray(newCookies) && newCookies.length > 0) {
-      const [existing] = await pool.execute('SELECT cookie_data FROM purchase_cookies WHERE account_id=?', [accountId])
-      let mergedCookies = newCookies
-      if (existing.length && existing[0].cookie_data) {
-        let existingCookies = typeof existing[0].cookie_data === 'string'
-          ? JSON.parse(existing[0].cookie_data)
-          : existing[0].cookie_data
-        if (Array.isArray(existingCookies) && existingCookies.length > 0) {
-          // 对已有数据也做 PDD domain 规范化，确保合并 key 一致
-          if (platform === 'pinduoduo') {
-            existingCookies = existingCookies.map(c => {
-              if (c.domain === 'mobile.yangkeduo.com' && c.hostOnly) {
-                return { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false }
-              }
-              return c
-            })
-          }
-          // 以 name|domain|path 为合并 key，新数据优先，已有数据中不在新数据的保留
-          const newCookieMap = new Map()
-          for (const c of newCookies) {
-            newCookieMap.set(`${c.name}|${c.domain || ''}|${c.path || '/'}`, c)
-          }
-          const merged = [...newCookies]
-          for (const c of existingCookies) {
-            const key = `${c.name}|${c.domain || ''}|${c.path || '/'}`
-            if (!newCookieMap.has(key)) {
-              merged.push(c)
-            }
-          }
-          mergedCookies = merged
-        }
+      if (normalizedCount > 0) {
+        console.log(`[CookieSave] PDD domain 规范化: account=${accountId}, ${normalizedCount} 条 cookie 加前导点`)
       }
-      await pool.execute(
-        'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
-        [accountId, JSON.stringify(mergedCookies), platform || '']
-      )
-    } else {
-      await pool.execute(
-        'INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at) VALUES (?,?,?,NOW()) ON DUPLICATE KEY UPDATE cookie_data=VALUES(cookie_data), platform=VALUES(platform), saved_at=NOW()',
-        [accountId, JSON.stringify(newCookies), platform || '']
-      )
     }
 
-    // 淘宝账号必须通过轻量 MTOP 接口校验后才能标记在线；仅保存 Cookie 不代表会话有效。
-    if (platform !== 'taobao' && platform !== 'tmall') {
-      await pool.execute('UPDATE purchase_accounts SET online=1 WHERE id=?', [accountId])
+    const [existingRows] = await pool.execute(
+      'SELECT cookie_data FROM purchase_cookies WHERE account_id = ?',
+      [accountId]
+    )
+    let existingCookies = []
+    if (existingRows[0]?.cookie_data) {
+      try {
+        existingCookies = typeof existingRows[0].cookie_data === 'string'
+          ? JSON.parse(existingRows[0].cookie_data)
+          : existingRows[0].cookie_data
+      } catch (_) {
+        existingCookies = []
+      }
+    }
+    if (!Array.isArray(existingCookies)) existingCookies = []
+    if (normalizedPlatform === 'pinduoduo') {
+      existingCookies = existingCookies.map(cookie => {
+        if (cookie.domain === 'mobile.yangkeduo.com' && cookie.hostOnly) {
+          return { ...cookie, domain: '.mobile.yangkeduo.com', hostOnly: false }
+        }
+        return cookie
+      })
+    }
+
+    const cookieMap = new Map()
+    for (const cookie of existingCookies) {
+      cookieMap.set(`${cookie.name}|${cookie.domain || ''}|${cookie.path || '/'}`, cookie)
+    }
+    for (const cookie of newCookies) {
+      cookieMap.set(`${cookie.name}|${cookie.domain || ''}|${cookie.path || '/'}`, cookie)
+    }
+    const mergedCookies = [...cookieMap.values()]
+
+    await pool.execute(
+      `INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at)
+       VALUES (?,?,?,NOW())
+       ON DUPLICATE KEY UPDATE cookie_data = VALUES(cookie_data), platform = VALUES(platform), saved_at = NOW()`,
+      [accountId, JSON.stringify(mergedCookies), normalizedPlatform]
+    )
+
+    if (normalizedPlatform !== 'taobao' && normalizedPlatform !== 'tmall') {
+      const cookieValid = hasValidPlatformCookies(mergedCookies, normalizedPlatform)
+      await pool.execute('UPDATE purchase_accounts SET online = ? WHERE id = ?', [cookieValid ? 1 : 0, accountId])
     }
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }
@@ -5042,18 +5155,17 @@ app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
 
 app.get('/api/purchase-accounts/:id/cookies', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const [check] = await pool.execute('SELECT id FROM purchase_accounts WHERE id=? AND owner_id=?', [req.params.id, ownerId])
-    if (!check.length) return res.status(403).json(fail('无权操作此账号'))
-    const [rows] = await pool.execute('SELECT * FROM purchase_cookies WHERE account_id=?', [req.params.id])
+    const account = await requireAccessiblePurchaseAccount(req, res)
+    if (!account) return
+    const [rows] = await pool.execute('SELECT * FROM purchase_cookies WHERE account_id = ?', [account.id])
     res.json(ok(rows.length ? rows[0] : null))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
 app.put('/api/purchase-accounts/:id/cookie-validation', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const accountId = req.params.id
+    const account = await requireAccessiblePurchaseAccount(req, res)
+    if (!account) return
     const requestedStatus = String(req.body?.status || 'unknown').toLowerCase()
     const allowedStatuses = new Set(['valid', 'invalid', 'risk', 'unknown', 'mismatch'])
     const status = allowedStatuses.has(requestedStatus) ? requestedStatus : 'unknown'
@@ -5061,13 +5173,6 @@ app.put('/api/purchase-accounts/:id/cookie-validation', async (req, res) => {
     const taobaoUserId = String(req.body?.taobao_user_id || '').trim().slice(0, 100)
     const taobaoNick = String(req.body?.taobao_nick || '').trim().slice(0, 200)
 
-    const [rows] = await pool.execute(
-      `SELECT id, platform, online, taobao_user_id, taobao_nick
-       FROM purchase_accounts WHERE id=? AND owner_id=?`,
-      [accountId, ownerId]
-    )
-    if (!rows.length) return res.status(403).json(fail('无权操作此账号'))
-    const account = rows[0]
     if (account.platform !== 'taobao' && account.platform !== 'tmall') {
       return res.status(400).json(fail('该账号不是淘宝/天猫采购账号'))
     }
@@ -5076,21 +5181,18 @@ app.put('/api/purchase-accounts/:id/cookie-validation', async (req, res) => {
     const identityMismatch = status === 'valid' && !!existingUserId && !!taobaoUserId && existingUserId !== taobaoUserId
     const finalStatus = identityMismatch ? 'mismatch' : status
     const finalReason = identityMismatch ? 'account_identity_mismatch' : reason
-    const fields = ['cookie_status=?', 'cookie_status_reason=?', 'cookie_checked_at=NOW()']
+    const fields = ['cookie_status = ?', 'cookie_status_reason = ?', 'cookie_checked_at = NOW()']
     const values = [finalStatus, finalReason]
 
     if (finalStatus === 'valid') {
-      fields.push('online=1')
-      if (taobaoUserId) { fields.push('taobao_user_id=?'); values.push(taobaoUserId) }
-      if (taobaoNick) { fields.push('taobao_nick=?'); values.push(taobaoNick) }
+      fields.push('online = 1')
+      if (taobaoUserId) { fields.push('taobao_user_id = ?'); values.push(taobaoUserId) }
+      if (taobaoNick) { fields.push('taobao_nick = ?'); values.push(taobaoNick) }
     } else if (finalStatus === 'invalid' || finalStatus === 'mismatch') {
-      fields.push('online=0')
+      fields.push('online = 0')
     }
-    values.push(accountId, ownerId)
-    await pool.execute(
-      `UPDATE purchase_accounts SET ${fields.join(', ')} WHERE id=? AND owner_id=?`,
-      values
-    )
+    values.push(account.id)
+    await pool.execute(`UPDATE purchase_accounts SET ${fields.join(', ')} WHERE id = ?`, values)
 
     res.json(ok({
       status: finalStatus,
@@ -5104,12 +5206,13 @@ app.put('/api/purchase-accounts/:id/cookie-validation', async (req, res) => {
 
 app.put('/api/purchase-accounts/:id/status', async (req, res) => {
   try {
-    const ownerId = getOwnerId(req.user)
-    const { online } = req.body
-    await pool.execute('UPDATE purchase_accounts SET online=? WHERE id=? AND owner_id=?', [online?1:0, req.params.id, ownerId])
+    const account = await requireAccessiblePurchaseAccount(req, res)
+    if (!account) return
+    await pool.execute('UPDATE purchase_accounts SET online = ? WHERE id = ?', [req.body?.online ? 1 : 0, account.id])
     res.json(ok(true))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
+
 
 // ============ 采购订单 ============
 
@@ -6228,7 +6331,10 @@ app.post('/api/purchase-orders/sync', async (req, res) => {
       if (!localOrder) continue
 
       matchedCount++
-      const newStatus = statusMap[platformOrder.status] || localOrder.status
+      const newStatus = mergePurchaseOrderStatus(
+        localOrder.status,
+        statusMap[platformOrder.status] || localOrder.status
+      )
 
       // 更新订单状态和account_id
       if (newStatus !== localOrder.status || !localOrder.account_id) {
@@ -6391,7 +6497,7 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
       '退款中': 'refunded'
     }
 
-    const newStatus = statusMap[orderInfo.status] || null
+    const syncedStatus = statusMap[orderInfo.status] || null
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
@@ -6404,6 +6510,7 @@ app.post('/api/purchase-orders/sync-single', async (req, res) => {
     }
 
     const localOrder = localOrders[0]
+    const newStatus = mergePurchaseOrderStatus(localOrder.status, syncedStatus)
 
     // 更新状态和account_id
     const updateFields = []
@@ -6548,6 +6655,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
     }
 
     const localOrder = localOrders[0]
+    newStatus = mergePurchaseOrderStatus(localOrder.status, newStatus)
 
     // 更新状态和物流信息
     const updateFields = []
@@ -6730,6 +6838,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
       if (!statusMap[platformOrder.status] && validStatuses.includes(platformOrder.status)) {
         newStatus = platformOrder.status
       }
+      newStatus = mergePurchaseOrderStatus(localOrder.status, newStatus)
 
       const updateFields = []
       const updateValues = []

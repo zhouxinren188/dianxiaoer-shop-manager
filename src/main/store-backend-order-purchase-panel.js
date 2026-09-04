@@ -52,6 +52,7 @@ const PURCHASE_STATUS_LABELS = {
   shipped: '已发货',
   in_transit: '运输中',
   received: '已签收',
+  pending_print: '待打印',
   forwarded: '已转发',
   stocked: '已入库',
   completed: '已完成',

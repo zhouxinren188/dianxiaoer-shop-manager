@@ -88,6 +88,37 @@ describe('云仓助手第三方服务架构', () => {
     expect(renderer).toContain('resultRecordedAt')
   })
 
+  it('异常处理明确成功后进入待打印，采购列表按该状态筛选并返回订单状态', () => {
+    const service = read('server/services/cloud-warehouse-third-party-service.js')
+    const statusService = read('server/services/purchase-order-status-service.js')
+    const server = read('server/index.js')
+    const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
+    expect(service).toContain('applyConfirmedExceptionResolutionStatus')
+    expect(statusService).toContain("SET status = 'pending_print'")
+    expect(statusService).toContain('mergePurchaseOrderStatus')
+    expect(server).toContain("if (status) { sql += ' AND po.status=?'")
+    expect(server).toContain('po.account_id, po.status, po.platform_order_no')
+    expect(renderer).toContain("{ label: '待打印', value: 'pending_print' }")
+  })
+
+  it('待打印页手动查询会发送一次无订单参数的云仓列表查询并在本地匹配', () => {
+    const service = read('server/services/cloud-warehouse-third-party-service.js')
+    const route = read('server/routes/cloud-warehouse.js')
+    const api = read('src/renderer/src/api/cloudWarehouse.js')
+    const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
+    const database = read('server/db.js')
+    expect(service).toContain('function buildWarehouseOrderCheckPayload({ requestId, machineCode })')
+    expect(service).toContain("command: assertEnabledCommand('warehouse.order.check')")
+    expect(service).not.toContain("function buildWarehouseOrderCheckPayload({ requestId, machineCode, orderNo")
+    expect(route).toContain("router.post('/warehouse-orders/check'")
+    expect(route).toContain("router.get('/warehouse-orders/check/:requestId'")
+    expect(api).toContain("post('/api/cloud-warehouse/warehouse-orders/check', {})")
+    expect(renderer).toContain("filterForm.status !== 'pending_print'")
+    expect(renderer).toContain('await startCloudWarehouseOrderCheck()')
+    expect(renderer).toContain("String(row.sales_order_no || '').trim()")
+    expect(database).toContain('MODIFY COLUMN purchase_order_id INT DEFAULT NULL')
+  })
+
   it('云仓区域使用持久处理日志且只在有异常时展示异常明细', () => {
     const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
     const api = read('src/renderer/src/api/cloudWarehouse.js')

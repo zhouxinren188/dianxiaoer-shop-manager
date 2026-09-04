@@ -213,12 +213,12 @@ async function initDB() {
         cookie_data LONGTEXT,
         domain VARCHAR(50) DEFAULT '',
         revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
-        source_device_id VARCHAR(100) DEFAULT '',
+        source_device_id VARCHAR(100) NOT NULL DEFAULT '',
         source_type VARCHAR(30) DEFAULT 'legacy',
         fingerprint CHAR(64) DEFAULT '',
         last_verified_at DATETIME DEFAULT NULL,
         saved_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uk_store_id (store_id)
+        UNIQUE KEY uk_store_device (store_id, source_device_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
@@ -228,6 +228,20 @@ async function initDB() {
     try { await connection.execute(`ALTER TABLE cookies ADD COLUMN source_type VARCHAR(30) DEFAULT 'legacy' AFTER source_device_id`) } catch (e) { /* 字段已存在 */ }
     try { await connection.execute(`ALTER TABLE cookies ADD COLUMN fingerprint CHAR(64) DEFAULT '' AFTER source_type`) } catch (e) { /* 字段已存在 */ }
     try { await connection.execute(`ALTER TABLE cookies ADD COLUMN last_verified_at DATETIME DEFAULT NULL AFTER fingerprint`) } catch (e) { /* 字段已存在 */ }
+
+    // 同一店铺允许多台电脑分别保存自己的 Cookie，避免某台电脑的京东会话
+    // 被另一台电脑的心跳或重新登录覆盖。旧数据保留原 source_device_id；
+    // 没有设备标识的历史记录统一归入 legacy 设备槽位。
+    await connection.execute(`UPDATE cookies SET source_device_id = '' WHERE source_device_id IS NULL`)
+    try { await connection.execute(`ALTER TABLE cookies MODIFY COLUMN source_device_id VARCHAR(100) NOT NULL DEFAULT ''`) } catch (e) { /* 已符合定义 */ }
+    const [cookieIndexes] = await connection.execute(`SHOW INDEX FROM cookies`)
+    const cookieIndexNames = new Set(cookieIndexes.map(index => index.Key_name))
+    if (cookieIndexNames.has('uk_store_id')) {
+      await connection.execute(`ALTER TABLE cookies DROP INDEX uk_store_id`)
+    }
+    if (!cookieIndexNames.has('uk_store_device')) {
+      await connection.execute(`ALTER TABLE cookies ADD UNIQUE KEY uk_store_device (store_id, source_device_id)`)
+    }
 
     // 每台设备分别上报店铺健康状态；店铺总体在线状态由最近验证成功的设备汇总得出。
     await connection.execute(`
@@ -838,12 +852,12 @@ async function initDB() {
       CREATE TABLE IF NOT EXISTS cloud_external_commands (
         request_id VARCHAR(64) PRIMARY KEY,
         owner_id INT NOT NULL,
-        purchase_order_id INT NOT NULL,
+        purchase_order_id INT DEFAULT NULL,
         requested_by_user_id INT NOT NULL,
         machine_code VARCHAR(12) NOT NULL,
         command VARCHAR(50) NOT NULL,
-        order_no VARCHAR(100) NOT NULL,
-        order_year SMALLINT UNSIGNED NOT NULL,
+        order_no VARCHAR(100) NOT NULL DEFAULT '',
+        order_year SMALLINT UNSIGNED DEFAULT NULL,
         transport_status VARCHAR(30) NOT NULL DEFAULT 'submitting',
         http_status SMALLINT UNSIGNED DEFAULT NULL,
         reason VARCHAR(100) DEFAULT '',
@@ -857,6 +871,22 @@ async function initDB() {
         CONSTRAINT fk_cloud_external_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    // 全量云仓订单查询不定位单笔采购单，因此这三个定位字段必须允许为空。
+    // 查询回执返回后再按关联销售订单号与当前待打印列表匹配。
+    await connection.execute(`
+      ALTER TABLE cloud_external_commands
+        MODIFY COLUMN purchase_order_id INT DEFAULT NULL,
+        MODIFY COLUMN order_no VARCHAR(100) NOT NULL DEFAULT '',
+        MODIFY COLUMN order_year SMALLINT UNSIGNED DEFAULT NULL
+    `)
+    try {
+      await connection.execute(`
+        ALTER TABLE cloud_external_commands
+          ADD KEY idx_cloud_external_global (owner_id, command, purchase_order_id, created_at)
+      `)
+    } catch (e) {
+      if (e.code !== 'ER_DUP_KEYNAME') throw e
+    }
 
     // 店小二本机动作日志。目前仅记录处理异常前自动提交京东采购编号备注的结果；
     // 云仓查询与处理日志直接来自 cloud_external_commands，避免重复保存第三方回执。
