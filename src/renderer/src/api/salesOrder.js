@@ -8,8 +8,15 @@ export function fetchSalesOrderStatusCounts(params) {
   return get('/api/sales-orders/status-counts', params)
 }
 
-export function saveSalesOrders(storeId, orders) {
-  return post('/api/sales-orders/batch', { store_id: storeId, orders })
+export async function saveSalesOrders(storeId, orders) {
+  const result = await post('/api/sales-orders/batch', { store_id: storeId, orders })
+  const tasks = Array.isArray(result?.stockRemarkTasks) ? result.stockRemarkTasks : []
+  if (tasks.length && window.electronAPI) {
+    window.electronAPI.invoke('process-stock-remark-tasks', { storeId, tasks }).catch(error => {
+      console.error('[库存备注] 加入客户端任务队列失败:', error.message)
+    })
+  }
+  return result
 }
 
 export function fetchSalesOrder(orderId, storeId) {

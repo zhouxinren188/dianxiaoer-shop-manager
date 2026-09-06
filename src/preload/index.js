@@ -53,6 +53,7 @@ const validInvokeChannels = [
   'open-jd-outbound',
   'open-jd-order-detail',
   'submit-vendor-remark',
+  'process-stock-remark-tasks',
   'open-purchase-url',
   'open-log-file',
   'generate-qrcode',

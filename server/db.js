@@ -349,6 +349,12 @@ async function initDB() {
         raw_data LONGTEXT,
         buyer_message TEXT DEFAULT NULL COMMENT '买家留言（从平台同步）',
         order_remark TEXT DEFAULT NULL COMMENT '订单备注（商家在平台填写的备注，从平台同步）',
+        stock_status TINYINT NOT NULL DEFAULT 0 COMMENT '库存分配: 0=未处理, 1=延迟发货, 2=仓库直发(已扣库存)',
+        stock_remark_text VARCHAR(1000) DEFAULT NULL COMMENT '库存扣减后待提交京东的货位备注',
+        stock_remark_status VARCHAR(20) NOT NULL DEFAULT 'none' COMMENT '库存备注状态: none/pending/success/failed',
+        stock_remark_attempts INT NOT NULL DEFAULT 0,
+        stock_remark_error VARCHAR(500) DEFAULT '',
+        stock_remark_updated_at DATETIME DEFAULT NULL,
         sms_content TEXT DEFAULT NULL COMMENT '最近一次成功发送的短信内容',
         sms_sent_at DATETIME DEFAULT NULL COMMENT '最近一次短信发送时间',
         sms_send_count INT NOT NULL DEFAULT 0 COMMENT '短信发送次数',
@@ -393,6 +399,24 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_status TINYINT NOT NULL DEFAULT 0 COMMENT '库存分配: 0=未处理, 1=延迟发货, 2=仓库直发(已扣库存)'`)
     } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_remark_text VARCHAR(1000) DEFAULT NULL COMMENT '库存扣减后待提交京东的货位备注' AFTER stock_status`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_remark_status VARCHAR(20) NOT NULL DEFAULT 'none' COMMENT '库存备注状态: none/pending/success/failed' AFTER stock_remark_text`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_remark_attempts INT NOT NULL DEFAULT 0 AFTER stock_remark_status`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_remark_error VARCHAR(500) DEFAULT '' AFTER stock_remark_attempts`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD COLUMN stock_remark_updated_at DATETIME DEFAULT NULL AFTER stock_remark_error`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute(`ALTER TABLE sales_orders ADD KEY idx_stock_remark_retry (store_id, stock_remark_status, stock_remark_updated_at)`)
+    } catch (e) { /* 索引已存在 */ }
     // 兼容已存在的 sales_orders 表：添加问题事件标记字段
     try {
       await connection.execute(`ALTER TABLE sales_orders ADD COLUMN issue_event VARCHAR(50) DEFAULT NULL COMMENT '问题事件标记（如职业打假、超时未发货等）'`)

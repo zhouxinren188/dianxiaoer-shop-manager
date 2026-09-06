@@ -8,6 +8,8 @@ const { extractJdSalesOrderLogistics } = require('./jd-sales-order-logistics')
 const { extractJdSalesOrderSkuSpec } = require('./jd-sales-order-item')
 
 let submitVendorRemarkImplementation = null
+let stockRemarkQueue = Promise.resolve()
+const queuedStockRemarkTasks = new Set()
 
 async function submitVendorRemark(input) {
   if (typeof submitVendorRemarkImplementation !== 'function') {
@@ -3113,6 +3115,10 @@ function registerSalesOrderIpc(mainWindow) {
     }
   }
   ipcMain.handle('submit-vendor-remark', (event, input) => submitVendorRemark(input))
+  ipcMain.handle('process-stock-remark-tasks', (_event, input = {}) => ({
+    success: true,
+    queued: enqueueStockRemarkTasks(input.storeId, input.tasks)
+  }))
 
   // 注入SFF请求头拦截器：拦截XMLHttpRequest和fetch的sff.jd.com请求，捕获安全头（dsm-eid等）
   async function _injectSffHeaderInterceptor(win) {
@@ -3497,6 +3503,112 @@ function httpPostJsonAuth(url, body, token) {
   })
 }
 
+// 带认证的 HTTP PUT JSON（用于回写库存备注提交结果）
+function httpPutJsonAuth(url, body, token) {
+  const http = require('http')
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url)
+    const data = JSON.stringify(body)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(data),
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      },
+      timeout: 10000
+    }
+    const req = http.request(options, (res) => {
+      let responseBody = ''
+      res.on('data', chunk => { responseBody += chunk })
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(responseBody)
+          if (res.statusCode >= 400 || parsed?.code !== 0) {
+            return reject(new Error(parsed?.message || `HTTP ${res.statusCode}`))
+          }
+          resolve(parsed)
+        } catch (error) {
+          reject(new Error(`回写库存备注结果失败: ${error.message}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(data)
+    req.end()
+  })
+}
+
+function normalizeStockRemarkTasks(storeId, tasks) {
+  const normalizedStoreId = Number(storeId)
+  if (!Number.isSafeInteger(normalizedStoreId) || normalizedStoreId <= 0 || !Array.isArray(tasks)) return []
+  return tasks.map(task => ({
+    storeId: normalizedStoreId,
+    salesOrderId: Number(task?.salesOrderId),
+    orderId: String(task?.orderId || '').trim(),
+    remark: String(task?.remark || '').trim()
+  })).filter(task => Number.isSafeInteger(task.salesOrderId) && task.salesOrderId > 0 && task.orderId && task.remark)
+}
+
+async function processStockRemarkTask(task) {
+  let result
+  try {
+    result = await submitVendorRemark({
+      storeId: task.storeId,
+      orderId: task.orderId,
+      remark: task.remark
+    })
+  } catch (error) {
+    result = { success: false, message: error.message || '京东备注请求异常' }
+  }
+
+  const success = result?.success === true
+  const message = String(result?.message || (success ? '京东备注提交成功' : '京东备注提交失败')).slice(0, 500)
+  runtimeLog.writeLog(
+    'STOCK_REMARK',
+    `store_id=${task.storeId} order_id=${task.orderId} result=${success ? 'success' : 'failed'} message=${message}`
+  )
+
+  try {
+    await httpPutJsonAuth(
+      `http://150.158.54.108:3002/api/sales-orders/${task.salesOrderId}/stock-remark-result`,
+      { success, message, remark: task.remark },
+      getAuthToken()
+    )
+  } catch (error) {
+    runtimeLog.writeLog(
+      'STOCK_REMARK',
+      `store_id=${task.storeId} order_id=${task.orderId} result=ack_failed message=${String(error.message || error).slice(0, 300)}`
+    )
+  }
+}
+
+function enqueueStockRemarkTasks(storeId, tasks) {
+  const pending = []
+  for (const task of normalizeStockRemarkTasks(storeId, tasks)) {
+    const key = `${task.storeId}:${task.salesOrderId}:${task.remark}`
+    if (queuedStockRemarkTasks.has(key)) continue
+    queuedStockRemarkTasks.add(key)
+    pending.push({ ...task, key })
+  }
+  if (!pending.length) return 0
+
+  stockRemarkQueue = stockRemarkQueue.catch(() => {}).then(async () => {
+    for (const task of pending) {
+      try {
+        await processStockRemarkTask(task)
+      } finally {
+        queuedStockRemarkTasks.delete(task.key)
+      }
+    }
+  })
+  return pending.length
+}
+
 // 带认证的 HTTP DELETE JSON（用于请求远程服务器）
 function httpDeleteJsonAuth(url, body, token) {
   const http = require('http')
@@ -3569,6 +3681,8 @@ async function saveOrdersToServer(storeId, orders) {
             const json = JSON.parse(body)
             if (json.code === 0) {
               console.log(`[AutoSync] 保存成功: ${json.data?.saved || '?'} 条`)
+              const queued = enqueueStockRemarkTasks(storeId, json.data?.stockRemarkTasks)
+              if (queued > 0) console.log(`[AutoSync] 已加入库存备注队列: ${queued} 条`)
               resolve(true)
             } else {
               console.error(`[AutoSync] 保存订单业务失败: ${json.message}`)

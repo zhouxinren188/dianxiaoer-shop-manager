@@ -51,6 +51,7 @@ const {
   normalizeInventoryUpdateInput
 } = require('./services/inventory-product-input')
 const { normalizeSkuBindingInput } = require('./services/sku-binding-input')
+const { buildStockDeductionRemark } = require('./services/stock-deduction-remark')
 const {
   STATUS_ALIAS_MAP,
   buildPurchaseOrderSalesLogisticsFilter,
@@ -502,7 +503,7 @@ function extractOrderSkus(orderData) {
 // 查询正式绑定；若该 SKU 仅做了无店铺预绑定，则在首次销售同步时补齐店铺并转成正式绑定。
 async function resolveSkuBindingForOrder(storeId, skuId, ownerId) {
   const [bindings] = await pool.execute(
-    `SELECT sb.inventory_id, sb.package_num, i.quantity, i.sku, i.product_name, i.warehouse_id
+    `SELECT sb.inventory_id, sb.package_num, i.quantity, i.sku, i.product_name, i.warehouse_id, i.location
      FROM sku_bindings sb
      INNER JOIN inventory i ON sb.inventory_id = i.id AND i.owner_id = ?
      WHERE sb.store_id = ? AND sb.sku_id = ? AND sb.owner_id = ?
@@ -512,7 +513,7 @@ async function resolveSkuBindingForOrder(storeId, skuId, ownerId) {
   if (bindings.length > 0) return bindings[0]
 
   const [pendingRows] = await pool.execute(
-    `SELECT psb.inventory_id, psb.package_num, i.quantity, i.sku, i.product_name, i.warehouse_id
+    `SELECT psb.inventory_id, psb.package_num, i.quantity, i.sku, i.product_name, i.warehouse_id, i.location
      FROM pending_sku_bindings psb
      INNER JOIN inventory i ON psb.inventory_id = i.id AND i.owner_id = ?
      WHERE psb.owner_id = ? AND psb.sku_id = ?
@@ -538,10 +539,11 @@ async function resolveSkuBindingForOrder(storeId, skuId, ownerId) {
   return pending
 }
 
-// 尝试为订单扣减库存，返回最终 stock_status（0=未绑定, 1=延迟发货, 2=仓库直发）
+// 尝试为订单扣减库存，并生成需要提交到京东的货位备注。
+// stockStatus: 0=未绑定, 1=延迟发货, 2=仓库直发
 async function attemptStockDeduction(storeId, orderId, orderData, ownerId) {
   const items = extractOrderSkus(orderData)
-  if (items.length === 0) return 0
+  if (items.length === 0) return { stockStatus: 0, remark: '' }
 
   // 查询所有SKU的绑定信息
   const boundItems = []
@@ -555,12 +557,13 @@ async function attemptStockDeduction(storeId, orderId, orderData, ownerId) {
         current_quantity: binding.quantity,
         sku: binding.sku,
         product_name: binding.product_name,
-        warehouse_id: binding.warehouse_id
+        warehouse_id: binding.warehouse_id,
+        location: binding.location
       })
     }
   }
 
-  if (boundItems.length === 0) return 0 // 无绑定，未处理
+  if (boundItems.length === 0) return { stockStatus: 0, remark: '' } // 无绑定，未处理
 
   // 按仓库商品汇总扣减量（多个店铺SKU可能绑同一个仓库商品）
   const inventoryMap = new Map()
@@ -597,15 +600,54 @@ async function attemptStockDeduction(storeId, orderId, orderData, ownerId) {
       )
     }
     console.log(`[StockDeduct] 仓库直发: order_id=${orderId}, items=${boundItems.length}`)
-    return 2 // 仓库直发
+    return {
+      stockStatus: 2,
+      remark: buildStockDeductionRemark(boundItems)
+    }
   } else {
     // 库存不足 → 不扣，标记延迟
     const insufficientSkus = boundItems
       .filter(i => insufficientInvIds.includes(i.inventory_id))
       .map(i => i.skuId)
     console.log(`[StockDeduct] 延迟发货: order_id=${orderId}, 不足的SKU: ${insufficientSkus.join(',')}`)
-    return 1 // 延迟发货
+    return { stockStatus: 1, remark: '' }
   }
+}
+
+async function queueStockDeductionRemark(storeId, orderId, remark) {
+  const normalizedRemark = String(remark || '').trim()
+  if (!normalizedRemark) return
+  await pool.execute(
+    `UPDATE sales_orders
+        SET stock_remark_text=?, stock_remark_status='pending', stock_remark_attempts=0,
+            stock_remark_error='', stock_remark_updated_at=NOW()
+      WHERE store_id=? AND order_id=?`,
+    [normalizedRemark, storeId, orderId]
+  )
+}
+
+async function listPendingStockRemarkTasks(storeId, ownerId) {
+  const [rows] = await pool.execute(
+    `SELECT so.id AS sales_order_id, so.order_id, so.stock_remark_text, so.stock_remark_attempts
+       FROM sales_orders so
+       INNER JOIN stores s ON s.id=so.store_id AND s.owner_id=?
+      WHERE so.store_id=? AND so.stock_status=2 AND so.stock_remark_text IS NOT NULL
+        AND so.stock_remark_text!='' AND so.stock_remark_attempts < 20
+        AND (
+          so.stock_remark_status='pending'
+          OR (so.stock_remark_status='failed'
+              AND so.stock_remark_updated_at <= DATE_SUB(NOW(), INTERVAL 5 MINUTE))
+        )
+      ORDER BY so.stock_remark_updated_at ASC, so.id ASC
+      LIMIT 20`,
+    [ownerId, storeId]
+  )
+  return rows.map(row => ({
+    salesOrderId: Number(row.sales_order_id),
+    orderId: String(row.order_id),
+    remark: String(row.stock_remark_text),
+    attempts: Number(row.stock_remark_attempts || 0)
+  }))
 }
 
 // 订单退款/取消时回库（仅 stock_status=2 的才退回）
@@ -2138,7 +2180,10 @@ app.post('/api/sales-orders/batch', async (req, res) => {
         const isCancelledNow = CANCEL_STATUSES.includes(newStatusText)
         if (isNew) {
           // 新订单 → 尝试扣库存
-          const stockStatus = await attemptStockDeduction(store_id, o.orderId, o, ownerId)
+          const stockResult = isCancelledNow
+            ? { stockStatus: 0, remark: '' }
+            : await attemptStockDeduction(store_id, o.orderId, o, ownerId)
+          const stockStatus = stockResult.stockStatus
           if (stockStatus > 0) {
             await pool.execute(
               'UPDATE sales_orders SET stock_status=? WHERE store_id=? AND order_id=?',
@@ -2150,6 +2195,7 @@ app.post('/api/sales-orders/batch', async (req, res) => {
                 `UPDATE sales_orders SET purchase_status='有货（仓库直发）' WHERE store_id=? AND order_id=? AND (purchase_status IS NULL OR purchase_status='未采购')`,
                 [store_id, o.orderId]
               )
+              await queueStockDeductionRemark(store_id, o.orderId, stockResult.remark)
             }
           }
           // 新订单同步时已是取消状态 → 采购状态设为无效订单
@@ -2179,7 +2225,8 @@ app.post('/api/sales-orders/batch', async (req, res) => {
             )
           } else if (wasCancelled && !isCancelledNow) {
             // 取消→重新活跃：重新尝试扣库存
-            const stockStatus = await attemptStockDeduction(store_id, o.orderId, o, ownerId)
+            const stockResult = await attemptStockDeduction(store_id, o.orderId, o, ownerId)
+            const stockStatus = stockResult.stockStatus
             await pool.execute(
               'UPDATE sales_orders SET stock_status=? WHERE store_id=? AND order_id=?',
               [stockStatus, store_id, o.orderId]
@@ -2190,6 +2237,7 @@ app.post('/api/sales-orders/batch', async (req, res) => {
                 `UPDATE sales_orders SET purchase_status='有货（仓库直发）' WHERE store_id=? AND order_id=? AND purchase_status='未采购'`,
                 [store_id, o.orderId]
               )
+              await queueStockDeductionRemark(store_id, o.orderId, stockResult.remark)
             }
           }
         }
@@ -2199,7 +2247,8 @@ app.post('/api/sales-orders/batch', async (req, res) => {
 
       saved++
     }
-    res.json(ok({ saved }))
+    const stockRemarkTasks = await listPendingStockRemarkTasks(store_id, ownerId)
+    res.json(ok({ saved, stockRemarkTasks }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -2329,6 +2378,35 @@ app.put('/api/sales-orders/:orderId/order-remark', async (req, res) => {
       )
     }
     res.json(ok({ updated: result.affectedRows }))
+  } catch (err) {
+    res.status(500).json(fail(err.message))
+  }
+})
+
+// 回写库存扣减备注提交结果。失败只记录并等待后续订单同步重试，不影响库存和订单保存。
+app.put('/api/sales-orders/:orderId/stock-remark-result', async (req, res) => {
+  try {
+    const salesOrderId = Number(req.params.orderId)
+    const success = req.body?.success === true
+    const remark = String(req.body?.remark || '').trim()
+    const message = String(req.body?.message || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 500)
+    if (!Number.isSafeInteger(salesOrderId) || salesOrderId <= 0 || !remark) {
+      return res.json(fail('订单ID和备注内容不能为空'))
+    }
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) return res.status(403).json(fail('无权操作此订单'))
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [result] = await pool.execute(
+      `UPDATE sales_orders
+          SET stock_remark_status=?, stock_remark_attempts=stock_remark_attempts+1,
+              stock_remark_error=?, stock_remark_updated_at=NOW(),
+              order_remark=IF(?=1, stock_remark_text, order_remark), updated_at=NOW()
+        WHERE id=? AND store_id IN (${placeholders}) AND stock_remark_text=?`,
+      [success ? 'success' : 'failed', success ? '' : (message || '京东备注提交失败'), success ? 1 : 0,
+        salesOrderId, ...storeIds, remark]
+    )
+    res.json(ok({ updated: result.affectedRows, success }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -6122,12 +6200,16 @@ app.put('/api/purchase-orders/:id/status', async (req, res) => {
             [poRows[0].inventory_id, ownerId]
           )
           for (const dOrder of delayedOrders) {
-            const newStockStatus = await attemptStockDeduction(dOrder.store_id, dOrder.order_id, dOrder, ownerId)
-            if (newStockStatus === 2) {
+            const stockResult = await attemptStockDeduction(dOrder.store_id, dOrder.order_id, dOrder, ownerId)
+            if (stockResult.stockStatus === 2) {
               await pool.execute(
-                'UPDATE sales_orders SET stock_status=? WHERE id=?',
-                [2, dOrder.id]
+                `UPDATE sales_orders
+                    SET stock_status=2,
+                        purchase_status=IF(purchase_status IS NULL OR purchase_status='未采购', '有货（仓库直发）', purchase_status)
+                  WHERE id=?`,
+                [dOrder.id]
               )
+              await queueStockDeductionRemark(dOrder.store_id, dOrder.order_id, stockResult.remark)
               console.log(`[StockAutoAlloc] 延迟订单自动分配: order_id=${dOrder.order_id}`)
             }
           }
