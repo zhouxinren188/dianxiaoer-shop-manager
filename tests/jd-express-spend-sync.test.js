@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildLocalJdExpressPeriods,
+  fetchAllEnabledJdStores,
   isJdExpressInactiveResult
 } from '../src/renderer/src/services/jd-express-spend-sync'
 
@@ -28,5 +29,13 @@ describe('京准通消耗后台同步', () => {
       adSyncedStoreCount: 1,
       adTotalStoreCount: 2
     })
+  })
+
+  it('分页读取全部启用京东店铺，避免只同步第一页', async () => {
+    const fetchPage = async ({ page }) => page === 1
+      ? { list: [{ id: 1, platform: 'jd', status: 'enabled' }, { id: 2, platform: 'jd', status: 'enabled' }], total: 3 }
+      : { list: [{ id: 3, platform: 'jd', status: 'enabled' }], total: 3 }
+    const stores = await fetchAllEnabledJdStores(fetchPage)
+    expect(stores.map(store => store.id)).toEqual([1, 2, 3])
   })
 })

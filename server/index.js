@@ -4018,8 +4018,12 @@ app.get('/api/dashboard-stats', async (req, res) => {
     const knownStoreCount = Number(adStatus.known_store_count || 0)
     const activeStoreCount = Number(adStatus.active_store_count || 0)
     const syncedStoreCount = Number(adStatus.synced_store_count || 0)
+    // 已确认开通快车的店铺全部同步成功即可展示汇总；未开通、尚未识别或单店临时失败
+    // 不能把其他店铺已经落库的历史消耗整体遮掉。没有开通店铺时，仍要求全部完成识别。
     const adSpendReady = jdStoreCount === 0 || (
-      knownStoreCount === jdStoreCount && syncedStoreCount === activeStoreCount
+      activeStoreCount > 0 && syncedStoreCount === activeStoreCount
+    ) || (
+      knownStoreCount === jdStoreCount && activeStoreCount === 0
     )
     const adShared = {
       adSyncedStoreCount: syncedStoreCount,

@@ -81,4 +81,9 @@ describe('首页预估毛利', () => {
     expect(serverSource).toContain('cloud_binding.warehouse_id = cloud_store.cloud_warehouse_id')
     expect(serverSource).toContain('cloudOrderCount: Number(r[0].cloud_cnt || 0)')
   })
+
+  it('单个未知或失败店铺不隐藏已同步快车店铺的历史消耗', () => {
+    expect(serverSource).toContain('activeStoreCount > 0 && syncedStoreCount === activeStoreCount')
+    expect(serverSource).not.toContain('knownStoreCount === jdStoreCount && syncedStoreCount === activeStoreCount')
+  })
 })

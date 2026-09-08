@@ -83,6 +83,31 @@ export function getLatestLocalJdExpressPeriods() {
   return latestLocalPeriods
 }
 
+export async function fetchAllEnabledJdStores(fetchPage = fetchStores) {
+  const pageSize = 100
+  const stores = []
+  const seen = new Set()
+  for (let page = 1; page <= 100; page += 1) {
+    const response = await fetchPage({
+      platform: 'jd',
+      status: 'enabled',
+      page,
+      pageSize
+    })
+    const list = (response?.list || response?.data?.list || [])
+      .filter((store) => store.platform === 'jd' && store.status === 'enabled')
+    for (const store of list) {
+      const id = Number(store.id)
+      if (!Number.isSafeInteger(id) || seen.has(id)) continue
+      seen.add(id)
+      stores.push(store)
+    }
+    const total = Number(response?.total ?? response?.data?.total)
+    if (!list.length || (Number.isFinite(total) ? stores.length >= total : list.length < pageSize)) break
+  }
+  return stores
+}
+
 export function syncJdExpressSpend(options = {}) {
   const force = options.force === true
   const sessionKey = localStorage.getItem('accessToken') || ''
@@ -95,14 +120,7 @@ export function syncJdExpressSpend(options = {}) {
   if (!force && Date.now() - lastCompletedAt < MIN_MANUAL_GAP_MS) return Promise.resolve(null)
 
   inFlight = (async () => {
-    const response = await fetchStores({
-      platform: 'jd',
-      status: 'enabled',
-      page: 1,
-      pageSize: 1000
-    })
-    const stores = (response?.list || response?.data?.list || [])
-      .filter((store) => store.platform === 'jd' && store.status === 'enabled')
+    const stores = await fetchAllEnabledJdStores()
     const rawResults = await mapWithConcurrency(stores, 3, (store) => (
       window.electronAPI.invoke('jd-express-home-spend', { storeId: store.id })
     ))
