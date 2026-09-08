@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
@@ -30,6 +31,7 @@ const {
 
 const DEVICE_ID = 'device_12345678'
 const INSTANCE_ID = 'instance_12345678'
+const dbSource = readFileSync(new URL('../server/db.js', import.meta.url), 'utf8')
 
 function heartbeatBody(overrides = {}) {
   return {
@@ -101,6 +103,24 @@ describe('desktop command protocol', () => {
     expect(() => normalizeResultRequest(base, 'system.ping')).toThrowError(/claiming device/i)
   })
 
+  it('reads the UUID idempotency key from the snake_case request-body field unchanged', () => {
+    const idempotencyKey = '4355ef4c-4ffe-4c10-957c-354cf14ec6c2'
+    expect(normalizeCreateTaskRequest({
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 8110, confirmed: true },
+      idempotency_key: idempotencyKey
+    })).toMatchObject({
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 8110, confirmed: true },
+      idempotencyKey
+    })
+  })
+
+  it('stores idempotency keys without case folding or prefix truncation', () => {
+    expect(dbSource).toContain('idempotency_key VARCHAR(120) CHARACTER SET ascii COLLATE ascii_bin NOT NULL')
+    expect(dbSource).toContain('UNIQUE KEY uk_desktop_command_idempotency (user_id, idempotency_key)')
+  })
+
   it('binds a business result to the purchase order in the original task payload', () => {
     const body = {
       device_id: DEVICE_ID,
@@ -167,7 +187,7 @@ describe('desktop command channel service', () => {
     expect(execute.mock.calls[0][1][3]).toBe(PROTOCOL_VERSION)
   })
 
-  it('returns the idempotent task row selected after INSERT IGNORE', async () => {
+  it('returns the idempotent task row selected after an upsert', async () => {
     const row = {
       task_id: 'desktop_task_12345678',
       command: 'system.ping',
@@ -190,6 +210,86 @@ describe('desktop command channel service', () => {
     expect(task.task_id).toBe(row.task_id)
     expect(task.status).toBe('queued')
     expect(execute.mock.calls[1][1]).toEqual([7, 'ping:device:12345678'])
+  })
+
+  it('accepts a newly created task when MySQL reorders JSON object keys', async () => {
+    const idempotencyKey = '4355ef4c-4ffe-4c10-957c-354cf14ec6c2'
+    const row = {
+      task_id: 'desktop_task_12345678',
+      command: 'purchase.exception.resolve',
+      payload_json: { confirmed: true, purchase_order_id: 8110 },
+      status: 'queued',
+      target_device_id: '',
+      claimed_device_id: '',
+      attempt_count: 0,
+      created_at: '2026-09-08 19:07:14.000',
+      expires_at: '2026-09-08 19:17:14.000',
+      updated_at: '2026-09-08 19:07:14.000'
+    }
+    const execute = vi.fn()
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([[row]])
+
+    const task = await createTask({ execute }, { userId: 29 }, {
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 8110, confirmed: true },
+      idempotency_key: idempotencyKey
+    }, new Date('2026-09-08T11:07:14.000Z'))
+
+    expect(task.task_id).toBe(row.task_id)
+    expect(execute.mock.calls[0][1][5]).toBe(idempotencyKey)
+    expect(execute.mock.calls[1][1]).toEqual([29, idempotencyKey])
+  })
+
+  it('returns the original task for the same key and structurally identical request', async () => {
+    const row = {
+      task_id: 'desktop_task_original',
+      command: 'purchase.exception.resolve',
+      payload_json: JSON.stringify({ confirmed: true, purchase_order_id: 8110 }),
+      status: 'succeeded',
+      target_device_id: '',
+      claimed_device_id: DEVICE_ID,
+      attempt_count: 1,
+      created_at: '2026-09-08 19:07:14.000',
+      expires_at: '2026-09-08 19:17:14.000',
+      updated_at: '2026-09-08 19:07:20.000'
+    }
+    const execute = vi.fn()
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+      .mockResolvedValueOnce([[row]])
+
+    const task = await createTask({ execute }, { userId: 29 }, {
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 8110, confirmed: true },
+      idempotency_key: 'same-request-8110'
+    })
+
+    expect(task.task_id).toBe('desktop_task_original')
+    expect(task.status).toBe('succeeded')
+  })
+
+  it('rejects the same key only when the canonical request fingerprint differs', async () => {
+    const row = {
+      task_id: 'desktop_task_original',
+      command: 'purchase.exception.resolve',
+      payload_json: { confirmed: true, purchase_order_id: 8111 },
+      status: 'queued',
+      target_device_id: '',
+      claimed_device_id: '',
+      attempt_count: 0,
+      created_at: '2026-09-08 19:07:14.000',
+      expires_at: '2026-09-08 19:17:14.000',
+      updated_at: '2026-09-08 19:07:14.000'
+    }
+    const execute = vi.fn()
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+      .mockResolvedValueOnce([[row]])
+
+    await expect(createTask({ execute }, { userId: 29 }, {
+      command: 'purchase.exception.resolve',
+      payload: { purchase_order_id: 8110, confirmed: true },
+      idempotency_key: 'different-request-8110'
+    })).rejects.toMatchObject({ code: 'idempotency_conflict' })
   })
 
   it('rejects reuse of an idempotency key for a different target device', async () => {

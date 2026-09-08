@@ -51,6 +51,27 @@ function hashResult(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')
 }
 
+function canonicalizeJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeJson)
+  if (!value || typeof value !== 'object') return value
+  return Object.keys(value)
+    .sort()
+    .reduce((result, key) => {
+      result[key] = canonicalizeJson(value[key])
+      return result
+    }, {})
+}
+
+function taskRequestFingerprint({ command, payload, targetDeviceId }) {
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(canonicalizeJson({
+      command: String(command || ''),
+      payload: parseJsonObject(payload),
+      target_device_id: String(targetDeviceId || '')
+    })), 'utf8')
+    .digest('hex')
+}
+
 function formatTask(row, { includePayload = false } = {}) {
   if (!row) return null
   const task = {
@@ -101,10 +122,11 @@ async function createTask(pool, auth, body, now = new Date()) {
   const idempotencyKey = input.idempotencyKey || makeId('desktop_idem_')
   const expiresAt = new Date(now.getTime() + input.expiresInSeconds * 1000)
   await pool.execute(
-    `INSERT IGNORE INTO desktop_command_tasks
+    `INSERT INTO desktop_command_tasks
        (task_id, user_id, requested_by_user_id, command, payload_json, idempotency_key,
         target_device_id, status, created_at, expires_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+     ON DUPLICATE KEY UPDATE task_id = task_id`,
     [
       taskId,
       auth.userId,
@@ -124,9 +146,17 @@ async function createTask(pool, auth, body, now = new Date()) {
   )
   if (!rows.length) throw protocolError('task_create_failed', 'The desktop task could not be created')
   const existingTask = rows[0]
-  const sameRequest = existingTask.command === input.command &&
-    String(existingTask.target_device_id || '') === input.targetDeviceId &&
-    JSON.stringify(parseJsonObject(existingTask.payload_json)) === JSON.stringify(input.payload)
+  const storedFingerprint = taskRequestFingerprint({
+    command: existingTask.command,
+    payload: existingTask.payload_json,
+    targetDeviceId: existingTask.target_device_id
+  })
+  const incomingFingerprint = taskRequestFingerprint({
+    command: input.command,
+    payload: input.payload,
+    targetDeviceId: input.targetDeviceId
+  })
+  const sameRequest = storedFingerprint === incomingFingerprint
   if (!sameRequest) {
     throw protocolError(
       'idempotency_conflict',

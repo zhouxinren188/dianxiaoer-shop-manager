@@ -1018,7 +1018,7 @@ async function initDB() {
         requested_by_user_id INT NOT NULL,
         command VARCHAR(80) NOT NULL,
         payload_json JSON NOT NULL,
-        idempotency_key VARCHAR(120) NOT NULL,
+        idempotency_key VARCHAR(120) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
         target_device_id VARCHAR(100) DEFAULT '',
         status VARCHAR(20) NOT NULL DEFAULT 'queued',
         progress_json JSON DEFAULT NULL,
@@ -1044,6 +1044,21 @@ async function initDB() {
           REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    const [desktopIdempotencyColumns] = await connection.execute(`
+      SELECT COLLATION_NAME
+        FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'desktop_command_tasks'
+         AND COLUMN_NAME = 'idempotency_key'
+       LIMIT 1
+    `)
+    if (desktopIdempotencyColumns[0]?.COLLATION_NAME !== 'ascii_bin') {
+      await connection.execute(`
+        ALTER TABLE desktop_command_tasks
+        MODIFY COLUMN idempotency_key VARCHAR(120)
+          CHARACTER SET ascii COLLATE ascii_bin NOT NULL
+      `)
+    }
 
     // 云仓助手运行状态。机器码只负责路由，执行器使用独立凭据认证。
     await connection.execute(`

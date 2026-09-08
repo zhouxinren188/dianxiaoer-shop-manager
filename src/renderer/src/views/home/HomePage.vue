@@ -20,7 +20,7 @@
           <span class="overview-title">经营概览</span>
           <el-tooltip
             placement="top"
-            content="预估利润 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
+            content="预估毛利 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
           >
             <span class="overview-rule">计算口径</span>
           </el-tooltip>
@@ -94,10 +94,14 @@
         <div class="overview-kpi-card">
           <div class="overview-kpi-content">
             <div class="overview-kpi-info">
-              <p class="overview-kpi-label">{{ overviewPeriodLabel }}预估利润</p>
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}预估毛利</p>
               <h3
                 class="overview-kpi-value is-profit"
-                :class="{ 'is-placeholder': !hasMetricValue(activeOverviewStats.estimatedProfit) }"
+                :class="{
+                  'is-placeholder': !hasMetricValue(activeOverviewStats.estimatedProfit),
+                  'is-negative': hasMetricValue(activeOverviewStats.estimatedProfit) &&
+                    Number(activeOverviewStats.estimatedProfit) < 0
+                }"
               >
                 {{ formatMetricMoney(activeOverviewStats.estimatedProfit) }}
               </h3>
@@ -298,6 +302,7 @@ import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
 import { fetchStores } from '@/api/store'
+import { calculateDashboardProfit } from '@/utils/dashboard-profit'
 
 const currentUser = localStorage.getItem('currentUser') || '管理员'
 
@@ -390,13 +395,13 @@ function formatAdSpendStatus(period) {
 }
 
 function formatProfitStatus(period) {
-  if (!hasMetricValue(period?.estimatedProfit)) return '待快车与云仓成本接入'
+  if (!hasMetricValue(period?.estimatedProfit)) return '等待快车消耗同步'
   const rate = hasMetricValue(period?.estimatedProfitRate)
     ? Number(period.estimatedProfitRate)
     : (Number(period?.salesAmount || 0) > 0
         ? Number(period.estimatedProfit) / Number(period.salesAmount) * 100
         : 0)
-  return `预估利润率 ${rate.toFixed(1)}%`
+  return `预估毛利率 ${rate.toFixed(1)}%`
 }
 
 function formatTrendText(percent, compareLabel) {
@@ -417,7 +422,7 @@ const monthTrendPct = computed(() => calcPct(stats.value.thisMonth.salesAmount, 
 
 const dayTrendPct = computed(() => calcPct(stats.value.today.salesAmount, stats.value.yesterday.salesAmount))
 
-const activeOverviewStats = computed(() => (
+const activeOverviewStats = computed(() => calculateDashboardProfit(
   overviewPeriod.value === 'month' ? stats.value.thisMonth : stats.value.today
 ))
 
@@ -478,7 +483,7 @@ async function loadJdExpressSpend() {
       for (const key of ['today', 'thisMonth']) {
         stats.value[key] = {
           ...stats.value[key],
-          adSpend: null,
+          adSpend: 0,
           adSyncedStoreCount: 0,
           adTotalStoreCount: 0,
           adSpendUpdatedAt: null
@@ -893,6 +898,10 @@ onUnmounted(() => {
 
 .overview-kpi-value.is-profit:not(.is-placeholder) {
   color: #10b981;
+}
+
+.overview-kpi-value.is-profit.is-negative {
+  color: #e5484d;
 }
 
 .overview-kpi-value.is-placeholder {

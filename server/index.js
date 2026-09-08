@@ -3739,17 +3739,29 @@ app.get('/api/dashboard-stats', async (req, res) => {
       const placeholders = storeIds.map(() => '?').join(',')
       const excludeStatuses = ['待付款', '等待付款', '已取消']
       const excludePh = excludeStatuses.map(() => '?').join(',')
+      const salesAggregateSelect = `SELECT
+        COALESCE(SUM(so.total_amount), 0) AS amt,
+        COUNT(*) AS cnt,
+        COALESCE(SUM(CASE WHEN EXISTS (
+          SELECT 1
+            FROM stores cloud_store
+            INNER JOIN cloud_warehouse_machine_bindings cloud_binding
+              ON cloud_binding.warehouse_id = cloud_store.cloud_warehouse_id
+             AND cloud_binding.owner_id = cloud_store.owner_id
+           WHERE cloud_store.id = so.store_id
+        ) THEN 1 ELSE 0 END), 0) AS cloud_cnt
+        FROM sales_orders so`
 
       // 4 个时间段：今日、昨日、本月、上月
       const queries = [
         // 今日（凌晨至今）
-        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= CURDATE()`,
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= CURDATE()`,
         // 昨日同期（昨日凌晨至昨日此时，与今日同时长）
-        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND so.order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)`,
         // 本月（1日至今）
-        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
         // 上月同期（上月1日至上月同日，与本月天数一致）
-        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND so.order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
       ]
 
       const params = storeIds.concat(excludeStatuses)
@@ -3819,6 +3831,7 @@ app.get('/api/dashboard-stats', async (req, res) => {
       orderCount: Number(r[0].cnt),
       purchaseAmount: Number(purchaseAmount || 0),
       purchaseCount: Number(purchaseCount || 0),
+      cloudOrderCount: Number(r[0].cloud_cnt || 0),
       warehouseBreakdown: wh
     })
 
