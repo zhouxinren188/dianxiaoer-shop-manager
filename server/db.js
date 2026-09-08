@@ -204,6 +204,13 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE warehouses ADD COLUMN owner_id INT DEFAULT NULL`)
     } catch (e) { /* 字段已存在 */ }
+    // 店铺所属云仓：店铺只选择一个逻辑仓库，仓库再负责路由到云仓助手。
+    try {
+      await connection.execute(`ALTER TABLE stores ADD COLUMN cloud_warehouse_id INT DEFAULT NULL COMMENT '店铺所属云仓' AFTER owner_id`)
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute('CREATE INDEX idx_store_cloud_warehouse ON stores(owner_id, cloud_warehouse_id)')
+    } catch (e) { /* 索引已存在 */ }
 
     // Cookie 表
     await connection.execute(`
@@ -727,6 +734,7 @@ async function initDB() {
     try { await connection.execute('CREATE INDEX idx_owner_id ON purchase_orders(owner_id)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_owner_status ON purchase_orders(owner_id, status)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_owner_platform ON purchase_orders(owner_id, platform)') } catch(e) { /* 索引已存在 */ }
+    try { await connection.execute('CREATE INDEX idx_purchase_owner_created ON purchase_orders(owner_id, created_at)') } catch(e) { /* 索引已存在 */ }
     try { await connection.execute('CREATE INDEX idx_created_by ON purchase_orders(created_by)') } catch(e) { /* 索引已存在 */ }
     // 复合索引：服务端分页筛选优化（owner_id + status + platform 三条件联合查询）
     try { await connection.execute('CREATE INDEX idx_owner_status_platform ON purchase_orders(owner_id, status, platform)') } catch(e) { /* 索引已存在 */ }
@@ -870,6 +878,55 @@ async function initDB() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
 
+    // 仓库级云仓助手绑定。一个仓库只能绑定一个机器码；同一个机器码允许被
+    // 多个逻辑仓库绑定（包括不同主账号下、实际使用同一物理云仓的仓库）。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_warehouse_machine_bindings (
+        warehouse_id INT PRIMARY KEY,
+        owner_id INT NOT NULL,
+        machine_code VARCHAR(12) NOT NULL,
+        binding_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+        bound_by INT NOT NULL,
+        bound_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_warehouse_binding_owner (owner_id),
+        KEY idx_cloud_warehouse_binding_machine (machine_code),
+        CONSTRAINT fk_cloud_warehouse_binding_warehouse FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS cloud_warehouse_machine_binding_audit (
+        id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+        warehouse_id INT NOT NULL,
+        owner_id INT NOT NULL,
+        actor_user_id INT NOT NULL,
+        action VARCHAR(20) NOT NULL,
+        old_machine_code VARCHAR(12) DEFAULT '',
+        new_machine_code VARCHAR(12) DEFAULT '',
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_cloud_warehouse_binding_audit (owner_id, warehouse_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 订单保存首次解析出的仓库和机器码快照。之后即使店铺改换云仓，旧订单的
+    // 打印、补打和发货仍发送到原设备。
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN cloud_warehouse_id INT DEFAULT NULL COMMENT '云仓路由仓库快照'")
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN cloud_machine_code VARCHAR(12) DEFAULT '' COMMENT '云仓路由机器码快照'")
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN cloud_machine_binding_version BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '云仓绑定版本快照'")
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute("ALTER TABLE purchase_orders ADD COLUMN cloud_machine_routed_at DATETIME(3) DEFAULT NULL COMMENT '云仓路由锁定时间'")
+    } catch (e) { /* 字段已存在 */ }
+    try {
+      await connection.execute('CREATE INDEX idx_purchase_cloud_machine_route ON purchase_orders(owner_id, cloud_machine_code)')
+    } catch (e) { /* 索引已存在 */ }
+
     // 店小二调用云仓助手第三方服务时的最小指令记录。
     // 不保存 API Key、Cookie、Token 或云仓账号凭据；request_id 用于网络重试和结果轮询。
     await connection.execute(`
@@ -882,6 +939,7 @@ async function initDB() {
         command VARCHAR(50) NOT NULL,
         order_no VARCHAR(100) NOT NULL DEFAULT '',
         order_year SMALLINT UNSIGNED DEFAULT NULL,
+        scope_order_nos JSON DEFAULT NULL,
         transport_status VARCHAR(30) NOT NULL DEFAULT 'submitting',
         http_status SMALLINT UNSIGNED DEFAULT NULL,
         reason VARCHAR(100) DEFAULT '',
@@ -903,6 +961,9 @@ async function initDB() {
         MODIFY COLUMN order_no VARCHAR(100) NOT NULL DEFAULT '',
         MODIFY COLUMN order_year SMALLINT UNSIGNED DEFAULT NULL
     `)
+    try {
+      await connection.execute('ALTER TABLE cloud_external_commands ADD COLUMN scope_order_nos JSON DEFAULT NULL AFTER order_year')
+    } catch (e) { /* 字段已存在 */ }
     try {
       await connection.execute(`
         ALTER TABLE cloud_external_commands

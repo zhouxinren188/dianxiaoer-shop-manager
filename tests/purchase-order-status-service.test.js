@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import statusService from '../server/services/purchase-order-status-service.js'
 
 const {
+  markForwardedAfterCloudOutbound,
   markPendingPrintAfterExceptionResolution,
   mergePurchaseOrderStatus
 } = statusService
@@ -27,6 +28,18 @@ describe('purchase order workflow status', () => {
     expect(execute).toHaveBeenCalledWith(
       expect.stringContaining("SET status = 'pending_print'"),
       [23, 7, 'shipped', 'in_transit', 'received']
+    )
+  })
+
+  it('moves a confirmed cloud outbound order to forwarded inside the same tenant only', async () => {
+    const execute = vi.fn().mockResolvedValue([{ affectedRows: 1 }])
+    await expect(markForwardedAfterCloudOutbound({ execute }, {
+      ownerId: 7,
+      purchaseOrderId: 23
+    })).resolves.toBe(true)
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("SET status = 'forwarded'"),
+      [23, 7, 'pending_print', 'shipped', 'in_transit', 'received']
     )
   })
 })

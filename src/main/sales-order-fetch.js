@@ -3002,23 +3002,41 @@ function registerSalesOrderIpc(mainWindow) {
     console.log('[VendorRemark] 提交商家备注: storeId=' + storeId + ', orderId=' + orderId + ', remark=' + remark)
     if (!storeId || !orderId) return { success: false, message: '缺少参数' }
 
+    const startedAt = Date.now()
+    const withTiming = (result, path) => {
+      const timedResult = {
+        ...(result || {}),
+        path,
+        elapsedMs: Date.now() - startedAt
+      }
+      runtimeLog.writeLog(
+        'VENDOR_REMARK',
+        `store_id=${storeId} order_id=${orderId} path=${path} success=${timedResult.success === true} elapsed_ms=${timedResult.elapsedMs} message=${String(timedResult.message || '').replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`
+      )
+      return timedResult
+    }
+
     const partitionName = 'persist:platform-' + storeId
     const { platformWindows } = require('./platform-window')
-    const existingWin = platformWindows.get(Number(storeId))
+    const { getStoreBackendWebContents } = require('./store-backend-browser')
+    const backendContents = getStoreBackendWebContents(storeId)
+    const platformWin = platformWindows.get(Number(storeId))
+    const existingContents = backendContents || (
+      platformWin && !platformWin.isDestroyed() ? platformWin.webContents : null
+    )
 
-    // ===== 路径1：注入拦截器 + 等待页面SFF请求 + 平台窗口（较快）=====
-    if (existingWin && !existingWin.isDestroyed()) {
+    // ===== 路径1：直接复用当前店铺的京东窗口（Cookie 由浏览器分区自动携带）=====
+    if (existingContents && !existingContents.isDestroyed()) {
       try {
-        const url = existingWin.webContents.getURL()
+        const url = existingContents.getURL()
         if (url && !url.includes('passport.jd.com') && !url.includes('login.jd.com')) {
-          console.log('[VendorRemark] 复用平台窗口，注入拦截器:', url.substring(0, 100))
-          await _injectSffHeaderInterceptor(existingWin)
-          const headersReady = await _waitForSffHeaders(existingWin, 5000)
-          if (headersReady) {
-            const result = await _executeVendorRemarkApi(existingWin, orderId, remark)
-            return result
+          console.log('[VendorRemark] 复用店铺后台标签直接提交:', url.substring(0, 100))
+          const directResult = await _executeVendorRemarkApi(existingContents, orderId, remark)
+          if (directResult.success) {
+            return withTiming(directResult, backendContents ? 'store-backend-tab-signed' : 'platform-window-signed')
           }
-          console.log('[VendorRemark] 平台窗口未捕获到安全头，回退到临时窗口')
+
+          console.log('[VendorRemark] 平台窗口签名直调失败，回退到临时窗口:', directResult.message || '未知错误')
         }
       } catch (e) {
         console.log('[VendorRemark] 平台窗口失败，回退到临时窗口:', e.message)
@@ -3062,13 +3080,7 @@ function registerSalesOrderIpc(mainWindow) {
         }
       })
 
-      // 在dom-ready时注入SFF请求头拦截器（需要在页面JS环境建立后才能执行）
-      tempWin.webContents.on('dom-ready', () => {
-        if (tempWin.isDestroyed()) return
-        _injectSffHeaderInterceptor(tempWin).catch(() => {})
-      })
-
-      // 加载京东商家后台页面，建立会话上下文并捕获安全头
+      // 加载京东商家后台页面，建立该店铺的页面签名环境。
       await new Promise((resolve, reject) => {
         let loaded = false
         const timer = setTimeout(() => {
@@ -3080,11 +3092,9 @@ function registerSalesOrderIpc(mainWindow) {
           const url = tempWin.webContents.getURL()
           console.log('[VendorRemark] 页面加载完成:', url.substring(0, 150))
           if (!url.includes('passport.jd.com') && !url.includes('login.jd.com')) {
-            setTimeout(() => {
-              clearTimeout(timer)
-              loaded = true
-              resolve()
-            }, 5000)
+            clearTimeout(timer)
+            loaded = true
+            resolve()
           }
         })
 
@@ -3099,15 +3109,16 @@ function registerSalesOrderIpc(mainWindow) {
         tempWin.loadURL('https://shop.jd.com/jdm/trade/orders/order-list')
       })
 
-      // 等待安全头被捕获（最多等10秒）
-      await _waitForSffHeaders(tempWin, 10000)
-
-      const result = await _executeVendorRemarkApi(tempWin, orderId, remark)
-      return result
+      // 通过页面自身的 ParamsSign 和 getJsToken 生成本次备注请求的动态校验。
+      const directResult = await _executeVendorRemarkApi(tempWin.webContents, orderId, remark)
+      if (directResult.success) {
+        return withTiming(directResult, 'temporary-window-direct')
+      }
+      return withTiming(directResult, 'temporary-window-signed-failed')
 
     } catch (err) {
       console.log('[VendorRemark] 异常:', err.message)
-      return { success: false, message: err.message }
+      return withTiming({ success: false, message: err.message }, 'temporary-window-error')
     } finally {
       if (tempWin && !tempWin.isDestroyed()) {
         tempWin.destroy()
@@ -3120,136 +3131,102 @@ function registerSalesOrderIpc(mainWindow) {
     queued: enqueueStockRemarkTasks(input.storeId, input.tasks)
   }))
 
-  // 注入SFF请求头拦截器：拦截XMLHttpRequest和fetch的sff.jd.com请求，捕获安全头（dsm-eid等）
-  async function _injectSffHeaderInterceptor(win) {
-    if (win.isDestroyed()) return
-    await win.webContents.executeJavaScript(`
-      (function() {
-        if (window.__sffHeaderInterceptorInstalled) return;
-        window.__sffHeaderInterceptorInstalled = true;
-        window.__capturedSffHeaders = null;
-
-        // === 拦截 XMLHttpRequest ===
-        var origSetReqHeader = XMLHttpRequest.prototype.setRequestHeader;
-        var origOpen = XMLHttpRequest.prototype.open;
-        var origSend = XMLHttpRequest.prototype.send;
-
-        XMLHttpRequest.prototype.open = function(method, url) {
-          this.__captureUrl = (url || '').toString();
-          this.__captureHeaders = {};
-          return origOpen.apply(this, arguments);
-        };
-
-        XMLHttpRequest.prototype.setRequestHeader = function(name, value) {
-          if (this.__captureHeaders) {
-            this.__captureHeaders[name] = value;
+  // 在指定京东页面中使用官方 ParamsSign 环境执行 batchSubmitVenderRemark。
+  async function _executeVendorRemarkApi(webContents, orderId, remark) {
+    const encodedInput = Buffer.from(JSON.stringify({ orderId: String(orderId), remark: String(remark) }), 'utf8').toString('base64')
+    const apiResult = await webContents.executeJavaScript(`
+      (async function() {
+        try {
+          var bytes = Uint8Array.from(atob('${encodedInput}'), function(char) { return char.charCodeAt(0); });
+          var input = JSON.parse(new TextDecoder().decode(bytes));
+          var api = 'dsm.order.bff.orderVenderRemarkBffService.batchSubmitVenderRemark';
+          var appId = 'COCX0HBWR4BA7RDVDBIQ';
+          var sleep = function(milliseconds) { return new Promise(function(resolve) { setTimeout(resolve, milliseconds); }); };
+          var deadline = Date.now() + 10000;
+          var config = window.__DSM_SECURITY_CONFIG || {};
+          while (Date.now() < deadline) {
+            config = window.__DSM_SECURITY_CONFIG || {};
+            if (typeof window.ParamsSign === 'function' && window.CryptoJS && window.CryptoJS.SHA256) break;
+            await sleep(150);
           }
-          return origSetReqHeader.apply(this, arguments);
-        };
-
-        XMLHttpRequest.prototype.send = function(body) {
-          var xhr = this;
-          var url = xhr.__captureUrl || '';
-          if (url.indexOf('sff.jd.com') !== -1 && url.indexOf('appId=COCX0HBWR4BA7RDVDBIQ') !== -1 && !window.__capturedSffHeaders) {
-            window.__capturedSffHeaders = Object.assign({}, xhr.__captureHeaders);
-            console.log('[SFF-XHR] 捕获到安全头:', Object.keys(window.__capturedSffHeaders).join(','));
+          if (typeof window.ParamsSign !== 'function' || !window.CryptoJS || !window.CryptoJS.SHA256) {
+            throw new Error('京东页面签名组件未就绪');
           }
-          return origSend.apply(this, arguments);
-        };
 
-        // === 拦截 fetch ===
-        var origFetch = window.fetch;
-        window.fetch = function(input, init) {
-          var url = (typeof input === 'string') ? input : (input && input.url ? input.url : '');
-          if (url.indexOf('sff.jd.com') !== -1 && url.indexOf('appId=COCX0HBWR4BA7RDVDBIQ') !== -1) {
-            var fetchHeaders = {};
-            if (init && init.headers) {
-              if (typeof init.headers.forEach === 'function') {
-                init.headers.forEach(function(v, k) { fetchHeaders[k] = v; });
-              } else if (typeof init.headers === 'object') {
-                for (var k in init.headers) {
-                  if (init.headers.hasOwnProperty(k)) fetchHeaders[k] = init.headers[k];
-                }
-              }
-            }
-            if (!window.__capturedSffHeaders && Object.keys(fetchHeaders).length > 0) {
-              window.__capturedSffHeaders = fetchHeaders;
-              console.log('[SFF-Fetch] 捕获到安全头:', Object.keys(fetchHeaders).join(','));
-            }
-          }
-          return origFetch.apply(this, arguments);
-        };
-      })()
-    `).catch(() => {})
-  }
-
-  // 等待SFF安全头被捕获（页面自身的SFF请求触发拦截器）
-  // timeout: 最大等待毫秒数，interval: 轮询间隔毫秒
-  async function _waitForSffHeaders(win, timeout = 10000, interval = 500) {
-    const startTime = Date.now()
-    while (Date.now() - startTime < timeout) {
-      if (win.isDestroyed()) return false
-      try {
-        const captured = await win.webContents.executeJavaScript('window.__capturedSffHeaders || null')
-        if (captured && Object.keys(captured).length > 0) {
-          console.log('[VendorRemark] 安全头已捕获:', JSON.stringify(captured).substring(0, 300))
-          return true
-        }
-      } catch (e) {
-        console.log('[VendorRemark] 检查安全头异常:', e.message)
-        return false
-      }
-      await new Promise(r => setTimeout(r, interval))
-    }
-    console.log('[VendorRemark] 等待安全头超时(' + timeout + 'ms)，尝试不带安全头继续')
-    return false
-  }
-
-  // 在指定BrowserWindow中执行batchSubmitVenderRemark API调用
-  async function _executeVendorRemarkApi(win, orderId, remark) {
-    const escapedRemark = remark.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n')
-    const apiResult = await win.webContents.executeJavaScript(`
-      (function() {
-        return new Promise(function(resolve) {
           var requestBody = {
             request: {
               source: '2000',
               data: {
-                orderIds: ['${orderId}'],
-                remark: '${escapedRemark}',
+                orderIds: [input.orderId],
+                remark: input.remark,
                 level: 0,
                 levelDesc: ''
               }
             }
           };
+          var bodyText = JSON.stringify(requestBody);
+          var bodyHash = window.CryptoJS.SHA256(bodyText).toString().toUpperCase();
+          var businessId = (config.securityWhiteList && config.securityWhiteList[api]) || config.defaultBusinessId || '0248a';
+          var signer = new window.ParamsSign({ appId: businessId, preRequest: false, debug: false, onSign: function() {} });
 
-          console.log('[VendorRemark] 请求体:', JSON.stringify(requestBody));
-
-          var headers = { 'Content-Type': 'application/json' };
-          if (window.__capturedSffHeaders) {
-            for (var k in window.__capturedSffHeaders) {
-              if (window.__capturedSffHeaders.hasOwnProperty(k)) {
-                headers[k] = window.__capturedSffHeaders[k];
+          function getJsToken() {
+            if (typeof window.getJsToken !== 'function') return Promise.resolve('');
+            return new Promise(function(resolve) {
+              var settled = false;
+              var timer = setTimeout(function() {
+                if (settled) return;
+                settled = true;
+                resolve('');
+              }, 1800);
+              try {
+                window.getJsToken(function(result) {
+                  if (settled) return;
+                  settled = true;
+                  clearTimeout(timer);
+                  resolve((result && result.jsToken) || '');
+                }, 1200);
+              } catch (error) {
+                clearTimeout(timer);
+                resolve('');
               }
-            }
-          }
-          if (headers['dsm-file-path']) {
-            headers['dsm-file-path'] = 'vender-remark';
+            });
           }
 
-          fetch('https://sff.jd.com/api?v=1.0&appId=COCX0HBWR4BA7RDVDBIQ&api=dsm.order.bff.orderVenderRemarkBffService.batchSubmitVenderRemark', {
+          var signedAndEid = await Promise.all([
+            signer.sign({ body: bodyHash, appId: appId, api: api, v: '1.0' }),
+            getJsToken()
+          ]);
+          var signed = signedAndEid[0];
+          var eid = signedAndEid[1];
+          if (!signed || !signed.h5st) throw new Error('京东页面未生成备注签名');
+
+          var headers = {
+            'accept': 'application/json, text/plain, */*',
+            'content-type': 'application/json;charset=UTF-8',
+            'dsm-client-info': JSON.stringify({ terminal: '0' }),
+            'dsm-file-path': 'vender-remark',
+            'dsm-language': 'zh_CN',
+            'dsm-platform': 'pc',
+            'dsm-site': '',
+            'dsm-trace-id': (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(36).slice(2)),
+            'h5st': encodeURI(signed.h5st),
+            'x-referer-page': window.location.href,
+            'x-requested-with': 'XMLHttpRequest',
+            'x-rp-client': 'h5_2.4.0'
+          };
+          if (eid) headers['dsm-eid'] = eid;
+
+          var response = await fetch('https://sff.jd.com/api?v=1.0&appId=' + appId + '&api=' + encodeURIComponent(api), {
             method: 'POST',
             credentials: 'include',
             headers: headers,
-            body: JSON.stringify(requestBody)
-          }).then(function(resp) {
-            return resp.json();
-          }).then(function(data) {
-            resolve({ success: true, data: data });
-          }).catch(function(err) {
-            resolve({ success: false, error: err.message });
+            body: bodyText
           });
-        });
+          var data = await response.json();
+          return { success: true, data: data };
+        } catch (error) {
+          return { success: false, error: error && error.message ? error.message : String(error) };
+        }
       })()
     `)
 

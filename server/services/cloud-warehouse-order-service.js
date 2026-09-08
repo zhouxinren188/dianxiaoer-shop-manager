@@ -3,6 +3,7 @@ const {
   createOrderRefId,
   getTenantOwnerId
 } = require('./cloud-warehouse-protocol')
+const { resolveOrderMachineRoute } = require('./cloud-warehouse-routing-service')
 
 const EXCEPTION_SOURCES = new Set(['billexception', 'soExceptionCentre'])
 const LOCATOR_ERRORS = new Set([
@@ -13,6 +14,13 @@ const LOCATOR_ERRORS = new Set([
   'platform_order_no_missing',
   'sales_order_time_missing',
   'sales_order_time_invalid'
+])
+const ROUTE_ERRORS = new Set([
+  'sales_order_store_missing',
+  'store_cloud_warehouse_missing',
+  'cloud_warehouse_disabled',
+  'warehouse_machine_binding_missing',
+  'machine_code_invalid'
 ])
 
 function serviceError(code, message) {
@@ -50,7 +58,9 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
     ;[rows] = await db.execute(
       `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
               po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
-              po.cloud_locator_version
+              po.cloud_locator_version, po.cloud_warehouse_id,
+              po.cloud_machine_code, po.cloud_machine_binding_version,
+              po.cloud_machine_routed_at
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?${lock}`,
       [id, ownerId]
@@ -59,7 +69,9 @@ async function readAccessiblePurchaseOrder(db, user, purchaseOrderId, { forUpdat
     ;[rows] = await db.execute(
       `SELECT po.id, po.owner_id, po.purchase_no, po.platform,
               po.account_id, po.created_by, po.sales_order_id, po.sales_order_no,
-              po.cloud_locator_version
+              po.cloud_locator_version, po.cloud_warehouse_id,
+              po.cloud_machine_code, po.cloud_machine_binding_version,
+              po.cloud_machine_routed_at
          FROM purchase_orders po
         WHERE po.id = ? AND po.owner_id = ?
           AND (EXISTS (
@@ -87,7 +99,7 @@ async function readRelatedSalesLocator(db, order, { forUpdate = false } = {}) {
     ;[rows] = await db.execute(
       `SELECT so.id AS sales_order_id, so.order_id AS platform_order_no,
               so.order_time AS sales_order_time, YEAR(so.order_time) AS order_year,
-              s.owner_id AS store_owner_id
+              so.store_id, s.owner_id AS store_owner_id
          FROM sales_orders so
          JOIN stores s ON s.id = so.store_id
         WHERE so.id = ? AND s.owner_id = ?${lock}`,
@@ -97,7 +109,7 @@ async function readRelatedSalesLocator(db, order, { forUpdate = false } = {}) {
     ;[rows] = await db.execute(
       `SELECT so.id AS sales_order_id, so.order_id AS platform_order_no,
               so.order_time AS sales_order_time, YEAR(so.order_time) AS order_year,
-              s.owner_id AS store_owner_id
+              so.store_id, s.owner_id AS store_owner_id
          FROM sales_orders so
          JOIN stores s ON s.id = so.store_id
         WHERE so.order_id = ? AND s.owner_id = ?
@@ -122,6 +134,7 @@ async function readRelatedSalesLocator(db, order, { forUpdate = false } = {}) {
 
   return {
     salesOrderId: Number(row.sales_order_id),
+    storeId: Number(row.store_id),
     platformOrderNo,
     salesOrderTime: row.sales_order_time,
     orderYear: normalizeOrderYear(row.order_year),
@@ -168,17 +181,27 @@ function assertOrderLocatorReady(locator) {
 async function getOrderConfiguration(pool, user, purchaseOrderId) {
   const order = await readAccessiblePurchaseOrder(pool, user, purchaseOrderId)
   const ownerId = getTenantOwnerId(user)
-  const [bindingRows] = await pool.execute(
-    'SELECT 1 FROM cloud_machine_bindings WHERE owner_id = ? LIMIT 1',
-    [ownerId]
-  )
   let locator = null
   let locatorError = null
+  let machineRoute = null
+  let routeError = null
   try {
     locator = await readRelatedSalesLocator(pool, order)
   } catch (error) {
     if (!LOCATOR_ERRORS.has(error?.code)) throw error
     locatorError = error
+  }
+  if (locator) {
+    try {
+      machineRoute = await resolveOrderMachineRoute(pool, {
+        ownerId,
+        purchaseOrderId: order.id,
+        storeId: locator.storeId
+      })
+    } catch (error) {
+      if (!ROUTE_ERRORS.has(error?.code)) throw error
+      routeError = error
+    }
   }
 
   return {
@@ -192,7 +215,16 @@ async function getOrderConfiguration(pool, user, purchaseOrderId) {
     locatorReady: !!locator,
     locatorReason: locatorError?.code || '',
     locatorMessage: locatorError?.message || '',
-    machineBound: bindingRows.length > 0,
+    machineBound: !!machineRoute,
+    machineRoute: machineRoute ? {
+      warehouseId: machineRoute.warehouseId,
+      warehouseName: machineRoute.warehouseName,
+      machineCode: machineRoute.machineCode,
+      source: machineRoute.source,
+      routedAt: machineRoute.routedAt
+    } : null,
+    machineRouteReason: routeError?.code || '',
+    machineRouteMessage: routeError?.message || '',
     orderRefId: '',
     exception: null,
     exceptionResolution: null,

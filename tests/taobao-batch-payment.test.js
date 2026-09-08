@@ -29,7 +29,13 @@ describe('淘宝合并支付订单号处理', () => {
       'https://trade.taobao.com/trade/detail/trade_item_detail.htm?biz_order_id=5123456789012345678'
     )).toBe('5123456789012345678')
     expect(extractTrustedTaobaoOrderNoFromUrl(
+      'https://web.m.taobao.com/app/tbpc-trade/tbpc-pay-success/home?biz_order_id=5127724945596012324'
+    )).toBe('5127724945596012324')
+    expect(extractTrustedTaobaoOrderNoFromUrl(
       'https://item.taobao.com/item.htm?orderId=4123456789012345678&id=1005306455324'
+    )).toBe('')
+    expect(extractTrustedTaobaoOrderNoFromUrl(
+      'https://web.m.taobao.com/app/other-page/home?biz_order_id=5127724945596012324'
     )).toBe('')
   })
 

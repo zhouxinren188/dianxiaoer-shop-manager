@@ -6667,6 +6667,17 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
       // === 淘宝/天猫：DL系统方案 ===
       if (platform === 'taobao') {
+        // 淘宝新版支付完成页会回到 web.m.taobao.com，并在可信 URL 中通过
+        // biz_order_id 提供淘宝订单号。先处理该类强证据，再进入旧版
+        // confirm_order / 支付宝页面的提取流程，以便继续查询实付金额。
+        const trustedOrderNo = extractTrustedTaobaoOrderNoFromUrl(url)
+        if (trustedOrderNo) {
+          console.log(`[PurchaseCapture] Order found in trusted Taobao URL: ${trustedOrderNo}`)
+          runtimeLog.writeLog('PurchaseCapture', `从淘宝可信页面取得订单号: purchaseNo=${purchaseNo}, orderNo=${trustedOrderNo}`)
+          onOrderCaptured(trustedOrderNo)
+          return
+        }
+
         // 仅在两个关键页面检测：
         // 1. confirm_order 页面 - 从HTML提取 b2c_orid（最可靠）
         // 2. 支付宝页面 - 从URL提取 out_trade_no（备用）

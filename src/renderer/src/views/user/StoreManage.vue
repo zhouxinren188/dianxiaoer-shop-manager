@@ -127,6 +127,18 @@
               <span class="info-label">到期时间</span>
               <span class="info-value expiry-date" :class="{ 'expired': isExpired(row.subscription_end) }">{{ formatDate(row.subscription_end) }}</span>
             </div>
+            <div class="info-item">
+              <span class="info-label">所属云仓</span>
+              <span class="info-value">
+                {{ row.cloud_warehouse_name || '未分配' }}
+                <el-tag
+                  v-if="row.cloud_warehouse_name && !row.cloud_machine_bound"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                >未绑定机器</el-tag>
+              </span>
+            </div>
           </div>
           <div class="info-row" v-if="row.tags && row.tags.length">
             <span class="info-label">标签</span>
@@ -192,6 +204,7 @@
       v-model:visible="editDialogVisible"
       :store-data="editStoreData"
       :tag-options="tagOptions"
+      :warehouse-options="warehouseOptions"
       @saved="onStoreSaved"
     />
 
@@ -235,6 +248,7 @@ import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet, ArrowRight, Shop, Goods, Van } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchStores, createStore, deleteStore, deletePendingStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
+import { fetchWarehouses } from '@/api/warehouse'
 import StoreEditDialog from './components/StoreEditDialog.vue'
 import SubscriptionDialog from './components/SubscriptionDialog.vue'
 
@@ -290,6 +304,7 @@ const pageInfo = reactive({
 })
 
 const tableData = ref([])
+const warehouseOptions = ref([])
 const loading = ref(false)
 let keywordSearchTimer = null
 let storeRequestId = 0
@@ -362,6 +377,16 @@ function cancelKeywordSearch() {
   }
 }
 
+async function loadWarehouseOptions() {
+  try {
+    const data = await fetchWarehouses()
+    warehouseOptions.value = data.list || []
+  } catch (err) {
+    warehouseOptions.value = []
+    ElMessage.warning('所属云仓列表加载失败，请稍后重试')
+  }
+}
+
 function handleKeywordInput() {
   cancelKeywordSearch()
   pageInfo.page = 1
@@ -390,6 +415,7 @@ function handleReset() {
 function onStoreSaved() {
   loadStores()
   loadAllTagOptions()
+  loadWarehouseOptions()
 }
 
 function handleAdd() {
@@ -602,6 +628,7 @@ function handlePageChange() {
 
 onMounted(() => {
   loadStores()
+  loadWarehouseOptions()
   // 单独加载全量标签选项（不受分页限制）
   loadAllTagOptions()
 
@@ -782,7 +809,7 @@ onUnmounted(() => {
 
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px 20px;
 }
 

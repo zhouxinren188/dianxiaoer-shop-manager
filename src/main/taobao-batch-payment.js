@@ -38,7 +38,8 @@ function extractTrustedTaobaoOrderNoFromUrl(value) {
   const path = parsed.pathname.toLowerCase()
   const isOrderPage = path.includes('/trade/detail') || path.includes('/order/detail') ||
     path.includes('order_detail') || path.includes('trade_item_detail') ||
-    path.includes('trade_order_detail')
+    path.includes('trade_order_detail') ||
+    path.includes('/app/tbpc-trade/tbpc-pay-success')
   if (!isOrderPage) return ''
 
   for (const name of ['bizOrderId', 'biz_order_id', 'mainOrderId', 'orderId', 'order_id', 'b2c_orid']) {

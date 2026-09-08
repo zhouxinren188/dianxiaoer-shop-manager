@@ -230,6 +230,7 @@ describe('订单定位与脱敏异常结果', () => {
         platform_order_no: '3588401003348721',
         sales_order_time: '2026-08-12 13:07:12',
         order_year: 2026,
+        store_id: 7,
         store_owner_id: 18
         }]]
       }
@@ -241,6 +242,7 @@ describe('订单定位与脱敏异常结果', () => {
       cloud_locator_version: 1
     })).resolves.toEqual({
       salesOrderId: 321,
+      storeId: 7,
       platformOrderNo: '3588401003348721',
       salesOrderTime: '2026-08-12 13:07:12',
       orderYear: 2026,

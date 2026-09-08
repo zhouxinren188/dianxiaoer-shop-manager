@@ -737,9 +737,34 @@ function closeAllStoreBackendBrowsers() {
   }
 }
 
+function getStoreBackendWebContents(storeId) {
+  const browser = backendBrowsers.get(storeKey(storeId))
+  if (!browser || browser.isDestroyed()) return null
+
+  const tabs = [browser.activeTab(), ...browser.tabs]
+  const visited = new Set()
+  for (const tab of tabs) {
+    const contents = tab?.view?.webContents
+    if (!contents || contents.isDestroyed() || visited.has(contents.id)) continue
+    visited.add(contents.id)
+    try {
+      const url = new URL(contents.getURL() || tab.url || tab.requestedUrl)
+      const hostname = url.hostname.toLowerCase()
+      if ((hostname === 'shop.jd.com' || hostname.endsWith('.jd.com')) &&
+          !hostname.includes('passport') && !url.pathname.toLowerCase().includes('login')) {
+        return contents
+      }
+    } catch {
+      // 继续检查同一店铺的其他标签。
+    }
+  }
+  return null
+}
+
 module.exports = {
   openStoreBackendBrowser,
   closeAllStoreBackendBrowsers,
+  getStoreBackendWebContents,
   normalizeTabUrl,
   isHttpUrl,
   DEFAULT_MAX_TABS

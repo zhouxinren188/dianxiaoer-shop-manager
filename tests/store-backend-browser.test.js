@@ -118,6 +118,15 @@ describe('店铺后台多标签浏览器', () => {
     expect(source).toContain('session: this.platformSession')
   })
 
+  it('允许业务能力复用指定店铺已经打开的京东标签', () => {
+    const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
+
+    expect(source).toContain('function getStoreBackendWebContents(storeId)')
+    expect(source).toContain('browser.activeTab()')
+    expect(source).toContain("hostname === 'shop.jd.com'")
+    expect(source).toContain('getStoreBackendWebContents,')
+  })
+
   it('像普通浏览器一样处理网页离开确认，允许用户决定重载或保留编辑内容', () => {
     const source = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
 

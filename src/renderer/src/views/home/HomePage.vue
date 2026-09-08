@@ -13,50 +13,112 @@
       </div>
     </div>
 
-    <!-- KPI 统计卡片 -->
-    <div class="kpi-grid">
-      <!-- 本月销售 -->
-      <div class="kpi-card">
-        <div class="kpi-content">
-          <div class="kpi-info">
-            <p class="kpi-label">本月销售</p>
-            <h3 class="kpi-value">¥ {{ formatMoney(stats.thisMonth.salesAmount) }}</h3>
-            <p class="kpi-sub" v-html="formatOrderCount(stats.thisMonth)"></p>
-          </div>
-          <div class="kpi-icon" style="background:#eaf0fd">
-            <el-icon :size="22" color="#2b5aed"><DataLine /></el-icon>
-          </div>
+    <!-- 经营概览：右上角切换本月/今日 -->
+    <section class="overview-section">
+      <div class="overview-toolbar">
+        <div class="overview-heading">
+          <span class="overview-title">经营概览</span>
+          <el-tooltip
+            placement="top"
+            content="预估利润 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
+          >
+            <span class="overview-rule">计算口径</span>
+          </el-tooltip>
         </div>
-        <div class="kpi-footer">
-          <span class="kpi-trend" :class="monthTrendType">
-            <el-icon :size="12"><component :is="monthTrendType === 'up' ? Top : Bottom" /></el-icon>
-            {{ monthTrendPct }}%
-          </span>
-          <span class="kpi-compare">较上月同期</span>
-        </div>
+        <el-radio-group v-model="overviewPeriod" size="small">
+          <el-radio-button label="month">本月</el-radio-button>
+          <el-radio-button label="today">今日</el-radio-button>
+        </el-radio-group>
       </div>
 
-      <!-- 当日销售 -->
-      <div class="kpi-card">
-        <div class="kpi-content">
-          <div class="kpi-info">
-            <p class="kpi-label">当日销售</p>
-            <h3 class="kpi-value">¥ {{ formatMoney(stats.today.salesAmount) }}</h3>
-            <p class="kpi-sub" v-html="formatOrderCount(stats.today)"></p>
+      <div class="overview-grid">
+        <div class="overview-kpi-card">
+          <div class="overview-kpi-content">
+            <div class="overview-kpi-info">
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}销售</p>
+              <h3 class="overview-kpi-value">¥ {{ formatMoney(activeOverviewStats.salesAmount) }}</h3>
+              <p class="overview-kpi-sub" :title="formatOrderCountPlain(activeOverviewStats)">
+                {{ formatOrderCountPlain(activeOverviewStats) }}
+              </p>
+            </div>
+            <div class="overview-kpi-icon is-sales">
+              <el-icon :size="22"><ShoppingCart /></el-icon>
+            </div>
           </div>
-          <div class="kpi-icon" style="background:#f0f5ff">
-            <el-icon :size="22" color="#722ed1"><ShoppingCart /></el-icon>
+          <div class="overview-kpi-footer">
+            <span class="overview-trend" :class="activeSalesTrendPct >= 0 ? 'up' : 'down'">
+              {{ formatTrendText(activeSalesTrendPct, overviewCompareLabel) }}
+            </span>
           </div>
         </div>
-        <div class="kpi-footer">
-          <span class="kpi-trend" :class="dayTrendType">
-            <el-icon :size="12"><component :is="dayTrendType === 'up' ? Top : Bottom" /></el-icon>
-            {{ dayTrendPct }}%
-          </span>
-          <span class="kpi-compare">较昨日同期</span>
+
+        <div class="overview-kpi-card">
+          <div class="overview-kpi-content">
+            <div class="overview-kpi-info">
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}采购</p>
+              <h3 class="overview-kpi-value">¥ {{ formatMoney(activeOverviewStats.purchaseAmount) }}</h3>
+              <p class="overview-kpi-sub">{{ formatPurchaseCount(activeOverviewStats) }}</p>
+            </div>
+            <div class="overview-kpi-icon is-purchase">
+              <el-icon :size="22"><Goods /></el-icon>
+            </div>
+          </div>
+          <div class="overview-kpi-footer">
+            <span class="overview-trend" :class="activePurchaseTrendPct >= 0 ? 'up' : 'down'">
+              {{ formatTrendText(activePurchaseTrendPct, overviewCompareLabel) }}
+            </span>
+            <span class="overview-kpi-note">含采购运费</span>
+          </div>
+        </div>
+
+        <div class="overview-kpi-card">
+          <div class="overview-kpi-content">
+            <div class="overview-kpi-info">
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}快车消耗</p>
+              <h3 class="overview-kpi-value" :class="{ 'is-placeholder': !hasMetricValue(activeOverviewStats.adSpend) }">
+                {{ formatMetricMoney(activeOverviewStats.adSpend) }}
+              </h3>
+              <p class="overview-kpi-sub">{{ formatAdSpendStatus(activeOverviewStats) }}</p>
+            </div>
+            <div class="overview-kpi-icon is-ad">
+              <el-icon :size="22"><DataLine /></el-icon>
+            </div>
+          </div>
+          <div class="overview-kpi-footer">
+            <span class="overview-status" :class="{ 'is-ready': hasMetricValue(activeOverviewStats.adSpend) }">
+              {{ hasMetricValue(activeOverviewStats.adSpend) ? '数据已同步' : '暂未同步' }}
+            </span>
+          </div>
+        </div>
+
+        <div class="overview-kpi-card">
+          <div class="overview-kpi-content">
+            <div class="overview-kpi-info">
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}预估利润</p>
+              <h3
+                class="overview-kpi-value is-profit"
+                :class="{ 'is-placeholder': !hasMetricValue(activeOverviewStats.estimatedProfit) }"
+              >
+                {{ formatMetricMoney(activeOverviewStats.estimatedProfit) }}
+              </h3>
+              <p class="overview-kpi-sub">{{ formatProfitStatus(activeOverviewStats) }}</p>
+            </div>
+            <div class="overview-kpi-icon is-profit">
+              <el-icon :size="22"><Wallet /></el-icon>
+            </div>
+          </div>
+          <div class="overview-kpi-footer">
+            <span class="overview-status" :class="{ 'is-ready': hasMetricValue(activeOverviewStats.estimatedProfit) }">
+              {{ hasMetricValue(activeOverviewStats.estimatedProfit) ? '经营预估值' : '成本数据未完整' }}
+            </span>
+          </div>
         </div>
       </div>
-    </div>
+    </section>
+
+
+
+
 
     <!-- 图表区域 -->
     <el-row :gutter="24">
@@ -231,10 +293,11 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { UserFilled, ShoppingCart, DataLine, Top, Bottom } from '@element-plus/icons-vue'
+import { UserFilled, ShoppingCart, DataLine, Goods, Wallet } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
+import { fetchStores } from '@/api/store'
 
 const currentUser = localStorage.getItem('currentUser') || '管理员'
 
@@ -253,6 +316,7 @@ let refreshTimer = null
 let countdownTimer = null
 let invoiceMetricRefreshTimer = null
 let unsubscribeMetricUpdated = null
+let adSpendLoading = false
 
 async function loadUserInfo() {
   try {
@@ -283,24 +347,62 @@ async function loadUserInfo() {
 }
 
 const stats = ref({
-  today: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-  yesterday: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-  thisMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-  lastMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] }
+  today: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  yesterday: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  thisMonth: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  lastMonth: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] }
 })
-
+const overviewPeriod = ref('month')
 // 格式化金额
 function formatMoney(val) {
   return Number(val || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-// 格式化订单数（含仓库明细）
-function formatOrderCount(s) {
-  const total = s.orderCount || 0
-  const wh = s.warehouseBreakdown || []
-  if (!wh.length) return `${total} 笔订单`
-  const parts = wh.map(w => `${w.warehouse} ${w.count}笔`)
-  return `共 ${total} 笔，${parts.join('，')}`
+function formatOrderCountPlain(s) {
+  const total = Number(s?.orderCount || 0)
+  const warehouses = Array.isArray(s?.warehouseBreakdown) ? s.warehouseBreakdown : []
+  if (!warehouses.length) return `${total} 笔订单`
+  const details = warehouses.map(item => `${item.warehouse} ${Number(item.count || 0)}笔`)
+  return `共 ${total} 笔，${details.join('，')}`
+}
+
+function formatPurchaseCount(s) {
+  return `共 ${Number(s?.purchaseCount || 0)} 笔采购单`
+}
+
+function hasMetricValue(value) {
+  return value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+}
+
+function formatMetricMoney(value) {
+  return hasMetricValue(value) ? `¥ ${formatMoney(value)}` : '--'
+}
+
+function formatAdSpendStatus(period) {
+  if (period?.adTotalStoreCount === 0) return '暂无启用的京东店铺'
+  if (!hasMetricValue(period?.adSpend)) return '暂未同步到快车消耗'
+  const synced = Number(period?.adSyncedStoreCount)
+  const total = Number(period?.adTotalStoreCount)
+  if (Number.isFinite(synced) && Number.isFinite(total) && total > 0) {
+    return `已同步 ${synced}/${total} 家店铺`
+  }
+  return period?.adSpendUpdatedAt ? `更新于 ${period.adSpendUpdatedAt}` : '数据已同步'
+}
+
+function formatProfitStatus(period) {
+  if (!hasMetricValue(period?.estimatedProfit)) return '待快车与云仓成本接入'
+  const rate = hasMetricValue(period?.estimatedProfitRate)
+    ? Number(period.estimatedProfitRate)
+    : (Number(period?.salesAmount || 0) > 0
+        ? Number(period.estimatedProfit) / Number(period.salesAmount) * 100
+        : 0)
+  return `预估利润率 ${rate.toFixed(1)}%`
+}
+
+function formatTrendText(percent, compareLabel) {
+  const value = Number(percent || 0)
+  if (value === 0) return `较${compareLabel}持平`
+  return `较${compareLabel}${value > 0 ? '增长' : '下降'} ${Math.abs(value)}%`
 }
 
 // 计算环比
@@ -312,10 +414,23 @@ function calcPct(curr, prev) {
 }
 
 const monthTrendPct = computed(() => calcPct(stats.value.thisMonth.salesAmount, stats.value.lastMonth.salesAmount))
-const monthTrendType = computed(() => stats.value.thisMonth.salesAmount >= stats.value.lastMonth.salesAmount ? 'up' : 'down')
 
 const dayTrendPct = computed(() => calcPct(stats.value.today.salesAmount, stats.value.yesterday.salesAmount))
-const dayTrendType = computed(() => stats.value.today.salesAmount >= stats.value.yesterday.salesAmount ? 'up' : 'down')
+
+const activeOverviewStats = computed(() => (
+  overviewPeriod.value === 'month' ? stats.value.thisMonth : stats.value.today
+))
+
+const overviewPeriodLabel = computed(() => overviewPeriod.value === 'month' ? '本月' : '当日')
+const overviewCompareLabel = computed(() => overviewPeriod.value === 'month' ? '上月同期' : '昨日同期')
+const activeSalesTrendPct = computed(() => (
+  overviewPeriod.value === 'month' ? monthTrendPct.value : dayTrendPct.value
+))
+const activePurchaseTrendPct = computed(() => (
+  overviewPeriod.value === 'month'
+    ? calcPct(stats.value.thisMonth.purchaseAmount, stats.value.lastMonth.purchaseAmount)
+    : calcPct(stats.value.today.purchaseAmount, stats.value.yesterday.purchaseAmount)
+))
 
 async function loadStats() {
   try {
@@ -326,6 +441,86 @@ async function loadStats() {
   } catch (err) {
     console.error('[HomePage] 加载统计失败:', err.message)
   }
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length)
+  let nextIndex = 0
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      try {
+        results[index] = await worker(items[index], index)
+      } catch (error) {
+        results[index] = { success: false, message: error?.message || '查询失败' }
+      }
+    }
+  })
+  await Promise.all(runners)
+  return results
+}
+
+async function loadJdExpressSpend() {
+  if (adSpendLoading || !window.electronAPI?.invoke) return
+  adSpendLoading = true
+  try {
+    const response = await fetchStores({
+      platform: 'jd',
+      status: 'enabled',
+      page: 1,
+      pageSize: 1000
+    })
+    const stores = (response?.list || response?.data?.list || [])
+      .filter((store) => store.platform === 'jd' && store.status === 'enabled')
+    const totalStoreCount = stores.length
+    if (!totalStoreCount) {
+      for (const key of ['today', 'thisMonth']) {
+        stats.value[key] = {
+          ...stats.value[key],
+          adSpend: null,
+          adSyncedStoreCount: 0,
+          adTotalStoreCount: 0,
+          adSpendUpdatedAt: null
+        }
+      }
+      return
+    }
+
+    const results = await mapWithConcurrency(stores, 3, (store) => (
+      window.electronAPI.invoke('jd-express-home-spend', { storeId: store.id })
+    ))
+    const successful = results.filter((result) => result?.success)
+    const updatedAt = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    const shared = {
+      adSyncedStoreCount: successful.length,
+      adTotalStoreCount: totalStoreCount,
+      adSpendUpdatedAt: successful.length ? updatedAt : null
+    }
+    stats.value.today = {
+      ...stats.value.today,
+      ...shared,
+      adSpend: successful.length
+        ? successful.reduce((total, result) => total + Number(result.todaySpend || 0), 0)
+        : null
+    }
+    stats.value.thisMonth = {
+      ...stats.value.thisMonth,
+      ...shared,
+      adSpend: successful.length
+        ? successful.reduce((total, result) => total + Number(result.monthSpend || 0), 0)
+        : null
+    }
+  } catch (error) {
+    console.warn('[HomePage] 快车消耗暂未同步:', error?.message || error)
+  } finally {
+    adSpendLoading = false
+  }
+}
+
+async function loadOverviewStats() {
+  await loadStats()
+  await loadJdExpressSpend()
 }
 
 const pendingInvoiceTotal = ref(0)
@@ -525,7 +720,7 @@ const tooltipY = computed(() => {
 
 onMounted(() => {
   loadUserInfo()
-  loadStats()
+  loadOverviewStats()
   loadTrend()
   loadPendingInvoiceTotal()
   if (window.electronAPI?.onUpdate) {
@@ -542,7 +737,7 @@ onMounted(() => {
   }, 1000)
   // 每5分钟自动刷新统计数据
   refreshTimer = setInterval(() => {
-    loadStats()
+    loadOverviewStats()
     loadTrend()
     loadPendingInvoiceTotal()
   }, 5 * 60 * 1000)
@@ -617,92 +812,193 @@ onUnmounted(() => {
   margin: 0;
 }
 
-/* KPI 卡片 */
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 24px;
-}
-
-.kpi-card {
-  background: #fff;
-  padding: 20px 24px;
-  border-radius: 12px;
-  border: 1px solid #f0f0f0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
-  transition: box-shadow 0.3s;
-  cursor: pointer;
-}
-
-.kpi-card:hover {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
-
-.kpi-content {
+/* 可切换经营概览卡片 */
+.overview-section {
   display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.overview-toolbar {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px;
+}
+
+.overview-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.overview-title {
+  color: #1f2937;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.overview-rule {
+  color: #2b5aed;
+  font-size: 12px;
+  cursor: help;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.overview-kpi-card {
+  min-width: 0;
+  padding: 18px 20px;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.overview-kpi-card:hover {
+  box-shadow: 0 5px 16px rgba(31, 41, 55, 0.08);
+  transform: translateY(-1px);
+}
+
+.overview-kpi-content {
+  display: flex;
   align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.kpi-label {
-  font-size: 14px;
-  color: #6b7280;
+.overview-kpi-info {
+  min-width: 0;
+}
+
+.overview-kpi-label {
   margin: 0 0 8px;
+  color: #6b7280;
+  font-size: 14px;
 }
 
-.kpi-value {
+.overview-kpi-value {
+  margin: 0;
+  color: #1f2937;
   font-size: 28px;
   font-weight: 700;
-  color: #1f2937;
-  margin: 0;
+  white-space: nowrap;
 }
 
-.kpi-sub {
-  font-size: 13px;
-  color: #9ca3af;
-  margin: 4px 0 0;
-}
-
-.kpi-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.3s;
-}
-
-.kpi-card:hover .kpi-icon {
-  transform: scale(1.1);
-}
-
-.kpi-footer {
-  margin-top: 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.kpi-trend {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  font-weight: 500;
-}
-
-.kpi-trend.up {
-  color: #f5222d;
-}
-
-.kpi-trend.down {
+.overview-kpi-value.is-profit:not(.is-placeholder) {
   color: #10b981;
 }
 
-.kpi-compare {
+.overview-kpi-value.is-placeholder {
+  color: #b6bdc9;
+}
+
+.overview-kpi-sub {
+  min-height: 38px;
+  margin: 4px 0 0;
+  color: #9ca3af;
+  font-size: 13px;
+  line-height: 19px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.overview-kpi-icon {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  transition: transform 0.2s ease;
+}
+
+.overview-kpi-card:hover .overview-kpi-icon {
+  transform: scale(1.06);
+}
+
+.overview-kpi-icon.is-sales {
+  color: #2b5aed;
+  background: #eaf0fd;
+}
+
+.overview-kpi-icon.is-purchase {
+  color: #722ed1;
+  background: #f2edff;
+}
+
+.overview-kpi-icon.is-ad {
+  color: #fa8c16;
+  background: #fff7e6;
+}
+
+.overview-kpi-icon.is-profit {
+  color: #10b981;
+  background: #ecfdf5;
+}
+
+.overview-kpi-footer {
+  min-height: 20px;
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.overview-trend.up {
+  color: #f5222d;
+}
+
+.overview-trend.down {
+  color: #10b981;
+}
+
+.overview-kpi-note {
   color: #9ca3af;
 }
+
+.overview-status {
+  color: #b7791f;
+}
+
+.overview-status.is-ready {
+  color: #10b981;
+}
+
+@media (max-width: 1280px) {
+  .overview-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .overview-toolbar,
+  .overview-heading {
+    align-items: flex-start;
+  }
+
+  .overview-toolbar {
+    flex-direction: column;
+  }
+
+  .overview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+
+
 
 /* 图表区域 */
 .chart-card {

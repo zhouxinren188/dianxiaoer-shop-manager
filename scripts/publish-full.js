@@ -223,6 +223,8 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'services', 'desktop-command-channel-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-channel-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'desktop-command-protocol.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-protocol.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-api-client.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-api-client.js` },
+    { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-order-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-order-service.js` },
+    { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-routing-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-routing-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-third-party-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-third-party-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-identity.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-identity.js` },
     { local: path.join(ROOT, 'server', 'services', 'inventory-image-storage.js'), remote: `${BUSINESS_REMOTE_DIR}/services/inventory-image-storage.js` },

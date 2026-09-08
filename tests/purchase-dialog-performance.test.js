@@ -27,4 +27,15 @@ describe('采购弹窗低配置设备首开优化', () => {
     expect(mainSource).toContain("ipcMain.handle('purchase-dialog-render-timing'")
     expect(mainSource).toContain("runtimeLog.writeLog('PurchaseDialogTiming'")
   })
+
+  it('仓库发货优先自动选择当前店铺所属云仓', () => {
+    expect(salesSource).toContain('fetchStore(purchaseInfo.storeId)')
+    expect(salesSource).toContain('purchaseInfo.storeCloudWarehouseId = storeRes?.cloud_warehouse_id')
+    expect(salesSource).toContain('function applyStoreCloudWarehouse()')
+    expect(salesSource).toContain('const selectedStoreWarehouse = applyStoreCloudWarehouse()')
+    expect(salesSource).toContain('if (!selectedStoreWarehouse && lastWhId)')
+    expect(salesSource).toContain("if (type === 'warehouse' || type === 'warehouse_in') {")
+    expect(salesSource.indexOf('applyStoreCloudWarehouse()', salesSource.indexOf('watch(() => purchaseInfo.purchaseType')))
+      .toBeLessThan(salesSource.indexOf('updateWarehouseShipping()', salesSource.indexOf('watch(() => purchaseInfo.purchaseType')))
+  })
 })

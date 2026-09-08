@@ -8,7 +8,7 @@
         </div>
         <div class="header-info">
           <h2 class="header-title">仓库信息管理</h2>
-          <p class="header-desc">管理所有仓库的基本信息与联系方式</p>
+          <p class="header-desc">管理仓库信息，并为云仓绑定对应的云仓助手设备</p>
         </div>
       </div>
       <div class="header-actions">
@@ -64,6 +64,18 @@
             <div class="info-item">
               <div class="info-label">手机号码</div>
               <div class="info-value">{{ item.phone }}</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">云仓助手</div>
+              <div class="info-value cloud-machine-state">
+                <template v-if="item.cloudMachineCode">
+                  <el-tag effect="plain" size="small">{{ item.cloudMachineCode }}</el-tag>
+                  <el-tag :type="machineStatusType(item)" effect="plain" size="small">
+                    {{ machineStatusText(item) }}
+                  </el-tag>
+                </template>
+                <span v-else class="muted-value">未绑定</span>
+              </div>
             </div>
           </div>
           <div class="info-row">
@@ -126,6 +138,28 @@
             show-word-limit
           />
         </el-form-item>
+        <template v-if="isEdit">
+          <el-divider content-position="left">云仓助手</el-divider>
+          <el-form-item v-if="canManageCloudMachine" label="机器码" prop="cloudMachineCode">
+            <el-input
+              :model-value="formData.cloudMachineCode"
+              maxlength="12"
+              clearable
+              placeholder="例如：YC-7F3K-92MX"
+              @update:model-value="handleMachineCodeInput"
+            />
+            <div class="form-help">
+              同一个机器码可以绑定多个仓库；留空表示该仓库不使用云仓助手。
+            </div>
+          </el-form-item>
+          <el-alert
+            v-else
+            title="只有主账号或管理员可以绑定、更换云仓助手机器码"
+            type="info"
+            :closable="false"
+            show-icon
+          />
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -167,13 +201,19 @@
             <div class="detail-value">{{ viewData.address }}</div>
           </div>
         </div>
+        <div class="detail-row">
+          <div class="detail-item detail-item-full">
+            <div class="detail-label">云仓助手机器码</div>
+            <div class="detail-value">{{ viewData.cloudMachineCode || '未绑定' }}</div>
+          </div>
+        </div>
       </div>
     </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import {
   Plus,
   Refresh,
@@ -185,14 +225,24 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   fetchWarehouses,
+  fetchWarehouse,
   createWarehouse,
   updateWarehouse,
   deleteWarehouse
 } from '@/api/warehouse'
+import { fetchWarehouseMachineStatus } from '@/api/cloudWarehouse'
 
 // 仓库列表数据
 const warehouseList = ref([])
 const loading = ref(false)
+const canManageCloudMachine = computed(() => {
+  try {
+    const user = JSON.parse(localStorage.getItem('userInfo') || '{}')
+    return user.userType === 'master' || user.role === 'admin'
+  } catch {
+    return false
+  }
+})
 
 onMounted(() => {
   loadWarehouses()
@@ -203,7 +253,7 @@ async function loadWarehouses() {
   try {
     const res = await fetchWarehouses()
     // 后端字段 location 映射为 address，created_at / createdAt 映射为 createTime
-    warehouseList.value = (res.list || []).map(item => {
+    const list = (res.list || []).map(item => {
       const rawTime = item.created_at || item.createdAt || ''
       let createTime = ''
       if (rawTime) {
@@ -222,14 +272,36 @@ async function loadWarehouses() {
         address: item.location || '',
         contact: item.contact || '',
         phone: item.phone || '',
+        cloudMachineCode: item.cloud_machine_code || '',
+        cloudMachineStatus: item.cloud_machine_code ? 'checking' : 'unbound',
+        cloudMachineOnline: false,
+        cloudMachineBusy: false,
         createTime
       }
     })
+    warehouseList.value = list
+    // 从 ref 中取响应式对象写回异步状态，避免结果已返回但界面仍停在“检测中”。
+    void loadWarehouseMachineStatuses(warehouseList.value)
   } catch (err) {
     ElMessage.error('加载仓库列表失败: ' + err.message)
   } finally {
     loading.value = false
   }
+}
+
+async function loadWarehouseMachineStatuses(list) {
+  await Promise.all(list.filter(item => item.cloudMachineCode).map(async item => {
+      try {
+        const status = await fetchWarehouseMachineStatus(item.id)
+        item.cloudMachineStatus = status.status || (status.online ? 'online' : 'offline')
+        item.cloudMachineOnline = status.online === true
+        item.cloudMachineBusy = status.busy === true
+      } catch {
+        item.cloudMachineStatus = 'unavailable'
+        item.cloudMachineOnline = false
+        item.cloudMachineBusy = false
+      }
+    }))
 }
 
 // 对话框控制
@@ -245,6 +317,7 @@ const viewData = reactive({
   address: '',
   contact: '',
   phone: '',
+  cloudMachineCode: '',
   createTime: ''
 })
 
@@ -254,7 +327,8 @@ const formData = reactive({
   name: '',
   address: '',
   contact: '',
-  phone: ''
+  phone: '',
+  cloudMachineCode: ''
 })
 
 const formRules = {
@@ -271,6 +345,18 @@ const formRules = {
   ],
   address: [
     { required: true, message: '请输入仓库地址', trigger: 'blur' }
+  ],
+  cloudMachineCode: [
+    {
+      validator: (_rule, value, callback) => {
+        if (!value || /^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/.test(value)) {
+          callback()
+          return
+        }
+        callback(new Error('请输入有效的云仓助手机器码'))
+      },
+      trigger: 'blur'
+    }
   ]
 }
 
@@ -279,6 +365,7 @@ function resetForm() {
   formData.address = ''
   formData.contact = ''
   formData.phone = ''
+  formData.cloudMachineCode = ''
 }
 
 function handleAdd() {
@@ -297,6 +384,7 @@ function handleEdit(item) {
   formData.address = item.address
   formData.contact = item.contact
   formData.phone = item.phone
+  formData.cloudMachineCode = item.cloudMachineCode
   dialogVisible.value = true
 }
 
@@ -305,6 +393,7 @@ function handleView(item) {
   viewData.address = item.address
   viewData.contact = item.contact
   viewData.phone = item.phone
+  viewData.cloudMachineCode = item.cloudMachineCode
   viewData.createTime = item.createTime
   viewVisible.value = true
 }
@@ -341,8 +430,19 @@ async function handleSubmit() {
       contact: formData.contact,
       phone: formData.phone
     }
+    if (isEdit.value && canManageCloudMachine.value) {
+      payload.cloud_machine_code = formData.cloudMachineCode
+    }
     if (isEdit.value) {
       await updateWarehouse(currentId.value, payload)
+      if (canManageCloudMachine.value) {
+        const saved = await fetchWarehouse(currentId.value)
+        const expectedMachineCode = String(payload.cloud_machine_code || '').trim().toUpperCase()
+        const actualMachineCode = String(saved?.cloud_machine_code || '').trim().toUpperCase()
+        if (actualMachineCode !== expectedMachineCode) {
+          throw new Error('服务端未保存云仓助手机器码，请先升级业务服务后重试')
+        }
+      }
       ElMessage.success('修改成功')
     } else {
       await createWarehouse(payload)
@@ -355,9 +455,27 @@ async function handleSubmit() {
   }
 }
 
+function handleMachineCodeInput(value) {
+  formData.cloudMachineCode = String(value || '').trim().toUpperCase()
+}
+
 function handleRefresh() {
   loadWarehouses()
   ElMessage.success('刷新成功')
+}
+
+function machineStatusText(item) {
+  if (item.cloudMachineStatus === 'checking') return '检测中'
+  if (item.cloudMachineStatus === 'unavailable') return '状态未知'
+  if (item.cloudMachineOnline && item.cloudMachineBusy) return '在线·忙碌'
+  if (item.cloudMachineOnline) return '在线'
+  return '离线'
+}
+
+function machineStatusType(item) {
+  if (item.cloudMachineStatus === 'checking') return 'info'
+  if (item.cloudMachineStatus === 'unavailable') return 'warning'
+  return item.cloudMachineOnline ? 'success' : 'danger'
 }
 </script>
 
@@ -468,7 +586,7 @@ function handleRefresh() {
 
 .info-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 24px;
 }
 
@@ -479,7 +597,7 @@ function handleRefresh() {
 }
 
 .info-item-full {
-  grid-column: span 3;
+  grid-column: 1 / -1;
 }
 
 .info-label {
@@ -496,6 +614,18 @@ function handleRefresh() {
   word-break: break-all;
 }
 
+.muted-value {
+  color: #a8abb2;
+  font-weight: 400;
+}
+
+.cloud-machine-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 空状态 */
 .empty-state {
   background: #fff;
@@ -508,6 +638,13 @@ function handleRefresh() {
 .warehouse-form :deep(.el-input__wrapper),
 .warehouse-form :deep(.el-textarea__inner) {
   border-radius: 6px;
+}
+
+.form-help {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* 查看详情 */

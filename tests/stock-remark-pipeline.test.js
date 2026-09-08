@@ -30,6 +30,16 @@ describe('stock deduction JD remark pipeline', () => {
     expect(rendererApiSource).toContain("window.electronAPI.invoke('process-stock-remark-tasks'")
   })
 
+  it('signs in the existing logged-in JD window before calling the remark API', () => {
+    const directCall = mainSource.indexOf('const directResult = await _executeVendorRemarkApi(existingContents, orderId, remark)')
+    expect(directCall).toBeGreaterThan(-1)
+    expect(mainSource).toContain('getStoreBackendWebContents(storeId)')
+    expect(mainSource).toContain("'store-backend-tab-signed'")
+    expect(mainSource).toContain('new window.ParamsSign')
+    expect(mainSource).toContain("'h5st': encodeURI(signed.h5st)")
+    expect(mainSource).not.toContain('_waitForSffHeaders(existingWin')
+  })
+
   it('keeps failed JD remarks retryable without failing order synchronization', () => {
     expect(serverSource).toContain("so.stock_remark_status='failed'")
     expect(serverSource).toContain('DATE_SUB(NOW(), INTERVAL 5 MINUTE)')

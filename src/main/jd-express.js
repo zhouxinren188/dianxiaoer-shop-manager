@@ -34,6 +34,7 @@ const {
   formatVerificationDifference,
   verifyCreatedRoiCampaigns
 } = require('./jd-express-verify')
+const { fetchHomeSpend } = require('./jd-express-report')
 
 const JZT_LOGIN_URL = 'https://jzt-api.jd.com/common/logininfo?businessFrom=26'
 const PRODUCT_QUERY_URL = 'https://data.shop.jd.com/fullQuery/querySpu'
@@ -1402,6 +1403,30 @@ async function runPostCreationVerification(storeId, created, sender) {
 }
 
 function registerJdExpressIpc(ipcMain, dependencies = {}) {
+  ipcMain.handle('jd-express-home-spend', async (_event, payload = {}) => {
+    const startedAt = Date.now()
+    let normalizedStoreId = null
+    try {
+      const prepared = await prepareStore(payload.storeId)
+      normalizedStoreId = prepared.storeId
+      const result = await fetchHomeSpend({
+        platformSession: prepared.platformSession,
+        requestJson
+      })
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=home_spend store_id=${normalizedStoreId} status=success today=${result.todaySpend} month=${result.monthSpend} duration_ms=${Date.now() - startedAt}`
+      )
+      return { success: true, storeId: normalizedStoreId, ...result }
+    } catch (error) {
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=home_spend store_id=${normalizedStoreId || payload.storeId || ''} status=unavailable duration_ms=${Date.now() - startedAt} message=${logSafe(error?.message)}`
+      )
+      return serializeError(error)
+    }
+  })
+
   ipcMain.handle('jd-express-preflight', async (_event, payload = {}) => {
     const startedAt = Date.now()
     try {
@@ -1668,6 +1693,7 @@ module.exports = {
   fetchDeletableCampaigns,
   fetchProductPage,
   fetchSkuDetails,
+  fetchHomeSpend,
   preflightStore,
   prepareRoiCreation,
   probeSigning,

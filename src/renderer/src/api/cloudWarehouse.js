@@ -4,6 +4,10 @@ export function fetchCloudMachineBinding() {
   return get('/api/cloud-warehouse/machine-binding')
 }
 
+export function fetchWarehouseMachineStatus(warehouseId) {
+  return get(`/api/cloud-warehouse/warehouses/${warehouseId}/machine-status`)
+}
+
 export function bindCloudMachine(machineCode) {
   return put('/api/cloud-warehouse/machine-binding', { machine_code: machineCode })
 }
@@ -24,8 +28,22 @@ export function startCloudExceptionResolve(purchaseOrderId) {
   return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/exception/resolve`, {})
 }
 
-export function startCloudWarehouseOrderCheck() {
-  return post('/api/cloud-warehouse/warehouse-orders/check', {})
+export function startCloudOrderPrint(purchaseOrderId) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/print`, {})
+}
+
+export function startCloudOrderOutbound(purchaseOrderId) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/outbound`, {})
+}
+
+export function startCloudOrderReprint(purchaseOrderId) {
+  return post(`/api/cloud-warehouse/orders/${purchaseOrderId}/reprint`, {})
+}
+
+export function startCloudWarehouseOrderCheck(purchaseOrderIds = []) {
+  return post('/api/cloud-warehouse/warehouse-orders/check', {
+    purchase_order_ids: purchaseOrderIds
+  }, 120000)
 }
 
 export function fetchCloudWarehouseOrderCheck(requestId) {

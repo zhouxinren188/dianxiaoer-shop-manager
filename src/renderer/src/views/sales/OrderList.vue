@@ -1266,7 +1266,7 @@
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Refresh, Van, ShoppingCart, OfficeBuilding, Loading, CircleCheck, Plus, Edit, Delete, Message, View, ArrowRight, Setting, ShoppingBag, Shop, Warning, InfoFilled, Connection, Document, Tickets, Box, PriceTag, StarFilled, Lightning, Lock } from '@element-plus/icons-vue'
-import { fetchStores, updateStoreSyncTime } from '@/api/store'
+import { fetchStore, fetchStores, updateStoreSyncTime } from '@/api/store'
 import { fetchSalesOrders, fetchSalesOrderStatusCounts, saveSalesOrders, updateBuyerInfo, updateRemark, updateSalesOrderPurchaseStatus, lockSalesOrderForPurchase, unlockSalesOrderPurchase, submitVendorRemark, updateOrderRemark, updateIssueEvent, fetchSalesOrderSmsContext, sendSalesOrderSms, checkFraudster, batchCheckFraudsters } from '@/api/salesOrder'
 import { FRAUD_WATERMARK_URL, SUSPECT_WATERMARK_URL } from '@/assets/watermark'
 function getWatermarkUrl(issueEvent) {
@@ -1954,6 +1954,8 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.buyerPhone = order.customerPhone || ''
   purchaseInfo.buyerAddress = order.address || ''
   purchaseInfo.warehouseId = null
+  const currentStore = storeOptions.value.find(store => Number(store.id) === Number(order.storeId))
+  purchaseInfo.storeCloudWarehouseId = currentStore?.cloud_warehouse_id || null
   purchaseInfo.warehouseName = ''
   purchaseInfo.warehouseContact = ''
   purchaseInfo.warehousePhone = ''
@@ -1980,7 +1982,7 @@ async function handlePurchase(order, item, itemIdx) {
 
   // 货源与账号/仓库并行加载；货源链接一到就会触发返利预取。
   const sourceLoadPromise = loadSkuSources(purchaseInfo.skuId)
-  const [accountsRes, warehousesRes] = await Promise.all([
+  const [accountsRes, warehousesRes, storeRes] = await Promise.all([
     fetchPurchaseAccounts().catch(e => {
       console.warn('[采购下单] 加载采购账号失败:', e.message)
       ElMessage.warning('加载采购账号失败: ' + e.message)
@@ -1989,6 +1991,10 @@ async function handlePurchase(order, item, itemIdx) {
     fetchWarehouses().catch(e => {
       console.warn('[采购下单] 加载仓库失败:', e.message)
       ElMessage.warning('加载仓库失败: ' + e.message)
+      return null
+    }),
+    fetchStore(purchaseInfo.storeId).catch(e => {
+      console.warn('[采购下单] 加载店铺所属云仓失败:', e.message)
       return null
     })
   ])
@@ -2011,9 +2017,11 @@ async function handlePurchase(order, item, itemIdx) {
       warehouseList.value = []
     }
   }
-  // 恢复上次选择的仓库，或只有一个仓库时自动选中
+  purchaseInfo.storeCloudWarehouseId = storeRes?.cloud_warehouse_id || purchaseInfo.storeCloudWarehouseId
+  // 店铺所属云仓优先；未配置时才恢复上次选择，或在只有一个仓库时自动选中。
+  const selectedStoreWarehouse = applyStoreCloudWarehouse()
   const lastWhId = localStorage.getItem('lastWarehouseId')
-  if (lastWhId) {
+  if (!selectedStoreWarehouse && lastWhId) {
     const whMatch = warehouseList.value.find(w => String(w.id) === lastWhId)
     if (whMatch) {
       applyWarehouseAddress(whMatch)
@@ -2023,7 +2031,7 @@ async function handlePurchase(order, item, itemIdx) {
         updateWarehouseShipping()
       }
     }
-  } else if (warehouseList.value.length === 1) {
+  } else if (!selectedStoreWarehouse && warehouseList.value.length === 1) {
     applyWarehouseAddress(warehouseList.value[0])
     if (purchaseInfo.purchaseType === 'dropship') {
       updateDropshipShipping()
@@ -2235,6 +2243,7 @@ const purchaseInfo = reactive({
   buyerPhone: '',
   buyerAddress: '',
   warehouseId: null,
+  storeCloudWarehouseId: null,
   warehouseName: '',
   warehouseContact: '',
   warehousePhone: '',
@@ -2669,6 +2678,17 @@ function applyWarehouseAddress(wh) {
   purchaseInfo.warehouseAddress = wh.location || wh.address || ''
 }
 
+// 仓库发货默认跟随订单所属店铺配置的云仓；云仓机器指令由服务端独立路由。
+function applyStoreCloudWarehouse() {
+  if (!purchaseInfo.storeCloudWarehouseId) return false
+  const warehouse = warehouseList.value.find(
+    item => Number(item.id) === Number(purchaseInfo.storeCloudWarehouseId)
+  )
+  if (!warehouse) return false
+  applyWarehouseAddress(warehouse)
+  return true
+}
+
 // 三方代发：手机号=仓库手机号，姓名去掉[编号]，地址+【派件联系{buyerPhone}】
 function updateDropshipShipping() {
   // 从买家姓名中提取编号并去掉，如 "苏宝宝[3899]" -> 姓名"苏宝宝"，编号"3899"
@@ -2720,6 +2740,7 @@ watch(() => purchaseInfo.purchaseType, (type) => {
   if (type === 'dropship') {
     updateDropshipShipping()
   } else if (type === 'warehouse' || type === 'warehouse_in') {
+    applyStoreCloudWarehouse()
     updateWarehouseShipping()
   }
 })
@@ -4210,14 +4231,15 @@ function handleEditOrderRemark(order) {
       const result = await submitVendorRemark(storeId, order.orderNo, remark)
       loading.close()
       if (result.success) {
-        // 提交成功后更新本地数据库
+        // 京东返回成功后立即反馈；本地落库放到后台，不能拖慢成功提示。
         order.orderRemark = remark
-        try {
-          await updateOrderRemark(order.id, remark)
-        } catch (e) {
+        updateOrderRemark(order.id, remark).catch(e => {
           console.error('[商家备注] 本地更新失败:', e.message)
-        }
-        ElMessage.success('商家备注已提交到京东')
+        })
+        const elapsedText = Number.isFinite(Number(result.elapsedMs))
+          ? `（${(Number(result.elapsedMs) / 1000).toFixed(1)}秒）`
+          : ''
+        ElMessage.success('商家备注已提交到京东' + elapsedText)
       } else {
         ElMessage.error('提交失败：' + (result.message || '未知错误'))
       }

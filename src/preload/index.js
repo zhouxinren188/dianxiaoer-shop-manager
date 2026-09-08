@@ -57,6 +57,7 @@ const validInvokeChannels = [
   'open-purchase-url',
   'open-log-file',
   'generate-qrcode',
+  'jd-express-home-spend',
   'jd-express-preflight',
   'jd-express-delete-preview',
   'jd-express-delete-all',

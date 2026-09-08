@@ -48,7 +48,7 @@ function createPool() {
           store_owner_id: 18
         }]]
       }
-      if (sql.includes("command IN ('exception.order.check', 'exception.order.resolve')")) {
+      if (sql.includes('command IN') && sql.includes("'warehouse.order.check'")) {
         return [[commandRow()]]
       }
       if (sql.includes('FROM cloud_order_process_logs')) return [[]]
@@ -85,7 +85,7 @@ function createMutablePool() {
           store_owner_id: 18
         }]]
       }
-      if (sql.includes("command IN ('exception.order.check', 'exception.order.resolve')")) {
+      if (sql.includes('command IN') && sql.includes("'warehouse.order.check'")) {
         return [[currentCommand]]
       }
       if (sql.includes('FROM cloud_order_process_logs')) return [[]]

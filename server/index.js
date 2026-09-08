@@ -66,6 +66,10 @@ const {
 } = require('./services/purchase-account-policy')
 const { buildReturnPackageLookup } = require('./services/return-package-purchase-matcher')
 const { mergePurchaseOrderStatus } = require('./services/purchase-order-status-service')
+const {
+  assertMachineCode,
+  canManageMachineBinding
+} = require('./services/cloud-warehouse-protocol')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -717,7 +721,7 @@ app.get('/api/users', async (req, res) => {
 
     const limit = Math.max(1, parseInt(pageSize, 10) || 10)
     const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
-    sql += ` ORDER BY id DESC LIMIT ${limit} OFFSET ${offset}`
+    sql += ` ORDER BY (status = 'enabled') DESC, id DESC LIMIT ${limit} OFFSET ${offset}`
 
     const [rows] = await pool.execute(sql, params)
 
@@ -1160,10 +1164,33 @@ app.get('/api/stores', async (req, res) => {
 
     const limit = Math.max(1, parseInt(pageSize, 10) || 10)
     const offset = Math.max(0, ((parseInt(page, 10) || 1) - 1) * limit)
-    sql += ` ORDER BY id ASC LIMIT ${limit} OFFSET ${offset}`
+    sql += ` ORDER BY (status = 'enabled') DESC, id ASC LIMIT ${limit} OFFSET ${offset}`
 
     const [rows] = await pool.execute(sql, params)
-    res.json(ok({ list: rows, total }))
+    const pageStoreIds = rows.map(row => Number(row.id)).filter(Number.isInteger)
+    let cloudWarehouseByStore = new Map()
+    if (pageStoreIds.length) {
+      const pagePlaceholders = pageStoreIds.map(() => '?').join(',')
+      const [warehouseRows] = await pool.execute(
+        `SELECT s.id AS store_id, w.id AS cloud_warehouse_id, w.name AS cloud_warehouse_name,
+                b.machine_code AS cloud_machine_code
+           FROM stores s
+           LEFT JOIN warehouses w
+             ON w.id = s.cloud_warehouse_id AND w.owner_id = s.owner_id
+           LEFT JOIN cloud_warehouse_machine_bindings b
+             ON b.warehouse_id = w.id AND b.owner_id = w.owner_id
+          WHERE s.id IN (${pagePlaceholders})`,
+        pageStoreIds
+      )
+      cloudWarehouseByStore = new Map(warehouseRows.map(row => [Number(row.store_id), row]))
+    }
+    const list = rows.map(row => ({
+      ...row,
+      cloud_warehouse_id: cloudWarehouseByStore.get(Number(row.id))?.cloud_warehouse_id || null,
+      cloud_warehouse_name: cloudWarehouseByStore.get(Number(row.id))?.cloud_warehouse_name || '',
+      cloud_machine_bound: !!cloudWarehouseByStore.get(Number(row.id))?.cloud_machine_code
+    }))
+    res.json(ok({ list, total }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -1204,7 +1231,17 @@ app.get('/api/stores/:id', async (req, res) => {
     if (!storeIds.includes(id)) {
       return res.status(403).json(fail('无权访问此店铺'))
     }
-    const [rows] = await pool.execute('SELECT * FROM stores WHERE id = ?', [id])
+    const [rows] = await pool.execute(
+      `SELECT s.*, w.name AS cloud_warehouse_name,
+              CASE WHEN b.machine_code IS NULL THEN 0 ELSE 1 END AS cloud_machine_bound
+         FROM stores s
+         LEFT JOIN warehouses w
+           ON w.id = s.cloud_warehouse_id AND w.owner_id = s.owner_id
+         LEFT JOIN cloud_warehouse_machine_bindings b
+           ON b.warehouse_id = w.id AND b.owner_id = w.owner_id
+        WHERE s.id = ?`,
+      [id]
+    )
     if (!rows.length) return res.status(404).json(fail('店铺不存在'))
     res.json(ok(rows[0]))
   } catch (err) {
@@ -1250,7 +1287,7 @@ app.post('/api/stores', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const {
       name, platform, store_type, account, password, merchant_id, shop_id,
-      tags, status, setup_pending
+      tags, status, setup_pending, cloud_warehouse_id
     } = req.body
 
     const supportedPlatforms = new Set(['jd', 'taobao', 'tmall', 'pdd', 'douyin'])
@@ -1260,6 +1297,18 @@ app.post('/api/stores', async (req, res) => {
     }
     if (store_type && !supportedStoreTypes.has(String(store_type))) {
       return res.status(400).json(fail('不支持的店铺类型'))
+    }
+    let cloudWarehouseId = null
+    if (cloud_warehouse_id !== undefined && cloud_warehouse_id !== null && cloud_warehouse_id !== '') {
+      cloudWarehouseId = Number(cloud_warehouse_id)
+      if (!Number.isInteger(cloudWarehouseId) || cloudWarehouseId <= 0) {
+        return res.status(400).json(fail('所属云仓无效'))
+      }
+      const [warehouseRows] = await pool.execute(
+        'SELECT id FROM warehouses WHERE id = ? AND owner_id = ?',
+        [cloudWarehouseId, ownerId]
+      )
+      if (!warehouseRows.length) return res.status(400).json(fail('所属云仓不存在或不属于当前主账号'))
     }
     
     // 如果提供了 merchant_id，检查是否已存在
@@ -1298,6 +1347,10 @@ app.post('/api/stores', async (req, res) => {
           updateFields.push('tags = ?')
           updateValues.push(JSON.stringify(tags))
         }
+        if (cloud_warehouse_id !== undefined) {
+          updateFields.push('cloud_warehouse_id = ?')
+          updateValues.push(cloudWarehouseId)
+        }
         updateValues.push(existingId, ownerId)
         await pool.execute(
           `UPDATE stores SET ${updateFields.join(', ')} WHERE id = ? AND owner_id = ?`,
@@ -1313,11 +1366,11 @@ app.post('/api/stores', async (req, res) => {
     const [result] = await pool.execute(
       `INSERT INTO stores
          (name, platform, store_type, account, password, merchant_id, shop_id, tags,
-          status, setup_status, owner_id, subscription_end)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
+          status, setup_status, owner_id, cloud_warehouse_id, subscription_end)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
       [name || '', platform || '', store_type || '', account || '', password || '',
         merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled',
-        setup_pending === true ? 'pending' : 'active', ownerId]
+        setup_pending === true ? 'pending' : 'active', ownerId, cloudWarehouseId]
     )
 
     // 如果是子账号创建的店铺，自动关联到子账号（写入 user_stores 表）
@@ -1344,20 +1397,36 @@ app.put('/api/stores/:id', async (req, res) => {
       return res.status(403).json(fail('无权修改此店铺'))
     }
 
-    const allowed = ['name', 'platform', 'store_type', 'account', 'password', 'merchant_id', 'shop_id', 'tags', 'status']
+    const ownerId = getOwnerId(req.user)
+    let cloudWarehouseId = null
+    if (req.body.cloud_warehouse_id !== undefined &&
+        req.body.cloud_warehouse_id !== null && req.body.cloud_warehouse_id !== '') {
+      cloudWarehouseId = Number(req.body.cloud_warehouse_id)
+      if (!Number.isInteger(cloudWarehouseId) || cloudWarehouseId <= 0) {
+        return res.status(400).json(fail('所属云仓无效'))
+      }
+      const [warehouseRows] = await pool.execute(
+        'SELECT id FROM warehouses WHERE id = ? AND owner_id = ?',
+        [cloudWarehouseId, ownerId]
+      )
+      if (!warehouseRows.length) return res.status(400).json(fail('所属云仓不存在或不属于当前主账号'))
+    }
+
+    const allowed = ['name', 'platform', 'store_type', 'account', 'password', 'merchant_id', 'shop_id', 'tags', 'status', 'cloud_warehouse_id']
     const fields = []
     const values = []
     for (const [key, val] of Object.entries(req.body)) {
       if (allowed.includes(key) && val !== undefined) {
         fields.push(`${key} = ?`)
-        values.push(key === 'tags' ? JSON.stringify(val || []) : val)
+        values.push(key === 'tags'
+          ? JSON.stringify(val || [])
+          : (key === 'cloud_warehouse_id' ? cloudWarehouseId : val))
       }
     }
     if (!fields.length) return res.json(fail('没有要修改的字段'))
 
     // ★ 如果更新了 merchant_id，检查是否与其他店铺重复（防止PUT绕过去重）
     if (req.body.merchant_id !== undefined && req.body.merchant_id) {
-      const ownerId = getOwnerId(req.user)
       const [dupStores] = await pool.execute(
         'SELECT id, name FROM stores WHERE merchant_id = ? AND owner_id = ? AND id != ?',
         [req.body.merchant_id, ownerId, id]
@@ -1703,7 +1772,15 @@ app.get('/api/warehouses', async (req, res) => {
 
     const placeholders = whIds.map(() => '?').join(',')
     const [rows] = await pool.execute(
-      `SELECT * FROM warehouses WHERE id IN (${placeholders}) ORDER BY id`,
+      `SELECT w.*, b.machine_code AS cloud_machine_code,
+              b.binding_version AS cloud_binding_version,
+              b.bound_at AS cloud_machine_bound_at,
+              b.updated_at AS cloud_machine_updated_at
+         FROM warehouses w
+         LEFT JOIN cloud_warehouse_machine_bindings b
+           ON b.warehouse_id = w.id AND b.owner_id = w.owner_id
+        WHERE w.id IN (${placeholders})
+        ORDER BY w.id`,
       whIds
     )
     res.json(ok({ list: rows, total: rows.length }))
@@ -1720,7 +1797,17 @@ app.get('/api/warehouses/:id', async (req, res) => {
     if (!whIds.includes(id)) {
       return res.status(403).json(fail('无权访问此仓库'))
     }
-    const [rows] = await pool.execute('SELECT * FROM warehouses WHERE id = ?', [id])
+    const [rows] = await pool.execute(
+      `SELECT w.*, b.machine_code AS cloud_machine_code,
+              b.binding_version AS cloud_binding_version,
+              b.bound_at AS cloud_machine_bound_at,
+              b.updated_at AS cloud_machine_updated_at
+         FROM warehouses w
+         LEFT JOIN cloud_warehouse_machine_bindings b
+           ON b.warehouse_id = w.id AND b.owner_id = w.owner_id
+        WHERE w.id = ?`,
+      [id]
+    )
     if (!rows.length) return res.status(404).json(fail('仓库不存在'))
     res.json(ok(rows[0]))
   } catch (err) {
@@ -1730,28 +1817,80 @@ app.get('/api/warehouses/:id', async (req, res) => {
 
 // 创建仓库（自动设置 owner_id）
 app.post('/api/warehouses', async (req, res) => {
+  let connection
   try {
     const ownerId = getOwnerId(req.user)
-    const { name, code, location, contact, phone, status } = req.body
+    const { name, code, location, contact, phone, status, cloud_machine_code } = req.body
     if (!name) return res.json(fail('仓库名称不能为空'))
-    const [result] = await pool.execute(
+    let machineCode = ''
+    if (cloud_machine_code !== undefined && String(cloud_machine_code || '').trim()) {
+      if (!canManageMachineBinding(req.user)) {
+        return res.status(403).json(fail('只有主账号或管理员才能绑定云仓助手机器码'))
+      }
+      try {
+        machineCode = assertMachineCode(cloud_machine_code)
+      } catch (error) {
+        return res.status(400).json(fail(error.message))
+      }
+    }
+
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const [result] = await connection.execute(
       `INSERT INTO warehouses (name, code, location, contact, phone, status, owner_id)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [name, code || '', location || '', contact || '', phone || '', status || 'enabled', ownerId]
     )
-    res.json(ok({ id: result.insertId, ...req.body }))
+    if (machineCode) {
+      await connection.execute(
+        `INSERT INTO cloud_warehouse_machine_bindings
+           (warehouse_id, owner_id, machine_code, binding_version, bound_by, bound_at)
+         VALUES (?, ?, ?, 1, ?, NOW(3))`,
+        [result.insertId, ownerId, machineCode, Number(req.user.id)]
+      )
+      await connection.execute(
+        `INSERT INTO cloud_warehouse_machine_binding_audit
+           (warehouse_id, owner_id, actor_user_id, action, old_machine_code, new_machine_code)
+         VALUES (?, ?, ?, 'bind', '', ?)`,
+        [result.insertId, ownerId, Number(req.user.id), machineCode]
+      )
+    }
+    await connection.commit()
+    res.json(ok({ id: result.insertId, ...req.body, cloud_machine_code: machineCode }))
   } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
     res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
   }
 })
 
 // 修改仓库（权限校验）
 app.put('/api/warehouses/:id', async (req, res) => {
+  let connection
   try {
     const whIds = await getAccessibleWarehouseIds(req.user)
     const id = +req.params.id
     if (!whIds.includes(id)) {
       return res.status(403).json(fail('无权修改此仓库'))
+    }
+
+    const ownerId = getOwnerId(req.user)
+    const machineCodeProvided = Object.prototype.hasOwnProperty.call(req.body || {}, 'cloud_machine_code')
+    let machineCode = ''
+    if (machineCodeProvided) {
+      if (!canManageMachineBinding(req.user)) {
+        return res.status(403).json(fail('只有主账号或管理员才能绑定或更换云仓助手机器码'))
+      }
+      if (String(req.body.cloud_machine_code || '').trim()) {
+        try {
+          machineCode = assertMachineCode(req.body.cloud_machine_code)
+        } catch (error) {
+          return res.status(400).json(fail(error.message))
+        }
+      }
     }
 
     const allowed = ['name', 'code', 'location', 'contact', 'phone', 'status']
@@ -1763,12 +1902,70 @@ app.put('/api/warehouses/:id', async (req, res) => {
         values.push(val)
       }
     }
-    if (!fields.length) return res.json(fail('没有要修改的字段'))
-    values.push(id)
-    await pool.execute(`UPDATE warehouses SET ${fields.join(', ')} WHERE id = ?`, values)
+    if (!fields.length && !machineCodeProvided) return res.json(fail('没有要修改的字段'))
+
+    connection = await pool.getConnection()
+    await connection.beginTransaction()
+    const [warehouseRows] = await connection.execute(
+      'SELECT id FROM warehouses WHERE id = ? AND owner_id = ? FOR UPDATE',
+      [id, ownerId]
+    )
+    if (!warehouseRows.length) {
+      await connection.rollback()
+      return res.status(403).json(fail('无权修改此仓库'))
+    }
+    if (fields.length) {
+      values.push(id, ownerId)
+      await connection.execute(
+        `UPDATE warehouses SET ${fields.join(', ')} WHERE id = ? AND owner_id = ?`,
+        values
+      )
+    }
+
+    if (machineCodeProvided) {
+      const [bindingRows] = await connection.execute(
+        'SELECT machine_code FROM cloud_warehouse_machine_bindings WHERE warehouse_id = ? AND owner_id = ? FOR UPDATE',
+        [id, ownerId]
+      )
+      const oldMachineCode = String(bindingRows[0]?.machine_code || '')
+      if (oldMachineCode !== machineCode) {
+        const action = machineCode ? (oldMachineCode ? 'rebind' : 'bind') : 'unbind'
+        if (machineCode) {
+          await connection.execute(
+            `INSERT INTO cloud_warehouse_machine_bindings
+               (warehouse_id, owner_id, machine_code, binding_version, bound_by, bound_at)
+             VALUES (?, ?, ?, 1, ?, NOW(3))
+             ON DUPLICATE KEY UPDATE
+               machine_code = VALUES(machine_code),
+               binding_version = binding_version + 1,
+               bound_by = VALUES(bound_by),
+               bound_at = NOW(3),
+               updated_at = NOW(3)`,
+            [id, ownerId, machineCode, Number(req.user.id)]
+          )
+        } else {
+          await connection.execute(
+            'DELETE FROM cloud_warehouse_machine_bindings WHERE warehouse_id = ? AND owner_id = ?',
+            [id, ownerId]
+          )
+        }
+        await connection.execute(
+          `INSERT INTO cloud_warehouse_machine_binding_audit
+             (warehouse_id, owner_id, actor_user_id, action, old_machine_code, new_machine_code)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [id, ownerId, Number(req.user.id), action, oldMachineCode, machineCode]
+        )
+      }
+    }
+    await connection.commit()
     res.json(ok(true))
   } catch (err) {
+    if (connection) {
+      try { await connection.rollback() } catch { /* ignore rollback failure */ }
+    }
     res.status(500).json(fail(err.message))
+  } finally {
+    if (connection) connection.release()
   }
 })
 
@@ -1781,6 +1978,13 @@ app.delete('/api/warehouses/:id', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const [check] = await pool.execute('SELECT id FROM warehouses WHERE id = ? AND owner_id = ?', [req.params.id, ownerId])
     if (!check.length) return res.status(403).json(fail('无权删除此仓库'))
+    const [assignedStores] = await pool.execute(
+      'SELECT COUNT(*) AS total FROM stores WHERE owner_id = ? AND cloud_warehouse_id = ?',
+      [ownerId, req.params.id]
+    )
+    if (Number(assignedStores[0]?.total || 0) > 0) {
+      return res.status(409).json(fail('该仓库仍有店铺使用，请先调整店铺所属云仓'))
+    }
 
     await pool.execute('DELETE FROM warehouses WHERE id = ?', [req.params.id])
     res.json(ok(true))
@@ -3524,51 +3728,105 @@ app.get('/api/store-sales-stats', async (req, res) => {
 app.get('/api/dashboard-stats', async (req, res) => {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
-    if (!storeIds.length) {
-      return res.json(ok({
-        today: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-        yesterday: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-        thisMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] },
-        lastMonth: { salesAmount: 0, orderCount: 0, warehouseBreakdown: [] }
-      }))
+    let r1 = [{ amt: 0, cnt: 0 }]
+    let r2 = [{ amt: 0, cnt: 0 }]
+    let r3 = [{ amt: 0, cnt: 0 }]
+    let r4 = [{ amt: 0, cnt: 0 }]
+    let whToday = []
+    let whMonth = []
+
+    if (storeIds.length) {
+      const placeholders = storeIds.map(() => '?').join(',')
+      const excludeStatuses = ['待付款', '等待付款', '已取消']
+      const excludePh = excludeStatuses.map(() => '?').join(',')
+
+      // 4 个时间段：今日、昨日、本月、上月
+      const queries = [
+        // 今日（凌晨至今）
+        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= CURDATE()`,
+        // 昨日同期（昨日凌晨至昨日此时，与今日同时长）
+        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)`,
+        // 本月（1日至今）
+        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
+        // 上月同期（上月1日至上月同日，与本月天数一致）
+        `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
+      ]
+
+      const params = storeIds.concat(excludeStatuses)
+      ;[r1] = await pool.execute(queries[0], params)
+      ;[r2] = await pool.execute(queries[1], params)
+      ;[r3] = await pool.execute(queries[2], params)
+      ;[r4] = await pool.execute(queries[3], params)
+
+      // 按仓库分组统计订单数（今日 + 本月）
+      const whQuery = (dateCond) =>
+        `SELECT warehouse_name, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND ${dateCond} AND warehouse_name IS NOT NULL AND warehouse_name != '' GROUP BY warehouse_name ORDER BY cnt DESC`
+      ;[whToday] = await pool.execute(whQuery('DATE(order_time) = CURDATE()'), params)
+      ;[whMonth] = await pool.execute(whQuery('order_time >= DATE_FORMAT(CURDATE(),\'%Y-%m-01\')'), params)
     }
 
-    const placeholders = storeIds.map(() => '?').join(',')
-    const excludeStatuses = ['待付款', '等待付款', '已取消']
-    const excludePh = excludeStatuses.map(() => '?').join(',')
-
-    // 4 个时间段：今日、昨日、本月、上月
-    const queries = [
-      // 今日（凌晨至今）
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= CURDATE()`,
-      // 昨日同期（昨日凌晨至昨日此时，与今日同时长）
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)`,
-      // 本月（1日至今）
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
-      // 上月同期（上月1日至上月同日，与本月天数一致）
-      `SELECT COALESCE(SUM(total_amount),0) as amt, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
-    ]
-
-    const params = storeIds.concat(excludeStatuses)
-    const [r1] = await pool.execute(queries[0], params)
-    const [r2] = await pool.execute(queries[1], params)
-    const [r3] = await pool.execute(queries[2], params)
-    const [r4] = await pool.execute(queries[3], params)
-
-    // 按仓库分组统计订单数（今日 + 本月）
-    const whQuery = (dateCond) =>
-      `SELECT warehouse_name, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND ${dateCond} AND warehouse_name IS NOT NULL AND warehouse_name != '' GROUP BY warehouse_name ORDER BY cnt DESC`
-    const [whToday] = await pool.execute(whQuery('DATE(order_time) = CURDATE()'), params)
-    const [whMonth] = await pool.execute(whQuery('order_time >= DATE_FORMAT(CURDATE(),\'%Y-%m-01\')'), params)
+    // 采购额优先使用平台实付总额；旧记录没有实付总额时按单价×数量+运费计算。
+    // 子账号沿用采购单列表权限，只统计已分配采购账号或自己创建的无账号采购单。
+    const ownerId = getOwnerId(req.user)
+    const purchaseAmountExpr = `CASE
+      WHEN COALESCE(po.total_amount, 0) > 0 THEN po.total_amount
+      ELSE COALESCE(po.purchase_price, 0) * COALESCE(po.quantity, 0) + COALESCE(po.shipping_fee, 0)
+    END`
+    const purchaseVisibilitySql = req.user.user_type === 'sub'
+      ? `AND (
+           EXISTS (
+             SELECT 1 FROM user_purchase_accounts upa
+             WHERE upa.account_id = po.account_id AND upa.user_id = ?
+           )
+           OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL))
+         )`
+      : ''
+    const purchaseParams = req.user.user_type === 'sub'
+      ? [ownerId, req.user.id, req.user.id]
+      : [ownerId]
+    const [purchaseRows] = await pool.execute(
+      `SELECT
+         COALESCE(SUM(CASE WHEN po.created_at >= CURDATE() THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS today_amt,
+         COALESCE(SUM(CASE WHEN po.created_at >= CURDATE() THEN 1 ELSE 0 END), 0) AS today_cnt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                            AND po.created_at < DATE_SUB(NOW(), INTERVAL 1 DAY)
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS yesterday_amt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                            AND po.created_at < DATE_SUB(NOW(), INTERVAL 1 DAY)
+                           THEN 1 ELSE 0 END), 0) AS yesterday_cnt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS month_amt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                           THEN 1 ELSE 0 END), 0) AS month_cnt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+                            AND po.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), INTERVAL 1 DAY)
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS last_month_amt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+                            AND po.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), INTERVAL 1 DAY)
+                           THEN 1 ELSE 0 END), 0) AS last_month_cnt
+       FROM purchase_orders po
+       WHERE po.owner_id = ?
+         AND (po.status IS NULL OR po.status NOT IN ('cancelled', 'refunded'))
+         AND po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+         ${purchaseVisibilitySql}`,
+      purchaseParams
+    )
+    const purchase = purchaseRows[0] || {}
 
     const fmtWh = (rows) => rows.map(r => ({ warehouse: r.warehouse_name, count: Number(r.cnt) }))
-    const fmt = (r, wh) => ({ salesAmount: Number(r[0].amt), orderCount: Number(r[0].cnt), warehouseBreakdown: wh })
+    const fmt = (r, wh, purchaseAmount, purchaseCount) => ({
+      salesAmount: Number(r[0].amt),
+      orderCount: Number(r[0].cnt),
+      purchaseAmount: Number(purchaseAmount || 0),
+      purchaseCount: Number(purchaseCount || 0),
+      warehouseBreakdown: wh
+    })
 
     res.json(ok({
-      today: fmt(r1, fmtWh(whToday)),
-      yesterday: fmt(r2, []),
-      thisMonth: fmt(r3, fmtWh(whMonth)),
-      lastMonth: fmt(r4, [])
+      today: fmt(r1, fmtWh(whToday), purchase.today_amt, purchase.today_cnt),
+      yesterday: fmt(r2, [], purchase.yesterday_amt, purchase.yesterday_cnt),
+      thisMonth: fmt(r3, fmtWh(whMonth), purchase.month_amt, purchase.month_cnt),
+      lastMonth: fmt(r4, [], purchase.last_month_amt, purchase.last_month_cnt)
     }))
   } catch (err) {
     console.error('[Dashboard Stats] 错误:', err.message)
@@ -8782,8 +9040,8 @@ app.get('/api/auth/me', async (req, res) => {
 const warehouseRouter = require('./routes/warehouse')(pool)
 app.use('/api/warehouse', warehouseRouter)
 
-// ============ 云仓助手基础配置路由 ============
-// 店小二只保存主账号体系的机器码绑定；云仓助手执行器控制面由第三方服务自行提供。
+// ============ 云仓助手路由与指令接口 ============
+// 新订单按“店铺 -> 所属仓库 -> 机器码”解析并保存订单快照；旧账号级绑定仅兼容尚未迁移的账号。
 const cloudWarehouseRouter = require('./routes/cloud-warehouse')(pool)
 app.use('/api/cloud-warehouse', cloudWarehouseRouter)
 

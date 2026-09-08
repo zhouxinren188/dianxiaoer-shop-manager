@@ -17,6 +17,13 @@ const PENDING_PRINT_SOURCE_STATUSES = Object.freeze([
   'received'
 ])
 
+const FORWARDED_SOURCE_STATUSES = Object.freeze([
+  'pending_print',
+  'shipped',
+  'in_transit',
+  'received'
+])
+
 // 采购平台同步只描述上游交易/物流状态，不能把店小二自己的后续处理阶段倒退掉。
 function mergePurchaseOrderStatus(currentStatus, platformStatus) {
   const current = String(currentStatus || '').trim()
@@ -46,10 +53,30 @@ async function markPendingPrintAfterExceptionResolution(pool, { ownerId, purchas
   return Number(result?.affectedRows || 0) > 0
 }
 
+async function markForwardedAfterCloudOutbound(pool, { ownerId, purchaseOrderId }) {
+  const normalizedOwnerId = Number(ownerId)
+  const normalizedPurchaseOrderId = Number(purchaseOrderId)
+  if (!Number.isInteger(normalizedOwnerId) || normalizedOwnerId <= 0 ||
+      !Number.isInteger(normalizedPurchaseOrderId) || normalizedPurchaseOrderId <= 0) {
+    return false
+  }
+
+  const placeholders = FORWARDED_SOURCE_STATUSES.map(() => '?').join(', ')
+  const [result] = await pool.execute(
+    `UPDATE purchase_orders
+        SET status = 'forwarded', updated_at = NOW()
+      WHERE id = ? AND owner_id = ? AND status IN (${placeholders})`,
+    [normalizedPurchaseOrderId, normalizedOwnerId, ...FORWARDED_SOURCE_STATUSES]
+  )
+  return Number(result?.affectedRows || 0) > 0
+}
+
 module.exports = {
+  FORWARDED_SOURCE_STATUSES,
   LOCAL_WORKFLOW_STATUSES,
   PENDING_PRINT_SOURCE_STATUSES,
   PLATFORM_TERMINAL_STATUSES,
+  markForwardedAfterCloudOutbound,
   markPendingPrintAfterExceptionResolution,
   mergePurchaseOrderStatus
 }

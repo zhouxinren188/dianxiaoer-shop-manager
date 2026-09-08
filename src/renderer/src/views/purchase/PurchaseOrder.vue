@@ -31,7 +31,6 @@
         </div>
         <el-button type="danger" size="small" @click="handleAccountManage">账号管理</el-button>
         <el-button type="primary" size="small" @click="handleAddAccount">新增账号</el-button>
-        <el-button size="small" @click="handleCloudWarehouseConfig">云仓配置</el-button>
         <el-button type="primary" @click="handleSync" :loading="syncing">
           <el-icon><Refresh /></el-icon>
           同步采购订单
@@ -202,9 +201,13 @@
                    size="small"
                    style="margin-left: 6px"
                  >
-                   {{ row.cloud_print_ready
-                     ? '云仓可打印'
-                     : (cloudWarehouseOrderCheckLoading ? '云仓核验中' : (row.cloud_print_checked ? '云仓未就绪' : '待云仓核验')) }}
+                    {{ row.cloud_print_ready
+                      ? '云仓可打印'
+                      : (cloudWarehouseOrderCheckLoading
+                          ? '云仓核验中'
+                          : (row.cloud_print_checked
+                              ? (row.cloud_order_status === 'waiting_arrival' ? '等待云仓入单' : '云仓未就绪')
+                              : '待云仓核验')) }}
                  </el-tag>
                </span>
             </div>
@@ -253,7 +256,8 @@
               <div class="action-buttons">
                 <el-button type="success" size="small" @click="handleSyncSingle(row)">同步订单</el-button>
                 <el-button v-if="row.status === 'shipped'" type="primary" size="small" @click="handleConfirmReceive(row)">确认签收</el-button>
-                <el-button v-if="['in_transit', 'received', 'pending_print'].includes(row.status) && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
+                <el-button v-if="['in_transit', 'received'].includes(row.status) && (row.purchase_type === 'warehouse' || row.purchase_type === 'warehouse_in')" type="primary" size="small" @click="handleReceive(row)">收货转发</el-button>
+                <el-button v-if="row.status === 'pending_print' && row.purchase_type === 'warehouse'" type="primary" size="small" @click="handlePendingPrint(row)">{{ row.cloud_print_ready ? '打印订单' : '查看云仓' }}</el-button>
                 <el-button v-if="(row.status === 'in_transit' || row.status === 'received') && row.purchase_type === 'dropship'" type="warning" size="small" @click="handleComplete(row)">订单确认</el-button>
                 <el-button v-if="row.status === 'stocked'" type="warning" size="small" @click="handleOutbound(row)">出库</el-button>
                 <el-button v-if="row.status !== 'cancelled'" type="danger" size="small" @click="handleDirectMarkAfterSale(row)">标记售后</el-button>
@@ -509,11 +513,59 @@
             </el-descriptions-item>
             <el-descriptions-item label="采购编码">{{ cloudOrderConfig.purchaseNo || '--' }}</el-descriptions-item>
             <el-descriptions-item label="订单年份">{{ cloudOrderConfig.orderYear || '--' }}</el-descriptions-item>
+            <el-descriptions-item label="执行云仓" :span="2">
+              <span v-if="cloudOrderConfig.machineRoute">
+                {{ cloudOrderConfig.machineRoute.warehouseName || '旧版兼容绑定' }}
+                <span class="cloud-route-machine">（{{ cloudOrderConfig.machineRoute.machineCode }}）</span>
+              </span>
+              <span v-else>尚未配置</span>
+            </el-descriptions-item>
             <el-descriptions-item label="打印状态">
-              <el-tag size="small" :type="cloudPrintStatus.tagType">{{ cloudPrintStatus.label }}</el-tag>
+              <span class="cloud-order-status-value">
+                <el-tag size="small" :type="cloudPrintStatus.tagType">{{ cloudPrintStatus.label }}</el-tag>
+                <el-button
+                  v-if="cloudPrintStatus.key !== 'printed' && !cloudOrderConfig.wmsOrderEntered"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudWarehouseEntryChecking"
+                  :disabled="!cloudThirdPartyReady || !cloudOrderConfig.machineBound || !cloudOrderConfig.locatorReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudWarehouseEntryCheck"
+                >{{ cloudWarehouseEntryChecking ? '核验中…' : '重新核验' }}</el-button>
+                <el-button
+                  v-if="cloudPrintStatus.key !== 'printed'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudPrinting"
+                  :title="!cloudOrderConfig.wmsOrderEntered ? '订单尚未进入云仓，暂不能打印' : ''"
+                  :disabled="!cloudThirdPartyReady || !cloudOrderConfig.machineBound || !cloudOrderConfig.locatorReady || !cloudOrderConfig.wmsOrderEntered || cloudOrderStatus.key !== 'normal' || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudOrderPrint"
+                >{{ cloudPrinting ? '打印中…' : '打印订单' }}</el-button>
+                <el-button
+                  v-else
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudReprinting"
+                  :disabled="!cloudThirdPartyReady || !cloudOrderConfig.machineBound || !cloudOrderConfig.locatorReady || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudOrderReprint"
+                >{{ cloudReprinting ? '补打中…' : '通道补打' }}</el-button>
+              </span>
             </el-descriptions-item>
             <el-descriptions-item label="出库状态">
-              <el-tag size="small" :type="cloudOutboundStatus.tagType">{{ cloudOutboundStatus.label }}</el-tag>
+              <span class="cloud-order-status-value">
+                <el-tag size="small" :type="cloudOutboundStatus.tagType">{{ cloudOutboundStatus.label }}</el-tag>
+                <el-button
+                  v-if="cloudOutboundStatus.key !== 'outbound'"
+                  type="primary"
+                  link
+                  class="cloud-exception-action"
+                  :loading="cloudOutbounding"
+                  :disabled="!cloudThirdPartyReady || !cloudOrderConfig.machineBound || !cloudOrderConfig.locatorReady || cloudOrderStatus.key !== 'normal' || cloudPrintStatus.key !== 'printed' || cloudTaskActive || cloudTaskActionLoading"
+                  @click="handleCloudOrderOutbound"
+                >{{ cloudOutbounding ? '发货中…' : '云仓发货' }}</el-button>
+              </span>
             </el-descriptions-item>
           </el-descriptions>
 
@@ -527,11 +579,27 @@
               show-icon
               class="cloud-order-alert"
             />
+              <el-alert
+                v-else-if="!cloudOrderConfig.machineBound"
+              :title="cloudOrderConfig.machineRouteMessage || '请先为店铺选择所属云仓，并在仓库设置中绑定机器码。'"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="cloud-order-alert"
+            />
 
-            <template v-if="cloudOrderConfig.locatorReady">
+            <template v-if="cloudOrderConfig.locatorReady && cloudOrderConfig.machineBound">
               <el-alert
                 v-if="cloudOrderConfig.workflow?.currentTask"
-                :title="cloudOrderConfig.workflow.currentTask.command === 'exception.order.resolve' ? '云仓助手正在处理异常，请稍候…' : '云仓助手正在查询订单异常，请稍候…'"
+                :title="cloudCurrentTaskMessage"
+                type="info"
+                :closable="false"
+                show-icon
+                class="cloud-order-alert"
+              />
+              <el-alert
+                v-else-if="cloudOrderConfig.warehouseCheck?.final && cloudOrderConfig.warehouseCheck?.resultShapeValid && !cloudOrderConfig.wmsOrderEntered"
+                title="云仓尚未收到该订单；请稍后重新核验，入单后即可打印。"
                 type="info"
                 :closable="false"
                 show-icon
@@ -877,69 +945,6 @@
       </template>
     </el-dialog>
 
-    <!-- 云仓助手机器码配置 -->
-    <el-dialog
-      v-model="cloudConfigVisible"
-      title="云仓配置"
-      width="540px"
-      align-center
-      :close-on-click-modal="false"
-    >
-      <div v-loading="cloudConfigLoading" class="cloud-config-content">
-        <el-alert
-          title="机器码由云仓助手生成，供当前主账号体系内的主账号和已授权子账号共享；它仅用于任务路由，不是密码或登录凭据。"
-          type="info"
-          :closable="false"
-          show-icon
-        />
-
-        <div v-if="cloudBinding.bound" class="cloud-binding-status">
-          <div class="cloud-binding-code-row">
-            <span class="cloud-binding-label">当前绑定</span>
-            <span class="cloud-binding-code">{{ cloudBinding.machineCode }}</span>
-            <el-tag :type="cloudConfigLoading ? 'warning' : (cloudBinding.assistant?.online ? 'success' : 'info')" size="small">
-              {{ cloudConfigLoading
-                ? '正在检测设备状态'
-                : (cloudBinding.assistant?.online
-                  ? (cloudBinding.assistant.busy ? '云仓助手忙碌' : '云仓助手在线')
-                  : (cloudBinding.assistant?.status === 'unavailable' ? '在线状态查询失败' : '云仓助手离线')) }}
-            </el-tag>
-          </div>
-          <div class="cloud-binding-meta">
-            <span>绑定版本：{{ cloudBinding.bindingVersion || 1 }}</span>
-            <span>更新时间：{{ formatTime(cloudBinding.updatedAt || cloudBinding.boundAt) }}</span>
-            <span v-if="cloudBinding.assistant?.checkedAt">检测时间：{{ formatTime(cloudBinding.assistant.checkedAt) }}</span>
-          </div>
-          <p class="cloud-binding-hint">设备在线状态将由店小二服务端向云仓助手第三方服务查询。</p>
-        </div>
-
-        <p v-if="!cloudBinding.canManage" class="cloud-binding-hint">
-          你可以查看本主账号体系的云仓配置；绑定、解除和换绑需由主账号或管理员操作。
-        </p>
-
-        <el-form v-if="cloudBinding.canManage" label-position="top" class="cloud-machine-form">
-          <el-form-item :label="cloudBinding.bound ? '更换机器码' : '绑定机器码'">
-            <el-input
-              :model-value="cloudMachineCodeInput"
-              maxlength="12"
-              clearable
-              placeholder="例如：YC-7F3K-92MX"
-              @update:model-value="handleCloudMachineCodeInput"
-              @keyup.enter="handleSaveCloudMachine"
-            />
-            <div class="cloud-machine-format">格式：YC-XXXX-XXXX，不包含数字 0、1 和易混淆字母 I、O。</div>
-          </el-form-item>
-        </el-form>
-      </div>
-      <template #footer>
-        <el-button v-if="cloudBinding.bound && cloudBinding.canManage" type="danger" plain :loading="cloudConfigSaving" @click="handleUnbindCloudMachine">解除绑定</el-button>
-        <el-button @click="cloudConfigVisible = false">关闭</el-button>
-        <el-button v-if="cloudBinding.canManage" type="primary" :loading="cloudConfigSaving" :disabled="!cloudMachineCodeValid" @click="handleSaveCloudMachine">
-          {{ cloudBinding.bound ? '确认换绑' : '确认绑定' }}
-        </el-button>
-      </template>
-    </el-dialog>
-
     <!-- 编辑账号弹窗 -->
     <el-dialog
       v-model="editAccountVisible"
@@ -1237,13 +1242,13 @@ import { fetchPurchaseAccounts, createPurchaseAccount, updatePurchaseAccount, de
 import { searchInventory, createSkuBinding, quickCreateInventory, fetchWarehouses } from '@/api/warehouse'
 import { submitVendorRemark, updateOrderRemark, updateRemark } from '@/api/salesOrder'
 import {
-  fetchCloudMachineBinding,
-  bindCloudMachine,
-  unbindCloudMachine,
   fetchCloudOrderConfiguration,
   fetchCloudWarehouseOrderCheck,
   startCloudExceptionCheck,
   startCloudExceptionResolve,
+  startCloudOrderOutbound,
+  startCloudOrderPrint,
+  startCloudOrderReprint,
   startCloudWarehouseOrderCheck,
   recordCloudAutomaticRemark
 } from '@/api/cloudWarehouse'
@@ -1374,28 +1379,17 @@ const editAccountVisible = ref(false)
 const addAccountForm = reactive({ platform: '', account: '', password: '' })
 const editAccountForm = reactive({ id: '', platform: '', username: '', password: '' })
 
-const CLOUD_MACHINE_CODE_PATTERN = /^YC-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}-[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{4}$/
-const cloudConfigVisible = ref(false)
-const cloudConfigLoading = ref(false)
-const cloudConfigSaving = ref(false)
-const cloudMachineCodeInput = ref('')
-const cloudBinding = reactive({
-  bound: false,
-  machineCode: '',
-  bindingVersion: 0,
-  boundAt: null,
-  updatedAt: null,
-  assistant: null,
-  canManage: false
-})
-const cloudMachineCodeValid = computed(() => CLOUD_MACHINE_CODE_PATTERN.test(cloudMachineCodeInput.value))
 const cloudOrderConfig = ref(null)
 const cloudLocalProcessLogs = ref([])
 const cloudTaskActionLoading = ref(false)
 const cloudTaskActionKind = ref('')
 const cloudWarehouseOrderCheckLoading = ref(false)
+const cloudWarehouseEntryChecking = ref(false)
 let cloudOrderPollTimer = null
 let cloudLastNotifiedState = ''
+let cloudPendingPrintRequestId = ''
+let cloudPendingOutboundRequestId = ''
+let cloudPendingReprintRequestId = ''
 const cloudTaskActive = computed(() => !!cloudOrderConfig.value?.workflow?.currentTask)
 const cloudThirdPartyReady = computed(() => cloudOrderConfig.value?.transportMode === 'third_party')
 const cloudExceptionResolving = computed(() => (
@@ -1408,6 +1402,33 @@ const cloudExceptionChecking = computed(() => (
 ) || (
   cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'exception.order.check'
 ))
+const cloudReprinting = computed(() => (
+  cloudTaskActionLoading.value && cloudTaskActionKind.value === 'reprint'
+) || (
+  cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'warehouse.order.reprint'
+))
+const cloudPrinting = computed(() => (
+  cloudTaskActionLoading.value && cloudTaskActionKind.value === 'print'
+) || (
+  cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'warehouse.order.print'
+))
+const cloudOutbounding = computed(() => (
+  cloudTaskActionLoading.value && cloudTaskActionKind.value === 'outbound'
+) || (
+  cloudTaskActive.value && cloudOrderConfig.value?.workflow?.currentTask?.command === 'warehouse.order.outbound'
+))
+const cloudCurrentTaskMessage = computed(() => {
+  const command = cloudOrderConfig.value?.workflow?.currentTask?.command
+  const labels = {
+    'warehouse.order.print': '云仓助手正在打印订单，请勿重复操作…',
+    'warehouse.order.check': '云仓助手正在核验订单是否已入单，请稍候…',
+    'warehouse.order.reprint': '云仓助手正在执行通道补打，请勿重复操作…',
+    'warehouse.order.outbound': '云仓助手正在执行发货，请勿重复操作…',
+    'exception.order.resolve': '云仓助手正在处理异常，请稍候…',
+    'exception.order.check': '云仓助手正在查询订单异常，请稍候…'
+  }
+  return labels[command] || '云仓助手正在执行指令，请稍候…'
+})
 const cloudProcessLogs = computed(() => mergeCloudProcessLogs(
   cloudOrderConfig.value,
   cloudLocalProcessLogs.value
@@ -1458,7 +1479,7 @@ const cloudPrintStatus = computed(() => {
   if (cloudOrderConfig.value?.wmsOrderEntered === true) {
     return { key: 'unprinted', label: '未打印', tagType: 'warning' }
   }
-  return { key: 'no_order', label: '无订单', tagType: 'info' }
+  return { key: 'no_order', label: '等待云仓入单', tagType: 'info' }
 })
 const cloudOutboundStatus = computed(() => {
   const observedStatus = cloudOrderConfig.value?.workflow?.lastObservedStatus ||
@@ -1758,92 +1779,6 @@ async function handleDeleteAccount(row) {
     }
   }
 }
-function applyCloudBinding(data) {
-  cloudBinding.bound = data?.bound === true
-  cloudBinding.machineCode = data?.machineCode || ''
-  cloudBinding.bindingVersion = Number(data?.bindingVersion || 0)
-  cloudBinding.boundAt = data?.boundAt || null
-  cloudBinding.updatedAt = data?.updatedAt || null
-  cloudBinding.assistant = data?.assistant || null
-  cloudBinding.canManage = data?.canManage === true
-  cloudMachineCodeInput.value = cloudBinding.machineCode
-}
-
-async function loadCloudMachineBinding() {
-  cloudConfigLoading.value = true
-  try {
-    applyCloudBinding(await fetchCloudMachineBinding())
-  } catch (err) {
-    ElMessage.error('读取云仓配置失败: ' + (err.message || ''))
-  } finally {
-    cloudConfigLoading.value = false
-  }
-}
-
-async function handleCloudWarehouseConfig() {
-  cloudConfigVisible.value = true
-  await loadCloudMachineBinding()
-}
-
-function handleCloudMachineCodeInput(value) {
-  cloudMachineCodeInput.value = String(value || '').trim().toUpperCase()
-}
-
-async function handleSaveCloudMachine() {
-  if (!cloudBinding.canManage) {
-    ElMessage.warning('只有主账号或管理员可以修改云仓配置')
-    return
-  }
-  if (!cloudMachineCodeValid.value) {
-    ElMessage.warning('请输入有效的云仓助手机器码')
-    return
-  }
-  if (cloudBinding.bound && cloudBinding.machineCode === cloudMachineCodeInput.value) {
-    ElMessage.info('机器码未发生变化')
-    return
-  }
-
-  try {
-    if (cloudBinding.bound) {
-      await ElMessageBox.confirm(
-        `确定将云仓助手从 ${cloudBinding.machineCode} 更换为 ${cloudMachineCodeInput.value}？进行中的云仓流程不会自动切换机器。`,
-        '确认更换机器码',
-        { confirmButtonText: '确认换绑', cancelButtonText: '取消', type: 'warning' }
-      )
-    }
-    cloudConfigSaving.value = true
-    const wasBound = cloudBinding.bound
-    applyCloudBinding(await bindCloudMachine(cloudMachineCodeInput.value))
-    ElMessage.success(wasBound ? '云仓助手机器码已更换' : '云仓助手机器码已绑定')
-  } catch (err) {
-    if (err !== 'cancel') ElMessage.error('保存云仓配置失败: ' + (err.message || ''))
-  } finally {
-    cloudConfigSaving.value = false
-  }
-}
-
-async function handleUnbindCloudMachine() {
-  if (!cloudBinding.canManage) {
-    ElMessage.warning('只有主账号或管理员可以修改云仓配置')
-    return
-  }
-  if (!cloudBinding.bound) return
-  try {
-    await ElMessageBox.confirm(
-      `确定解除机器码 ${cloudBinding.machineCode}？解除后不能创建新的云仓助手任务。`,
-      '解除机器码绑定',
-      { confirmButtonText: '解除绑定', cancelButtonText: '取消', type: 'warning' }
-    )
-    cloudConfigSaving.value = true
-    applyCloudBinding(await unbindCloudMachine())
-    ElMessage.success('已解除云仓助手机器码绑定')
-  } catch (err) {
-    if (err !== 'cancel') ElMessage.error('解除绑定失败: ' + (err.message || ''))
-  } finally {
-    cloudConfigSaving.value = false
-  }
-}
-
 function cloudExceptionSourceLabel(source) {
   const labels = {
     billexception: '账单异常中心',
@@ -1855,8 +1790,12 @@ function cloudExceptionSourceLabel(source) {
 function cloudProcessActionLabel(action) {
   const labels = {
     exception_check: '查询异常',
+    warehouse_check: '核验云仓入单',
     auto_remark: '自动备注',
-    exception_resolve: '处理异常'
+    exception_resolve: '处理异常',
+    warehouse_print: '打印订单',
+    warehouse_outbound: '云仓发货',
+    warehouse_reprint: '通道补打'
   }
   return labels[action] || '云仓处理'
 }
@@ -1888,9 +1827,10 @@ function buildLegacyCloudProcessLogs(config) {
   const currentTask = config?.workflow?.currentTask
   const appendCommand = (item, action, fallbackId) => {
     if (!item) return
-    const processing = currentTask?.taskId === item.taskId
+    const itemTaskId = item.taskId || item.requestId || fallbackId
+    const processing = currentTask?.taskId === itemTaskId
     logs.push({
-      id: `command:${item.taskId || fallbackId}`,
+      id: `command:${itemTaskId}`,
       action,
       status: processing ? 'processing' : (item.status === 'succeeded' ? 'succeeded' : 'failed'),
       reason: item.reason || '',
@@ -1900,10 +1840,21 @@ function buildLegacyCloudProcessLogs(config) {
   }
   appendCommand(config?.exception, 'exception_check', 'latest-check')
   appendCommand(config?.exceptionResolution, 'exception_resolve', 'latest-resolve')
+  appendCommand(config?.print, 'warehouse_print', 'latest-print')
+  appendCommand(config?.outbound, 'warehouse_outbound', 'latest-outbound')
+  appendCommand(config?.reprint, 'warehouse_reprint', 'latest-reprint')
   if (currentTask && !logs.some(log => log.id === `command:${currentTask.taskId}`)) {
+    const actions = {
+      'exception.order.check': 'exception_check',
+      'exception.order.resolve': 'exception_resolve',
+      'warehouse.order.print': 'warehouse_print',
+      'warehouse.order.outbound': 'warehouse_outbound',
+      'warehouse.order.reprint': 'warehouse_reprint'
+    }
+    const action = actions[currentTask.command] || 'exception_check'
     logs.push({
       id: `command:${currentTask.taskId}`,
-      action: currentTask.command === 'exception.order.resolve' ? 'exception_resolve' : 'exception_check',
+      action,
       status: 'processing',
       reason: '',
       message: '已提交，等待云仓助手返回结果',
@@ -1936,6 +1887,54 @@ function clearCloudOrderPolling() {
 }
 
 function notifyCloudWorkflowState(config) {
+  const pendingWrites = [
+    {
+      key: 'print',
+      requestId: cloudPendingPrintRequestId,
+      result: config?.print,
+      successMessage: '订单打印成功',
+      failureMessage: '打印结果未满足成功条件，请先查询原请求结果或人工确认',
+      clear: () => { cloudPendingPrintRequestId = '' }
+    },
+    {
+      key: 'outbound',
+      requestId: cloudPendingOutboundRequestId,
+      result: config?.outbound,
+      successMessage: '云仓发货成功',
+      failureMessage: '发货结果未满足成功条件，请先查询原请求结果或人工确认',
+      clear: () => { cloudPendingOutboundRequestId = '' }
+    },
+    {
+      key: 'reprint',
+      requestId: cloudPendingReprintRequestId,
+      result: config?.reprint,
+      successMessage: config?.reprint?.printedCount
+        ? `通道补打成功，共打印 ${config.reprint.printedCount} 张`
+        : '通道补打成功',
+      failureMessage: '补打结果未满足成功条件，请先查询原请求结果或人工确认',
+      clear: () => { cloudPendingReprintRequestId = '' }
+    }
+  ]
+  const pendingWrite = pendingWrites.find(item => item.requestId &&
+    item.result?.requestId === item.requestId && item.result.terminal === true)
+  if (pendingWrite) {
+    const result = pendingWrite.result
+    const notifyKey = `${pendingWrite.key}:${result.requestId}:${result.status}:${result.updatedAt || ''}`
+    if (notifyKey !== cloudLastNotifiedState) {
+      cloudLastNotifiedState = notifyKey
+      if (result.succeeded === true) {
+        ElMessage.success(pendingWrite.successMessage)
+        if (pendingWrite.key === 'outbound') loadData().catch(() => {})
+      } else {
+        ElMessage.error({
+          message: result.message || pendingWrite.failureMessage,
+          duration: 6000
+        })
+      }
+    }
+    pendingWrite.clear()
+    return
+  }
   const workflow = config?.workflow
   if (!workflow || workflow.currentTask) return
   const notifyKey = `${workflow.workflowId}:${workflow.state}:${workflow.updatedAt || ''}`
@@ -2007,6 +2006,226 @@ async function startExceptionRecheckAfterResolve(config) {
   return true
 }
 
+const CLOUD_ORDER_WRITE_ACTIONS = Object.freeze({
+  print: {
+    command: 'warehouse.order.print',
+    summaryKey: 'print',
+    start: startCloudOrderPrint,
+    confirmTitle: '确认打印订单',
+    confirmMessage: '确认向云仓助手发送打印指令？该操作会实际出纸，请确认现场没有正在执行的打印任务。',
+    confirmButtonText: '确认打印',
+    submittingMessage: '打印指令已提交，正在查询原请求结果，请勿重复操作',
+    uncertainMessage: '打印提交结果暂不明确，正在查询原请求，请勿重复操作',
+    successMessage: '订单打印成功',
+    failureMessage: '打印结果未满足成功条件，请先查询原请求结果或人工确认'
+  },
+  outbound: {
+    command: 'warehouse.order.outbound',
+    summaryKey: 'outbound',
+    start: startCloudOrderOutbound,
+    confirmTitle: '确认云仓发货',
+    confirmMessage: '确认向云仓助手发送发货指令？请先确认订单已经打印且现场未在执行相同订单的发货任务。',
+    confirmButtonText: '确认发货',
+    submittingMessage: '云仓发货指令已提交，正在查询原请求结果，请勿重复操作',
+    uncertainMessage: '发货提交结果暂不明确，正在查询原请求，请勿重复操作',
+    successMessage: '云仓发货成功',
+    failureMessage: '发货结果未满足成功条件，请先查询原请求结果或人工确认'
+  }
+})
+
+function setCloudPendingWriteRequest(kind, requestId) {
+  if (kind === 'print') cloudPendingPrintRequestId = requestId || ''
+  if (kind === 'outbound') cloudPendingOutboundRequestId = requestId || ''
+}
+
+async function handleCloudOrderWrite(kind) {
+  const action = CLOUD_ORDER_WRITE_ACTIONS[kind]
+  const row = currentReceiveRow.value
+  if (!action || !row || cloudTaskActive.value || cloudTaskActionLoading.value) return
+  if (!cloudThirdPartyReady.value) {
+    ElMessage.warning('云仓助手第三方接口尚未在店小二服务端启用')
+    return
+  }
+  if (!cloudOrderConfig.value?.machineBound) {
+    ElMessage.warning(cloudOrderConfig.value?.machineRouteMessage || '请先为店铺选择所属云仓，并在仓库设置中绑定机器码')
+    return
+  }
+  if (!cloudOrderConfig.value?.locatorReady) {
+    ElMessage.warning(cloudOrderConfig.value?.locatorMessage || '当前订单定位信息不完整')
+    return
+  }
+  if (kind === 'print' && cloudOrderStatus.value.key !== 'normal') {
+    ElMessage.warning('请先确认云仓订单不存在待处理异常')
+    return
+  }
+  if (kind === 'outbound' && cloudOrderStatus.value.key !== 'normal') {
+    ElMessage.warning('当前云仓订单存在异常或状态未确认，不能发货')
+    return
+  }
+  if (kind === 'outbound' && cloudPrintStatus.value.key !== 'printed') {
+    ElMessage.warning('请先完成订单打印并确认打印成功')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(action.confirmMessage, action.confirmTitle, {
+      confirmButtonText: action.confirmButtonText,
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(`${action.confirmTitle}失败: ${error.message || ''}`)
+    }
+    return
+  }
+
+  cloudTaskActionLoading.value = true
+  cloudTaskActionKind.value = kind
+  cloudLastNotifiedState = ''
+  try {
+    let task
+    try {
+      task = await action.start(row.id)
+    } catch (error) {
+      // 写指令超时不代表现场未执行；只恢复并查询服务端已保存的原 request_id。
+      try {
+        const config = await refreshCloudOrderConfiguration()
+        const currentTask = config?.workflow?.currentTask
+        if (currentTask?.command === action.command && currentTask.taskId) {
+          setCloudPendingWriteRequest(kind, currentTask.taskId)
+          ElMessage.warning({ message: action.uncertainMessage, duration: 5000 })
+          scheduleCloudOrderPolling()
+          return
+        }
+      } catch { /* 保留原始错误提示 */ }
+      ElMessage.error({
+        message: `${action.confirmTitle}结果暂不明确：${error.message || '请求失败'}。请勿重复操作，请稍后重新打开查询原请求或人工确认`,
+        duration: 7000
+      })
+      return
+    }
+
+    if (task?.terminal === true) {
+      if (task.succeeded === true) {
+        ElMessage.success(action.successMessage)
+        if (kind === 'outbound') await loadData().catch(() => {})
+      } else {
+        ElMessage.error({ message: task.message || action.failureMessage, duration: 6000 })
+      }
+      await refreshCloudOrderConfiguration().catch(() => {})
+      return
+    }
+
+    setCloudPendingWriteRequest(kind, task?.requestId || '')
+    ElMessage.info({ message: action.submittingMessage, duration: 4000 })
+    try {
+      const config = await refreshCloudOrderConfiguration()
+      if (config?.workflow?.currentTask) scheduleCloudOrderPolling()
+    } catch {
+      ElMessage.warning(`${action.confirmTitle}指令已提交，请稍后重新打开查询原请求结果`)
+    }
+  } finally {
+    cloudTaskActionLoading.value = false
+    if (cloudTaskActionKind.value === kind) cloudTaskActionKind.value = ''
+  }
+}
+
+async function handleCloudOrderPrint() {
+  return handleCloudOrderWrite('print')
+}
+
+async function handleCloudOrderOutbound() {
+  return handleCloudOrderWrite('outbound')
+}
+
+async function handleCloudOrderReprint() {
+  const row = currentReceiveRow.value
+  if (!row || cloudTaskActive.value || cloudTaskActionLoading.value) return
+  if (!cloudThirdPartyReady.value) {
+    ElMessage.warning('云仓助手第三方接口尚未在店小二服务端启用')
+    return
+  }
+  if (!cloudOrderConfig.value?.machineBound) {
+    ElMessage.warning(cloudOrderConfig.value?.machineRouteMessage || '请先为店铺选择所属云仓，并在仓库设置中绑定机器码')
+    return
+  }
+  if (!cloudOrderConfig.value?.locatorReady) {
+    ElMessage.warning(cloudOrderConfig.value?.locatorMessage || '当前订单定位信息不完整')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '确认通过云仓通道重新打印该订单？补打会实际出纸，请先确认现场没有正在执行的补打任务。',
+      '确认通道补打',
+      { confirmButtonText: '确认补打', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error('确认补打失败: ' + (error.message || ''))
+    }
+    return
+  }
+
+  cloudTaskActionLoading.value = true
+  cloudTaskActionKind.value = 'reprint'
+  cloudLastNotifiedState = ''
+  try {
+    let task
+    try {
+      task = await startCloudOrderReprint(row.id)
+    } catch (error) {
+      // POST 超时并不代表未出纸。先从服务端读取已落库的原 request_id，
+      // 后续仅查询该请求，绝不创建新的补打请求。
+      try {
+        const config = await refreshCloudOrderConfiguration()
+        const currentTask = config?.workflow?.currentTask
+        if (currentTask?.command === 'warehouse.order.reprint' && currentTask.taskId) {
+          cloudPendingReprintRequestId = currentTask.taskId
+          ElMessage.warning({
+            message: '补打提交结果暂不明确，正在查询原请求，请勿重复操作',
+            duration: 5000
+          })
+          scheduleCloudOrderPolling()
+          return
+        }
+      } catch { /* 保留原始错误提示 */ }
+      ElMessage.error({
+        message: `补打结果暂不明确：${error.message || '请求失败'}。请勿重复操作，请稍后重新打开查询原请求或人工确认`,
+        duration: 7000
+      })
+      return
+    }
+
+    if (task?.terminal === true) {
+      if (task.succeeded === true) {
+        ElMessage.success(`通道补打成功，共打印 ${task.printedCount} 张`)
+      } else {
+        ElMessage.error({
+          message: task.message || '补打结果未满足成功条件，请先查询原请求结果或人工确认',
+          duration: 6000
+        })
+      }
+      await refreshCloudOrderConfiguration().catch(() => {})
+      return
+    }
+
+    cloudPendingReprintRequestId = task?.requestId || ''
+    ElMessage.info({
+      message: '通道补打已提交，正在查询原请求结果，请勿重复操作',
+      duration: 4000
+    })
+    try {
+      const config = await refreshCloudOrderConfiguration()
+      if (config?.workflow?.currentTask) scheduleCloudOrderPolling()
+    } catch (error) {
+      ElMessage.warning('补打指令已提交，请稍后重新打开查询原请求结果')
+    }
+  } finally {
+    cloudTaskActionLoading.value = false
+    if (cloudTaskActionKind.value === 'reprint') cloudTaskActionKind.value = ''
+  }
+}
+
 async function handleCloudExceptionCheck(options = {}) {
   const automatic = options?.automatic === true
   const followUp = options?.followUp === true
@@ -2017,7 +2236,7 @@ async function handleCloudExceptionCheck(options = {}) {
     return
   }
   if (!cloudOrderConfig.value?.machineBound) {
-    ElMessage.warning('请先在云仓配置中绑定云仓助手机器码')
+    ElMessage.warning(cloudOrderConfig.value?.machineRouteMessage || '请先为店铺选择所属云仓，并在仓库设置中绑定机器码')
     return
   }
   if (!cloudOrderConfig.value?.locatorReady) {
@@ -2270,10 +2489,11 @@ const statusTabs = computed(() => {
   ]
 })
 
-function handleStatusTab(val) {
+async function handleStatusTab(val) {
   filterForm.status = val
   pageInfo.page = 1
-  loadData()
+  await loadData()
+  await checkCloudWarehouseOrdersForCurrentPage()
 }
 
 // ==================== 筛选与分页 ====================
@@ -2292,18 +2512,81 @@ watch(selectedAccount, (val) => {
 function applyCloudWarehouseOrderCheck(result) {
   const cloudOrders = Array.isArray(result?.orders) ? result.orders : []
   const orderMap = new Map(cloudOrders.map(order => [String(order?.orderNo || '').trim(), order]))
+  const issueOrderIds = new Set((result?.issues || [])
+    .map(issue => Number(issue?.purchaseOrderId))
+    .filter(Number.isInteger))
+  const hasGlobalIssue = (result?.issues || []).some(issue => !issue?.purchaseOrderId)
   tableData.value = tableData.value.map(row => {
     if (row.status !== 'pending_print') return row
     const matched = orderMap.get(String(row.sales_order_no || '').trim())
     return {
       ...row,
-      cloud_print_checked: result?.final === true,
+      cloud_print_checked: result?.final === true &&
+        !issueOrderIds.has(Number(row.id)) &&
+        (!hasGlobalIssue || !!matched),
       cloud_print_ready: matched?.printable === true,
       cloud_order_status: matched?.status || '',
       cloud_logistics_no: matched?.logisticsNo || '',
       cloud_logistics_company: matched?.logisticsCompany || ''
     }
   })
+}
+
+function combineCloudWarehouseChecks(checks, issues = []) {
+  const orderMap = new Map()
+  for (const check of checks || []) {
+    for (const order of check?.orders || []) {
+      const key = String(order?.orderNo || '').trim()
+      if (!key) continue
+      const previous = orderMap.get(key)
+      orderMap.set(key, previous?.printable ? previous : order)
+    }
+  }
+  return {
+    batch: true,
+    checks,
+    issues,
+    final: checks.length > 0 && checks.every(check => check?.final === true),
+    resultShapeValid: checks.length > 0 && checks.every(check => check?.resultShapeValid === true),
+    orders: [...orderMap.values()]
+  }
+}
+
+async function resolveCloudWarehouseOrderCheck(purchaseOrderIds) {
+  let result = await startCloudWarehouseOrderCheck(purchaseOrderIds)
+  const activeStatuses = new Set(['submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing'])
+  if (result?.batch) {
+    let checks = Array.isArray(result.checks) ? result.checks : []
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const hasActiveCheck = checks.some(check => check?.requestId && !check?.final &&
+        activeStatuses.has(String(check?.transportStatus || '').toLowerCase()))
+      if (!hasActiveCheck) break
+      await new Promise(resolve => setTimeout(resolve, 750))
+      checks = await Promise.all(checks.map(async check => {
+        if (!check?.requestId || check?.final ||
+            !activeStatuses.has(String(check?.transportStatus || '').toLowerCase())) return check
+        try {
+          return await fetchCloudWarehouseOrderCheck(check.requestId)
+        } catch (error) {
+          return {
+            ...check,
+            final: true,
+            resultShapeValid: false,
+            message: error?.message || '云仓查询结果读取失败'
+          }
+        }
+      }))
+    }
+    return combineCloudWarehouseChecks(checks, result.issues || [])
+  }
+
+  // 兼容升级过程中的旧服务端：只轮询同一个 requestId，不会重复创建查询指令。
+  for (let attempt = 0; attempt < 20 && result?.requestId && !result?.final &&
+    activeStatuses.has(String(result?.transportStatus || '').toLowerCase()); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 750))
+    result = await fetchCloudWarehouseOrderCheck(result.requestId)
+  }
+  return result
 }
 
 async function checkCloudWarehouseOrdersForCurrentPage() {
@@ -2315,21 +2598,24 @@ async function checkCloudWarehouseOrdersForCurrentPage() {
     cloud_print_ready: false
   }))
   try {
-    let result = await startCloudWarehouseOrderCheck()
-    const activeStatuses = new Set(['submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing'])
-    // 这里只轮询同一个 requestId 的执行结果，不会再次创建云仓查询指令。
-    for (let attempt = 0; attempt < 20 && result?.requestId && !result?.final &&
-      activeStatuses.has(String(result?.transportStatus || '').toLowerCase()); attempt += 1) {
-      await new Promise(resolve => setTimeout(resolve, 750))
-      result = await fetchCloudWarehouseOrderCheck(result.requestId)
-    }
+    const currentPageOrderIds = tableData.value
+      .filter(row => row.status === 'pending_print')
+      .map(row => Number(row.id))
+      .filter(Number.isInteger)
+    const result = await resolveCloudWarehouseOrderCheck(currentPageOrderIds)
     applyCloudWarehouseOrderCheck(result)
+    if (result?.issues?.length) {
+      const firstIssue = result.issues[0]
+      ElMessage.warning(`有 ${result.issues.length} 项未完成云仓核验：${firstIssue.message || '请检查店铺所属云仓与机器码配置'}`)
+    }
     if (!result?.final) {
       ElMessage.info('云仓订单查询已提交，稍后可再次点击查询读取结果')
       return
     }
     if (!result?.resultShapeValid) {
-      ElMessage.warning(result?.message || '云仓助手未返回有效的订单列表')
+      if (!result?.issues?.length) {
+        ElMessage.warning(result?.message || '云仓助手未返回有效的订单列表')
+      }
       return
     }
     const readyCount = tableData.value.filter(row => row.status === 'pending_print' && row.cloud_print_ready).length
@@ -2342,6 +2628,38 @@ async function checkCloudWarehouseOrdersForCurrentPage() {
     ElMessage.warning(error?.message || '云仓订单查询失败')
   } finally {
     cloudWarehouseOrderCheckLoading.value = false
+  }
+}
+
+async function handleCloudWarehouseEntryCheck(options = {}) {
+  const automatic = options?.automatic === true
+  const row = currentReceiveRow.value
+  if (!row?.id || cloudWarehouseEntryChecking.value) return
+  cloudWarehouseEntryChecking.value = true
+  try {
+    const result = await resolveCloudWarehouseOrderCheck([Number(row.id)])
+    applyCloudWarehouseOrderCheck(result)
+    const matched = (result?.orders || []).find(order => (
+      String(order?.orderNo || '').trim() === String(row.sales_order_no || '').trim()
+    ))
+    if (result?.issues?.length) {
+      ElMessage.warning(result.issues[0]?.message || '云仓入单核验未完成')
+    } else if (!result?.final) {
+      ElMessage.info('云仓入单核验已提交，正在等待结果')
+    } else if (!result?.resultShapeValid) {
+      ElMessage.warning(result?.message || '云仓助手未返回有效的入单核验结果')
+    } else if (matched?.printable === true) {
+      ElMessage.success('订单已进入云仓，可以打印')
+    } else if (!automatic) {
+      ElMessage.info('订单尚未进入云仓，请稍后重新核验')
+    }
+
+    const config = await refreshCloudOrderConfiguration().catch(() => null)
+    if (config?.workflow?.currentTask) scheduleCloudOrderPolling()
+  } catch (error) {
+    ElMessage.warning(error?.message || '云仓入单核验失败')
+  } finally {
+    cloudWarehouseEntryChecking.value = false
   }
 }
 
@@ -2367,15 +2685,17 @@ function handleReset() {
   loadData()
 }
 
-function handleSizeChange(val) {
+async function handleSizeChange(val) {
   pageInfo.pageSize = val
   pageInfo.page = 1
-  loadData()
+  await loadData()
+  await checkCloudWarehouseOrdersForCurrentPage()
 }
 
-function handlePageChange(val) {
+async function handlePageChange(val) {
   pageInfo.page = val
-  loadData()
+  await loadData()
+  await checkCloudWarehouseOrdersForCurrentPage()
 }
 
 // ==================== 数据加载 ====================
@@ -2618,6 +2938,11 @@ function handleReceive(row) {
   receiveDialogVisible.value = true
 }
 
+async function handlePendingPrint(row) {
+  currentReceiveRow.value = row
+  await handleForward()
+}
+
 // 从卡片直接标记售后
 function handleDirectMarkAfterSale(row) {
   currentAftersaleRow.value = row
@@ -2710,6 +3035,9 @@ async function handleForward() {
   // 加载关联销售订单信息
   clearCloudOrderPolling()
   cloudLastNotifiedState = ''
+  cloudPendingPrintRequestId = ''
+  cloudPendingOutboundRequestId = ''
+  cloudPendingReprintRequestId = ''
   forwardLoading.value = true
   forwardSalesData.value = null
   cloudOrderConfig.value = null
@@ -2731,11 +3059,23 @@ async function handleForward() {
   }
   forwardLoading.value = false
   if (cloudOrderConfig.value?.workflow?.currentTask) {
+    const currentTask = cloudOrderConfig.value.workflow.currentTask
+    if (currentTask.command === 'warehouse.order.print') cloudPendingPrintRequestId = currentTask.taskId || ''
+    if (currentTask.command === 'warehouse.order.outbound') cloudPendingOutboundRequestId = currentTask.taskId || ''
+    if (currentTask.command === 'warehouse.order.reprint') cloudPendingReprintRequestId = currentTask.taskId || ''
     scheduleCloudOrderPolling()
   } else if (shouldRecheckAfterExceptionResolve(cloudOrderConfig.value)) {
     await startExceptionRecheckAfterResolve(cloudOrderConfig.value)
   } else if (shouldAutoCheckCloudException(cloudOrderConfig.value)) {
     await handleCloudExceptionCheck({ automatic: true })
+  }
+  if (row.status === 'pending_print' &&
+      cloudOrderConfig.value?.machineBound &&
+      cloudOrderConfig.value?.locatorReady &&
+      cloudOrderStatus.value.key === 'normal' &&
+      !cloudOrderConfig.value?.workflow?.currentTask &&
+      !cloudOrderConfig.value?.warehouseCheck) {
+    await handleCloudWarehouseEntryCheck({ automatic: true })
   }
 }
 
@@ -4463,68 +4803,15 @@ function handleImportDialogClose() {
   margin-top: 4px;
 }
 
-/* ============ 云仓配置 ============ */
-.cloud-config-content {
-  min-height: 220px;
-}
-
-.cloud-binding-status {
-  margin-top: 16px;
-  padding: 14px;
-  border: 1px solid #e4e7ed;
-  border-radius: 8px;
-  background: #fafcff;
-}
-
-.cloud-binding-code-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.cloud-binding-label {
-  color: #606266;
-  font-size: 13px;
-}
-
-.cloud-binding-code {
-  color: #2b5aed;
-  font-family: Consolas, monospace;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 1px;
-}
-
-.cloud-binding-meta {
-  display: flex;
-  gap: 18px;
-  margin-top: 8px;
-  color: #909399;
-  font-size: 12px;
-}
-
-.cloud-binding-hint {
-  margin: 10px 0 0;
-  color: #e6a23c;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.cloud-machine-form {
-  margin-top: 18px;
-}
-
-.cloud-machine-format {
-  margin-top: 6px;
-  color: #909399;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
 .cloud-info-summary :deep(.el-descriptions__label) {
   width: 92px;
   color: #606266;
+}
+
+.cloud-route-machine {
+  color: #909399;
+  font-family: Consolas, monospace;
+  font-size: 12px;
 }
 
 .cloud-conversation-section {
