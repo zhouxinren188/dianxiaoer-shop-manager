@@ -33,6 +33,7 @@ describe('采购弹窗低配置设备首开优化', () => {
     expect(salesSource).toContain('purchaseInfo.storeCloudWarehouseId = storeRes?.cloud_warehouse_id')
     expect(salesSource).toContain('function applyStoreCloudWarehouse()')
     expect(salesSource).toContain('const selectedStoreWarehouse = applyStoreCloudWarehouse()')
+    expect(salesSource).toMatch(/if \(selectedStoreWarehouse\) \{[\s\S]{0,180}updateDropshipShipping\(\)/)
     expect(salesSource).toContain('if (!selectedStoreWarehouse && lastWhId)')
     expect(salesSource).toContain("if (type === 'warehouse' || type === 'warehouse_in') {")
     expect(salesSource.indexOf('applyStoreCloudWarehouse()', salesSource.indexOf('watch(() => purchaseInfo.purchaseType')))

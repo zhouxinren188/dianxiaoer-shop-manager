@@ -13,21 +13,27 @@
       </div>
     </div>
 
-    <!-- 经营概览：右上角切换本月/今日 -->
+    <!-- 经营概览：右上角切换今日/昨日/本月/本年 -->
     <section class="overview-section">
       <div class="overview-toolbar">
         <div class="overview-heading">
           <span class="overview-title">经营概览</span>
-          <el-tooltip
-            placement="top"
-            content="预估毛利 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
-          >
-            <span class="overview-rule">计算口径</span>
-          </el-tooltip>
+          <el-button
+            class="overview-refresh"
+            :icon="Refresh"
+            circle
+            size="small"
+            :loading="overviewRefreshing"
+            aria-label="刷新经营概览"
+            title="刷新经营概览"
+            @click="refreshOverviewStats"
+          />
         </div>
         <el-radio-group v-model="overviewPeriod" size="small">
-          <el-radio-button label="month">本月</el-radio-button>
           <el-radio-button label="today">今日</el-radio-button>
+          <el-radio-button label="yesterday">昨日</el-radio-button>
+          <el-radio-button label="month">本月</el-radio-button>
+          <el-radio-button label="year">本年</el-radio-button>
         </el-radio-group>
       </div>
 
@@ -46,9 +52,10 @@
             </div>
           </div>
           <div class="overview-kpi-footer">
-            <span class="overview-trend" :class="activeSalesTrendPct >= 0 ? 'up' : 'down'">
+            <span v-if="activePeriodConfig.hasComparison !== false" class="overview-trend" :class="activeSalesTrendPct >= 0 ? 'up' : 'down'">
               {{ formatTrendText(activeSalesTrendPct, overviewCompareLabel) }}
             </span>
+            <span v-else class="overview-status is-ready">完整自然日</span>
           </div>
         </div>
 
@@ -64,9 +71,10 @@
             </div>
           </div>
           <div class="overview-kpi-footer">
-            <span class="overview-trend" :class="activePurchaseTrendPct >= 0 ? 'up' : 'down'">
+            <span v-if="activePeriodConfig.hasComparison !== false" class="overview-trend" :class="activePurchaseTrendPct >= 0 ? 'up' : 'down'">
               {{ formatTrendText(activePurchaseTrendPct, overviewCompareLabel) }}
             </span>
+            <span v-else class="overview-status is-ready">完整自然日</span>
             <span class="overview-kpi-note">含采购运费</span>
           </div>
         </div>
@@ -94,7 +102,15 @@
         <div class="overview-kpi-card">
           <div class="overview-kpi-content">
             <div class="overview-kpi-info">
-              <p class="overview-kpi-label">{{ overviewPeriodLabel }}预估毛利</p>
+              <p class="overview-kpi-label is-with-help">
+                <span>{{ overviewPeriodLabel }}预估毛利</span>
+                <el-tooltip
+                  placement="top"
+                  content="预估毛利 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
+                >
+                  <span class="overview-profit-help" aria-label="预估毛利计算口径">?</span>
+                </el-tooltip>
+              </p>
               <h3
                 class="overview-kpi-value is-profit"
                 :class="{
@@ -144,7 +160,7 @@
               </span>
             </div>
           </div>
-          <div class="chart-body" ref="chartContainer">
+          <div class="chart-body sales-trend-body" ref="chartContainer">
             <svg v-if="trendData.length" :viewBox="`0 0 ${chartW} ${chartH}`" class="trend-svg" preserveAspectRatio="xMidYMid meet">
               <!-- 网格线 -->
               <g class="grid-lines">
@@ -297,12 +313,12 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { UserFilled, ShoppingCart, DataLine, Goods, Wallet } from '@element-plus/icons-vue'
+import { UserFilled, ShoppingCart, DataLine, Goods, Wallet, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
-import { fetchStores } from '@/api/store'
 import { calculateDashboardProfit } from '@/utils/dashboard-profit'
+import { getLatestLocalJdExpressPeriods } from '@/services/jd-express-spend-sync'
 
 const currentUser = localStorage.getItem('currentUser') || '管理员'
 
@@ -321,7 +337,7 @@ let refreshTimer = null
 let countdownTimer = null
 let invoiceMetricRefreshTimer = null
 let unsubscribeMetricUpdated = null
-let adSpendLoading = false
+let handleJdExpressSpendSynced = null
 
 async function loadUserInfo() {
   try {
@@ -354,10 +370,14 @@ async function loadUserInfo() {
 const stats = ref({
   today: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
   yesterday: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  yesterdayFull: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
   thisMonth: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
-  lastMonth: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] }
+  lastMonth: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  thisYear: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] },
+  lastYear: { salesAmount: 0, orderCount: 0, purchaseAmount: 0, purchaseCount: 0, adSpend: null, cloudOrderCount: null, estimatedProfit: null, warehouseBreakdown: [] }
 })
-const overviewPeriod = ref('month')
+const overviewPeriod = ref('today')
+const overviewRefreshing = ref(false)
 // 格式化金额
 function formatMoney(val) {
   return Number(val || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -418,114 +438,64 @@ function calcPct(curr, prev) {
   return Math.round((c - p) / p * 1000) / 10
 }
 
-const monthTrendPct = computed(() => calcPct(stats.value.thisMonth.salesAmount, stats.value.lastMonth.salesAmount))
+const overviewPeriodConfig = {
+  today: { current: 'today', previous: 'yesterday', label: '今日', compareLabel: '昨日同期' },
+  yesterday: { current: 'yesterdayFull', previous: null, label: '昨日', compareLabel: '', hasComparison: false },
+  month: { current: 'thisMonth', previous: 'lastMonth', label: '本月', compareLabel: '上月同期' },
+  year: { current: 'thisYear', previous: 'lastYear', label: '本年', compareLabel: '去年同期' }
+}
 
-const dayTrendPct = computed(() => calcPct(stats.value.today.salesAmount, stats.value.yesterday.salesAmount))
+const activePeriodConfig = computed(() => overviewPeriodConfig[overviewPeriod.value] || overviewPeriodConfig.today)
+const activePeriodStats = computed(() => stats.value[activePeriodConfig.value.current] || {})
+const previousPeriodStats = computed(() => stats.value[activePeriodConfig.value.previous] || {})
+const activeOverviewStats = computed(() => calculateDashboardProfit(activePeriodStats.value))
 
-const activeOverviewStats = computed(() => calculateDashboardProfit(
-  overviewPeriod.value === 'month' ? stats.value.thisMonth : stats.value.today
-))
-
-const overviewPeriodLabel = computed(() => overviewPeriod.value === 'month' ? '本月' : '当日')
-const overviewCompareLabel = computed(() => overviewPeriod.value === 'month' ? '上月同期' : '昨日同期')
+const overviewPeriodLabel = computed(() => activePeriodConfig.value.label)
+const overviewCompareLabel = computed(() => activePeriodConfig.value.compareLabel)
 const activeSalesTrendPct = computed(() => (
-  overviewPeriod.value === 'month' ? monthTrendPct.value : dayTrendPct.value
+  calcPct(activePeriodStats.value.salesAmount, previousPeriodStats.value.salesAmount)
 ))
 const activePurchaseTrendPct = computed(() => (
-  overviewPeriod.value === 'month'
-    ? calcPct(stats.value.thisMonth.purchaseAmount, stats.value.lastMonth.purchaseAmount)
-    : calcPct(stats.value.today.purchaseAmount, stats.value.yesterday.purchaseAmount)
+  calcPct(activePeriodStats.value.purchaseAmount, previousPeriodStats.value.purchaseAmount)
 ))
 
-async function loadStats() {
+async function loadStats({ force = false } = {}) {
   try {
-    const data = await get('/api/dashboard-stats')
+    const data = await get('/api/dashboard-stats', force ? { _ts: Date.now() } : undefined)
     if (data) {
-      stats.value = data
+      stats.value = { ...stats.value, ...data }
     }
+    return true
   } catch (err) {
     console.error('[HomePage] 加载统计失败:', err.message)
+    return false
+  } finally {
+    // 服务端升级前或短暂不可用时，也保留本机刚成功取得的今日/本月快车消耗。
+    applyLocalJdExpressPeriods(getLatestLocalJdExpressPeriods())
   }
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length)
-  let nextIndex = 0
-  const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex
-      nextIndex += 1
-      try {
-        results[index] = await worker(items[index], index)
-      } catch (error) {
-        results[index] = { success: false, message: error?.message || '查询失败' }
-      }
-    }
-  })
-  await Promise.all(runners)
-  return results
-}
-
-async function loadJdExpressSpend() {
-  if (adSpendLoading || !window.electronAPI?.invoke) return
-  adSpendLoading = true
-  try {
-    const response = await fetchStores({
-      platform: 'jd',
-      status: 'enabled',
-      page: 1,
-      pageSize: 1000
-    })
-    const stores = (response?.list || response?.data?.list || [])
-      .filter((store) => store.platform === 'jd' && store.status === 'enabled')
-    const totalStoreCount = stores.length
-    if (!totalStoreCount) {
-      for (const key of ['today', 'thisMonth']) {
-        stats.value[key] = {
-          ...stats.value[key],
-          adSpend: 0,
-          adSyncedStoreCount: 0,
-          adTotalStoreCount: 0,
-          adSpendUpdatedAt: null
-        }
-      }
-      return
-    }
-
-    const results = await mapWithConcurrency(stores, 3, (store) => (
-      window.electronAPI.invoke('jd-express-home-spend', { storeId: store.id })
-    ))
-    const successful = results.filter((result) => result?.success)
-    const updatedAt = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-    const shared = {
-      adSyncedStoreCount: successful.length,
-      adTotalStoreCount: totalStoreCount,
-      adSpendUpdatedAt: successful.length ? updatedAt : null
-    }
-    stats.value.today = {
-      ...stats.value.today,
-      ...shared,
-      adSpend: successful.length
-        ? successful.reduce((total, result) => total + Number(result.todaySpend || 0), 0)
-        : null
-    }
-    stats.value.thisMonth = {
-      ...stats.value.thisMonth,
-      ...shared,
-      adSpend: successful.length
-        ? successful.reduce((total, result) => total + Number(result.monthSpend || 0), 0)
-        : null
-    }
-  } catch (error) {
-    console.warn('[HomePage] 快车消耗暂未同步:', error?.message || error)
-  } finally {
-    adSpendLoading = false
+function applyLocalJdExpressPeriods(localPeriods) {
+  if (!localPeriods) return
+  for (const [key, values] of Object.entries(localPeriods)) {
+    stats.value[key] = { ...stats.value[key], ...values }
   }
 }
 
 async function loadOverviewStats() {
   await loadStats()
-  await loadJdExpressSpend()
+}
+
+async function refreshOverviewStats() {
+  if (overviewRefreshing.value) return
+  overviewRefreshing.value = true
+  try {
+    const succeeded = await loadStats({ force: true })
+    if (succeeded) ElMessage.success('经营概览已刷新')
+    else ElMessage.warning('刷新失败，请稍后重试')
+  } finally {
+    overviewRefreshing.value = false
+  }
 }
 
 const pendingInvoiceTotal = ref(0)
@@ -609,7 +579,7 @@ const chartContainer = ref(null)
 
 // 图表尺寸
 const chartW = 760
-const chartH = 320
+const chartH = 370
 const padL = 56
 const padR = 48
 const padT = 20
@@ -728,6 +698,12 @@ onMounted(() => {
   loadOverviewStats()
   loadTrend()
   loadPendingInvoiceTotal()
+  handleJdExpressSpendSynced = (event) => {
+    const localPeriods = event?.detail?.localPeriods
+    applyLocalJdExpressPeriods(localPeriods)
+    if (event?.detail?.serverSaved) loadStats()
+  }
+  window.addEventListener('jd-express-spend-synced', handleJdExpressSpendSynced)
   if (window.electronAPI?.onUpdate) {
     unsubscribeMetricUpdated = window.electronAPI.onUpdate('aftersale-metric-updated', event => {
       if (event?.metric !== 'pending_consumer_invoices') return
@@ -749,6 +725,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (handleJdExpressSpendSynced) {
+    window.removeEventListener('jd-express-spend-synced', handleJdExpressSpendSynced)
+    handleJdExpressSpendSynced = null
+  }
   if (unsubscribeMetricUpdated) {
     unsubscribeMetricUpdated()
     unsubscribeMetricUpdated = null
@@ -834,8 +814,8 @@ onUnmounted(() => {
 
 .overview-heading {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
 }
 
 .overview-title {
@@ -844,10 +824,14 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.overview-rule {
+.overview-refresh {
+  color: #64748b;
+}
+
+.overview-refresh:hover {
   color: #2b5aed;
-  font-size: 12px;
-  cursor: help;
+  border-color: #aebfff;
+  background: #f3f6ff;
 }
 
 .overview-grid {
@@ -886,6 +870,28 @@ onUnmounted(() => {
   margin: 0 0 8px;
   color: #6b7280;
   font-size: 14px;
+}
+
+.overview-kpi-label.is-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.overview-profit-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
 }
 
 .overview-kpi-value {
@@ -1081,6 +1087,10 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.sales-trend-body {
+  min-height: 310px;
 }
 
 .invoice-summary {

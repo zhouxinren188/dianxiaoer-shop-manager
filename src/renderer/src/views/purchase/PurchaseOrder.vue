@@ -1990,7 +1990,10 @@ function scheduleCloudOrderPolling() {
       if (config?.workflow?.currentTask) {
         scheduleCloudOrderPolling()
       } else {
-        await startExceptionRecheckAfterResolve(config)
+        const recheckStarted = await startExceptionRecheckAfterResolve(config)
+        if (!recheckStarted && shouldAutoCheckCloudWarehouseEntry(config)) {
+          await handleCloudWarehouseEntryCheck({ automatic: true })
+        }
       }
     } catch (error) {
       ElMessage.error('刷新云仓任务状态失败: ' + (error.message || ''))
@@ -2004,6 +2007,16 @@ async function startExceptionRecheckAfterResolve(config) {
   ElMessage.info({ message: '异常处理中，正在重新查询是否仍有异常', duration: 3000 })
   await handleCloudExceptionCheck({ automatic: true, followUp: true })
   return true
+}
+
+function shouldAutoCheckCloudWarehouseEntry(config) {
+  const row = currentReceiveRow.value
+  return row?.status === 'pending_print' &&
+    config?.machineBound === true &&
+    config?.locatorReady === true &&
+    cloudOrderStatus.value.key === 'normal' &&
+    !config?.workflow?.currentTask &&
+    !config?.warehouseCheck
 }
 
 const CLOUD_ORDER_WRITE_ACTIONS = Object.freeze({
@@ -2519,6 +2532,19 @@ function applyCloudWarehouseOrderCheck(result) {
   tableData.value = tableData.value.map(row => {
     if (row.status !== 'pending_print') return row
     const matched = orderMap.get(String(row.sales_order_no || '').trim())
+    // 服务端会把全量云仓回执按当前页订单范围匹配；没有匹配结果且没有明确错误时，
+    // 保留该订单原有临时状态，避免一次局部失败覆盖同页其他订单。
+    if (!matched) {
+      if (!issueOrderIds.has(Number(row.id)) && !hasGlobalIssue) return row
+      return {
+        ...row,
+        cloud_print_checked: false,
+        cloud_print_ready: false,
+        cloud_order_status: '',
+        cloud_logistics_no: '',
+        cloud_logistics_company: ''
+      }
+    }
     return {
       ...row,
       cloud_print_checked: result?.final === true &&
@@ -3069,12 +3095,7 @@ async function handleForward() {
   } else if (shouldAutoCheckCloudException(cloudOrderConfig.value)) {
     await handleCloudExceptionCheck({ automatic: true })
   }
-  if (row.status === 'pending_print' &&
-      cloudOrderConfig.value?.machineBound &&
-      cloudOrderConfig.value?.locatorReady &&
-      cloudOrderStatus.value.key === 'normal' &&
-      !cloudOrderConfig.value?.workflow?.currentTask &&
-      !cloudOrderConfig.value?.warehouseCheck) {
+  if (shouldAutoCheckCloudWarehouseEntry(cloudOrderConfig.value)) {
     await handleCloudWarehouseEntryCheck({ automatic: true })
   }
 }

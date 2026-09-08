@@ -36,7 +36,7 @@ function extractJdSalesOrderSkuSpec(item = {}) {
   if (attributes.length === 1) return attributes[0].value.slice(0, 300)
   if (attributes.length > 1) {
     return attributes
-      .map(attribute => attribute.name ? `${attribute.name}?${attribute.value}` : attribute.value)
+      .map(attribute => attribute.name ? `${attribute.name}：${attribute.value}` : attribute.value)
       .filter((value, index, values) => values.indexOf(value) === index)
       .join(' / ')
       .slice(0, 300)

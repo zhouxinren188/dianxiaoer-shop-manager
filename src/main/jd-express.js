@@ -1415,7 +1415,7 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
       })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=home_spend store_id=${normalizedStoreId} status=success today=${result.todaySpend} month=${result.monthSpend} duration_ms=${Date.now() - startedAt}`
+        `action=home_spend store_id=${normalizedStoreId} status=success today=${result.todaySpend} month=${result.monthSpend} days=${result.dailySpends.length} duration_ms=${Date.now() - startedAt}`
       )
       return { success: true, storeId: normalizedStoreId, ...result }
     } catch (error) {

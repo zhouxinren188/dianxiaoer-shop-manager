@@ -87,13 +87,28 @@ function extractHomeSpend(payload, now = Date.now()) {
   if (!envelope) throw new Error('京准通账户报表返回结构已变更')
   const rows = envelope.datas
   const today = formatLocalDate(now)
-  const monthSpend = rows.reduce((total, row) => total + parseAmount(row?.cost), 0)
-  const todaySpend = rows
-    .filter((row) => normalizeReportDate(row?.date ?? row?.day ?? row?.startDay) === today)
-    .reduce((total, row) => total + parseAmount(row?.cost), 0)
+  const month = today.slice(0, 7)
+  const getRowDate = (row) => normalizeReportDate(row?.date ?? row?.day ?? row?.startDay)
+  const dailyTotals = new Map()
+  for (const row of rows) {
+    const date = getRowDate(row)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(month)) continue
+    dailyTotals.set(date, (dailyTotals.get(date) || 0) + parseAmount(row?.cost))
+  }
+  // 即使当天没有花费也登记 0，服务端才能确认该店铺今日已成功同步。
+  if (!dailyTotals.has(today)) dailyTotals.set(today, 0)
+  const dailySpends = Array.from(dailyTotals.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([date, spend]) => ({
+      date,
+      spend: Math.round(spend * 100) / 100
+    }))
+  const monthSpend = dailySpends.reduce((total, item) => total + item.spend, 0)
+  const todaySpend = dailyTotals.get(today) || 0
   return {
     todaySpend: Math.round(todaySpend * 100) / 100,
     monthSpend: Math.round(monthSpend * 100) / 100,
+    dailySpends,
     rowCount: rows.length
   }
 }

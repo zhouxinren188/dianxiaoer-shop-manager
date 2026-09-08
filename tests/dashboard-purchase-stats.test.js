@@ -9,17 +9,38 @@ describe('首页采购统计', () => {
   it('可切换展示本月与今日采购金额和采购单数', () => {
     expect(homeSource).toContain('<el-radio-button label="month">本月</el-radio-button>')
     expect(homeSource).toContain('<el-radio-button label="today">今日</el-radio-button>')
+    expect(homeSource).toContain('<el-radio-button label="yesterday">昨日</el-radio-button>')
     expect(homeSource).toContain('{{ overviewPeriodLabel }}采购')
     expect(homeSource).toContain('activeOverviewStats.purchaseAmount')
     expect(homeSource).toContain('formatPurchaseCount(activeOverviewStats)')
   })
 
+  it('昨日使用完整自然日数据且不混用昨日同期', () => {
+    expect(homeSource).toContain("yesterday: { current: 'yesterdayFull', previous: null")
+    expect(serverSource).toContain('AND so.order_time < CURDATE()')
+    expect(serverSource).toContain('AS yesterday_full_amt')
+    expect(serverSource).toContain('AS yesterday_full_cnt')
+    expect(serverSource).toContain('yesterdayFull: fmt(r7, fmtWh(whYesterday)')
+  })
+
+  it('经营概览支持手动从服务器刷新', () => {
+    expect(homeSource).toContain('aria-label="刷新经营概览"')
+    expect(homeSource).toContain('async function refreshOverviewStats()')
+    expect(homeSource).toContain("loadStats({ force: true })")
+    expect(homeSource).toContain("force ? { _ts: Date.now() } : undefined")
+  })
+
   it('优先统计实付总额并为旧采购单回退计算金额', () => {
     expect(serverSource).toContain('WHEN COALESCE(po.total_amount, 0) > 0 THEN po.total_amount')
     expect(serverSource).toContain('COALESCE(po.purchase_price, 0) * COALESCE(po.quantity, 0) + COALESCE(po.shipping_fee, 0)')
-    expect(serverSource).toContain("po.status NOT IN ('cancelled', 'refunded')")
+    expect(serverSource).toContain("po.status NOT IN ('ordered', 'cancelled', 'refunded')")
     expect(serverSource).toContain('purchaseAmount: Number(purchaseAmount || 0)')
     expect(serverSource).toContain('purchaseCount: Number(purchaseCount || 0)')
+  })
+
+  it('等待付款订单不计入，后续同步为已付款状态后再纳入', () => {
+    expect(serverSource).toContain('ordered 表示等待付款/已下单未付款，不计入经营采购数据')
+    expect(serverSource).toContain("po.status NOT IN ('ordered', 'cancelled', 'refunded')")
   })
 
   it('子账号采购统计沿用采购账号权限并使用日期索引', () => {

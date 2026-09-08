@@ -9,6 +9,7 @@ const {
   normalizeCapabilities,
   normalizeCreateTaskRequest,
   normalizeExceptionCheckResult,
+  normalizeJdRemarkResult,
   normalizeHeartbeatRequest,
   normalizeResultRequest,
   redactMessage
@@ -47,9 +48,10 @@ function heartbeatBody(overrides = {}) {
 }
 
 describe('desktop command protocol', () => {
-  it('enables only the diagnostic and two fixed purchase exception commands', () => {
+  it('enables only the diagnostic, JD remark and two legacy purchase exception commands', () => {
     expect(ENABLED_DESKTOP_COMMANDS).toEqual([
       'system.ping',
+      'purchase.jd.remark',
       'purchase.exception.check',
       'purchase.exception.resolve'
     ])
@@ -78,6 +80,7 @@ describe('desktop command protocol', () => {
   it('normalizes capabilities and rejects unknown heartbeat fields', () => {
     expect(normalizeCapabilities({ 'system.ping': true, 'future.command': true })).toEqual({
       'system.ping': true,
+      'purchase.jd.remark': false,
       'purchase.exception.check': false,
       'purchase.exception.resolve': false
     })
@@ -171,6 +174,18 @@ describe('desktop command protocol', () => {
       message: '',
       checked_at: '2026-08-31T01:00:01.000Z'
     })).toThrowError(/does not match/i)
+  })
+
+  it('validates the compact JD remark result shape', () => {
+    expect(normalizeJdRemarkResult({
+      purchase_order_id: 12,
+      remark_succeeded: true,
+      remark_message: '采购编号已备注',
+      remarked_at: '2026-09-09T01:00:01.000Z'
+    })).toMatchObject({
+      purchase_order_id: 12,
+      remark_succeeded: true
+    })
   })
 })
 
@@ -446,6 +461,52 @@ describe('desktop command HTTPS boundary', () => {
       'GET',
       '/api/desktop-channel/business/purchase-orders/12/related-sales'
     )).toBe('/api/purchase-orders/12/related-sales')
+  })
+
+  it('persists terminal completion time from the server clock', async () => {
+    const task = {
+      task_id: 'desktop_task_12345678',
+      command: 'system.ping',
+      payload_json: '{}',
+      status: 'executing',
+      claimed_device_id: DEVICE_ID,
+      claimed_instance_id: INSTANCE_ID,
+      lease_id: 'lease_12345678',
+      lease_expires_at: '2026-09-09T01:05:00.000Z',
+      fencing_token: 1
+    }
+    const execute = vi.fn()
+      .mockResolvedValueOnce([[task]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+    const connection = {
+      beginTransaction: vi.fn(),
+      commit: vi.fn(),
+      rollback: vi.fn(),
+      release: vi.fn(),
+      execute
+    }
+    await recordTaskResult(
+      { getConnection: async () => connection },
+      { userId: 7 },
+      task.task_id,
+      {
+        device_id: DEVICE_ID,
+        instance_id: INSTANCE_ID,
+        lease_id: task.lease_id,
+        fencing_token: 1,
+        status: 'succeeded',
+        result: {
+          pong: true,
+          device_id: DEVICE_ID,
+          app_version: '1.9.82',
+          handled_at: '2026-09-09T01:00:04.000Z'
+        },
+        completed_at: '2026-09-09T01:00:04.000Z'
+      },
+      new Date('2026-09-09T01:00:01.000Z')
+    )
+    expect(execute.mock.calls[1][1][5]).toBe('2026-09-09 09:00:01.000')
+    expect(execute.mock.calls[1][1][6]).toBe('2026-09-09 09:00:01.000')
   })
 
   it('cannot be configured as an arbitrary upstream proxy', () => {

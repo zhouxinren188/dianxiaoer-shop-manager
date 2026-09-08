@@ -7,6 +7,7 @@ const https = require('https')
 const path = require('path')
 const { getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
+const { SALES_PRODUCT_CARD_RENDERER_SOURCE } = require('./sales-product-card-script')
 const {
   normalizeTaobaoSkuSelection,
   decodeTaobaoSkuSourceUrl,
@@ -2079,6 +2080,7 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
   var binding = ${JSON.stringify(safeBinding)};
   var logoDataUrl = ${JSON.stringify(logoDataUrl)};
   var diagnosticId = ${JSON.stringify(String(diagnosticId || ''))};
+  var renderSalesProductCard = ${SALES_PRODUCT_CARD_RENDERER_SOURCE};
 
   function isCurrentProductDocument() {
     try {
@@ -2282,36 +2284,12 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
 
     var body = document.createElement('div');
     body.style.cssText = 'max-height:calc(100vh - 250px);overflow-y:auto;padding:12px;box-sizing:border-box;background:#fff;';
-    if (info.image) {
-      var image = document.createElement('img');
-      image.src = info.image;
-      image.alt = '';
-      image.style.cssText = 'display:block;width:100%;aspect-ratio:1/1;border-radius:6px;background:#f7f7f7;object-fit:contain;';
-      image.onerror = function() { image.style.display = 'none'; };
-      body.appendChild(image);
-    }
-    appendText(body, 'div', info.goodsName || '\u672a\u83b7\u53d6\u5230\u8ba2\u5355\u5546\u54c1\u6807\u9898', 'margin-top:10px;color:#303133;font-size:13px;font-weight:600;line-height:1.5;white-space:normal;word-break:break-all;');
-    if (info.skuSpec) appendText(body, 'div', '\u9500\u552e\u89c4\u683c\uff1a' + info.skuSpec, 'margin-top:7px;padding:6px 8px;border:1px solid #ffd7ba;border-radius:5px;background:#fff7e8;color:#fa541c;font-size:12px;font-weight:700;line-height:1.5;word-break:break-all;');
-    if (info.sku) appendText(body, 'div', 'SKU: ' + info.sku, 'margin-top:5px;color:#909399;word-break:break-all;');
-
-    var priceRow = document.createElement('div');
-    priceRow.style.cssText = 'display:flex;justify-content:space-between;gap:8px;margin-top:9px;';
-    appendText(priceRow, 'span', '\u6570\u91cf: ' + info.quantity, 'color:#606266;');
-    appendText(priceRow, 'span', '\u5355\u4ef7: \u00a5' + Number(info.price || 0).toFixed(2), 'color:#e6a23c;font-weight:600;');
-    body.appendChild(priceRow);
-    appendText(body, 'div', '\u91c7\u8d2d\u4ef7: \u00a5' + Number(info.purchasePrice || 0).toFixed(2), 'margin-top:5px;color:#67c23a;');
-
-    if (info.shippingName || info.shippingPhone || info.shippingAddress) {
-      var contact = document.createElement('div');
-      contact.style.cssText = 'margin-top:9px;padding-top:9px;border-top:1px solid #f0f0f0;';
-      var contactRow = document.createElement('div');
-      contactRow.style.cssText = 'display:flex;justify-content:space-between;gap:8px;color:#606266;';
-      if (info.shippingName) appendText(contactRow, 'span', info.shippingName, 'min-width:0;word-break:break-all;');
-      if (info.shippingPhone) appendText(contactRow, 'span', info.shippingPhone, 'flex:0 0 auto;');
-      contact.appendChild(contactRow);
-      if (info.shippingAddress) appendText(contact, 'div', info.shippingAddress, 'margin-top:6px;color:#909399;font-size:11px;line-height:1.45;word-break:break-all;');
-      body.appendChild(contact);
-    }
+    renderSalesProductCard({
+      info: info,
+      overlay: overlay,
+      body: body,
+      imageTransformOrigin: 'left center'
+    });
 
     overlay.appendChild(header);
     overlay.appendChild(body);

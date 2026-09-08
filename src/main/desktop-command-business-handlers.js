@@ -118,7 +118,7 @@ function createDesktopCommandBusinessHandlers({
     return summarizeExceptionCheck(configuration, purchaseOrderId, now)
   }
 
-  async function resolveException(payload, context) {
+  async function submitPurchaseRemark(payload, context) {
     const purchaseOrderId = normalizePurchaseOrderId(payload?.purchase_order_id)
     if (payload?.confirmed !== true) {
       throw businessError('confirmation_required', '处理异常前必须由用户明确确认')
@@ -181,10 +181,25 @@ function createDesktopCommandBusinessHandlers({
       }
     }
 
+    return {
+      purchase_order_id: purchaseOrderId,
+      remark_succeeded: remarkResult.success,
+      remark_message: remarkResult.message,
+      remarked_at: new Date(now()).toISOString()
+    }
+  }
+
+  async function resolveException(payload, context) {
+    const purchaseOrderId = normalizePurchaseOrderId(payload?.purchase_order_id)
+    if (payload?.confirmed !== true) {
+      throw businessError('confirmation_required', '处理异常前必须由用户明确确认')
+    }
+    const remarkResult = await submitPurchaseRemark(payload, context)
+
     context.assertActive()
     await context.reportProgress({
       phase: 'submitting_exception_resolve',
-      remark_succeeded: remarkResult.success
+      remark_succeeded: remarkResult.remark_succeeded
     })
     await requestApi({
       method: 'POST',
@@ -211,8 +226,8 @@ function createDesktopCommandBusinessHandlers({
     const verification = summarizeExceptionCheck(verifiedConfiguration, purchaseOrderId, now)
     return {
       purchase_order_id: purchaseOrderId,
-      remark_succeeded: remarkResult.success,
-      remark_message: remarkResult.message,
+      remark_succeeded: remarkResult.remark_succeeded,
+      remark_message: remarkResult.remark_message,
       resolve_state: 'succeeded',
       verification_state: verification.state,
       remaining_exception_count: verification.exception_count,
@@ -224,6 +239,7 @@ function createDesktopCommandBusinessHandlers({
   }
 
   return {
+    'purchase.jd.remark': submitPurchaseRemark,
     'purchase.exception.check': checkException,
     'purchase.exception.resolve': resolveException
   }

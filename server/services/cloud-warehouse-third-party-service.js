@@ -416,14 +416,12 @@ async function applyConfirmedOrderCommandStatus(pool, ownerId, purchaseOrderId, 
   }
 }
 
-function buildWarehouseOrderCheckPayload({ requestId, machineCode, orderNo, orderYear }) {
-  return buildCommandPayload({
-    requestId,
-    machineCode,
-    command: 'warehouse.order.check',
-    orderNo,
-    orderYear
-  })
+function buildWarehouseOrderCheckPayload({ requestId, machineCode }) {
+  return {
+    request_id: String(requestId),
+    machine_code: assertMachineCode(machineCode),
+    command: assertEnabledCommand('warehouse.order.check')
+  }
 }
 
 async function queryMachineStatus(pool, apiClient, user) {
@@ -483,9 +481,19 @@ function warehouseOrdersFromCommand(command) {
   const success = command.status === 'completed' && command.executionStatus === 'succeeded'
   const scope = normalizeOrderScope(command.scopeOrderNos)
   const allowed = scope.length ? new Set(scope) : null
-  const orders = (rawOrders || [])
+  const returnedOrders = (rawOrders || [])
     .map(normalizeWarehouseOrderItem)
     .filter(order => order && (!allowed || allowed.has(order.orderNo)))
+  const returnedOrderMap = new Map(returnedOrders.map(order => [order.orderNo, order]))
+  const orders = success && Array.isArray(rawOrders) && scope.length
+    ? scope.map(orderNo => returnedOrderMap.get(orderNo) || {
+        orderNo,
+        status: 'waiting_arrival',
+        logisticsNo: '',
+        logisticsCompany: '',
+        printable: false
+      })
+    : returnedOrders
   return {
     requestId: command.requestId,
     machineCode: command.machineCode || '',
@@ -522,37 +530,37 @@ async function readSingleQueryMachineCode(pool, ownerId) {
 
 async function submitWarehouseOrderCheck(pool, apiClient, {
   user,
-  purchaseOrderId = null,
   machineCode: requestedMachineCode = '',
-  orderNo,
-  orderYear
+  scopeOrderNos = []
 }) {
   const command = assertEnabledCommand('warehouse.order.check')
   const ownerId = getTenantOwnerId(user)
   const machineCode = requestedMachineCode
     ? assertMachineCode(requestedMachineCode)
     : await readSingleQueryMachineCode(pool, ownerId)
-  const payloadFields = buildWarehouseOrderCheckPayload({
-    requestId: '00000000-0000-4000-8000-000000000000',
-    machineCode,
-    orderNo,
-    orderYear
-  })
-  const normalizedPurchaseOrderId = Number(purchaseOrderId)
-  const hasPurchaseOrderId = Number.isInteger(normalizedPurchaseOrderId) && normalizedPurchaseOrderId > 0
+  const normalizedScopeOrderNos = normalizeOrderScope(scopeOrderNos)
+  if (!normalizedScopeOrderNos.length) {
+    throw serviceError('invalid_request', '没有可用于匹配云仓结果的销售订单号')
+  }
 
   const [activeRows] = await pool.execute(
-    `SELECT request_id FROM cloud_external_commands
+    `SELECT request_id, scope_order_nos FROM cloud_external_commands
       WHERE owner_id = ? AND command = 'warehouse.order.check'
         AND machine_code = ? AND requested_by_user_id = ?
-        AND ${hasPurchaseOrderId ? 'purchase_order_id = ?' : 'purchase_order_id IS NULL AND order_no = ? AND order_year = ?'}
+        AND purchase_order_id IS NULL
         AND transport_status IN ('submitting', 'submission_unknown', 'accepted', 'pending', 'queued', 'executing')
       ORDER BY created_at DESC LIMIT 1`,
-    hasPurchaseOrderId
-      ? [ownerId, machineCode, Number(user.id), normalizedPurchaseOrderId]
-      : [ownerId, machineCode, Number(user.id), payloadFields.order_no, payloadFields.order_year]
+    [ownerId, machineCode, Number(user.id)]
   )
   if (activeRows.length) {
+    const mergedScope = normalizeOrderScope([
+      ...parseStoredOrderScope(activeRows[0].scope_order_nos),
+      ...normalizedScopeOrderNos
+    ])
+    await pool.execute(
+      'UPDATE cloud_external_commands SET scope_order_nos = ?, updated_at = NOW(3) WHERE owner_id = ? AND request_id = ?',
+      [JSON.stringify(mergedScope), ownerId, activeRows[0].request_id]
+    )
     return warehouseOrdersFromCommand(await refreshCommandResult(
       pool,
       apiClient,
@@ -571,17 +579,14 @@ async function submitWarehouseOrderCheck(pool, apiClient, {
   const requestId = createRequestId()
   const payload = buildWarehouseOrderCheckPayload({
     requestId,
-    machineCode,
-    orderNo: payloadFields.order_no,
-    orderYear: payloadFields.order_year
+    machineCode
   })
   await pool.execute(
     `INSERT INTO cloud_external_commands
        (request_id, owner_id, purchase_order_id, requested_by_user_id, machine_code,
         command, order_no, order_year, scope_order_nos, transport_status)
-     VALUES (?, ?, ?, ?, ?, 'warehouse.order.check', ?, ?, NULL, 'submitting')`,
-    [requestId, ownerId, hasPurchaseOrderId ? normalizedPurchaseOrderId : null,
-      Number(user.id), machineCode, payload.order_no, payload.order_year]
+     VALUES (?, ?, NULL, ?, ?, 'warehouse.order.check', '', NULL, ?, 'submitting')`,
+    [requestId, ownerId, Number(user.id), machineCode, JSON.stringify(normalizedScopeOrderNos)]
   )
   try {
     const normalized = normalizeCommandResponse(await apiClient.submitCommand(payload), requestId, command)
@@ -639,8 +644,7 @@ async function submitWarehouseOrderChecksForOrders(pool, apiClient, { user, purc
     throw serviceError('invalid_request', '请提供 1 至 100 个当前页采购订单标识')
   }
   const ownerId = getTenantOwnerId(user)
-  const routedOrders = []
-  const allowedOrderNos = new Set()
+  const machineGroups = new Map()
   const issues = []
   for (const purchaseOrderId of ids) {
     try {
@@ -652,13 +656,14 @@ async function submitWarehouseOrderChecksForOrders(pool, apiClient, { user, purc
         storeId: locator.storeId
       })
       const orderNo = String(locator.platformOrderNo || '').trim()
-      routedOrders.push({
-        purchaseOrderId: Number(order.id),
+      const group = machineGroups.get(route.machineCode) || {
         machineCode: route.machineCode,
-        orderNo,
-        orderYear: locator.orderYear
-      })
-      allowedOrderNos.add(orderNo)
+        purchaseOrderIds: [],
+        orderNos: []
+      }
+      group.purchaseOrderIds.push(Number(order.id))
+      group.orderNos.push(orderNo)
+      machineGroups.set(route.machineCode, group)
     } catch (error) {
       issues.push({
         purchaseOrderId,
@@ -669,21 +674,24 @@ async function submitWarehouseOrderChecksForOrders(pool, apiClient, { user, purc
   }
 
   const checks = []
-  for (const routedOrder of routedOrders) {
+  for (const group of machineGroups.values()) {
     try {
       checks.push(await submitWarehouseOrderCheck(pool, apiClient, {
         user,
-        ...routedOrder
+        machineCode: group.machineCode,
+        scopeOrderNos: group.orderNos
       }))
     } catch (error) {
-      issues.push({
-        purchaseOrderId: routedOrder.purchaseOrderId,
-        reason: String(error?.code || 'cloud_query_failed').slice(0, 100),
-        message: String(error?.message || '云仓订单查询失败').slice(0, 300)
-      })
+      for (const purchaseOrderId of group.purchaseOrderIds) {
+        issues.push({
+          purchaseOrderId,
+          reason: String(error?.code || 'cloud_query_failed').slice(0, 100),
+          message: String(error?.message || '云仓订单查询失败').slice(0, 300)
+        })
+      }
     }
   }
-  return combineWarehouseOrderChecks(scopeWarehouseOrderChecks(checks, allowedOrderNos), issues)
+  return combineWarehouseOrderChecks(checks, issues)
 }
 
 async function refreshWarehouseOrderCheck(pool, apiClient, user, requestId) {
@@ -887,16 +895,23 @@ function resolutionFromCommand(command) {
 
 async function attachExternalCommands(pool, user, purchaseOrderId, configuration) {
   const ownerId = getTenantOwnerId(user)
+  const platformOrderNo = String(configuration?.platformOrderNo || '').trim()
   const [rows] = await pool.execute(
     `SELECT request_id, purchase_order_id, machine_code, command, order_no, order_year,
-            transport_status, http_status, reason, message_redacted, response_json,
+            scope_order_nos, transport_status, http_status, reason, message_redacted, response_json,
             created_at, updated_at, completed_at
        FROM cloud_external_commands
-      WHERE owner_id = ? AND purchase_order_id = ?
+      WHERE owner_id = ? AND (
+        purchase_order_id = ? OR (
+          purchase_order_id IS NULL AND command = 'warehouse.order.check'
+          AND scope_order_nos IS NOT NULL
+          AND JSON_CONTAINS(scope_order_nos, JSON_QUOTE(?))
+        )
+      )
         AND command IN ('exception.order.check', 'exception.order.resolve', 'warehouse.order.check', 'warehouse.order.print', 'warehouse.order.outbound', 'warehouse.order.reprint')
       ORDER BY created_at DESC
       LIMIT 20`,
-    [ownerId, Number(purchaseOrderId)]
+    [ownerId, Number(purchaseOrderId), platformOrderNo]
   )
   const [localLogRows] = await pool.execute(
     `SELECT id, action, status, message_redacted, created_at

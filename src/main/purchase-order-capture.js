@@ -23,6 +23,7 @@ const {
   convertTaobaoRebateUrlDirect
 } = require('./taobao-rebate')
 const { createTaobaoRebatePrefetchCache } = require('./taobao-rebate-prefetch')
+const { SALES_PRODUCT_CARD_RENDERER_SOURCE } = require('./sales-product-card-script')
 const {
   EXTRACT_ALIPAY_TAOBAO_ORDER_CANDIDATES,
   REMOVE_BATCH_PAYMENT_NOTICE,
@@ -543,6 +544,7 @@ const PRODUCT_INFO_OVERLAY = `
 
   var info = window.__jdProductInfo;
   if (!info) return '[OVERLAY] skipped: no __jdProductInfo';
+  var renderSalesProductCard = ${SALES_PRODUCT_CARD_RENDERER_SOURCE};
 
   var url = (location.href || '').toLowerCase();
   var host = (location.hostname || '').toLowerCase();
@@ -831,92 +833,13 @@ const PRODUCT_INFO_OVERLAY = `
       body.appendChild(emptyEl);
     }
   } else {
-    // === 商品详情页模式：显示完整商品信息 ===
-    // 商品图片（180x180）
-    if (info.image) {
-      var imgWrap = document.createElement('div');
-      imgWrap.style.cssText = 'text-align:center;margin-bottom:10px;';
-      var img = document.createElement('img');
-      img.src = info.image;
-      img.style.cssText = 'width:100%;aspect-ratio:1/1;border-radius:6px;object-fit:contain;';
-      img.onerror = function() { imgWrap.style.display = 'none'; };
-      imgWrap.appendChild(img);
-      body.appendChild(imgWrap);
-    }
-
-    // 商品名称
-    if (info.goodsName) {
-      var nameEl = document.createElement('div');
-      nameEl.style.cssText = 'font-weight:600;font-size:13px;color:#303133;margin-bottom:4px;word-break:break-all;line-height:1.4;';
-      nameEl.textContent = info.goodsName;
-      body.appendChild(nameEl);
-    }
-
-    // SKU
-    if (info.sku) {
-      var skuEl = document.createElement('div');
-      skuEl.style.cssText = 'font-size:12px;color:#909399;margin-bottom:8px;word-break:break-all;';
-      skuEl.textContent = info.sku;
-      body.appendChild(skuEl);
-    }
-
-    // 数量 + 销售单价
-    var priceRow = document.createElement('div');
-    priceRow.style.cssText = 'display:flex;justify-content:space-between;margin-bottom:4px;font-size:12px;';
-
-    var qtySpan = document.createElement('span');
-    qtySpan.style.color = '#606266';
-    qtySpan.textContent = '\\u6570\\u91cf: ' + (info.quantity || 0);
-
-    var priceSpan = document.createElement('span');
-    priceSpan.style.color = '#e6a23c';
-    priceSpan.style.fontWeight = '500';
-    priceSpan.textContent = '\\u5355\\u4ef7: \\u00a5' + (Number(info.price || 0).toFixed(2));
-
-    priceRow.appendChild(qtySpan);
-    priceRow.appendChild(priceSpan);
-    body.appendChild(priceRow);
-
-    // 采购价
-    if (info.purchasePrice) {
-      var purchaseRow = document.createElement('div');
-      purchaseRow.style.cssText = 'font-size:12px;color:#67c23a;margin-bottom:8px;';
-      purchaseRow.textContent = '\\u91c7\\u8d2d\\u4ef7: \\u00a5' + Number(info.purchasePrice).toFixed(2);
-      body.appendChild(purchaseRow);
-    }
-
-    // 分割线 + 收货信息
-    if (info.shippingName || info.shippingPhone || info.shippingAddress) {
-      var divider = document.createElement('div');
-      divider.style.cssText = 'border-top:1px solid #f0f0f0;margin:8px 0;';
-      body.appendChild(divider);
-
-      if (info.shippingName || info.shippingPhone) {
-        var contactRow = document.createElement('div');
-        contactRow.style.cssText = 'display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;';
-
-        if (info.shippingName) {
-          var nameSpan = document.createElement('span');
-          nameSpan.style.color = '#606266';
-          nameSpan.textContent = info.shippingName;
-          contactRow.appendChild(nameSpan);
-        }
-        if (info.shippingPhone) {
-          var phoneSpan = document.createElement('span');
-          phoneSpan.style.color = '#606266';
-          phoneSpan.textContent = info.shippingPhone;
-          contactRow.appendChild(phoneSpan);
-        }
-        body.appendChild(contactRow);
-      }
-
-      if (info.shippingAddress) {
-        var addrEl = document.createElement('div');
-        addrEl.style.cssText = 'font-size:11px;color:#909399;line-height:1.4;word-break:break-all;';
-        addrEl.textContent = info.shippingAddress;
-        body.appendChild(addrEl);
-      }
-    }
+    // === 商品详情页模式：采购页与“搜同款”共用同一张商品信息卡片 ===
+    renderSalesProductCard({
+      info: info,
+      overlay: overlay,
+      body: body,
+      imageTransformOrigin: isPdd ? 'right center' : 'left center'
+    });
   }
 
   overlay.appendChild(header);
@@ -4277,6 +4200,81 @@ function waitMs(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+async function fetchTaobaoOrderAmountFromSession(ses, platformOrderNo) {
+  const orderNo = String(platformOrderNo || '').trim()
+  if (!ses || !orderNo) return { error: 'missing_session_or_order_no' }
+
+  const form = new URLSearchParams({
+    buyerNick: '',
+    dateBegin: '0',
+    dateEnd: '0',
+    itemTitle: orderNo,
+    lastStartRow: '',
+    logisticsService: '',
+    options: '0',
+    orderStatus: '',
+    pageNum: '1',
+    pageSize: '15',
+    queryBizType: '',
+    queryOrder: 'desc',
+    rateStatus: '',
+    refund: '',
+    sellerNick: '',
+    auctionTitle: orderNo,
+    prePageNo: '1'
+  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 10000)
+  try {
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const response = await ses.fetch(
+      'https://buyertrade.taobao.com/trade/itemlist/asyncBought.htm?action=itemlist/BoughtQueryAction&event_submit_do_query=1&_input_charset=utf8',
+      {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: 'https://buyertrade.taobao.com',
+          Referer: 'https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm',
+          'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+        },
+        body: form.toString()
+      }
+    )
+    const text = await response.text()
+    if (!response.ok) return { error: `http_${response.status}`, responseLength: text.length }
+
+    let data
+    try {
+      data = JSON.parse(text)
+    } catch (_) {
+      return {
+        error: /login|登录|login\.taobao\.com/i.test(text) ? 'login_required' : 'invalid_json',
+        responseLength: text.length
+      }
+    }
+
+    const mainOrders = data?.mainOrders || data?.data?.mainOrders
+    if (!Array.isArray(mainOrders) || mainOrders.length === 0) return { error: 'no_orders', responseLength: text.length }
+    const orderItem = mainOrders.find(item => JSON.stringify(item).includes(orderNo)) || mainOrders[0]
+    const actualFee = Number(orderItem?.payInfo?.actualFee || 0)
+    const postFee = Number(orderItem?.payInfo?.postFee || 0)
+    const goodsItem = Array.isArray(orderItem?.subOrders) ? orderItem.subOrders[0] : null
+    const rawQuantity = goodsItem?.quantity?.count ?? goodsItem?.quantity ?? goodsItem?.buyAmount ?? 0
+    const quantity = Number.parseInt(rawQuantity, 10) || 0
+    if (!(actualFee > 0)) return { error: 'no_fee', postFee, quantity, responseLength: text.length }
+    return { actualFee, postFee, quantity, responseLength: text.length }
+  } catch (error) {
+    return { error: error?.name === 'AbortError' ? 'timeout' : (error?.message || 'request_failed') }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 function getPurchaseWindowFrames(win) {
   if (!win || win.isDestroyed()) return []
   try {
@@ -5321,6 +5319,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       goodsName: purchaseInfo.goodsName || '',
       image: purchaseInfo.image || '',
       sku: purchaseInfo.sku || '',
+      skuSpec: purchaseInfo.skuSpec || '',
       quantity: purchaseInfo.quantity || 0,
       price: purchaseInfo.price || 0,
       purchasePrice: purchaseInfo.purchasePrice || 0,
@@ -5431,6 +5430,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     let taobaoBatchExtractionStarted = false
     let taobaoBatchExtractionPromise = null
     let taobaoBatchNoticeShown = false
+    let pendingTaobaoAmountRecovery = null
+    let taobaoAmountRecoveryRunning = false
+    let purchaseBindPromise = null
+    let capturedPlatformOrderNo = ''
+    let taobaoPaidMarked = false
+    let taobaoPaidMarkPromise = null
     const taobaoBatchTimers = new Set()
     const windowState = {
       win,
@@ -5604,9 +5609,173 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }
     }
 
+    async function recoverTaobaoAmountAfterCapture(url, source) {
+      if ((platform !== 'taobao' && platform !== 'tmall') || !pendingTaobaoAmountRecovery || taobaoAmountRecoveryRunning) return false
+      if (!win || win.isDestroyed()) return false
+
+      const recoveryOrderNo = pendingTaobaoAmountRecovery.platformOrderNo
+
+      taobaoAmountRecoveryRunning = true
+      try {
+        const pageAmount = Number(await win.webContents.executeJavaScript(EXTRACT_PAYMENT_AMOUNT, true).catch(() => 0))
+        const amountData = pageAmount > 0
+          ? {
+              actualFee: pageAmount,
+              postFee: 0,
+              quantity: Number(pendingTaobaoAmountRecovery.quantity || purchaseInfo.quantity || 0),
+              source: 'payment_page'
+            }
+          : {
+              ...(await fetchTaobaoOrderAmountFromSession(ses, recoveryOrderNo)),
+              source: 'taobao_session'
+            }
+        const actualFee = Number(amountData?.actualFee || 0)
+        if (!(actualFee > 0)) {
+          runtimeLog.writeLog('PurchaseAmount', `订单实付金额暂未就绪: purchaseNo=${purchaseNo}, orderNo=${recoveryOrderNo}, trigger=${source}, result=${amountData?.error || 'empty'}, responseLength=${amountData?.responseLength || 0}`)
+          return false
+        }
+
+        if (purchaseBindPromise) await purchaseBindPromise
+
+        const queryRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders?page=1&pageSize=20&purchaseNo=${encodeURIComponent(purchaseNo)}`)
+        const queryJson = JSON.parse(queryRes.data)
+        const purchaseRows = queryJson?.code === 0 && Array.isArray(queryJson?.data?.list) ? queryJson.data.list : []
+        const purchaseRow = purchaseRows.find(row => String(row.purchase_no) === String(purchaseNo) && String(row.platform_order_no) === recoveryOrderNo)
+        if (!purchaseRow) throw new Error('未找到刚绑定的采购单')
+
+        const shippingFee = Number(amountData?.postFee || 0)
+        const quantity = Number(amountData?.quantity || pendingTaobaoAmountRecovery.quantity || purchaseInfo.quantity || 1)
+        const goodsTotal = actualFee - shippingFee
+        const purchasePrice = Math.round(((goodsTotal > 0 ? goodsTotal : actualFee) / Math.max(1, quantity)) * 100) / 100
+        const updateRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders/${purchaseRow.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            purchase_price: purchasePrice,
+            total_amount: actualFee,
+            shipping_fee: shippingFee
+          })
+        })
+        checkApiResponse(updateRes, '补写采购金额')
+
+        purchaseInfo.purchasePrice = purchasePrice
+        purchaseInfo.totalAmount = actualFee
+        purchaseInfo.shippingFee = shippingFee
+        pendingTaobaoAmountRecovery = null
+        runtimeLog.writeLog('PurchaseAmount', `订单实付金额补写成功: purchaseNo=${purchaseNo}, orderNo=${recoveryOrderNo}, unit=${purchasePrice}, total=${actualFee}, shipping=${shippingFee}, amountSource=${amountData.source}, trigger=${source}`)
+
+        const sysRemark = `【${purchaseNo}】${recoveryOrderNo} ${actualFee}（${purchaseInfo.accountName || ''}）`
+        if (purchaseInfo.salesOrderId) {
+          try {
+            const remarkRes = await httpRequest(`${BUSINESS_SERVER}/api/sales-orders/${purchaseInfo.salesOrderId}/sys-remark`, {
+              method: 'PUT',
+              body: JSON.stringify({ sys_remark: sysRemark })
+            })
+            checkApiResponse(remarkRes, '补写金额后更新系统备注')
+          } catch (error) {
+            console.warn(`[PurchaseCapture] 补写金额后更新系统备注失败(非关键): ${error.message}`)
+          }
+        }
+
+        // 首次绑定事件已携带货源旧价更新过界面；静默再发一次最终实付结果，
+        // 只刷新金额与系统备注，不重复显示“绑定成功”提示或改变采购流程状态。
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('purchase-order-captured', {
+            purchaseNo,
+            platformOrderNo: recoveryOrderNo,
+            platform,
+            success: true,
+            amountUpdated: true,
+            purchasePrice,
+            totalAmount: actualFee,
+            shippingFee,
+            sysRemark,
+            salesOrderId: purchaseInfo.salesOrderId || null
+          })
+        }
+
+        if (purchaseInfo.skuId && purchaseInfo.sourceUrl) {
+          httpRequest(`${BUSINESS_SERVER}/api/sku-purchase-config/update-price`, {
+            method: 'PUT',
+            body: JSON.stringify({
+              sku_id: purchaseInfo.skuId,
+              purchase_link: purchaseInfo.sourceUrl,
+              purchase_price: purchasePrice,
+              platform
+            })
+          }).catch(error => console.warn(`[PurchaseCapture] 补写金额后更新货源价失败(非关键): ${error.message}`))
+        }
+        return true
+      } catch (error) {
+        runtimeLog.writeLog('PurchaseAmount', `可信付款成功页补写金额失败: purchaseNo=${purchaseNo}, source=${source}, error=${error.message}`)
+        return false
+      } finally {
+        taobaoAmountRecoveryRunning = false
+      }
+    }
+
+    async function markTaobaoPaidFromTrustedSuccess(url, source) {
+      if ((platform !== 'taobao' && platform !== 'tmall') || taobaoPaidMarked || !capturedPlatformOrderNo) return false
+      if (!win || win.isDestroyed()) return false
+
+      const trustedOrderNo = extractTrustedTaobaoOrderNoFromUrl(url)
+      if (!trustedOrderNo || trustedOrderNo !== capturedPlatformOrderNo) return false
+      if (!purchaseBindPromise) return false
+      if (taobaoPaidMarkPromise) return taobaoPaidMarkPromise
+
+      taobaoPaidMarkPromise = (async () => {
+        try {
+          await purchaseBindPromise
+          const queryRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders?page=1&pageSize=20&purchaseNo=${encodeURIComponent(purchaseNo)}`)
+          const queryJson = JSON.parse(queryRes.data)
+          const purchaseRows = queryJson?.code === 0 && Array.isArray(queryJson?.data?.list) ? queryJson.data.list : []
+          const purchaseRow = purchaseRows.find(row =>
+            String(row.purchase_no) === String(purchaseNo) && String(row.platform_order_no) === trustedOrderNo
+          )
+          if (!purchaseRow) throw new Error('未找到刚绑定的采购单')
+
+          if (purchaseRow.status === 'ordered') {
+            const statusRes = await httpRequest(`${BUSINESS_SERVER}/api/purchase-orders/${purchaseRow.id}/status`, {
+              method: 'PUT',
+              body: JSON.stringify({ status: 'pending' })
+            })
+            checkApiResponse(statusRes, '支付成功后更新采购状态')
+          }
+
+          taobaoPaidMarked = true
+          runtimeLog.writeLog(
+            'PurchasePayment',
+            `可信支付成功页确认已付款: purchaseNo=${purchaseNo}, orderNo=${trustedOrderNo}, previousStatus=${purchaseRow.status || 'unknown'}, source=${source}`
+          )
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('purchase-order-captured', {
+              purchaseNo,
+              platformOrderNo: trustedOrderNo,
+              platform,
+              success: true,
+              statusUpdated: true,
+              status: 'pending',
+              salesOrderId: purchaseInfo.salesOrderId || null
+            })
+          }
+          return true
+        } catch (error) {
+          runtimeLog.writeLog(
+            'PurchasePayment',
+            `可信支付成功页更新状态失败: purchaseNo=${purchaseNo}, orderNo=${trustedOrderNo}, source=${source}, error=${error.message}`
+          )
+          return false
+        } finally {
+          taobaoPaidMarkPromise = null
+        }
+      })()
+
+      return taobaoPaidMarkPromise
+    }
+
     function onOrderCaptured(platformOrderNo) {
       if (resolved) return
       removeTaobaoBatchPaymentNotice()
+      capturedPlatformOrderNo = String(platformOrderNo || '')
       resolved = true
       windowState.resolved = true
       console.log(`[PurchaseCapture] onOrderCaptured called: orderNo=${platformOrderNo}`)
@@ -5627,7 +5796,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       let capturedQuantity = 0
       const doBindAndNotify = () => {
         console.log(`[PurchaseCapture] doBindAndNotify called, starting autoCreateAndBind...`)
-        autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
+        const needsTrustedSuccessAmount = (platform === 'taobao' || platform === 'tmall') &&
+          !(Number(capturedAmount) > 0)
+        pendingTaobaoAmountRecovery = needsTrustedSuccessAmount
+          ? { platformOrderNo: String(platformOrderNo), quantity: Number(capturedQuantity || purchaseInfo.quantity || 0) }
+          : null
+        if (pendingTaobaoAmountRecovery) {
+          runtimeLog.writeLog('PurchaseAmount', `首次未抓到实付金额，准备从收银台或淘宝会话补抓: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
+        }
+        purchaseBindPromise = autoCreateAndBind(purchaseInfo, platformOrderNo, platform, capturedAmount)
+        if (pendingTaobaoAmountRecovery && win && !win.isDestroyed()) {
+          recoverTaobaoAmountAfterCapture(win.webContents.getURL(), 'initial-capture-completed').catch(() => {})
+        }
+        if (win && !win.isDestroyed()) {
+          markTaobaoPaidFromTrustedSuccess(win.webContents.getURL(), 'initial-capture-completed').catch(() => {})
+        }
+        purchaseBindPromise
           .then(async () => {
             console.log(`[PurchaseCapture] Auto-bind 成功: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}`)
             // 系统备注已在 autoCreateAndBind 内部写入；先通知主界面绑定成功，
@@ -5814,6 +5998,27 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
                   }
                 } catch (e) {
                   console.log(`[PurchaseCapture] 淘宝asyncBought调用失败: ${e.message}`)
+                }
+
+                // 当前页面此时通常已跳到支付宝，页面内 fetch 会受跨域限制。
+                // 仅在页面内未抓到金额时，使用同一采购账号的持久化 session 直接查询一次淘宝订单。
+                if (!(capturedAmount > 0)) {
+                  const sessionAmountData = await fetchTaobaoOrderAmountFromSession(ses, platformOrderNo)
+                  runtimeLog.writeLog(
+                    'PurchaseAmount',
+                    `淘宝会话直查: purchaseNo=${purchaseNo}, orderNo=${platformOrderNo}, amount=${sessionAmountData.actualFee || 0}, quantity=${sessionAmountData.quantity || 0}, shipping=${sessionAmountData.postFee || 0}, result=${sessionAmountData.error || 'ok'}, responseLength=${sessionAmountData.responseLength || 0}`
+                  )
+                  if (Number(sessionAmountData.actualFee) > 0) {
+                    capturedAmount = Number(sessionAmountData.actualFee)
+                    capturedShippingFee = Number(sessionAmountData.postFee || 0)
+                    capturedQuantity = Number(sessionAmountData.quantity || 0)
+                    const calcQuantity = capturedQuantity || Number(purchaseInfo.quantity || 0)
+                    const goodsTotal = capturedAmount - capturedShippingFee
+                    if (calcQuantity > 0 && goodsTotal > 0) {
+                      capturedGoodsPrice = Math.round((goodsTotal / calcQuantity) * 100) / 100
+                    }
+                    console.log(`[PurchaseCapture] 淘宝会话直查获取金额: total=¥${capturedAmount}, unit=¥${capturedGoodsPrice || 0}, quantity=${calcQuantity || 0}`)
+                  }
                 }
               }
             }
@@ -6920,7 +7125,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     // 页面导航后检测（核心：淘宝提交订单后会跳转到confirm_order.htm）
     win.webContents.on('did-navigate', (event, url) => {
-      if (win.isDestroyed() || resolved) return
+      if (win.isDestroyed()) return
+      if (resolved) {
+        recoverTaobaoAmountAfterCapture(url, 'did-navigate').catch(() => {})
+        markTaobaoPaidFromTrustedSuccess(url, 'did-navigate').catch(() => {})
+        return
+      }
       console.log(`[PurchaseCapture] did-navigate: ${url.substring(0, 120)}`)
       scheduleTaobaoAddressCodeGuard('did-navigate', 350)
       // ★ 记录关键页面导航到运行日志
@@ -7075,7 +7285,12 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     // SPA内的hash/pushState导航
     win.webContents.on('did-navigate-in-page', (event, url) => {
-      if (win.isDestroyed() || resolved) return
+      if (win.isDestroyed()) return
+      if (resolved) {
+        recoverTaobaoAmountAfterCapture(url, 'did-navigate-in-page').catch(() => {})
+        markTaobaoPaidFromTrustedSuccess(url, 'did-navigate-in-page').catch(() => {})
+        return
+      }
       console.log(`[PurchaseCapture] did-navigate-in-page: ${url.substring(0, 120)}`)
       scheduleTaobaoAddressCodeGuard('did-navigate-in-page', 200)
 
@@ -7334,6 +7549,8 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         runtimeLog.writeLog('PurchaseDOM', `dom-ready: ${url.substring(0, 200)}`)
       }
       startTaobaoBatchPaymentExtraction(url, 'dom-ready')
+      recoverTaobaoAmountAfterCapture(url, 'dom-ready').catch(() => {})
+      markTaobaoPaidFromTrustedSuccess(url, 'dom-ready').catch(() => {})
     })
 
     // 主窗口始终加载商品页（DL系统经验：地址设置在独立后台窗口完成，不影响客户选品）

@@ -1,6 +1,7 @@
 const PROTOCOL_VERSION = '1.0'
 const ENABLED_DESKTOP_COMMANDS = Object.freeze([
   'system.ping',
+  'purchase.jd.remark',
   'purchase.exception.check',
   'purchase.exception.resolve'
 ])
@@ -78,7 +79,7 @@ function normalizeCommandPayload(command, payload) {
     }
     return { purchase_order_id: purchaseOrderId }
   }
-  if (command === 'purchase.exception.resolve') {
+  if (command === 'purchase.exception.resolve' || command === 'purchase.jd.remark') {
     assertExactKeys(
       payload,
       ['purchase_order_id', 'confirmed'],
@@ -117,7 +118,7 @@ function normalizeCreateTaskRequest(body) {
   const expiresInSeconds = body.expires_in_seconds === undefined
     ? (command === 'purchase.exception.resolve'
         ? 600
-        : (command === 'purchase.exception.check' ? 300 : 120))
+        : (command === 'purchase.exception.check' || command === 'purchase.jd.remark' ? 300 : 120))
     : Number(body.expires_in_seconds)
   if (!Number.isInteger(expiresInSeconds) || expiresInSeconds < 30 || expiresInSeconds > 600) {
     throw protocolError('invalid_request', 'expires_in_seconds must be between 30 and 600')
@@ -286,6 +287,28 @@ function normalizeExceptionResolveResult(result) {
   }
 }
 
+function normalizeJdRemarkResult(result) {
+  assertExactKeys(
+    result,
+    ['purchase_order_id', 'remark_succeeded', 'remark_message', 'remarked_at'],
+    'result',
+    ['purchase_order_id', 'remark_succeeded', 'remark_message', 'remarked_at']
+  )
+  const purchaseOrderId = Number(result.purchase_order_id)
+  if (!Number.isSafeInteger(purchaseOrderId) || purchaseOrderId <= 0) {
+    throw protocolError('invalid_result', 'result.purchase_order_id is invalid')
+  }
+  if (typeof result.remark_succeeded !== 'boolean') {
+    throw protocolError('invalid_result', 'result.remark_succeeded is invalid')
+  }
+  return {
+    purchase_order_id: purchaseOrderId,
+    remark_succeeded: result.remark_succeeded,
+    remark_message: redactMessage(result.remark_message),
+    remarked_at: normalizeIsoTime(result.remarked_at, 'result.remarked_at')
+  }
+}
+
 function normalizeResultRequest(body, command, commandPayload = {}) {
   assertExactKeys(
     body,
@@ -317,6 +340,8 @@ function normalizeResultRequest(body, command, commandPayload = {}) {
         app_version: String(body.result.app_version || '').trim().slice(0, 40),
         handled_at: normalizeIsoTime(body.result.handled_at, 'result.handled_at')
       }
+    } else if (command === 'purchase.jd.remark') {
+      result = normalizeJdRemarkResult(body.result)
     } else if (command === 'purchase.exception.check') {
       result = normalizeExceptionCheckResult(body.result)
     } else if (command === 'purchase.exception.resolve') {
@@ -325,7 +350,7 @@ function normalizeResultRequest(body, command, commandPayload = {}) {
       throw protocolError('command_not_allowed', 'The command result is not enabled')
     }
     if (
-      command.startsWith('purchase.exception.') &&
+      (command.startsWith('purchase.exception.') || command === 'purchase.jd.remark') &&
       Number(result.purchase_order_id) !== Number(commandPayload.purchase_order_id)
     ) {
       throw protocolError('invalid_result', 'The result purchase order does not match the task payload')
@@ -361,6 +386,7 @@ module.exports = {
   normalizeLeaseRequest,
   normalizeExceptionCheckResult,
   normalizeExceptionResolveResult,
+  normalizeJdRemarkResult,
   normalizeResultRequest,
   protocolError,
   redactMessage

@@ -267,6 +267,40 @@ async function initDB() {
     `)
     try { await connection.execute(`ALTER TABLE store_device_status ADD KEY idx_store_recent_report (store_id, online, updated_at)`) } catch (e) { /* 索引已存在 */ }
 
+    // 京准通快车消耗按店铺、日期登记。首页的今日/本月/本年均从本表汇总，
+    // 不再为了年度统计向京准通发起超过 92 天的查询。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS jd_express_daily_spend (
+        owner_id INT NOT NULL,
+        store_id INT NOT NULL,
+        spend_date DATE NOT NULL,
+        spend DECIMAL(14,2) NOT NULL DEFAULT 0,
+        synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (owner_id, store_id, spend_date),
+        KEY idx_jd_express_spend_owner_date (owner_id, spend_date),
+        CONSTRAINT fk_jd_express_spend_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE,
+        CONSTRAINT fk_jd_express_spend_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
+    // 记录店铺是否已开通快车以及最近一次同步结果。未开通快车不计入同步失败店铺。
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS jd_express_store_sync_status (
+        owner_id INT NOT NULL,
+        store_id INT NOT NULL,
+        is_activated TINYINT DEFAULT NULL,
+        last_result VARCHAR(20) NOT NULL DEFAULT 'unknown',
+        last_error VARCHAR(255) DEFAULT '',
+        last_attempt_at DATETIME DEFAULT NULL,
+        last_success_at DATETIME DEFAULT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (owner_id, store_id),
+        KEY idx_jd_express_status_owner (owner_id, is_activated, last_result),
+        CONSTRAINT fk_jd_express_status_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE,
+        CONSTRAINT fk_jd_express_status_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // 商家ID归并锁：按主账号+商家ID串行完成“查询并归并”，避免并发登录产生重复店铺。
     await connection.execute(`
       CREATE TABLE IF NOT EXISTS store_merchant_locks (

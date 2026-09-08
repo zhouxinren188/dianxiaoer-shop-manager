@@ -257,7 +257,7 @@ class DesktopCommandChannelClient {
     clearTimeoutFn = clearTimeout,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
-    idlePollMs = 3000,
+    idlePollMs = 1000,
     noAuthPollMs = 1500,
     maxBackoffMs = 60000
   }) {
@@ -342,7 +342,9 @@ class DesktopCommandChannelClient {
     try {
       const result = await this.runOnce()
       this.failureCount = 0
-      delayMs = result.state === 'unauthenticated' ? this.noAuthPollMs : this.idlePollMs
+      delayMs = result.state === 'unauthenticated'
+        ? this.noAuthPollMs
+        : (result.state === 'handled' ? 0 : this.idlePollMs)
     } catch (error) {
       this.failureCount += 1
       delayMs = Math.min(this.maxBackoffMs, 1000 * (2 ** Math.min(this.failureCount - 1, 6)))

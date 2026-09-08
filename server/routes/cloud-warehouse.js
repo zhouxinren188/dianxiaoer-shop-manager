@@ -348,8 +348,8 @@ module.exports = function createCloudWarehouseRouter(pool, options = {}) {
     }
   })
 
-  // 按当前页采购单逐笔核验是否已进入云仓。服务端负责解析关联销售订单号、
-  // 订单年份和所属机器码，客户端不直接提交这些可被篡改的路由字段。
+  // 服务端先解析当前页采购单的所属机器码，再按机器码各发送一次全量云仓订单查询；
+  // 回执只在服务端按可信销售订单号匹配，客户端不提交可被篡改的路由字段。
   router.post('/warehouse-orders/check', async (req, res) => {
     try {
       assertWarehouseCheckBody(req.body || {})

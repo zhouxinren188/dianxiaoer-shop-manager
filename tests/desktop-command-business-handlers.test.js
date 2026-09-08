@@ -26,6 +26,33 @@ function finalCheckConfiguration(count) {
 }
 
 describe('desktop purchase exception business handlers', () => {
+  it('runs the JD remark command without submitting any cloud command', async () => {
+    const requests = []
+    const requestApi = vi.fn(async request => {
+      requests.push(request)
+      if (request.endpoint === '/purchase-orders/20') {
+        return { id: 20, purchase_no: 'A8872', sales_order_id: 90 }
+      }
+      if (request.endpoint.endsWith('/related-sales')) {
+        return { storeId: 6, orderId: '3596445007470239', storePlatform: 'jd' }
+      }
+      return { accepted: true }
+    })
+    const submitVendorRemark = vi.fn(async () => ({ success: true, message: '备注成功' }))
+    const handlers = createDesktopCommandBusinessHandlers({ requestApi, submitVendorRemark })
+
+    await expect(handlers['purchase.jd.remark'](
+      { purchase_order_id: 20, confirmed: true },
+      makeContext()
+    )).resolves.toMatchObject({
+      purchase_order_id: 20,
+      remark_succeeded: true,
+      remark_message: '备注成功'
+    })
+    expect(requests.some(request => /\/exception\/(check|resolve)$/.test(request.endpoint))).toBe(false)
+    expect(submitVendorRemark).toHaveBeenCalledOnce()
+  })
+
   it('submits one query command and waits for a confirmed compact result', async () => {
     let configurationReads = 0
     let nowMs = Date.parse('2026-08-31T03:00:00.000Z')

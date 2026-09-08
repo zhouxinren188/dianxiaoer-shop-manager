@@ -20,10 +20,10 @@ describe('JD sales order item specification', () => {
   it('keeps multiple sales dimensions readable', () => {
     expect(extractJdSalesOrderSkuSpec({
       saleAttributes: [
-        { saleName: '??', saleValue: '???' },
-        { saleName: '??', saleValue: '5???' }
+        { saleName: '规格', saleValue: '套餐13号' },
+        { saleName: '尺码', saleValue: '不含盆' }
       ]
-    })).toBe('?????? / ???5???')
+    })).toBe('规格：套餐13号 / 尺码：不含盆')
   })
 
   it('accepts an object-shaped attributes payload', () => {

@@ -436,7 +436,8 @@ async function recordTaskResult(pool, auth, taskId, body, now = new Date()) {
         resultHash,
         input.errorCode,
         input.errorMessage,
-        toMysqlDate(input.completedAt),
+        // 客户端时间只用于结果防重；持久化完成时间以服务器为准，避免两台机器时钟偏差。
+        toMysqlDate(now),
         toMysqlDate(now),
         task.task_id,
         auth.userId

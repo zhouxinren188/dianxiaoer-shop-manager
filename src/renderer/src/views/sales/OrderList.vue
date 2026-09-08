@@ -1286,6 +1286,7 @@ import {
   withTaobaoSameSearchTimeout
 } from '@/utils/taobaoSameHistory'
 import { normalizeBuyerAddress } from '@/utils/buyerAddress'
+import { normalizeSalesSkuSpec } from '@/utils/salesSkuSpec'
 
 // ==================== 筛选项配置 ====================
 
@@ -1894,7 +1895,7 @@ function extractSalesSkuSpec(item = {}) {
     item.skuText, item.sku_text, item.specification, item.variantName, item.variant_name
   ]
   for (const candidate of explicitCandidates) {
-    const value = String(candidate || '').replace(/\s+/g, ' ').trim()
+    const value = normalizeSalesSkuSpec(candidate)
     if (value && value !== item.name && !/^(?:SKU\s*[:\uFF1A]?\s*)?\d+$/i.test(value)) return value.slice(0, 160)
   }
   return ''
@@ -2020,6 +2021,15 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.storeCloudWarehouseId = storeRes?.cloud_warehouse_id || purchaseInfo.storeCloudWarehouseId
   // 店铺所属云仓优先；未配置时才恢复上次选择，或在只有一个仓库时自动选中。
   const selectedStoreWarehouse = applyStoreCloudWarehouse()
+  // 所属仓库选中后同步收货信息。此前只选中了 warehouseId，却漏掉这一步，
+  // 导致三方代发继续携带初始化的空手机号。
+  if (selectedStoreWarehouse) {
+    if (purchaseInfo.purchaseType === 'dropship') {
+      updateDropshipShipping()
+    } else if (purchaseInfo.purchaseType === 'warehouse' || purchaseInfo.purchaseType === 'warehouse_in') {
+      updateWarehouseShipping()
+    }
+  }
   const lastWhId = localStorage.getItem('lastWarehouseId')
   if (!selectedStoreWarehouse && lastWhId) {
     const whMatch = warehouseList.value.find(w => String(w.id) === lastWhId)
@@ -3596,6 +3606,7 @@ async function handleGoOrder() {
           goodsName: purchaseInfo.goodsName,
           image: purchaseInfo.image,
           sku: purchaseInfo.sku,
+          skuSpec: purchaseInfo.skuSpec,
           skuId: purchaseInfo.skuId,
           quantity: purchaseInfo.quantity,
           price: purchaseInfo.price,
@@ -3647,6 +3658,16 @@ function setupPurchaseListeners() {
   cleanupPurchaseListeners()
   unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      if (data.amountUpdated || data.statusUpdated) {
+        if (data.salesOrderId) {
+          const order = tableData.value.find(o => o.id === data.salesOrderId)
+          if (data.amountUpdated && order && data.sysRemark) {
+            order.sysRemark = data.sysRemark
+            order.sys_remark = data.sysRemark
+          }
+        }
+        return
+      }
       purchaseInfo.capturedOrderNo = data.platformOrderNo
       if (data.success === false) {
         purchaseInfo.captureStatus = 'captured'

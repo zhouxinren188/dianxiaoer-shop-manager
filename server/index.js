@@ -3725,6 +3725,104 @@ app.get('/api/store-sales-stats', async (req, res) => {
 
 // ============ 首页 Dashboard 统计 ============
 
+function normalizeJdExpressDailySpend(value) {
+  if (!value || typeof value !== 'object') return null
+  const date = String(value.date || '').trim()
+  const spend = Number(value.spend)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(spend) || spend < 0 || spend > 100000000) {
+    return null
+  }
+  const parsed = new Date(`${date}T00:00:00Z`)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return null
+  return { date, spend: Math.round(spend * 100) / 100 }
+}
+
+// 客户端使用各店铺现有京准通登录态读取本月逐日消耗后，在服务端幂等登记。
+app.post('/api/jd-express/spend-sync', async (req, res) => {
+  const results = Array.isArray(req.body?.results) ? req.body.results.slice(0, 1000) : null
+  if (!results) return res.status(400).json(fail('快车消耗同步数据格式错误'))
+
+  const ownerId = getOwnerId(req.user)
+  const accessibleStoreIds = new Set(await getAccessibleStoreIds(req.user))
+  const connection = await pool.getConnection()
+  let savedDayCount = 0
+  let successStoreCount = 0
+  let inactiveStoreCount = 0
+  let failedStoreCount = 0
+
+  try {
+    await connection.beginTransaction()
+    for (const item of results) {
+      const storeId = Number(item?.storeId)
+      if (!Number.isSafeInteger(storeId) || !accessibleStoreIds.has(storeId)) continue
+      const status = ['success', 'inactive', 'error'].includes(item?.status) ? item.status : 'error'
+      const message = String(item?.message || '').trim().slice(0, 255)
+
+      if (status === 'success') {
+        const dailySpends = Array.isArray(item?.dailySpends)
+          ? item.dailySpends.slice(0, 100).map(normalizeJdExpressDailySpend).filter(Boolean)
+          : []
+        for (const daily of dailySpends) {
+          await connection.execute(
+            `INSERT INTO jd_express_daily_spend (owner_id, store_id, spend_date, spend, synced_at)
+             VALUES (?, ?, ?, ?, NOW())
+             ON DUPLICATE KEY UPDATE spend = VALUES(spend), synced_at = NOW()`,
+            [ownerId, storeId, daily.date, daily.spend]
+          )
+          savedDayCount += 1
+        }
+        await connection.execute(
+          `INSERT INTO jd_express_store_sync_status
+             (owner_id, store_id, is_activated, last_result, last_error, last_attempt_at, last_success_at)
+           VALUES (?, ?, 1, 'success', '', NOW(), NOW())
+           ON DUPLICATE KEY UPDATE
+             is_activated = 1,
+             last_result = 'success',
+             last_error = '',
+             last_attempt_at = NOW(),
+             last_success_at = NOW()`,
+          [ownerId, storeId]
+        )
+        successStoreCount += 1
+      } else if (status === 'inactive') {
+        await connection.execute(
+          `INSERT INTO jd_express_store_sync_status
+             (owner_id, store_id, is_activated, last_result, last_error, last_attempt_at)
+           VALUES (?, ?, 0, 'inactive', ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             is_activated = 0,
+             last_result = 'inactive',
+             last_error = VALUES(last_error),
+             last_attempt_at = NOW()`,
+          [ownerId, storeId, message]
+        )
+        inactiveStoreCount += 1
+      } else {
+        // 临时失败时保留此前是否已开通的判断，只更新本次错误状态。
+        await connection.execute(
+          `INSERT INTO jd_express_store_sync_status
+             (owner_id, store_id, is_activated, last_result, last_error, last_attempt_at)
+           VALUES (?, ?, NULL, 'error', ?, NOW())
+           ON DUPLICATE KEY UPDATE
+             last_result = 'error',
+             last_error = VALUES(last_error),
+             last_attempt_at = NOW()`,
+          [ownerId, storeId, message]
+        )
+        failedStoreCount += 1
+      }
+    }
+    await connection.commit()
+    res.json(ok({ savedDayCount, successStoreCount, inactiveStoreCount, failedStoreCount }))
+  } catch (err) {
+    await connection.rollback()
+    console.error('[JD Express Spend Sync] 错误:', err.message)
+    res.status(500).json(fail('保存快车消耗失败'))
+  } finally {
+    connection.release()
+  }
+})
+
 app.get('/api/dashboard-stats', async (req, res) => {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -3732,8 +3830,29 @@ app.get('/api/dashboard-stats', async (req, res) => {
     let r2 = [{ amt: 0, cnt: 0 }]
     let r3 = [{ amt: 0, cnt: 0 }]
     let r4 = [{ amt: 0, cnt: 0 }]
+    let r5 = [{ amt: 0, cnt: 0 }]
+    let r6 = [{ amt: 0, cnt: 0 }]
+    let r7 = [{ amt: 0, cnt: 0 }]
     let whToday = []
+    let whYesterday = []
     let whMonth = []
+    let whYear = []
+    let adSpend = {
+      today_amt: 0,
+      yesterday_amt: 0,
+      month_amt: 0,
+      last_month_amt: 0,
+      year_amt: 0,
+      last_year_amt: 0,
+      first_date: null
+    }
+    let adStatus = {
+      jd_store_count: 0,
+      known_store_count: 0,
+      active_store_count: 0,
+      synced_store_count: 0,
+      updated_at: null
+    }
 
     if (storeIds.length) {
       const placeholders = storeIds.map(() => '?').join(',')
@@ -3752,7 +3871,7 @@ app.get('/api/dashboard-stats', async (req, res) => {
         ) THEN 1 ELSE 0 END), 0) AS cloud_cnt
         FROM sales_orders so`
 
-      // 4 个时间段：今日、昨日、本月、上月
+      // 7 个时间段：今日、昨日同期、本月、上月同期、本年、去年同期、完整昨日
       const queries = [
         // 今日（凌晨至今）
         `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= CURDATE()`,
@@ -3761,7 +3880,13 @@ app.get('/api/dashboard-stats', async (req, res) => {
         // 本月（1日至今）
         `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(CURDATE(),'%Y-%m-01')`,
         // 上月同期（上月1日至上月同日，与本月天数一致）
-        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND so.order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 MONTH),'%Y-%m-01') AND so.order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 MONTH), INTERVAL 1 DAY)`,
+        // 本年（1月1日至今）
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(CURDATE(),'%Y-01-01')`,
+        // 去年同期（去年1月1日至去年同日）
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(),INTERVAL 1 YEAR),'%Y-01-01') AND so.order_time < DATE_ADD(DATE_SUB(CURDATE(),INTERVAL 1 YEAR), INTERVAL 1 DAY)`,
+        // 完整昨日（昨日凌晨至今日凌晨）
+        `${salesAggregateSelect} WHERE so.store_id IN (${placeholders}) AND so.status_text NOT IN (${excludePh}) AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND so.order_time < CURDATE()`
       ]
 
       const params = storeIds.concat(excludeStatuses)
@@ -3769,15 +3894,62 @@ app.get('/api/dashboard-stats', async (req, res) => {
       ;[r2] = await pool.execute(queries[1], params)
       ;[r3] = await pool.execute(queries[2], params)
       ;[r4] = await pool.execute(queries[3], params)
+      ;[r5] = await pool.execute(queries[4], params)
+      ;[r6] = await pool.execute(queries[5], params)
+      ;[r7] = await pool.execute(queries[6], params)
 
-      // 按仓库分组统计订单数（今日 + 本月）
+      // 按仓库分组统计订单数（今日 + 完整昨日 + 本月 + 本年）
       const whQuery = (dateCond) =>
         `SELECT warehouse_name, COUNT(*) as cnt FROM sales_orders WHERE store_id IN (${placeholders}) AND status_text NOT IN (${excludePh}) AND ${dateCond} AND warehouse_name IS NOT NULL AND warehouse_name != '' GROUP BY warehouse_name ORDER BY cnt DESC`
       ;[whToday] = await pool.execute(whQuery('DATE(order_time) = CURDATE()'), params)
+      ;[whYesterday] = await pool.execute(whQuery('order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY) AND order_time < CURDATE()'), params)
       ;[whMonth] = await pool.execute(whQuery('order_time >= DATE_FORMAT(CURDATE(),\'%Y-%m-01\')'), params)
+      ;[whYear] = await pool.execute(whQuery('order_time >= DATE_FORMAT(CURDATE(),\'%Y-01-01\')'), params)
+
+      const ownerId = getOwnerId(req.user)
+      const [adSpendRows] = await pool.execute(
+        `SELECT
+           COALESCE(SUM(CASE WHEN spend_date = CURDATE() THEN spend ELSE 0 END), 0) AS today_amt,
+           COALESCE(SUM(CASE WHEN spend_date = DATE_SUB(CURDATE(), INTERVAL 1 DAY) THEN spend ELSE 0 END), 0) AS yesterday_amt,
+           COALESCE(SUM(CASE WHEN spend_date >= DATE_FORMAT(CURDATE(), '%Y-%m-01') THEN spend ELSE 0 END), 0) AS month_amt,
+           COALESCE(SUM(CASE WHEN spend_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+                              AND spend_date <= DATE_SUB(CURDATE(), INTERVAL 1 MONTH)
+                             THEN spend ELSE 0 END), 0) AS last_month_amt,
+           COALESCE(SUM(CASE WHEN spend_date >= DATE_FORMAT(CURDATE(), '%Y-01-01') THEN spend ELSE 0 END), 0) AS year_amt,
+           COALESCE(SUM(CASE WHEN spend_date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+                              AND spend_date <= DATE_SUB(CURDATE(), INTERVAL 1 YEAR)
+                             THEN spend ELSE 0 END), 0) AS last_year_amt,
+           MIN(spend_date) AS first_date
+         FROM jd_express_daily_spend
+         WHERE owner_id = ? AND store_id IN (${placeholders})`,
+        [ownerId, ...storeIds]
+      )
+      adSpend = adSpendRows[0] || adSpend
+
+      const [adStatusRows] = await pool.execute(
+        `SELECT
+           COUNT(*) AS jd_store_count,
+           COALESCE(SUM(CASE WHEN status.is_activated IS NOT NULL THEN 1 ELSE 0 END), 0) AS known_store_count,
+           COALESCE(SUM(CASE WHEN status.is_activated = 1 THEN 1 ELSE 0 END), 0) AS active_store_count,
+           COALESCE(SUM(CASE WHEN status.is_activated = 1
+                              AND status.last_result = 'success'
+                              AND DATE(status.last_success_at) = CURDATE()
+                             THEN 1 ELSE 0 END), 0) AS synced_store_count,
+           DATE_FORMAT(MAX(status.last_success_at), '%H:%i') AS updated_at
+         FROM stores store_row
+         LEFT JOIN jd_express_store_sync_status status
+           ON status.owner_id = store_row.owner_id AND status.store_id = store_row.id
+         WHERE store_row.owner_id = ?
+           AND store_row.id IN (${placeholders})
+           AND store_row.platform = 'jd'
+           AND store_row.status = 'enabled'`,
+        [ownerId, ...storeIds]
+      )
+      adStatus = adStatusRows[0] || adStatus
     }
 
     // 采购额优先使用平台实付总额；旧记录没有实付总额时按单价×数量+运费计算。
+    // ordered 表示等待付款/已下单未付款，不计入经营采购数据；同步为已付款状态后自动纳入。
     // 子账号沿用采购单列表权限，只统计已分配采购账号或自己创建的无账号采购单。
     const ownerId = getOwnerId(req.user)
     const purchaseAmountExpr = `CASE
@@ -3806,6 +3978,12 @@ app.get('/api/dashboard-stats', async (req, res) => {
          COALESCE(SUM(CASE WHEN po.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
                             AND po.created_at < DATE_SUB(NOW(), INTERVAL 1 DAY)
                            THEN 1 ELSE 0 END), 0) AS yesterday_cnt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                            AND po.created_at < CURDATE()
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS yesterday_full_amt,
+         COALESCE(SUM(CASE WHEN po.created_at >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                            AND po.created_at < CURDATE()
+                           THEN 1 ELSE 0 END), 0) AS yesterday_full_cnt,
          COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
                            THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS month_amt,
          COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
@@ -3816,30 +3994,58 @@ app.get('/api/dashboard-stats', async (req, res) => {
          COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
                             AND po.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), INTERVAL 1 DAY)
                            THEN 1 ELSE 0 END), 0) AS last_month_cnt
+         ,COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-01-01')
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS year_amt
+         ,COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(CURDATE(), '%Y-01-01')
+                           THEN 1 ELSE 0 END), 0) AS year_cnt
+         ,COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+                            AND po.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), INTERVAL 1 DAY)
+                           THEN ${purchaseAmountExpr} ELSE 0 END), 0) AS last_year_amt
+         ,COALESCE(SUM(CASE WHEN po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+                            AND po.created_at < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), INTERVAL 1 DAY)
+                           THEN 1 ELSE 0 END), 0) AS last_year_cnt
        FROM purchase_orders po
        WHERE po.owner_id = ?
-         AND (po.status IS NULL OR po.status NOT IN ('cancelled', 'refunded'))
-         AND po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+         AND (po.status IS NULL OR po.status NOT IN ('ordered', 'cancelled', 'refunded'))
+         AND po.created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
          ${purchaseVisibilitySql}`,
       purchaseParams
     )
     const purchase = purchaseRows[0] || {}
 
     const fmtWh = (rows) => rows.map(r => ({ warehouse: r.warehouse_name, count: Number(r.cnt) }))
-    const fmt = (r, wh, purchaseAmount, purchaseCount) => ({
+    const jdStoreCount = Number(adStatus.jd_store_count || 0)
+    const knownStoreCount = Number(adStatus.known_store_count || 0)
+    const activeStoreCount = Number(adStatus.active_store_count || 0)
+    const syncedStoreCount = Number(adStatus.synced_store_count || 0)
+    const adSpendReady = jdStoreCount === 0 || (
+      knownStoreCount === jdStoreCount && syncedStoreCount === activeStoreCount
+    )
+    const adShared = {
+      adSyncedStoreCount: syncedStoreCount,
+      adTotalStoreCount: activeStoreCount,
+      adSpendUpdatedAt: adStatus.updated_at || null,
+      adSpendCoverageStart: adSpend.first_date || null
+    }
+    const fmt = (r, wh, purchaseAmount, purchaseCount, adAmount) => ({
       salesAmount: Number(r[0].amt),
       orderCount: Number(r[0].cnt),
       purchaseAmount: Number(purchaseAmount || 0),
       purchaseCount: Number(purchaseCount || 0),
       cloudOrderCount: Number(r[0].cloud_cnt || 0),
-      warehouseBreakdown: wh
+      warehouseBreakdown: wh,
+      adSpend: adSpendReady ? Number(adAmount || 0) : null,
+      ...adShared
     })
 
     res.json(ok({
-      today: fmt(r1, fmtWh(whToday), purchase.today_amt, purchase.today_cnt),
-      yesterday: fmt(r2, [], purchase.yesterday_amt, purchase.yesterday_cnt),
-      thisMonth: fmt(r3, fmtWh(whMonth), purchase.month_amt, purchase.month_cnt),
-      lastMonth: fmt(r4, [], purchase.last_month_amt, purchase.last_month_cnt)
+      today: fmt(r1, fmtWh(whToday), purchase.today_amt, purchase.today_cnt, adSpend.today_amt),
+      yesterday: fmt(r2, [], purchase.yesterday_amt, purchase.yesterday_cnt, adSpend.yesterday_amt),
+      yesterdayFull: fmt(r7, fmtWh(whYesterday), purchase.yesterday_full_amt, purchase.yesterday_full_cnt, adSpend.yesterday_amt),
+      thisMonth: fmt(r3, fmtWh(whMonth), purchase.month_amt, purchase.month_cnt, adSpend.month_amt),
+      lastMonth: fmt(r4, [], purchase.last_month_amt, purchase.last_month_cnt, adSpend.last_month_amt),
+      thisYear: fmt(r5, fmtWh(whYear), purchase.year_amt, purchase.year_cnt, adSpend.year_amt),
+      lastYear: fmt(r6, [], purchase.last_year_amt, purchase.last_year_cnt, adSpend.last_year_amt)
     }))
   } catch (err) {
     console.error('[Dashboard Stats] 错误:', err.message)

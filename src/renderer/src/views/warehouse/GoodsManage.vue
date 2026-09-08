@@ -1655,6 +1655,7 @@ function setupPurchaseListeners() {
   cleanupPurchaseListeners()
   unsubOrderCaptured = window.electronAPI.onUpdate('purchase-order-captured', (data) => {
     if (data.purchaseNo === purchaseInfo.purchaseNo) {
+      if (data.amountUpdated || data.statusUpdated) return
       purchaseInfo.capturedOrderNo = data.platformOrderNo
       if (data.success === false) {
         confirmingQty.value = purchaseInfo.quantity

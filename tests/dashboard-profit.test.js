@@ -47,6 +47,35 @@ describe('首页预估毛利', () => {
     expect(homeSource).toContain("'is-negative'")
   })
 
+  it('默认展示当日，计算口径仅在毛利标题问号中悬浮展示', () => {
+    expect(homeSource).toContain("const overviewPeriod = ref('today')")
+    expect(homeSource).toContain('class="overview-profit-help"')
+    expect(homeSource).not.toContain('class="overview-rule"')
+  })
+
+  it('经营周期按今日、昨日、本月、本年排序并使用对应同期数据', () => {
+    const todayIndex = homeSource.indexOf('<el-radio-button label="today">今日</el-radio-button>')
+    const yesterdayIndex = homeSource.indexOf('<el-radio-button label="yesterday">昨日</el-radio-button>')
+    const monthIndex = homeSource.indexOf('<el-radio-button label="month">本月</el-radio-button>')
+    const yearIndex = homeSource.indexOf('<el-radio-button label="year">本年</el-radio-button>')
+    expect(todayIndex).toBeGreaterThan(-1)
+    expect(todayIndex).toBeLessThan(yesterdayIndex)
+    expect(yesterdayIndex).toBeLessThan(monthIndex)
+    expect(monthIndex).toBeLessThan(yearIndex)
+    expect(homeSource).toContain("year: { current: 'thisYear', previous: 'lastYear', label: '本年', compareLabel: '去年同期' }")
+    expect(homeSource).toContain('getLatestLocalJdExpressPeriods')
+    expect(serverSource).toContain('FROM jd_express_daily_spend')
+    expect(homeSource).not.toContain('result.yearSpend')
+    expect(serverSource).toContain('thisYear: fmt(r5')
+    expect(serverSource).toContain('lastYear: fmt(r6')
+  })
+
+  it('销售趋势模块比原高度增加50像素', () => {
+    expect(homeSource).toContain('class="chart-body sales-trend-body"')
+    expect(homeSource).toContain('const chartH = 370')
+    expect(homeSource).toContain('.sales-trend-body {\n  min-height: 310px;')
+  })
+
   it('云仓成本按店铺所属且已绑定机器码的仓库统计', () => {
     expect(serverSource).toContain('INNER JOIN cloud_warehouse_machine_bindings cloud_binding')
     expect(serverSource).toContain('cloud_binding.warehouse_id = cloud_store.cloud_warehouse_id')

@@ -34,19 +34,29 @@ describe('京东快车首页消耗', () => {
     })
   })
 
-  it('从按日账户报表一次计算今日和本月消耗', () => {
+  it('从当月按日账户报表计算今日、本月消耗并保留每日明细', () => {
     const result = extractHomeSpend({
       code: 1,
       data: {
         datas: [
           { date: '2026-09-08', cost: '12.34' },
           { date: '2026-09-07', cost: 5.66 },
-          { date: '2026-09-01', cost: '¥2.00' }
+          { date: '2026-09-01', cost: '¥2.00' },
+          { date: '2026-04-01', cost: 100 }
         ],
-        paginator: { items: 3 }
+        paginator: { items: 4 }
       }
     }, now)
-    expect(result).toEqual({ todaySpend: 12.34, monthSpend: 20, rowCount: 3 })
+    expect(result).toEqual({
+      todaySpend: 12.34,
+      monthSpend: 20,
+      dailySpends: [
+        { date: '2026-09-01', spend: 2 },
+        { date: '2026-09-07', spend: 5.66 },
+        { date: '2026-09-08', spend: 12.34 }
+      ],
+      rowCount: 4
+    })
   })
 
   it('使用原版搜索快车账户接口并保持只读 POST', async () => {
@@ -55,7 +65,11 @@ describe('京东快车首页消耗', () => {
       data: { datas: [{ date: '2026-09-08', cost: 8.88 }] }
     }))
     const result = await fetchHomeSpend({ platformSession: {}, requestJson, now })
-    expect(result).toMatchObject({ todaySpend: 8.88, monthSpend: 8.88 })
+    expect(result).toMatchObject({
+      todaySpend: 8.88,
+      monthSpend: 8.88,
+      dailySpends: [{ date: '2026-09-08', spend: 8.88 }]
+    })
     expect(requestJson).toHaveBeenCalledWith(
       {},
       KUAICHE_ACCOUNT_REPORT_URL,

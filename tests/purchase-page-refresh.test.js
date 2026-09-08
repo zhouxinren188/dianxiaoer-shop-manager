@@ -1,5 +1,9 @@
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
+
+const require = createRequire(import.meta.url)
+const { SALES_PRODUCT_CARD_RENDERER_SOURCE } = require('../src/main/sales-product-card-script')
 
 const mainSource = readFileSync(new URL('../src/main/purchase-order-capture.js', import.meta.url), 'utf8')
 const overlayDeclaration = 'const PRODUCT_INFO_OVERLAY = '
@@ -8,7 +12,10 @@ const literalStart = mainSource.indexOf('`', overlayStart + overlayDeclaration.l
 const literalEnd = mainSource.indexOf('\n`', literalStart + 1)
 const overlayLiteral = mainSource.slice(literalStart, literalEnd + 2).trim()
 const overlaySource = mainSource.slice(overlayStart, literalEnd + 2)
-const runtimeOverlaySource = Function(`return ${overlayLiteral}`)()
+const runtimeOverlaySource = Function(
+  'SALES_PRODUCT_CARD_RENDERER_SOURCE',
+  `return ${overlayLiteral}`
+)(SALES_PRODUCT_CARD_RENDERER_SOURCE)
 
 describe('采购淘宝商品页手动刷新浮窗', () => {
   it('只在淘宝或天猫商品详情页提供手动刷新，不在结算页自动触发', () => {
@@ -44,5 +51,20 @@ describe('采购淘宝商品页手动刷新浮窗', () => {
     const finalBuild = runtimeOverlaySource.slice(runtimeOverlaySource.lastIndexOf('// 原商品信息浮层'))
     expect(finalBuild.indexOf('buildOverlay();')).toBeLessThan(finalBuild.indexOf('buildManualRefreshButton();'))
     expect(finalBuild).toContain("console.warn('[PurchaseManualRefresh] initialization failed:'")
+  })
+
+  it('商品主图鼠标悬停时直接放大，移开后恢复', () => {
+    expect(runtimeOverlaySource).toContain("image.addEventListener('mouseenter', showImagePreview)")
+    expect(runtimeOverlaySource).toContain("image.addEventListener('mouseleave', hideImagePreview)")
+    expect(runtimeOverlaySource).toContain("image.style.transform = 'scale(2.45)'")
+    expect(runtimeOverlaySource).toContain("overlay.style.overflow = 'visible'")
+    expect(runtimeOverlaySource).toContain("imageTransformOrigin: isPdd ? 'right center' : 'left center'")
+    expect(runtimeOverlaySource).toContain("transform-origin:' + imageTransformOrigin")
+  })
+
+  it('商品信息主体由采购页和搜同款页共用，不再各维护一套', () => {
+    expect(mainSource).toContain("require('./sales-product-card-script')")
+    expect(runtimeOverlaySource).toContain('renderSalesProductCard({')
+    expect(SALES_PRODUCT_CARD_RENDERER_SOURCE).toContain('销售规格：')
   })
 })

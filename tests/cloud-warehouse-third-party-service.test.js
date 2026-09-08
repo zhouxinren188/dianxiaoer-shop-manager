@@ -17,6 +17,7 @@ const {
   scopeWarehouseOrderChecks,
   submitOrderReprint,
   submitWarehouseOrderCheck,
+  submitWarehouseOrderChecksForOrders,
   warehouseOrdersFromCommand,
   writeResultFromCommand
 } = service
@@ -109,23 +110,19 @@ describe('云仓助手在线状态', () => {
   })
 })
 
-describe('云仓订单逐单查询协议', () => {
-  it('查询命令携带销售订单号和年份', () => {
+describe('云仓订单全量查询协议', () => {
+  it('查询命令只携带 request_id、机器码和固定命令', () => {
     expect(buildWarehouseOrderCheckPayload({
       requestId: 'warehouse-query-001',
-      machineCode: 'YC-7F3K-92MX',
-      orderNo: '3589471019934064',
-      orderYear: 2026
+      machineCode: 'YC-7F3K-92MX'
     })).toEqual({
       request_id: 'warehouse-query-001',
       machine_code: 'YC-7F3K-92MX',
-      command: 'warehouse.order.check',
-      order_no: '3589471019934064',
-      order_year: 2026
+      command: 'warehouse.order.check'
     })
   })
 
-  it('解析现行逐单入单核验回执', () => {
+  it('兼容解析旧版逐单入单核验回执', () => {
     expect(warehouseOrdersFromCommand({
       requestId: 'warehouse-query-single',
       command: 'warehouse.order.check',
@@ -146,31 +143,6 @@ describe('云仓订单逐单查询协议', () => {
         orderNo: '3589471019934064',
         status: 'waiting_arrival',
         printable: false
-      }]
-    })
-  })
-
-  it('订单已入云仓时开放打印并带回运单号', () => {
-    expect(warehouseOrdersFromCommand({
-      requestId: 'warehouse-query-arrived',
-      command: 'warehouse.order.check',
-      orderNo: '3589471019934064',
-      orderYear: 2026,
-      status: 'completed',
-      executionStatus: 'succeeded',
-      final: true,
-      result: {
-        state: 'arrived',
-        exists: true,
-        waybill_no: 'JDV029243091652'
-      }
-    })).toMatchObject({
-      resultShapeValid: true,
-      orders: [{
-        orderNo: '3589471019934064',
-        status: 'arrived',
-        logisticsNo: 'JDV029243091652',
-        printable: true
       }]
     })
   })
@@ -218,14 +190,14 @@ describe('云仓订单逐单查询协议', () => {
     })
   })
 
-  it('轮询结果继续使用 request_id 保存的订单范围过滤', () => {
+  it('全量结果按 request_id 保存的订单范围过滤，未匹配订单标记等待入单', () => {
     const result = warehouseOrdersFromCommand({
       requestId: 'warehouse-query-scoped',
       command: 'warehouse.order.check',
       status: 'completed',
       executionStatus: 'succeeded',
       final: true,
-      scopeOrderNos: ['3589471019934064'],
+      scopeOrderNos: ['3589471019934064', '3589471019934065'],
       result: {
         orders: [
           { order_no: '3589471019934064', status: 'pending_print' },
@@ -234,22 +206,67 @@ describe('云仓订单逐单查询协议', () => {
       }
     })
 
-    expect(result.orders.map(order => order.orderNo)).toEqual(['3589471019934064'])
+    expect(result.orders).toEqual([{
+      orderNo: '3589471019934064',
+      status: 'pending_print',
+      logisticsNo: '',
+      logisticsCompany: '',
+      printable: true
+    }, {
+      orderNo: '3589471019934065',
+      status: 'waiting_arrival',
+      logisticsNo: '',
+      logisticsCompany: '',
+      printable: false
+    }])
   })
 
-  it('实际提交时发送一次逐单查询命令并保存结果', async () => {
+  it('同一机器的多个待打印订单只发送一次全量查询并在本地逐一匹配', async () => {
     let storedResponse = null
     let storedStatus = 'submitting'
     let storedHttpStatus = null
+    let storedScope = null
     const execute = vi.fn(async (sql, params) => {
-      if (sql.includes('FROM cloud_machine_bindings')) {
-        return [[{ machine_code: 'YC-7F3K-92MX' }]]
+      if (sql.includes('FROM purchase_orders po') && !sql.includes('LEFT JOIN warehouses')) {
+        const id = Number(params[0])
+        return [[{
+          id,
+          owner_id: 18,
+          purchase_no: `A${id}`,
+          sales_order_id: 500 + id,
+          sales_order_no: `358947101993406${id}`,
+          cloud_machine_code: 'YC-7F3K-92MX',
+          cloud_warehouse_id: 13,
+          cloud_machine_binding_version: 1,
+          cloud_machine_routed_at: '2026-09-02 08:00:00'
+        }]]
       }
-      if (sql.includes('SELECT request_id FROM cloud_external_commands') && sql.includes('transport_status IN')) {
+      if (sql.includes('FROM sales_orders so')) {
+        const id = Number(params[0]) - 500
+        return [[{
+          sales_order_id: 500 + id,
+          platform_order_no: `358947101993406${id}`,
+          sales_order_time: '2026-09-02 08:00:00',
+          order_year: 2026,
+          store_id: 30,
+          store_owner_id: 18
+        }]]
+      }
+      if (sql.includes('LEFT JOIN warehouses') && sql.includes('cloud_machine_code')) {
+        return [[{
+          cloud_warehouse_id: 13,
+          cloud_machine_code: 'YC-7F3K-92MX',
+          cloud_machine_binding_version: 1,
+          cloud_machine_routed_at: '2026-09-02 08:00:00',
+          cloud_warehouse_name: '1号库'
+        }]]
+      }
+      if (sql.includes('SELECT request_id, scope_order_nos') && sql.includes('transport_status IN')) {
         return [[]]
       }
       if (sql.includes('INSERT INTO cloud_external_commands')) {
-        expect(params).toHaveLength(7)
+        expect(params).toHaveLength(5)
+        storedScope = params[4]
         return [{ affectedRows: 1 }]
       }
       if (sql.includes('SET transport_status = ?')) {
@@ -261,12 +278,12 @@ describe('云仓订单逐单查询协议', () => {
       if (sql.includes('WHERE owner_id = ? AND request_id = ?') && sql.includes('SELECT request_id')) {
         return [[{
           request_id: params[1],
-          purchase_order_id: 99,
+          purchase_order_id: null,
           machine_code: 'YC-7F3K-92MX',
           command: 'warehouse.order.check',
-          order_no: '3589471019934064',
-          order_year: 2026,
-          scope_order_nos: null,
+          order_no: '',
+          order_year: null,
+          scope_order_nos: storedScope,
           transport_status: storedStatus,
           http_status: storedHttpStatus,
           reason: 'query_completed',
@@ -290,15 +307,17 @@ describe('云仓订单逐单查询协议', () => {
           reason: 'query_completed',
           message: '查询完成',
           result: {
-            state: 'arrived',
-            exists: true,
-            waybill_no: 'JT1234567890'
+            orders: [{
+              order_no: '3589471019934061',
+              status: 'pending_print',
+              logistics_no: 'JT1234567890'
+            }]
           }
         }
       }
     }))
 
-    const result = await submitWarehouseOrderCheck(
+    const result = await submitWarehouseOrderChecksForOrders(
       { execute },
       {
         getMachineStatus: vi.fn(async () => ({
@@ -314,27 +333,29 @@ describe('云仓订单逐单查询协议', () => {
       },
       {
         user: { id: 18, user_type: 'master' },
-        purchaseOrderId: 99,
-        machineCode: 'YC-7F3K-92MX',
-        orderNo: '3589471019934064',
-        orderYear: 2026
+        purchaseOrderIds: [1, 2]
       }
     )
 
     expect(submitCommand).toHaveBeenCalledWith({
       request_id: expect.any(String),
       machine_code: 'YC-7F3K-92MX',
-      command: 'warehouse.order.check',
-      order_no: '3589471019934064',
-      order_year: 2026
+      command: 'warehouse.order.check'
     })
+    expect(submitCommand).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(storedScope)).toEqual(['3589471019934061', '3589471019934062'])
     expect(result).toMatchObject({
+      batch: true,
       final: true,
       resultShapeValid: true,
       orders: [{
-        orderNo: '3589471019934064',
+        orderNo: '3589471019934061',
         logisticsNo: 'JT1234567890',
         printable: true
+      }, {
+        orderNo: '3589471019934062',
+        status: 'waiting_arrival',
+        printable: false
       }]
     })
   })

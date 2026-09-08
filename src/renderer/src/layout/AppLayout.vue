@@ -90,6 +90,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Close, Bell, Search, Minus, FullScreen, SwitchButton, User, ArrowDown } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { logout } from '@/api/user'
+import { startJdExpressSpendScheduler } from '@/services/jd-express-spend-sync'
 import Sidebar from './Sidebar.vue'
 
 const route = useRoute()
@@ -118,8 +119,11 @@ function showQuitConfirm() {
 
 // 进入主界面时切换到大窗口尺寸
 let unsubCloseRequested = null
+let stopJdExpressSpendScheduler = null
 onMounted(() => {
   window.electronAPI?.invoke('window-set-main-size')
+  // 登录后在整个主界面后台同步快车消耗，不依赖用户是否停留在首页。
+  stopJdExpressSpendScheduler = startJdExpressSpendScheduler()
   // 监听主进程的关闭请求（Alt+F4 等）
   unsubCloseRequested = window.electronAPI?.onUpdate('app-close-requested', () => {
     showQuitConfirm()
@@ -128,6 +132,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   unsubCloseRequested?.()
+  stopJdExpressSpendScheduler?.()
 })
 
 const visitedTabs = ref([
