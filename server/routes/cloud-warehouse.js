@@ -19,6 +19,7 @@ const {
   submitOrderOutbound,
   submitOrderPrint,
   submitOrderReprint,
+  submitWarehouseOrderCheckForPendingOrders,
   submitWarehouseOrderChecksForOrders
 } = require('../services/cloud-warehouse-third-party-service')
 
@@ -99,9 +100,11 @@ function assertWarehouseCheckBody(body) {
   if (keys.some(key => key !== 'purchase_order_ids')) {
     throw Object.assign(new Error('云仓订单查询字段不合法'), { code: 'invalid_request' })
   }
+  if (!Object.prototype.hasOwnProperty.call(body, 'purchase_order_ids')) return null
   if (!Array.isArray(body.purchase_order_ids) || body.purchase_order_ids.length === 0) {
     throw Object.assign(new Error('purchase_order_ids 必须为非空数组'), { code: 'invalid_request' })
   }
+  return body.purchase_order_ids
 }
 
 function assertAutomaticRemarkLogBody(body) {
@@ -348,15 +351,18 @@ module.exports = function createCloudWarehouseRouter(pool, options = {}) {
     }
   })
 
-  // 服务端先解析当前页采购单的所属机器码，再按机器码各发送一次全量云仓订单查询；
-  // 回执只在服务端按可信销售订单号匹配，客户端不提交可被篡改的路由字段。
+  // 空请求体由服务端读取当前账号的待打印订单并确定可信匹配范围；
+  // 兼容桌面端旧契约：携带采购单标识时仍按客户端当前页范围查询。
   router.post('/warehouse-orders/check', async (req, res) => {
     try {
-      assertWarehouseCheckBody(req.body || {})
-      res.json(ok(await submitWarehouseOrderChecksForOrders(pool, getApiClient(), {
-        user: req.user,
-        purchaseOrderIds: req.body.purchase_order_ids
-      })))
+      const purchaseOrderIds = assertWarehouseCheckBody(req.body || {})
+      const result = purchaseOrderIds === null
+        ? await submitWarehouseOrderCheckForPendingOrders(pool, getApiClient(), { user: req.user })
+        : await submitWarehouseOrderChecksForOrders(pool, getApiClient(), {
+            user: req.user,
+            purchaseOrderIds
+          })
+      res.json(ok(result))
     } catch (error) {
       console.error('[CloudWarehouse] 发送云仓订单查询指令失败:', error.code || error.message)
       res.status(statusForError(error)).json(fail(error.message || '发送云仓订单查询指令失败', error.code))

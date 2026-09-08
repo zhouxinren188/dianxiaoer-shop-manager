@@ -17,6 +17,7 @@ const {
   scopeWarehouseOrderChecks,
   submitOrderReprint,
   submitWarehouseOrderCheck,
+  submitWarehouseOrderCheckForPendingOrders,
   submitWarehouseOrderChecksForOrders,
   warehouseOrdersFromCommand,
   writeResultFromCommand
@@ -221,12 +222,16 @@ describe('云仓订单全量查询协议', () => {
     }])
   })
 
-  it('同一机器的多个待打印订单只发送一次全量查询并在本地逐一匹配', async () => {
+  it('空请求由服务端读取当前租户待打印订单，只发送一次全量查询并逐一匹配', async () => {
     let storedResponse = null
     let storedStatus = 'submitting'
     let storedHttpStatus = null
     let storedScope = null
     const execute = vi.fn(async (sql, params) => {
+      if (sql.includes("SELECT id FROM purchase_orders") && sql.includes("status = 'pending_print'")) {
+        expect(params).toEqual([18])
+        return [[{ id: 1 }, { id: 2 }]]
+      }
       if (sql.includes('FROM purchase_orders po') && !sql.includes('LEFT JOIN warehouses')) {
         const id = Number(params[0])
         return [[{
@@ -317,7 +322,7 @@ describe('云仓订单全量查询协议', () => {
       }
     }))
 
-    const result = await submitWarehouseOrderChecksForOrders(
+    const result = await submitWarehouseOrderCheckForPendingOrders(
       { execute },
       {
         getMachineStatus: vi.fn(async () => ({
@@ -332,8 +337,7 @@ describe('云仓订单全量查询协议', () => {
         submitCommand
       },
       {
-        user: { id: 18, user_type: 'master' },
-        purchaseOrderIds: [1, 2]
+        user: { id: 18, user_type: 'master' }
       }
     )
 
@@ -345,7 +349,6 @@ describe('云仓订单全量查询协议', () => {
     expect(submitCommand).toHaveBeenCalledTimes(1)
     expect(JSON.parse(storedScope)).toEqual(['3589471019934061', '3589471019934062'])
     expect(result).toMatchObject({
-      batch: true,
       final: true,
       resultShapeValid: true,
       orders: [{

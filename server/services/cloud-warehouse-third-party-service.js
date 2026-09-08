@@ -638,10 +638,15 @@ function scopeWarehouseOrderChecks(checks, allowedOrderNos) {
   }))
 }
 
-async function submitWarehouseOrderChecksForOrders(pool, apiClient, { user, purchaseOrderIds }) {
+async function submitWarehouseOrderChecksForOrders(pool, apiClient, {
+  user,
+  purchaseOrderIds,
+  maxPurchaseOrders = 100
+}) {
   const ids = [...new Set((purchaseOrderIds || []).map(Number).filter(id => Number.isInteger(id) && id > 0))]
-  if (!ids.length || ids.length > 100) {
-    throw serviceError('invalid_request', '请提供 1 至 100 个当前页采购订单标识')
+  const normalizedMaximum = Math.min(1000, Math.max(1, Number(maxPurchaseOrders) || 100))
+  if (!ids.length || ids.length > normalizedMaximum) {
+    throw serviceError('invalid_request', `请提供 1 至 ${normalizedMaximum} 个采购订单标识`)
   }
   const ownerId = getTenantOwnerId(user)
   const machineGroups = new Map()
@@ -692,6 +697,59 @@ async function submitWarehouseOrderChecksForOrders(pool, apiClient, { user, purc
     }
   }
   return combineWarehouseOrderChecks(checks, issues)
+}
+
+async function readPendingPrintPurchaseOrderIds(pool, user) {
+  const ownerId = getTenantOwnerId(user)
+  if (user?.user_type === 'sub') {
+    const [rows] = await pool.execute(
+      `SELECT DISTINCT po.id
+         FROM purchase_orders po
+         LEFT JOIN user_purchase_accounts upa
+           ON po.account_id = upa.account_id AND upa.user_id = ?
+        WHERE po.owner_id = ? AND po.status = 'pending_print'
+          AND (upa.user_id IS NOT NULL
+               OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL)))
+        ORDER BY po.id DESC
+        LIMIT 1000`,
+      [Number(user.id), ownerId, Number(user.id)]
+    )
+    return rows.map(row => Number(row.id)).filter(Number.isInteger)
+  }
+  const [rows] = await pool.execute(
+    `SELECT id FROM purchase_orders
+      WHERE owner_id = ? AND status = 'pending_print'
+      ORDER BY id DESC
+      LIMIT 1000`,
+    [ownerId]
+  )
+  return rows.map(row => Number(row.id)).filter(Number.isInteger)
+}
+
+async function submitWarehouseOrderCheckForPendingOrders(pool, apiClient, { user }) {
+  const purchaseOrderIds = await readPendingPrintPurchaseOrderIds(pool, user)
+  if (!purchaseOrderIds.length) {
+    throw serviceError('pending_print_orders_missing', '当前账号暂无待打印订单')
+  }
+  const batch = await submitWarehouseOrderChecksForOrders(pool, apiClient, {
+    user,
+    purchaseOrderIds,
+    maxPurchaseOrders: 1000
+  })
+  if (batch.checks.length === 1) {
+    return {
+      ...batch.checks[0],
+      issues: batch.issues
+    }
+  }
+  if (batch.checks.length > 1) {
+    throw serviceError('machine_selection_required', '当前待打印订单分属多个云仓助手，暂不能合并为一个 requestId')
+  }
+  const issue = batch.issues[0]
+  throw serviceError(
+    issue?.reason || 'cloud_query_failed',
+    issue?.message || '未能创建云仓待打印订单查询'
+  )
 }
 
 async function refreshWarehouseOrderCheck(pool, apiClient, user, requestId) {
@@ -1037,6 +1095,7 @@ module.exports = {
   submitOrderPrint,
   submitOrderReprint,
   submitWarehouseOrderCheck,
+  submitWarehouseOrderCheckForPendingOrders,
   submitWarehouseOrderChecksForOrders,
   warehouseOrdersFromCommand,
   writeResultFromCommand

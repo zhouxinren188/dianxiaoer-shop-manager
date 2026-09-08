@@ -121,6 +121,8 @@ describe('云仓助手第三方服务架构', () => {
     expect(service).toContain('scopeOrderNos: group.orderNos')
     expect(route).toContain("router.post('/warehouse-orders/check'")
     expect(route).toContain("router.get('/warehouse-orders/check/:requestId'")
+    expect(route).toContain("await submitWarehouseOrderCheckForPendingOrders(pool, getApiClient(), { user: req.user })")
+    expect(route).toContain("hasOwnProperty.call(body, 'purchase_order_ids')")
     expect(api).toContain('purchase_order_ids: purchaseOrderIds')
     expect(renderer).toContain("filterForm.status !== 'pending_print'")
     expect(renderer).toContain('resolveCloudWarehouseOrderCheck(currentPageOrderIds)')
