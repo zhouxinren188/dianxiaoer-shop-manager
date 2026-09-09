@@ -2458,6 +2458,105 @@ app.post('/api/sales-orders/batch', async (req, res) => {
   }
 })
 
+// 京东订单详情页实时状态回传。只更新已存在且当前用户可访问的销售订单，
+// 同时复用批量同步中的取消回库/恢复扣库存规则，定时同步继续作为兜底。
+app.put('/api/sales-orders/:orderId/realtime-status', async (req, res) => {
+  try {
+    const orderId = String(req.params.orderId || '').trim()
+    const storeId = Number(req.body?.store_id)
+    const rawStatusText = String(req.body?.status_text || '').trim()
+    const statusText = normalizeStatusText(rawStatusText)
+    const allowedStatuses = new Set(['待付款', '待出库', '暂停订单', '已出库', '已完成', '已取消'])
+    if (!/^\d{10,30}$/.test(orderId)) return res.status(400).json(fail('orderId 格式错误'))
+    if (!Number.isSafeInteger(storeId) || storeId <= 0) return res.status(400).json(fail('store_id 格式错误'))
+    if (!allowedStatuses.has(statusText)) return res.status(400).json(fail('status_text 不是支持的京东订单状态'))
+
+    const rawOrderState = req.body?.order_state
+    const orderState = rawOrderState == null || rawOrderState === '' ? null : Number(rawOrderState)
+    if (orderState !== null && (!Number.isInteger(orderState) || orderState < 0 || orderState > 1000)) {
+      return res.status(400).json(fail('order_state 格式错误'))
+    }
+
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.includes(storeId)) {
+      return res.status(403).json(fail('无权操作此店铺订单'))
+    }
+
+    const [rows] = await pool.execute(
+      `SELECT id, status_text, order_state, stock_status, sku_id, quantity, all_items
+         FROM sales_orders
+        WHERE store_id = ? AND order_id = ?
+        LIMIT 1`,
+      [storeId, orderId]
+    )
+    if (!rows.length) return res.status(404).json(fail('销售订单不存在'))
+
+    const existing = rows[0]
+    const oldStatusText = normalizeStatusText(String(existing.status_text || '').trim())
+    const statusChanged = oldStatusText !== statusText
+    const stateChanged = orderState !== null && Number(existing.order_state) !== orderState
+    if (statusChanged || stateChanged) {
+      await pool.execute(
+        `UPDATE sales_orders
+            SET status_text = ?, order_state = COALESCE(?, order_state), updated_at = NOW()
+          WHERE id = ? AND store_id = ?`,
+        [statusText, orderState, Number(existing.id), storeId]
+      )
+    }
+
+    if (statusChanged) {
+      const ownerId = getOwnerId(req.user)
+      try {
+        const wasCancelled = CANCEL_STATUSES.includes(oldStatusText)
+        const isCancelledNow = CANCEL_STATUSES.includes(statusText)
+        if (!wasCancelled && isCancelledNow) {
+          if (Number(existing.stock_status) === 2) {
+            await returnStockForOrder(storeId, orderId, ownerId)
+          }
+          await pool.execute(
+            'UPDATE sales_orders SET stock_status=0 WHERE store_id=? AND order_id=?',
+            [storeId, orderId]
+          )
+          await pool.execute(
+            `UPDATE sales_orders SET purchase_status='无效订单'
+              WHERE store_id=? AND order_id=?
+                AND purchase_status IN ('未采购','有货（仓库直发）')`,
+            [storeId, orderId]
+          )
+        } else if (wasCancelled && !isCancelledNow) {
+          const stockResult = await attemptStockDeduction(storeId, orderId, existing, ownerId)
+          await pool.execute(
+            'UPDATE sales_orders SET stock_status=? WHERE store_id=? AND order_id=?',
+            [stockResult.stockStatus, storeId, orderId]
+          )
+          if (stockResult.stockStatus === 2) {
+            await pool.execute(
+              `UPDATE sales_orders SET purchase_status='有货（仓库直发）'
+                WHERE store_id=? AND order_id=? AND purchase_status='未采购'`,
+              [storeId, orderId]
+            )
+            await queueStockDeductionRemark(storeId, orderId, stockResult.remark)
+          }
+        }
+      } catch (stockError) {
+        console.warn(`[RealtimeSalesStatus] 订单 ${orderId} 库存联动失败(非关键):`, stockError.message)
+      }
+    }
+
+    res.json(ok({
+      orderId,
+      storeId,
+      previousStatusText: oldStatusText,
+      statusText,
+      orderState,
+      updated: statusChanged || stateChanged
+    }))
+  } catch (err) {
+    console.error('[RealtimeSalesStatus] 更新京东订单实时状态失败:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
 // 获取指定店铺的活跃订单号（待出库/已出库/暂停）
 app.get('/api/sales-orders/active-order-ids', async (req, res) => {
   try {

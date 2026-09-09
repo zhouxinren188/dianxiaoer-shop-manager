@@ -9,6 +9,159 @@ const AFTERSALE_ORDER_MESSAGE_SOURCE = 'DXE_AFTERSALE_ORDER_CAPTURE_V1'
 const AFTERSALE_ORDER_CAPTURE_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 const AFTERSALE_RETURN_LOGISTICS_MESSAGE_SOURCE = 'DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_V1'
 const AFTERSALE_RETURN_LOGISTICS_CAPTURE_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+const ORDER_REALTIME_STATUS_MESSAGE_SOURCE = 'DXE_ORDER_REALTIME_STATUS_CAPTURE_V1'
+const ORDER_REALTIME_STATUS_CAPTURE_NONCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+
+// 订单详情页加载时，监听页面自身的结构化接口响应。仅上报当前 URL 中订单号对应的
+// orderStatusInfo，不读取 Cookie、请求头、收货信息、商品信息或完整响应内容。
+try {
+  window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin) return
+    const message = event.data
+    if (!message ||
+        message.source !== ORDER_REALTIME_STATUS_MESSAGE_SOURCE ||
+        message.nonce !== ORDER_REALTIME_STATUS_CAPTURE_NONCE) return
+    const observation = message.observation || {}
+    const rawOrderState = observation.orderState
+    ipcRenderer.invoke(ORDER_PURCHASE_ACTION_CHANNEL, {
+      action: 'sync-sales-order-status',
+      orderId: String(observation.orderId || ''),
+      orderState: rawOrderState == null || rawOrderState === ''
+        ? null
+        : (Number.isFinite(Number(rawOrderState)) ? Number(rawOrderState) : null),
+      statusText: String(observation.statusText || '').slice(0, 50),
+      evidence: String(observation.evidence || 'network_response').slice(0, 80)
+    }).catch(() => {})
+  })
+
+  contextBridge.executeInMainWorld({
+    func: (messageSource, captureNonce) => {
+      if (location.hostname.toLowerCase() !== 'shop.jd.com'
+        || !location.pathname.startsWith('/jdm/trade/orders/order-details')
+        || window.__DXE_ORDER_REALTIME_STATUS_CAPTURE_INSTALLED__) {
+        return false
+      }
+      const orderId = String(new URL(location.href).searchParams.get('orderId') || '').trim()
+      if (!/^\d{10,30}$/.test(orderId)) return false
+      window.__DXE_ORDER_REALTIME_STATUS_CAPTURE_INSTALLED__ = true
+      let publishedSignature = ''
+
+      function normalizeOrderId(value) {
+        if (typeof value === 'number' && !Number.isSafeInteger(value)) return ''
+        const text = String(value == null ? '' : value).trim()
+        return /^\d{10,30}$/.test(text) ? text : ''
+      }
+
+      function statusFromRecord(record) {
+        if (!record || typeof record !== 'object') return null
+        const statusInfo = record.orderStatusInfo || record.order_status_info || null
+        if (!statusInfo || typeof statusInfo !== 'object') return null
+        const statusText = String(
+          statusInfo.orderStatusName || statusInfo.orderStatusDesc ||
+          statusInfo.statusName || statusInfo.statusDesc || ''
+        ).trim()
+        const orderState = Number(
+          statusInfo.orderStatus ?? statusInfo.orderState ?? statusInfo.status
+        )
+        if (!statusText || statusText.length > 50 || /[\u0000-\u001f\u007f]/.test(statusText)) return null
+        return {
+          orderId,
+          orderState: Number.isFinite(orderState) ? orderState : null,
+          statusText
+        }
+      }
+
+      function findExactOrderStatus(value) {
+        if (!value || typeof value !== 'object') return null
+        const visited = new WeakSet()
+        let visitedCount = 0
+        function visit(node, depth) {
+          if (!node || typeof node !== 'object' || depth > 10 || visited.has(node) || visitedCount > 6000) return null
+          visited.add(node)
+          visitedCount += 1
+          const nodeOrderId = normalizeOrderId(
+            node.orderId ?? node.order_id ?? node.orderNo ?? node.order_no
+          )
+          if (nodeOrderId === orderId) {
+            const status = statusFromRecord(node)
+            if (status) return status
+          }
+          const children = Array.isArray(node) ? node : Object.values(node)
+          for (const child of children) {
+            const found = visit(child, depth + 1)
+            if (found) return found
+          }
+          return null
+        }
+        return visit(value, 0)
+      }
+
+      function isTrustedResponseUrl(urlValue) {
+        try {
+          const target = new URL(String(urlValue || ''), location.href)
+          const host = target.hostname.toLowerCase()
+          return target.protocol === 'https:' && (host === 'shop.jd.com' || host === 'sff.jd.com')
+        } catch {
+          return false
+        }
+      }
+
+      function publish(observation, evidence) {
+        if (!observation) return
+        const signature = `${observation.orderId}:${observation.orderState ?? ''}:${observation.statusText}`
+        if (signature === publishedSignature) return
+        publishedSignature = signature
+        window.postMessage({
+          source: messageSource,
+          nonce: captureNonce,
+          observation: { ...observation, evidence }
+        }, location.origin)
+      }
+
+      function inspectResponse(value, evidence) {
+        publish(findExactOrderStatus(value), evidence)
+      }
+
+      const originalFetch = window.fetch
+      if (typeof originalFetch === 'function') {
+        window.fetch = function(input) {
+          const responseUrl = typeof input === 'string' ? input : input?.url || ''
+          return originalFetch.apply(this, arguments).then(response => {
+            if (isTrustedResponseUrl(responseUrl || response.url)) {
+              response.clone().json().then(data => inspectResponse(data, 'fetch_response')).catch(() => {})
+            }
+            return response
+          })
+        }
+      }
+
+      const originalOpen = XMLHttpRequest.prototype.open
+      const originalSend = XMLHttpRequest.prototype.send
+      XMLHttpRequest.prototype.open = function(method, url) {
+        this.__dxeOrderRealtimeStatusTarget = isTrustedResponseUrl(url)
+        return originalOpen.apply(this, arguments)
+      }
+      XMLHttpRequest.prototype.send = function() {
+        const xhr = this
+        if (xhr.__dxeOrderRealtimeStatusTarget) {
+          xhr.addEventListener('load', () => {
+            try {
+              const data = xhr.responseType === 'json'
+                ? xhr.response
+                : (!xhr.responseType || xhr.responseType === 'text' ? JSON.parse(xhr.responseText || 'null') : null)
+              inspectResponse(data, 'xhr_response')
+            } catch (_) {}
+          })
+        }
+        return originalSend.apply(this, arguments)
+      }
+      return true
+    },
+    args: [ORDER_REALTIME_STATUS_MESSAGE_SOURCE, ORDER_REALTIME_STATUS_CAPTURE_NONCE]
+  })
+} catch (error) {
+  console.error('[DXE_ORDER_REALTIME_STATUS_PRELOAD] ' + String(error?.message || error))
+}
 
 // 售后详情 URL 只有 afsServiceId。这里在 document_start 观察京东自己的详情接口响应，
 // 只把响应中明确命名的销售订单号回传给主进程，不读取或传递 Cookie、请求头和售后内容。

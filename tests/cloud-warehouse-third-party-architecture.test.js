@@ -127,9 +127,9 @@ describe('云仓助手第三方服务架构', () => {
     expect(renderer).toContain("filterForm.status !== 'pending_print'")
     expect(renderer).toContain('resolveCloudWarehouseOrderCheck(currentPageOrderIds)')
     expect(renderer).toContain('combineCloudWarehouseChecks')
-    expect(service).toContain('for (const group of machineGroups.values())')
+    expect(service).toContain('Promise.all([...machineGroups.values()].map(async group =>')
     expect(renderer).toContain("String(row.sales_order_no || '').trim()")
-    expect(renderer).toContain("row.cloud_order_status === 'waiting_arrival' ? '等待云仓入单'")
+    expect(renderer).toContain("row.cloud_order_status === 'waiting_arrival' ? '等待下发'")
     expect(renderer).toContain('if (!matched) {')
     expect(renderer).toContain('if (!issueOrderIds.has(Number(row.id)) && !hasGlobalIssue) return row')
     expect(service).toContain('wmsOrderEntered: warehouseCheck?.resultShapeValid === true')
@@ -214,6 +214,29 @@ describe('云仓助手第三方服务架构', () => {
     expect(renderer).toContain('@click="handleCloudOrderOutbound"')
     expect(renderer).toContain('写指令超时不代表现场未执行')
     expect(renderer).toContain('请勿重复操作')
+  })
+
+  it('待打印列表直接打印，成功后由小弹窗继续补打或发货', () => {
+    const renderer = read('src/renderer/src/views/purchase/PurchaseOrder.vue')
+    expect(renderer).toContain('v-model="cloudPrintSuccessVisible"')
+    expect(renderer).toContain('>补打订单</el-button>')
+    expect(renderer).toContain('>立即发货</el-button>')
+    expect(renderer).toContain("const result = await runCloudDirectAction(row, 'print')")
+    expect(renderer).toContain("const result = await runCloudDirectAction(row, 'reprint')")
+    expect(renderer).toContain("const result = await runCloudDirectAction(row, 'outbound')")
+    expect(renderer).toContain('绝不自动重发写指令')
+    expect(renderer).toContain('await syncSalesLogisticsAfterCloudOutbound(row)')
+  })
+
+  it('只有云仓发货成功后才转已转发并用查询结果回填销售物流', () => {
+    const service = read('server/services/cloud-warehouse-third-party-service.js')
+    expect(service).toContain("command?.command !== 'warehouse.order.outbound'")
+    expect(service).toContain('markForwardedAfterCloudOutbound')
+    expect(service).toContain('backfillSalesOrderLogisticsFromWarehouseCheck')
+    expect(service).toContain("po.status = 'forwarded'")
+    expect(service).toContain('UPDATE sales_orders so')
+    expect(service).toContain('so.logistics_no = ?')
+    expect(service).toContain('warehouseOrdersFromCommand')
   })
 
   it('云仓区域使用持久处理日志且只在有异常时展示异常明细', () => {

@@ -68,6 +68,15 @@ const PURCHASE_AFTERSALE_STATUS_LABELS = {
   closed: '售后关闭'
 }
 
+const JD_SALES_STATUS_ALIASES = Object.freeze({
+  '等待付款': '待付款',
+  '等待出库': '待出库',
+  '锁定': '暂停订单',
+  '暂停': '暂停订单',
+  '已发货': '已出库'
+})
+const JD_SALES_STATUS_VALUES = new Set(['待付款', '待出库', '暂停订单', '已出库', '已完成', '已取消'])
+
 function getJdOrderId(url) {
   try {
     const parsed = new URL(url)
@@ -307,6 +316,47 @@ async function updatePurchaseOrderAftersale(purchaseId, data = {}, options = {})
     aftersaleStatus,
     aftersaleRemark
   }
+}
+
+function normalizeSalesOrderRealtimeStatus(orderId, data = {}) {
+  const normalizedOrderId = String(orderId || '').trim()
+  if (!/^\d{10,30}$/.test(normalizedOrderId)) throw new Error('销售订单号无效')
+  const rawStatusText = String(data.statusText || '').trim()
+  if (!rawStatusText || rawStatusText.length > 50 || /[\u0000-\u001f\u007f]/.test(rawStatusText)) {
+    throw new Error('京东订单状态无效')
+  }
+  const statusText = JD_SALES_STATUS_ALIASES[rawStatusText] || rawStatusText
+  if (!JD_SALES_STATUS_VALUES.has(statusText)) throw new Error('京东返回了暂不支持的订单状态')
+  const numericState = data.orderState == null || data.orderState === '' ? null : Number(data.orderState)
+  if (numericState !== null && (!Number.isInteger(numericState) || numericState < 0 || numericState > 1000)) {
+    throw new Error('京东订单状态码无效')
+  }
+  return { orderId: normalizedOrderId, orderState: numericState, statusText }
+}
+
+async function syncSalesOrderRealtimeStatus(storeId, orderId, data = {}, options = {}) {
+  const normalizedStoreId = Number(storeId)
+  if (!Number.isSafeInteger(normalizedStoreId) || normalizedStoreId <= 0) throw new Error('店铺ID无效')
+  const normalized = normalizeSalesOrderRealtimeStatus(orderId, data)
+  const request = typeof options.request === 'function'
+    ? options.request
+    : (url, requestOptions) => requestBusinessJson(url, requestOptions)
+  const response = await request(
+    `${BUSINESS_SERVER}/api/sales-orders/${encodeURIComponent(normalized.orderId)}/realtime-status`,
+    {
+      method: 'PUT',
+      body: {
+        store_id: normalizedStoreId,
+        order_state: normalized.orderState,
+        status_text: normalized.statusText
+      },
+      timeoutMs: 15000
+    }
+  )
+  if (!response || Number(response.code) !== 0) {
+    throw new Error(response?.message || '实时同步京东订单状态失败')
+  }
+  return response.data || normalized
 }
 
 async function fetchPurchaseOrdersBySalesOrder(orderId, options = {}) {
@@ -1141,6 +1191,9 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   const updateAftersale = typeof options.updatePurchaseAftersale === 'function'
     ? options.updatePurchaseAftersale
     : updatePurchaseOrderAftersale
+  const syncSalesStatus = typeof options.syncSalesOrderRealtimeStatus === 'function'
+    ? options.syncSalesOrderRealtimeStatus
+    : (orderId, data) => syncSalesOrderRealtimeStatus(storeId, orderId, data)
   const persistReturnLogistics = typeof options.persistReturnLogistics === 'function'
     ? options.persistReturnLogistics
     : records => requestBusinessJson(
@@ -1153,6 +1206,8 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   let panelMayExist = false
   let allowedPurchases = new Map()
   let syncRunning = false
+  let salesStatusSyncPromise = null
+  let lastSalesStatusSignature = ''
   let resolvedAfterSale = { serviceId: '', orderId: '' }
   const discoveryTimers = new Set()
 
@@ -1331,6 +1386,40 @@ function attachOrderPurchasePanel(webContents, options = {}) {
   }
 
   const handlePageAction = async payload => {
+    if (payload?.action === 'sync-sales-order-status') {
+      const currentOrderId = getJdOrderId(webContents.getURL())
+      const payloadOrderId = String(payload?.orderId || '').trim()
+      if (!currentOrderId || payloadOrderId !== currentOrderId) {
+        throw new Error('实时订单状态页面校验失败')
+      }
+      const observation = normalizeSalesOrderRealtimeStatus(payloadOrderId, {
+        orderState: payload?.orderState,
+        statusText: payload?.statusText
+      })
+      const signature = `${observation.orderId}:${observation.orderState ?? ''}:${observation.statusText}`
+      if (signature === lastSalesStatusSignature) {
+        return { action: 'sync-sales-order-status', reused: true }
+      }
+      if (salesStatusSyncPromise) {
+        await salesStatusSyncPromise.catch(() => {})
+        if (signature === lastSalesStatusSignature) {
+          return { action: 'sync-sales-order-status', reused: true }
+        }
+      }
+      salesStatusSyncPromise = syncSalesStatus(observation.orderId, observation)
+      try {
+        const result = await salesStatusSyncPromise
+        lastSalesStatusSignature = signature
+        log(`phase=realtime-sales-status order_id=${observation.orderId} status=${observation.statusText} state=${observation.orderState ?? '-'} result=success evidence=${String(payload?.evidence || 'network_response').slice(0, 80)}`)
+        return { action: 'sync-sales-order-status', statusText: observation.statusText, result }
+      } catch (error) {
+        log(`phase=realtime-sales-status order_id=${observation.orderId} status=${observation.statusText} result=failed error=${String(error?.message || error).replace(/[\r\n\t]+/g, ' ').slice(0, 180)}`)
+        throw error
+      } finally {
+        salesStatusSyncPromise = null
+      }
+    }
+
     if (payload?.action === 'capture-return-logistics') {
       let currentUrl
       try {
@@ -1534,6 +1623,8 @@ function attachOrderPurchasePanel(webContents, options = {}) {
     refreshTimer = null
     allowedPurchases = new Map()
     syncRunning = false
+    salesStatusSyncPromise = null
+    lastSalesStatusSignature = ''
     resolvedAfterSale = { serviceId: '', orderId: '' }
     for (const timer of discoveryTimers) clearTimeout(timer)
     discoveryTimers.clear()
@@ -1559,10 +1650,12 @@ module.exports = {
   normalizePurchaseOrder,
   normalizeReturnLogisticsRecords,
   normalizeLogisticsTracking,
+  normalizeSalesOrderRealtimeStatus,
   fetchPurchaseOrdersBySalesOrder,
   fetchPurchaseAccounts,
   fetchPurchaseOrderLogistics,
   updatePurchaseOrderAftersale,
+  syncSalesOrderRealtimeStatus,
   renderOrderPurchasePanel,
   renderOrderPurchaseLogisticsResult,
   renderOrderPurchaseSyncState,

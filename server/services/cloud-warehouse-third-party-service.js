@@ -409,10 +409,131 @@ async function applyConfirmedOrderCommandStatus(pool, ownerId, purchaseOrderId, 
   const writeResult = writeResultFromCommand(command)
   if (command?.command !== 'warehouse.order.outbound' || writeResult?.succeeded !== true) return false
   try {
-    return await markForwardedAfterCloudOutbound(pool, { ownerId, purchaseOrderId })
+    const forwarded = await markForwardedAfterCloudOutbound(pool, { ownerId, purchaseOrderId })
+    const logisticsBackfilled = await backfillSalesOrderLogisticsFromWarehouseCheck(pool, {
+      ownerId,
+      purchaseOrderId
+    })
+    return forwarded || logisticsBackfilled
   } catch (error) {
     console.error('[CloudWarehouse] 云仓发货成功后更新已转发状态失败:', error.message)
     return false
+  }
+}
+
+async function backfillSalesOrderLogisticsFromWarehouseCheck(pool, { ownerId, purchaseOrderId }) {
+  const normalizedOwnerId = Number(ownerId)
+  const normalizedPurchaseOrderId = Number(purchaseOrderId)
+  if (!Number.isInteger(normalizedOwnerId) || normalizedOwnerId <= 0 ||
+      !Number.isInteger(normalizedPurchaseOrderId) || normalizedPurchaseOrderId <= 0) {
+    return false
+  }
+
+  // 只有采购单已经由严格确认的云仓发货回执推进到 forwarded 后，才允许把
+  // 云仓查询得到的末端运单号写入关联销售订单，避免打印阶段提前污染发货物流。
+  const [salesRows] = await pool.execute(
+    `SELECT so.id AS sales_order_id, so.order_id AS platform_order_no
+       FROM purchase_orders po
+       JOIN sales_orders so ON (
+              (COALESCE(po.sales_order_id, 0) > 0 AND so.id = po.sales_order_id)
+           OR (COALESCE(po.sales_order_id, 0) = 0 AND so.order_id = po.sales_order_no)
+       )
+       JOIN stores s ON s.id = so.store_id AND s.owner_id = po.owner_id
+      WHERE po.id = ? AND po.owner_id = ? AND po.status = 'forwarded'
+      ORDER BY so.id
+      LIMIT 2`,
+    [normalizedPurchaseOrderId, normalizedOwnerId]
+  )
+  if (salesRows.length !== 1) return false
+
+  const salesOrderId = Number(salesRows[0].sales_order_id)
+  const platformOrderNo = String(salesRows[0].platform_order_no || '').trim()
+  if (!Number.isInteger(salesOrderId) || salesOrderId <= 0 || !platformOrderNo) return false
+
+  const [checkRows] = await pool.execute(
+    `SELECT request_id, purchase_order_id, machine_code, command, order_no, order_year,
+            scope_order_nos, transport_status, http_status, reason, message_redacted, response_json,
+            created_at, updated_at, completed_at
+       FROM cloud_external_commands
+      WHERE owner_id = ? AND command = 'warehouse.order.check'
+        AND transport_status = 'completed' AND http_status = 200
+        AND (
+          purchase_order_id = ? OR (
+            purchase_order_id IS NULL AND scope_order_nos IS NOT NULL
+            AND JSON_CONTAINS(scope_order_nos, JSON_QUOTE(?))
+          )
+        )
+      ORDER BY completed_at DESC, created_at DESC
+      LIMIT 1`,
+    [normalizedOwnerId, normalizedPurchaseOrderId, platformOrderNo]
+  )
+  const warehouseCheck = warehouseOrdersFromCommand(commandRowSummary(checkRows[0]))
+  if (!warehouseCheck?.resultShapeValid) return false
+  const warehouseOrder = warehouseCheck.orders.find(order => (
+    String(order?.orderNo || '').trim() === platformOrderNo
+  ))
+  const logisticsNo = String(warehouseOrder?.logisticsNo || '').trim().slice(0, 100)
+  const logisticsCompany = String(warehouseOrder?.logisticsCompany || '').trim().slice(0, 50)
+  if (!logisticsNo || /[\u0000-\u001f\u007f]/.test(logisticsNo) ||
+      /[\u0000-\u001f\u007f]/.test(logisticsCompany)) {
+    return false
+  }
+
+  const [result] = await pool.execute(
+    `UPDATE sales_orders so
+       JOIN stores s ON s.id = so.store_id
+        SET so.logistics_no = ?,
+            so.logistics_company = CASE WHEN ? <> '' THEN ? ELSE so.logistics_company END,
+            so.updated_at = NOW()
+      WHERE so.id = ? AND s.owner_id = ?`,
+    [logisticsNo, logisticsCompany, logisticsCompany, salesOrderId, normalizedOwnerId]
+  )
+  return Number(result?.affectedRows || 0) > 0
+}
+
+async function backfillForwardedSalesLogisticsFromWarehouseCheck(pool, { ownerId, warehouseCheck }) {
+  const normalizedOwnerId = Number(ownerId)
+  if (!Number.isInteger(normalizedOwnerId) || normalizedOwnerId <= 0 ||
+      warehouseCheck?.resultShapeValid !== true || !Array.isArray(warehouseCheck.orders)) {
+    return 0
+  }
+
+  let backfilled = 0
+  for (const order of warehouseCheck.orders) {
+    const orderNo = String(order?.orderNo || '').trim()
+    const logisticsNo = String(order?.logisticsNo || '').trim().slice(0, 100)
+    const logisticsCompany = String(order?.logisticsCompany || '').trim().slice(0, 50)
+    if (!orderNo || !logisticsNo || /[\u0000-\u001f\u007f]/.test(logisticsNo) ||
+        /[\u0000-\u001f\u007f]/.test(logisticsCompany)) continue
+
+    const [result] = await pool.execute(
+      `UPDATE sales_orders so
+         JOIN stores s ON s.id = so.store_id AND s.owner_id = ?
+         JOIN purchase_orders po ON po.owner_id = s.owner_id
+          AND po.status = 'forwarded'
+          AND (
+            (COALESCE(po.sales_order_id, 0) > 0 AND so.id = po.sales_order_id)
+            OR (COALESCE(po.sales_order_id, 0) = 0 AND so.order_id = po.sales_order_no)
+          )
+          SET so.logistics_no = ?,
+              so.logistics_company = CASE WHEN ? <> '' THEN ? ELSE so.logistics_company END,
+              so.updated_at = NOW()
+        WHERE so.order_id = ?`,
+      [normalizedOwnerId, logisticsNo, logisticsCompany, logisticsCompany, orderNo]
+    )
+    backfilled += Number(result?.affectedRows || 0)
+  }
+  return backfilled
+}
+
+async function bestEffortBackfillForwardedSalesLogistics(pool, input) {
+  try {
+    return await backfillForwardedSalesLogisticsFromWarehouseCheck(pool, input)
+  } catch (error) {
+    // 运单回填失败不能把已经成功的云仓查询误记为 submission_unknown；
+    // 后续查询或配置刷新仍可再次补写。
+    console.warn('[CloudWarehouse] 云仓查询成功但销售运单号回填失败:', error.message)
+    return 0
   }
 }
 
@@ -591,7 +712,9 @@ async function submitWarehouseOrderCheck(pool, apiClient, {
   try {
     const normalized = normalizeCommandResponse(await apiClient.submitCommand(payload), requestId, command)
     await persistCommandResponse(pool, ownerId, normalized)
-    return warehouseOrdersFromCommand(commandRowSummary(await readCommand(pool, ownerId, requestId)))
+    const warehouseCheck = warehouseOrdersFromCommand(commandRowSummary(await readCommand(pool, ownerId, requestId)))
+    await bestEffortBackfillForwardedSalesLogistics(pool, { ownerId, warehouseCheck })
+    return warehouseCheck
   } catch (error) {
     if (isRemoteCommandMissingError(error)) {
       await persistTerminalCommandFailure(pool, ownerId, requestId, error)
@@ -621,7 +744,10 @@ function combineWarehouseOrderChecks(checks, issues = []) {
     batch: true,
     checks: validChecks,
     issues,
-    final: validChecks.length > 0 && validChecks.every(check => check.final === true),
+    // 没有在线机器、但已经得到明确的订单级错误时也属于本次查询已结束，
+    // 调用方不应继续显示“查询中”或进入无意义轮询。
+    final: validChecks.every(check => check.final === true) &&
+      (validChecks.length > 0 || issues.length > 0),
     resultShapeValid: validChecks.length > 0 &&
       validChecks.every(check => check.resultShapeValid === true),
     orders: [...orderMap.values()]
@@ -678,24 +804,33 @@ async function submitWarehouseOrderChecksForOrders(pool, apiClient, {
     }
   }
 
-  const checks = []
-  for (const group of machineGroups.values()) {
+  // 每台机器只接收一次不带订单号的全量查询；不同机器并发执行，避免一台
+  // 离线或响应较慢的机器串行阻塞其他机器。订单号仅保存在本地查询范围中，
+  // 用于把各机器返回的全量列表安全地匹配回本次待打印订单。
+  const groupResults = await Promise.all([...machineGroups.values()].map(async group => {
     try {
-      checks.push(await submitWarehouseOrderCheck(pool, apiClient, {
-        user,
-        machineCode: group.machineCode,
-        scopeOrderNos: group.orderNos
-      }))
+      return {
+        check: await submitWarehouseOrderCheck(pool, apiClient, {
+          user,
+          machineCode: group.machineCode,
+          scopeOrderNos: group.orderNos
+        }),
+        issues: []
+      }
     } catch (error) {
-      for (const purchaseOrderId of group.purchaseOrderIds) {
-        issues.push({
+      return {
+        check: null,
+        issues: group.purchaseOrderIds.map(purchaseOrderId => ({
           purchaseOrderId,
+          machineCode: group.machineCode,
           reason: String(error?.code || 'cloud_query_failed').slice(0, 100),
           message: String(error?.message || '云仓订单查询失败').slice(0, 300)
-        })
+        }))
       }
     }
-  }
+  }))
+  const checks = groupResults.map(result => result.check).filter(Boolean)
+  issues.push(...groupResults.flatMap(result => result.issues))
   return combineWarehouseOrderChecks(checks, issues)
 }
 
@@ -736,20 +871,16 @@ async function submitWarehouseOrderCheckForPendingOrders(pool, apiClient, { user
     purchaseOrderIds,
     maxPurchaseOrders: 1000
   })
+  // 空请求始终返回批量结构。一台机器时同时投影顶层 requestId 等字段，
+  // 兼容尚未识别 checks 的旧客户端；新客户端统一分别轮询 checks，并按
+  // issues 标记受影响订单。一台机器离线不会阻断其他在线机器的查询结果。
   if (batch.checks.length === 1) {
     return {
       ...batch.checks[0],
-      issues: batch.issues
+      ...batch
     }
   }
-  if (batch.checks.length > 1) {
-    throw serviceError('machine_selection_required', '当前待打印订单分属多个云仓助手，暂不能合并为一个 requestId')
-  }
-  const issue = batch.issues[0]
-  throw serviceError(
-    issue?.reason || 'cloud_query_failed',
-    issue?.message || '未能创建云仓待打印订单查询'
-  )
+  return batch
 }
 
 async function refreshWarehouseOrderCheck(pool, apiClient, user, requestId) {
@@ -757,7 +888,12 @@ async function refreshWarehouseOrderCheck(pool, apiClient, user, requestId) {
   if (command?.command !== 'warehouse.order.check') {
     throw serviceError('cloud_command_mismatch', '该 requestId 不是云仓订单查询指令')
   }
-  return warehouseOrdersFromCommand(command)
+  const warehouseCheck = warehouseOrdersFromCommand(command)
+  await bestEffortBackfillForwardedSalesLogistics(pool, {
+    ownerId: getTenantOwnerId(user),
+    warehouseCheck
+  })
+  return warehouseCheck
 }
 
 async function recordAutomaticRemarkLog(pool, user, purchaseOrderId, result) {
@@ -1074,6 +1210,8 @@ module.exports = {
   attachExternalCommands,
   buildCommandPayload,
   buildWarehouseOrderCheckPayload,
+  backfillForwardedSalesLogisticsFromWarehouseCheck,
+  backfillSalesOrderLogisticsFromWarehouseCheck,
   combineWarehouseOrderChecks,
   scopeWarehouseOrderChecks,
   commandRowSummary,

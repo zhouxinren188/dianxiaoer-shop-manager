@@ -13,10 +13,12 @@ const {
   normalizePurchaseOrder,
   normalizeReturnLogisticsRecords,
   normalizeLogisticsTracking,
+  normalizeSalesOrderRealtimeStatus,
   fetchPurchaseOrdersBySalesOrder,
   fetchPurchaseAccounts,
   fetchPurchaseOrderLogistics,
   updatePurchaseOrderAftersale,
+  syncSalesOrderRealtimeStatus,
   getOrderPurchaseRuntimeFunctionSource,
   resetOrderPurchaseRuntimeSourceCache,
   buildOrderPurchasePanelScript,
@@ -85,6 +87,38 @@ describe('京东订单详情采购信息区域', () => {
       updatedAt: '2026-08-28 11:20:00',
       logisticsLabel: '中通快递 · ZT123'
     })
+  })
+
+  it('只接受当前京东订单的标准销售状态并沿用现有别名', () => {
+    expect(normalizeSalesOrderRealtimeStatus('3599471007575277', {
+      orderState: 5,
+      statusText: '暂停'
+    })).toEqual({
+      orderId: '3599471007575277',
+      orderState: 5,
+      statusText: '暂停订单'
+    })
+    expect(() => normalizeSalesOrderRealtimeStatus('3599471007575277', {
+      statusText: '任意伪造状态'
+    })).toThrow('暂不支持')
+  })
+
+  it('通过专用接口只发送店铺、订单状态码和状态文案', async () => {
+    const request = vi.fn().mockResolvedValue({
+      code: 0,
+      data: { orderId: '3599471007575277', statusText: '已出库', updated: true }
+    })
+    await expect(syncSalesOrderRealtimeStatus(12, '3599471007575277', {
+      orderState: 7,
+      statusText: '已发货'
+    }, { request })).resolves.toMatchObject({ statusText: '已出库', updated: true })
+    expect(request).toHaveBeenCalledWith(
+      expect.stringContaining('/api/sales-orders/3599471007575277/realtime-status'),
+      expect.objectContaining({
+        method: 'PUT',
+        body: { store_id: 12, order_state: 7, status_text: '已出库' }
+      })
+    )
   })
 
   it('normalizes and deduplicates only safe return-logistics linkage fields', () => {
@@ -379,8 +413,18 @@ describe('京东订单详情采购信息区域', () => {
         purchaseId: 81,
         aftersaleStatus: 'pending_refund'
       }))
+      const syncSalesOrderRealtimeStatus = vi.fn(() => Promise.resolve({
+        orderId: '3599471007575277',
+        statusText: '已出库',
+        updated: true
+      }))
 
-      attachOrderPurchasePanel(webContents, { fetchPurchaseOrders, fetchPurchaseOrderLogistics, updatePurchaseAftersale })
+      attachOrderPurchasePanel(webContents, {
+        fetchPurchaseOrders,
+        fetchPurchaseOrderLogistics,
+        updatePurchaseAftersale,
+        syncSalesOrderRealtimeStatus
+      })
       webContents.emit('did-finish-load')
       await vi.advanceTimersByTimeAsync(300)
       const readyScript = webContents.executeJavaScript.mock.calls.map(call => call[0]).find(script => script.includes('"state":"ready"'))
@@ -413,6 +457,23 @@ describe('京东订单详情采购信息区域', () => {
       expect(updatePurchaseAftersale).toHaveBeenCalledWith(81, {
         aftersaleStatus: 'pending_refund',
         aftersaleRemark: '用户已退款，商品已拒收，请申请退款。'
+      })
+
+      const statusResponse = await handler({ sender: { id: 701 } }, {
+        action: 'sync-sales-order-status',
+        orderId: '3599471007575277',
+        orderState: 7,
+        statusText: '已发货',
+        evidence: 'xhr_response'
+      })
+      expect(statusResponse).toMatchObject({
+        ok: true,
+        result: { action: 'sync-sales-order-status', statusText: '已出库' }
+      })
+      expect(syncSalesOrderRealtimeStatus).toHaveBeenCalledWith('3599471007575277', {
+        orderId: '3599471007575277',
+        orderState: 7,
+        statusText: '已出库'
       })
       webContents.emit('destroyed')
 
@@ -561,9 +622,13 @@ describe('京东订单详情采购信息区域', () => {
     expect(pagePreloadSource).toContain('aftersaleRemark: String(payload.aftersaleRemark')
     expect(pagePreloadSource).toContain('DXE_AFTERSALE_ORDER_CAPTURE_V1')
     expect(pagePreloadSource).toContain('DXE_AFTERSALE_RETURN_LOGISTICS_CAPTURE_V1')
+    expect(pagePreloadSource).toContain('DXE_ORDER_REALTIME_STATUS_CAPTURE_V1')
+    expect(pagePreloadSource).toContain("action: 'sync-sales-order-status'")
+    expect(pagePreloadSource).toContain('orderStatusInfo')
     expect(pagePreloadSource).toContain('dsm.seller.afs.bff.serviceOrderQueryDsmService.page')
     expect(pagePreloadSource).toContain("action: 'capture-return-logistics'")
     expect(serverSource).toContain("app.post('/api/sales-return-logistics/:storeId/batch'")
+    expect(serverSource).toContain("app.put('/api/sales-orders/:orderId/realtime-status'")
     expect(serverSource.indexOf("app.post('/api/sales-return-logistics/:storeId/batch'")).toBeLessThan(
       serverSource.indexOf("app.get('/api/sales-orders'")
     )

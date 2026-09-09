@@ -5,8 +5,11 @@ const {
   attachExternalCommands,
   applyConfirmedOrderCommandStatus,
   applyConfirmedExceptionResolutionStatus,
+  backfillForwardedSalesLogisticsFromWarehouseCheck,
+  backfillSalesOrderLogisticsFromWarehouseCheck,
   buildCommandPayload,
   buildWarehouseOrderCheckPayload,
+  combineWarehouseOrderChecks,
   exceptionFromCommand,
   normalizeCommandResponse,
   normalizeMachineStatus,
@@ -360,6 +363,190 @@ describe('云仓订单全量查询协议', () => {
         status: 'waiting_arrival',
         printable: false
       }]
+    })
+  })
+
+  it('空请求按不同机器并发查询，离线机器不发送并返回订单级问题', async () => {
+    const machineByOrderId = {
+      1: 'YC-7F3K-92MX',
+      2: 'YC-8G4L-A3NY',
+      3: 'YC-9H5M-B4PZ'
+    }
+    const orderNoByOrderId = {
+      1: '3589471019934061',
+      2: '3589471019934062',
+      3: '3589471019934063'
+    }
+    const commands = new Map()
+    const execute = vi.fn(async (sql, params) => {
+      if (sql.includes('SELECT id FROM purchase_orders') && sql.includes("status = 'pending_print'")) {
+        return [[{ id: 1 }, { id: 2 }, { id: 3 }]]
+      }
+      if (sql.includes('FROM purchase_orders po') && !sql.includes('LEFT JOIN warehouses')) {
+        const id = Number(params[0])
+        return [[{
+          id,
+          owner_id: 18,
+          purchase_no: `A${id}`,
+          sales_order_id: 500 + id,
+          sales_order_no: orderNoByOrderId[id],
+          cloud_machine_code: machineByOrderId[id],
+          cloud_warehouse_id: 10 + id,
+          cloud_machine_binding_version: 1,
+          cloud_machine_routed_at: '2026-09-09 13:00:00'
+        }]]
+      }
+      if (sql.includes('FROM sales_orders so')) {
+        const id = Number(params[0]) - 500
+        return [[{
+          sales_order_id: 500 + id,
+          platform_order_no: orderNoByOrderId[id],
+          sales_order_time: '2026-09-09 13:00:00',
+          order_year: 2026,
+          store_id: 30 + id,
+          store_owner_id: 18
+        }]]
+      }
+      if (sql.includes('LEFT JOIN warehouses') && sql.includes('cloud_machine_code')) {
+        const id = Number(params[0])
+        return [[{
+          cloud_warehouse_id: 10 + id,
+          cloud_machine_code: machineByOrderId[id],
+          cloud_machine_binding_version: 1,
+          cloud_machine_routed_at: '2026-09-09 13:00:00',
+          cloud_warehouse_name: `${id}号库`
+        }]]
+      }
+      if (sql.includes('SELECT request_id, scope_order_nos') && sql.includes('transport_status IN')) {
+        return [[]]
+      }
+      if (sql.includes('INSERT INTO cloud_external_commands')) {
+        commands.set(params[0], {
+          machineCode: params[3],
+          scopeOrderNos: params[4],
+          transportStatus: 'submitting',
+          httpStatus: null,
+          response: null
+        })
+        return [{ affectedRows: 1 }]
+      }
+      if (sql.includes('SET transport_status = ?')) {
+        const command = commands.get(params[7])
+        Object.assign(command, {
+          transportStatus: params[0],
+          httpStatus: params[1],
+          response: params[4]
+        })
+        return [{ affectedRows: 1 }]
+      }
+      if (sql.includes('WHERE owner_id = ? AND request_id = ?') && sql.includes('SELECT request_id')) {
+        const requestId = params[1]
+        const command = commands.get(requestId)
+        return [[{
+          request_id: requestId,
+          purchase_order_id: null,
+          machine_code: command.machineCode,
+          command: 'warehouse.order.check',
+          order_no: '',
+          order_year: null,
+          scope_order_nos: command.scopeOrderNos,
+          transport_status: command.transportStatus,
+          http_status: command.httpStatus,
+          reason: 'query_completed',
+          message_redacted: '查询完成',
+          response_json: command.response,
+          created_at: '2026-09-09 13:00:00',
+          updated_at: '2026-09-09 13:00:01',
+          completed_at: '2026-09-09 13:00:01'
+        }]]
+      }
+      throw new Error(`unexpected_sql:${sql.replace(/\s+/g, ' ').trim()}`)
+    })
+
+    let startedStatusChecks = 0
+    let releaseStatusChecks
+    const allStatusChecksStarted = new Promise(resolve => { releaseStatusChecks = resolve })
+    const getMachineStatus = vi.fn(async machineCode => {
+      startedStatusChecks += 1
+      if (startedStatusChecks === 3) releaseStatusChecks()
+      await allStatusChecksStarted
+      const online = machineCode !== machineByOrderId[3]
+      return {
+        httpStatus: 200,
+        body: {
+          machine_code: machineCode,
+          online,
+          state: online ? 'idle' : 'offline',
+          capabilities: { 'warehouse.order.check': online }
+        }
+      }
+    })
+    const submitCommand = vi.fn(async payload => {
+      const orderId = Object.entries(machineByOrderId)
+        .find(([, machineCode]) => machineCode === payload.machine_code)?.[0]
+      return {
+        httpStatus: 200,
+        body: {
+          request_id: payload.request_id,
+          command: 'warehouse.order.check',
+          status: 'completed',
+          response: {
+            status: 'succeeded',
+            reason: 'query_completed',
+            message: '查询完成',
+            result: {
+              orders: [{
+                order_no: orderNoByOrderId[orderId],
+                status: 'pending_print'
+              }]
+            }
+          }
+        }
+      }
+    })
+
+    const result = await submitWarehouseOrderCheckForPendingOrders(
+      { execute },
+      { getMachineStatus, submitCommand },
+      { user: { id: 18, user_type: 'master' } }
+    )
+
+    expect(getMachineStatus).toHaveBeenCalledTimes(3)
+    expect(submitCommand).toHaveBeenCalledTimes(2)
+    expect(submitCommand.mock.calls.every(([payload]) => (
+      !Object.hasOwn(payload, 'order_no') && !Object.hasOwn(payload, 'order_year')
+    ))).toBe(true)
+    expect(result).toMatchObject({
+      batch: true,
+      final: true,
+      resultShapeValid: true,
+      checks: [
+        { machineCode: machineByOrderId[1], final: true },
+        { machineCode: machineByOrderId[2], final: true }
+      ],
+      issues: [{
+        purchaseOrderId: 3,
+        machineCode: machineByOrderId[3],
+        reason: 'machine_offline'
+      }]
+    })
+    expect(result.orders.map(order => order.orderNo)).toEqual([
+      orderNoByOrderId[1],
+      orderNoByOrderId[2]
+    ])
+  })
+
+  it('全部机器均离线时立即结束，不进入无意义轮询', () => {
+    expect(combineWarehouseOrderChecks([], [{
+      purchaseOrderId: 3,
+      machineCode: 'YC-9H5M-B4PZ',
+      reason: 'machine_offline',
+      message: '绑定的云仓助手当前离线'
+    }])).toMatchObject({
+      batch: true,
+      checks: [],
+      final: true,
+      resultShapeValid: false
     })
   })
 })
@@ -723,7 +910,11 @@ describe('云仓打印与发货协议', () => {
   })
 
   it('仅严格确认的发货回执会将采购单投影为已转发', async () => {
-    const execute = vi.fn().mockResolvedValue([{ affectedRows: 1 }])
+    const execute = vi.fn(async sql => {
+      if (sql.includes("SET status = 'forwarded'")) return [{ affectedRows: 1 }]
+      if (sql.includes('SELECT so.id AS sales_order_id')) return [[]]
+      throw new Error(`unexpected_sql:${sql.replace(/\s+/g, ' ').trim()}`)
+    })
     await expect(applyConfirmedOrderCommandStatus(
       { execute },
       18,
@@ -736,11 +927,102 @@ describe('云仓打印与发货协议', () => {
       99,
       responseFor('warehouse.order.outbound', { verificationConfirmed: false })
     )).resolves.toBe(false)
-    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute).toHaveBeenCalledTimes(2)
     expect(execute).toHaveBeenCalledWith(
       expect.stringContaining("SET status = 'forwarded'"),
       [99, 18, 'pending_print', 'shipped', 'in_transit', 'received']
     )
+  })
+
+  it('打印成功只确认出纸，不会把采购单提前改为已转发', async () => {
+    const execute = vi.fn()
+    await expect(applyConfirmedOrderCommandStatus(
+      { execute },
+      18,
+      99,
+      responseFor('warehouse.order.print')
+    )).resolves.toBe(false)
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('发货成功后从最新云仓查询回填关联销售订单的运单号', async () => {
+    const orderNo = '3589471019934064'
+    const execute = vi.fn(async (sql, params) => {
+      if (sql.includes('SELECT so.id AS sales_order_id')) {
+        expect(params).toEqual([99, 18])
+        return [[{ sales_order_id: 321, platform_order_no: orderNo }]]
+      }
+      if (sql.includes('FROM cloud_external_commands')) {
+        expect(params).toEqual([18, 99, orderNo])
+        return [[{
+          request_id: 'warehouse-check-after-outbound',
+          purchase_order_id: null,
+          machine_code: 'YC-7F3K-92MX',
+          command: 'warehouse.order.check',
+          order_no: '',
+          order_year: null,
+          scope_order_nos: JSON.stringify([orderNo]),
+          transport_status: 'completed',
+          http_status: 200,
+          reason: '',
+          message_redacted: '',
+          response_json: {
+            request_id: 'warehouse-check-after-outbound',
+            command: 'warehouse.order.check',
+            status: 'completed',
+            response: {
+              status: 'succeeded',
+              result: {
+                orders: [{
+                  order_no: orderNo,
+                  status: 'shipped',
+                  logistics_no: 'JDVA1234567890',
+                  logistics_company: '京东物流'
+                }]
+              }
+            }
+          },
+          created_at: '2026-09-09 10:00:00',
+          updated_at: '2026-09-09 10:00:01',
+          completed_at: '2026-09-09 10:00:01'
+        }]]
+      }
+      if (sql.includes('UPDATE sales_orders so')) {
+        expect(params).toEqual(['JDVA1234567890', '京东物流', '京东物流', 321, 18])
+        return [{ affectedRows: 1 }]
+      }
+      throw new Error(`unexpected_sql:${sql.replace(/\s+/g, ' ').trim()}`)
+    })
+
+    await expect(backfillSalesOrderLogisticsFromWarehouseCheck(
+      { execute },
+      { ownerId: 18, purchaseOrderId: 99 }
+    )).resolves.toBe(true)
+    expect(execute).toHaveBeenCalledTimes(3)
+  })
+
+  it('后续云仓查询拿到运单号时会自动补齐已转发销售订单', async () => {
+    const execute = vi.fn(async (sql, params) => {
+      expect(sql).toContain("po.status = 'forwarded'")
+      expect(sql).toContain('SET so.logistics_no = ?')
+      expect(params).toEqual([18, 'JDVA99887766', '京东物流', '京东物流', '3589471019934064'])
+      return [{ affectedRows: 1 }]
+    })
+    await expect(backfillForwardedSalesLogisticsFromWarehouseCheck(
+      { execute },
+      {
+        ownerId: 18,
+        warehouseCheck: {
+          resultShapeValid: true,
+          orders: [{
+            orderNo: '3589471019934064',
+            logisticsNo: 'JDVA99887766',
+            logisticsCompany: '京东物流'
+          }]
+        }
+      }
+    )).resolves.toBe(1)
+    expect(execute).toHaveBeenCalledOnce()
   })
 })
 
