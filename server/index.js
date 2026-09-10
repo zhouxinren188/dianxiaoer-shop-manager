@@ -4049,23 +4049,32 @@ app.get('/api/dashboard-stats', async (req, res) => {
 
     // 采购额优先使用平台实付总额；旧记录没有实付总额时按单价×数量+运费计算。
     // ordered 表示等待付款/已下单未付款，不计入经营采购数据；同步为已付款状态后自动纳入。
-    // 子账号沿用采购单列表权限，只统计已分配采购账号或自己创建的无账号采购单。
+    // 子账号的经营概览与销售额保持同一店铺口径：采购账号只是下单通道，
+    // 不能用来判断采购成本归属。采购单必须关联到当前子账号可访问店铺的销售订单。
     const ownerId = getOwnerId(req.user)
     const purchaseAmountExpr = `CASE
       WHEN COALESCE(po.total_amount, 0) > 0 THEN po.total_amount
       ELSE COALESCE(po.purchase_price, 0) * COALESCE(po.quantity, 0) + COALESCE(po.shipping_fee, 0)
     END`
+    const purchaseStorePlaceholders = storeIds.map(() => '?').join(',')
     const purchaseVisibilitySql = req.user.user_type === 'sub'
-      ? `AND (
-           EXISTS (
-             SELECT 1 FROM user_purchase_accounts upa
-             WHERE upa.account_id = po.account_id AND upa.user_id = ?
-           )
-           OR (po.account_id IS NULL AND (po.created_by = ? OR po.created_by IS NULL))
-         )`
+      ? (storeIds.length
+          ? `AND (
+               EXISTS (
+                 SELECT 1 FROM sales_orders visible_sales_by_no
+                 WHERE visible_sales_by_no.store_id IN (${purchaseStorePlaceholders})
+                   AND visible_sales_by_no.order_id = po.sales_order_no
+               )
+               OR EXISTS (
+                 SELECT 1 FROM sales_orders visible_sales_by_id
+                 WHERE visible_sales_by_id.store_id IN (${purchaseStorePlaceholders})
+                   AND visible_sales_by_id.id = CAST(NULLIF(po.sales_order_id, '') AS UNSIGNED)
+               )
+             )`
+          : 'AND 1 = 0')
       : ''
-    const purchaseParams = req.user.user_type === 'sub'
-      ? [ownerId, req.user.id, req.user.id]
+    const purchaseParams = req.user.user_type === 'sub' && storeIds.length
+      ? [ownerId, ...storeIds, ...storeIds]
       : [ownerId]
     const [purchaseRows] = await pool.execute(
       `SELECT
@@ -4110,45 +4119,158 @@ app.get('/api/dashboard-stats', async (req, res) => {
          ${purchaseVisibilitySql}`,
       purchaseParams
     )
-    const purchase = purchaseRows[0] || {}
+    const actualPurchase = purchaseRows[0] || {}
+
+    // 毛利采用“收入成本配比”口径：采购成本归属到关联销售订单的下单日期，
+    // 而不是采购单实际创建/付款日期。这样昨日销售、今日补采不会冲减今日毛利。
+    // 已扣库存的仓库订单没有采购单时，使用库存商品成本价作为销售成本。
+    let salesCost = {
+      today_amt: 0, today_cnt: 0,
+      yesterday_amt: 0, yesterday_cnt: 0,
+      yesterday_full_amt: 0, yesterday_full_cnt: 0,
+      month_amt: 0, month_cnt: 0,
+      last_month_amt: 0, last_month_cnt: 0,
+      year_amt: 0, year_cnt: 0,
+      last_year_amt: 0, last_year_cnt: 0
+    }
+    if (storeIds.length) {
+      const salesCostStorePlaceholders = storeIds.map(() => '?').join(',')
+      const salesCostExcludedStatuses = ['待付款', '等待付款', '已取消']
+      const salesCostExcludedPlaceholders = salesCostExcludedStatuses.map(() => '?').join(',')
+      const attributedCostExpr = `CASE
+        WHEN COALESCE(purchase_by_id.cost_amount, 0) > 0 THEN purchase_by_id.cost_amount
+        WHEN COALESCE(purchase_by_no.cost_amount, 0) > 0 THEN purchase_by_no.cost_amount
+        WHEN sales.stock_status = 2 AND COALESCE(inventory_item.price, 0) > 0
+          THEN inventory_item.price * COALESCE(sales.quantity, 0) * COALESCE(sku_binding.package_num, 1)
+        ELSE 0
+      END`
+      const attributedCostKnownExpr = `CASE
+        WHEN COALESCE(purchase_by_id.cost_amount, 0) > 0 THEN 1
+        WHEN COALESCE(purchase_by_no.cost_amount, 0) > 0 THEN 1
+        WHEN sales.stock_status = 2 AND COALESCE(inventory_item.price, 0) > 0 THEN 1
+        ELSE 0
+      END`
+      const [salesCostRows] = await pool.execute(
+        `SELECT
+           COALESCE(SUM(CASE WHEN attributed.order_time >= CURDATE()
+                              THEN attributed.order_cost ELSE 0 END), 0) AS today_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= CURDATE()
+                              THEN attributed.cost_known ELSE 0 END), 0) AS today_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                              AND attributed.order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)
+                              THEN attributed.order_cost ELSE 0 END), 0) AS yesterday_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                              AND attributed.order_time < DATE_SUB(NOW(), INTERVAL 1 DAY)
+                              THEN attributed.cost_known ELSE 0 END), 0) AS yesterday_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                              AND attributed.order_time < CURDATE()
+                              THEN attributed.order_cost ELSE 0 END), 0) AS yesterday_full_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_SUB(CURDATE(), INTERVAL 1 DAY)
+                              AND attributed.order_time < CURDATE()
+                              THEN attributed.cost_known ELSE 0 END), 0) AS yesterday_full_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                              THEN attributed.order_cost ELSE 0 END), 0) AS month_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                              THEN attributed.cost_known ELSE 0 END), 0) AS month_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+                              AND attributed.order_time < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), INTERVAL 1 DAY)
+                              THEN attributed.order_cost ELSE 0 END), 0) AS last_month_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), '%Y-%m-01')
+                              AND attributed.order_time < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 MONTH), INTERVAL 1 DAY)
+                              THEN attributed.cost_known ELSE 0 END), 0) AS last_month_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(CURDATE(), '%Y-01-01')
+                              THEN attributed.order_cost ELSE 0 END), 0) AS year_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(CURDATE(), '%Y-01-01')
+                              THEN attributed.cost_known ELSE 0 END), 0) AS year_cnt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+                              AND attributed.order_time < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), INTERVAL 1 DAY)
+                              THEN attributed.order_cost ELSE 0 END), 0) AS last_year_amt,
+           COALESCE(SUM(CASE WHEN attributed.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+                              AND attributed.order_time < DATE_ADD(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), INTERVAL 1 DAY)
+                              THEN attributed.cost_known ELSE 0 END), 0) AS last_year_cnt
+         FROM (
+           SELECT sales.id, sales.order_time,
+                  ${attributedCostExpr} AS order_cost,
+                  ${attributedCostKnownExpr} AS cost_known
+             FROM sales_orders sales
+             LEFT JOIN (
+               SELECT CAST(NULLIF(po.sales_order_id, '') AS UNSIGNED) AS sales_order_id,
+                      SUM(${purchaseAmountExpr}) AS cost_amount
+                 FROM purchase_orders po
+                WHERE po.owner_id = ?
+                  AND po.sales_order_id IS NOT NULL AND po.sales_order_id != ''
+                  AND (po.status IS NULL OR po.status NOT IN ('ordered', 'cancelled', 'refunded'))
+                GROUP BY CAST(NULLIF(po.sales_order_id, '') AS UNSIGNED)
+             ) purchase_by_id ON purchase_by_id.sales_order_id = sales.id
+             LEFT JOIN (
+               SELECT po.sales_order_no,
+                      SUM(${purchaseAmountExpr}) AS cost_amount
+                 FROM purchase_orders po
+                WHERE po.owner_id = ?
+                  AND po.sales_order_no IS NOT NULL AND po.sales_order_no != ''
+                  AND (po.status IS NULL OR po.status NOT IN ('ordered', 'cancelled', 'refunded'))
+                GROUP BY po.sales_order_no
+             ) purchase_by_no ON purchase_by_no.sales_order_no = sales.order_id
+             LEFT JOIN sku_bindings sku_binding
+               ON sku_binding.store_id = sales.store_id AND sku_binding.sku_id = sales.sku_id
+             LEFT JOIN inventory inventory_item ON inventory_item.id = sku_binding.inventory_id
+            WHERE sales.store_id IN (${salesCostStorePlaceholders})
+              AND sales.status_text NOT IN (${salesCostExcludedPlaceholders})
+              AND sales.order_time >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 1 YEAR), '%Y-01-01')
+         ) attributed`,
+        [ownerId, ownerId, ...storeIds, ...salesCostExcludedStatuses]
+      )
+      salesCost = salesCostRows[0] || salesCost
+    }
 
     const fmtWh = (rows) => rows.map(r => ({ warehouse: r.warehouse_name, count: Number(r.cnt) }))
     const jdStoreCount = Number(adStatus.jd_store_count || 0)
     const knownStoreCount = Number(adStatus.known_store_count || 0)
     const activeStoreCount = Number(adStatus.active_store_count || 0)
     const syncedStoreCount = Number(adStatus.synced_store_count || 0)
-    // 已确认开通快车的店铺全部同步成功即可展示汇总；未开通、尚未识别或单店临时失败
-    // 不能把其他店铺已经落库的历史消耗整体遮掉。没有开通店铺时，仍要求全部完成识别。
-    const adSpendReady = jdStoreCount === 0 || (
-      activeStoreCount > 0 && syncedStoreCount === activeStoreCount
-    ) || (
+    const unknownStoreCount = Math.max(0, jdStoreCount - knownStoreCount)
+    const hasStoredAdSpend = Boolean(adSpend.first_date)
+    // 首页展示服务端已经登记的最新数据。部分店铺当天同步失败时只降低覆盖率，
+    // 不能把昨日、本年等已落库的历史消耗及依赖它计算的毛利整体隐藏。
+    // 完全没有历史记录时仍保持“暂未同步”，避免把未知消耗误报成 0。
+    const adSpendReady = jdStoreCount === 0 || hasStoredAdSpend || syncedStoreCount > 0 || (
       knownStoreCount === jdStoreCount && activeStoreCount === 0
     )
     const adShared = {
       adSyncedStoreCount: syncedStoreCount,
-      adTotalStoreCount: activeStoreCount,
+      // 已确认未开通快车的店铺不计入同步目标；尚未识别的店铺继续计入，
+      // 与客户端本机同步时的“成功数/待确认数”口径保持一致。
+      adTotalStoreCount: activeStoreCount + unknownStoreCount,
       adSpendUpdatedAt: adStatus.updated_at || null,
       adSpendCoverageStart: adSpend.first_date || null
     }
-    const fmt = (r, wh, purchaseAmount, purchaseCount, adAmount) => ({
+    const fmt = (r, wh, attributedCostAmount, attributedCostCount, actualPurchaseAmount, actualPurchaseCount, adAmount) => {
+      const orderCount = Number(r[0].cnt || 0)
+      const costKnownOrderCount = Number(attributedCostCount || 0)
+      return {
       salesAmount: Number(r[0].amt),
-      orderCount: Number(r[0].cnt),
-      purchaseAmount: Number(purchaseAmount || 0),
-      purchaseCount: Number(purchaseCount || 0),
+      orderCount,
+      // 保留 purchaseAmount 字段兼容现有 renderer；其含义升级为本期销售订单归属成本。
+      purchaseAmount: Number(attributedCostAmount || 0),
+      purchaseCount: costKnownOrderCount,
+      actualPurchaseAmount: Number(actualPurchaseAmount || 0),
+      actualPurchaseCount: Number(actualPurchaseCount || 0),
+      costKnownOrderCount,
+      costPendingOrderCount: Math.max(0, orderCount - costKnownOrderCount),
       cloudOrderCount: Number(r[0].cloud_cnt || 0),
       warehouseBreakdown: wh,
       adSpend: adSpendReady ? Number(adAmount || 0) : null,
       ...adShared
-    })
+    }}
 
     res.json(ok({
-      today: fmt(r1, fmtWh(whToday), purchase.today_amt, purchase.today_cnt, adSpend.today_amt),
-      yesterday: fmt(r2, [], purchase.yesterday_amt, purchase.yesterday_cnt, adSpend.yesterday_amt),
-      yesterdayFull: fmt(r7, fmtWh(whYesterday), purchase.yesterday_full_amt, purchase.yesterday_full_cnt, adSpend.yesterday_amt),
-      thisMonth: fmt(r3, fmtWh(whMonth), purchase.month_amt, purchase.month_cnt, adSpend.month_amt),
-      lastMonth: fmt(r4, [], purchase.last_month_amt, purchase.last_month_cnt, adSpend.last_month_amt),
-      thisYear: fmt(r5, fmtWh(whYear), purchase.year_amt, purchase.year_cnt, adSpend.year_amt),
-      lastYear: fmt(r6, [], purchase.last_year_amt, purchase.last_year_cnt, adSpend.last_year_amt)
+      today: fmt(r1, fmtWh(whToday), salesCost.today_amt, salesCost.today_cnt, actualPurchase.today_amt, actualPurchase.today_cnt, adSpend.today_amt),
+      yesterday: fmt(r2, [], salesCost.yesterday_amt, salesCost.yesterday_cnt, actualPurchase.yesterday_amt, actualPurchase.yesterday_cnt, adSpend.yesterday_amt),
+      yesterdayFull: fmt(r7, fmtWh(whYesterday), salesCost.yesterday_full_amt, salesCost.yesterday_full_cnt, actualPurchase.yesterday_full_amt, actualPurchase.yesterday_full_cnt, adSpend.yesterday_amt),
+      thisMonth: fmt(r3, fmtWh(whMonth), salesCost.month_amt, salesCost.month_cnt, actualPurchase.month_amt, actualPurchase.month_cnt, adSpend.month_amt),
+      lastMonth: fmt(r4, [], salesCost.last_month_amt, salesCost.last_month_cnt, actualPurchase.last_month_amt, actualPurchase.last_month_cnt, adSpend.last_month_amt),
+      thisYear: fmt(r5, fmtWh(whYear), salesCost.year_amt, salesCost.year_cnt, actualPurchase.year_amt, actualPurchase.year_cnt, adSpend.year_amt),
+      lastYear: fmt(r6, [], salesCost.last_year_amt, salesCost.last_year_cnt, actualPurchase.last_year_amt, actualPurchase.last_year_cnt, adSpend.last_year_amt)
     }))
   } catch (err) {
     console.error('[Dashboard Stats] 错误:', err.message)
@@ -7308,7 +7430,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, owner_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, owner_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price, total_amount FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -7383,7 +7505,29 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       updateValues.push(order_info.quantity)
       console.log(`[Browser-Sync-Update] 数量: ${order_info.quantity}`)
     }
-    // purchase_price 不再由同步覆盖：下单时已通过asyncBought准确抓取单价
+    // 下单时抓到的非零金额最可信，同步不得覆盖；但首次抓取为 0 时，
+    // 允许平台同步结果补写。实付总额有明确字段时优先使用；单件订单
+    // 只有单价返回时，可安全地同时补齐实付总额。
+    const syncedPurchasePrice = Number(order_info.purchase_price || 0)
+    const syncedTotalAmount = Number(order_info.total_amount || order_info.totalAmount || 0)
+    if (Number(localOrder.purchase_price || 0) <= 0 && syncedPurchasePrice > 0) {
+      updateFields.push('purchase_price=?')
+      updateValues.push(syncedPurchasePrice)
+      console.log(`[Browser-Sync-Update] 补写采购单价: ${syncedPurchasePrice}`)
+    }
+    if (Number(localOrder.total_amount || 0) <= 0 && syncedTotalAmount > 0) {
+      updateFields.push('total_amount=?')
+      updateValues.push(syncedTotalAmount)
+      console.log(`[Browser-Sync-Update] 补写实付总额: ${syncedTotalAmount}`)
+    } else if (
+      Number(localOrder.total_amount || 0) <= 0 &&
+      Number(localOrder.quantity || 0) === 1 &&
+      syncedPurchasePrice > 0
+    ) {
+      updateFields.push('total_amount=?')
+      updateValues.push(syncedPurchasePrice)
+      console.log(`[Browser-Sync-Update] 单件订单按同步价格补写实付总额: ${syncedPurchasePrice}`)
+    }
 
     if (updateFields.length > 0) {
       updateValues.push(localOrder.id)
@@ -7418,7 +7562,11 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       pickup_code: order_info.pickup_code || localOrder.pickup_code || '',
       pickup_address: order_info.pickup_address || localOrder.pickup_address || '',
       goods_name: order_info.goods_name || localOrder.goods_name,
-      goods_image: order_info.goods_image || localOrder.goods_image
+      goods_image: order_info.goods_image || localOrder.goods_image,
+      purchase_price: Number(localOrder.purchase_price || 0) > 0 ? localOrder.purchase_price : syncedPurchasePrice,
+      total_amount: Number(localOrder.total_amount || 0) > 0
+        ? localOrder.total_amount
+        : (syncedTotalAmount > 0 ? syncedTotalAmount : (Number(localOrder.quantity || 0) === 1 ? syncedPurchasePrice : 0))
     }))
   } catch (err) {
     console.error(`[Browser-Sync-Update] Error: ${err.message}`)
@@ -7441,7 +7589,7 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
 
     // 获取本地已绑定的采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, owner_id, account_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
+      'SELECT id, owner_id, account_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price, total_amount FROM purchase_orders WHERE owner_id=? AND platform_order_no IS NOT NULL AND platform_order_no != ?',
       [ownerId, '']
     )
 
@@ -7551,7 +7699,24 @@ app.post('/api/purchase-orders/browser-sync-batch', async (req, res) => {
         updateFields.push('quantity=?')
         updateValues.push(platformOrder.quantity)
       }
-      // purchase_price 不再由同步覆盖：下单时已通过asyncBought准确抓取单价
+      // 与单笔同步保持一致：只补本地为 0 的金额，不覆盖已有非零金额。
+      const syncedPurchasePrice = Number(platformOrder.purchase_price || 0)
+      const syncedTotalAmount = Number(platformOrder.total_amount || platformOrder.totalAmount || 0)
+      if (Number(localOrder.purchase_price || 0) <= 0 && syncedPurchasePrice > 0) {
+        updateFields.push('purchase_price=?')
+        updateValues.push(syncedPurchasePrice)
+      }
+      if (Number(localOrder.total_amount || 0) <= 0 && syncedTotalAmount > 0) {
+        updateFields.push('total_amount=?')
+        updateValues.push(syncedTotalAmount)
+      } else if (
+        Number(localOrder.total_amount || 0) <= 0 &&
+        Number(localOrder.quantity || 0) === 1 &&
+        syncedPurchasePrice > 0
+      ) {
+        updateFields.push('total_amount=?')
+        updateValues.push(syncedPurchasePrice)
+      }
 
       if (updateFields.length > 0) {
         updateValues.push(localOrder.id)

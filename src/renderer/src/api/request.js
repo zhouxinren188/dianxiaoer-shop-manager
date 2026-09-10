@@ -2,6 +2,22 @@
 const BASE_URL = 'http://150.158.54.108:3002'  // 远程服务器
 // const BASE_URL = 'http://localhost:3002'  // 本地开发（调试用）
 
+function isAuthSessionFailure(response, payload) {
+  if (response?.status === 401) return true
+  if (payload?.needsRelogin) return true
+  const message = String(payload?.message || '')
+  return payload?.code === 1 && /(?:未登录|token\s*(?:无效|失效|过期)|登录(?:状态|会话)?(?:已)?失效)/i.test(message)
+}
+
+function clearExpiredAuthSession(message) {
+  localStorage.removeItem('accessToken')
+  localStorage.removeItem('currentUser')
+  localStorage.removeItem('userInfo')
+  window.electronAPI?.invoke('set-auth-token', null).catch(() => {})
+  window.dispatchEvent(new CustomEvent('force-logout', { detail: message }))
+  window.location.hash = '#/login'
+}
+
 async function request(url, options = {}) {
   const { method = 'GET', data, params, timeout = 10000, baseUrl } = options
 
@@ -58,24 +74,18 @@ async function request(url, options = {}) {
     const json = JSON.parse(responseText)
 
     if (json.code !== 0) {
-      // 被踢下线：其他设备登录了同一账号
-      if (json.code === 1 && json.needsRelogin) {
-        localStorage.removeItem('accessToken')
-        localStorage.removeItem('currentUser')
-        localStorage.removeItem('userInfo')
-        window.electronAPI?.invoke('set-auth-token', null).catch(() => {})
-        window.dispatchEvent(new CustomEvent('force-logout', { detail: json.message }))
-        window.location.hash = '#/login'
+      // 被其他桌面端顶下线、令牌过期或服务端判定会话无效时，不能把错误响应
+      // 当作业务数据继续展示，否则首页会一直保留上一次的 0。
+      if (isAuthSessionFailure(res, json)) {
+        clearExpiredAuthSession(json.message || '登录状态已失效，请重新登录')
         const err = new Error(json.message)
         err.needsRelogin = true
+        err.httpStatus = res.status
         throw err
-      }
-      // 401 未登录错误不抛出，由调用方处理
-      if (json.code === 1 && json.message && json.message.includes('登录')) {
-        return json
       }
       const err = new Error(json.message || '请求失败')
       err.code = json.code
+      err.httpStatus = res.status
       if (json.needsRelogin) err.needsRelogin = true
       throw err
     }

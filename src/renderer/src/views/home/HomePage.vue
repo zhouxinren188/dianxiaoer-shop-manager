@@ -62,9 +62,9 @@
         <div class="overview-kpi-card">
           <div class="overview-kpi-content">
             <div class="overview-kpi-info">
-              <p class="overview-kpi-label">{{ overviewPeriodLabel }}采购</p>
+              <p class="overview-kpi-label">{{ overviewPeriodLabel }}订单成本</p>
               <h3 class="overview-kpi-value">¥ {{ formatMoney(activeOverviewStats.purchaseAmount) }}</h3>
-              <p class="overview-kpi-sub">{{ formatPurchaseCount(activeOverviewStats) }}</p>
+              <p class="overview-kpi-sub">{{ formatOrderCostCoverage(activeOverviewStats) }}</p>
             </div>
             <div class="overview-kpi-icon is-purchase">
               <el-icon :size="22"><Goods /></el-icon>
@@ -75,7 +75,7 @@
               {{ formatTrendText(activePurchaseTrendPct, overviewCompareLabel) }}
             </span>
             <span v-else class="overview-status is-ready">完整自然日</span>
-            <span class="overview-kpi-note">含采购运费</span>
+            <span class="overview-kpi-note">{{ formatActualPurchaseNote(activeOverviewStats) }}</span>
           </div>
         </div>
 
@@ -106,7 +106,7 @@
                 <span>{{ overviewPeriodLabel }}预估毛利</span>
                 <el-tooltip
                   placement="top"
-                  content="预估毛利 = 销售额 - 采购金额（含运费）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗"
+                  content="预估毛利 = 销售额 - 本期销售订单归属成本（跨日采购回算到销售日）- 京东佣金（8%）- 云仓运费（约10元/单）- 快车消耗。成本未归集完整时仍按已归集成本显示暂估值，并提示待补成本单数。"
                 >
                   <span class="overview-profit-help" aria-label="预估毛利计算口径">?</span>
                 </el-tooltip>
@@ -129,7 +129,7 @@
           </div>
           <div class="overview-kpi-footer">
             <span class="overview-status" :class="{ 'is-ready': hasMetricValue(activeOverviewStats.estimatedProfit) }">
-              {{ hasMetricValue(activeOverviewStats.estimatedProfit) ? '经营预估值' : '成本数据未完整' }}
+              {{ formatProfitValueType(activeOverviewStats) }}
             </span>
           </div>
         </div>
@@ -318,6 +318,7 @@ import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
 import { calculateDashboardProfit } from '@/utils/dashboard-profit'
+import { loadDashboardStatsWithRetry } from '@/utils/dashboard-stats'
 import { getLatestLocalJdExpressPeriods } from '@/services/jd-express-spend-sync'
 
 const currentUser = localStorage.getItem('currentUser') || '管理员'
@@ -391,8 +392,17 @@ function formatOrderCountPlain(s) {
   return `共 ${total} 笔，${details.join('，')}`
 }
 
-function formatPurchaseCount(s) {
-  return `共 ${Number(s?.purchaseCount || 0)} 笔采购单`
+function formatOrderCostCoverage(s) {
+  const total = Number(s?.orderCount || 0)
+  const known = Number(s?.costKnownOrderCount ?? s?.purchaseCount ?? 0)
+  const pending = Number(s?.costPendingOrderCount ?? Math.max(0, total - known))
+  if (total <= 0) return '暂无销售订单'
+  if (pending > 0) return `已归集 ${known}/${total} 单，${pending} 单待补成本`
+  return `已归集 ${known}/${total} 单成本`
+}
+
+function formatActualPurchaseNote(s) {
+  return `实际采购 ¥${formatMoney(s?.actualPurchaseAmount || 0)}`
 }
 
 function hasMetricValue(value) {
@@ -415,13 +425,22 @@ function formatAdSpendStatus(period) {
 }
 
 function formatProfitStatus(period) {
+  const pendingCostCount = Number(period?.costPendingOrderCount || 0)
   if (!hasMetricValue(period?.estimatedProfit)) return '等待快车消耗同步'
   const rate = hasMetricValue(period?.estimatedProfitRate)
     ? Number(period.estimatedProfitRate)
     : (Number(period?.salesAmount || 0) > 0
         ? Number(period.estimatedProfit) / Number(period.salesAmount) * 100
         : 0)
+  if (pendingCostCount > 0) {
+    return `暂估毛利率 ${rate.toFixed(1)}%，${pendingCostCount} 单成本待归集`
+  }
   return `预估毛利率 ${rate.toFixed(1)}%`
+}
+
+function formatProfitValueType(period) {
+  if (!hasMetricValue(period?.estimatedProfit)) return '等待快车消耗'
+  return Number(period?.costPendingOrderCount || 0) > 0 ? '部分成本暂估值' : '经营预估值'
 }
 
 function formatTrendText(percent, compareLabel) {
@@ -461,10 +480,10 @@ const activePurchaseTrendPct = computed(() => (
 
 async function loadStats({ force = false } = {}) {
   try {
-    const data = await get('/api/dashboard-stats', force ? { _ts: Date.now() } : undefined)
-    if (data) {
-      stats.value = { ...stats.value, ...data }
-    }
+    const data = await loadDashboardStatsWithRetry((attempt) => (
+      get('/api/dashboard-stats', force || attempt > 0 ? { _ts: Date.now() } : undefined)
+    ))
+    stats.value = { ...stats.value, ...data }
     return true
   } catch (err) {
     console.error('[HomePage] 加载统计失败:', err.message)

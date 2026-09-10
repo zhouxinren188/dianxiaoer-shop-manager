@@ -41,9 +41,29 @@ describe('首页预估毛利', () => {
     })
   })
 
+  it('销售订单成本未归集完整时仍展示暂估毛利并标记口径不完整', () => {
+    expect(calculateDashboardProfit({
+      salesAmount: 1000,
+      purchaseAmount: 300,
+      costPendingOrderCount: 2,
+      cloudOrderCount: 0,
+      adSpend: 50
+    })).toMatchObject({
+      costComplete: false,
+      estimatedProfit: 570,
+      estimatedProfitRate: 57
+    })
+  })
+
   it('首页在快车消耗更新后实时计算毛利', () => {
     expect(homeSource).toContain('calculateDashboardProfit(')
     expect(homeSource).toContain('{{ overviewPeriodLabel }}预估毛利')
+    expect(homeSource).toContain('{{ overviewPeriodLabel }}订单成本')
+    expect(homeSource).toContain('formatOrderCostCoverage(activeOverviewStats)')
+    expect(homeSource).toContain('formatActualPurchaseNote(activeOverviewStats)')
+    expect(homeSource).toContain('跨日采购回算到销售日')
+    expect(homeSource).toContain('部分成本暂估值')
+    expect(homeSource).toContain('单成本待归集')
     expect(homeSource).toContain("'is-negative'")
   })
 
@@ -83,7 +103,9 @@ describe('首页预估毛利', () => {
   })
 
   it('单个未知或失败店铺不隐藏已同步快车店铺的历史消耗', () => {
-    expect(serverSource).toContain('activeStoreCount > 0 && syncedStoreCount === activeStoreCount')
-    expect(serverSource).not.toContain('knownStoreCount === jdStoreCount && syncedStoreCount === activeStoreCount')
+    expect(serverSource).toContain('const hasStoredAdSpend = Boolean(adSpend.first_date)')
+    expect(serverSource).toContain('jdStoreCount === 0 || hasStoredAdSpend || syncedStoreCount > 0')
+    expect(serverSource).toContain('adTotalStoreCount: activeStoreCount + unknownStoreCount')
+    expect(serverSource).not.toContain('syncedStoreCount === activeStoreCount')
   })
 })

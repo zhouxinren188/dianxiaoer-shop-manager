@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../src/main/purchase-order-capture.js', import.meta.url), 'utf8')
+const serverSource = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8')
 
 describe('淘宝采购金额为 0 的付款成功页补抓', () => {
   it('只为首次未抓到实付金额的淘宝/天猫订单保留补抓状态', () => {
@@ -42,5 +43,14 @@ describe('淘宝采购金额为 0 的付款成功页补抓', () => {
     expect(source).toContain("purchaseRow.status === 'ordered'")
     expect(source).toContain("body: JSON.stringify({ status: 'pending' })")
     expect(source).toContain('statusUpdated: true')
+  })
+
+  it('同步订单只补写本地为零的金额，不覆盖已有非零金额', () => {
+    expect(serverSource).toContain('Number(localOrder.purchase_price || 0) <= 0 && syncedPurchasePrice > 0')
+    expect(serverSource).toContain('Number(localOrder.total_amount || 0) <= 0 && syncedTotalAmount > 0')
+    expect(serverSource).toContain("updateFields.push('purchase_price=?')")
+    expect(serverSource).toContain("updateFields.push('total_amount=?')")
+    expect(serverSource).toContain('单件订单按同步价格补写实付总额')
+    expect(serverSource).not.toContain('purchase_price 不再由同步覆盖')
   })
 })

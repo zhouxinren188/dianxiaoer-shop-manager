@@ -18,6 +18,7 @@ export function calculateDashboardProfit(period = {}) {
     period.adSpend !== undefined &&
     period.adSpend !== '' &&
     Number.isFinite(Number(period.adSpend))
+  const pendingCostOrderCount = Math.max(0, Math.trunc(toFiniteNumber(period.costPendingOrderCount)))
   const jdCommissionAmount = roundMoney(salesAmount * JD_COMMISSION_RATE)
   const cloudShippingAmount = roundMoney(cloudOrderCount * CLOUD_SHIPPING_FEE_PER_ORDER)
 
@@ -26,6 +27,7 @@ export function calculateDashboardProfit(period = {}) {
       ...period,
       jdCommissionAmount,
       cloudShippingAmount,
+      costComplete: pendingCostOrderCount === 0,
       estimatedProfit: null,
       estimatedProfitRate: null
     }
@@ -40,6 +42,7 @@ export function calculateDashboardProfit(period = {}) {
     adSpend,
     jdCommissionAmount,
     cloudShippingAmount,
+    costComplete: pendingCostOrderCount === 0,
     estimatedProfit,
     estimatedProfitRate: salesAmount > 0
       ? Math.round((estimatedProfit / salesAmount * 100 + Number.EPSILON) * 10) / 10
