@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url)
 const { SALES_PRODUCT_CARD_RENDERER_SOURCE } = require('../src/main/sales-product-card-script')
 
 const mainSource = readFileSync(new URL('../src/main/purchase-order-capture.js', import.meta.url), 'utf8')
+const sharedCardSource = readFileSync(new URL('../src/main/sales-product-card-script.js', import.meta.url), 'utf8')
 const overlayDeclaration = 'const PRODUCT_INFO_OVERLAY = '
 const overlayStart = mainSource.indexOf(overlayDeclaration)
 const literalStart = mainSource.indexOf('`', overlayStart + overlayDeclaration.length)
@@ -66,5 +67,12 @@ describe('采购淘宝商品页手动刷新浮窗', () => {
     expect(mainSource).toContain("require('./sales-product-card-script')")
     expect(runtimeOverlaySource).toContain('renderSalesProductCard({')
     expect(SALES_PRODUCT_CARD_RENDERER_SOURCE).toContain('销售规格：')
+  })
+
+  it('正式版字节码中使用静态注入源码，不依赖 Function#toString', () => {
+    expect(sharedCardSource).toContain('const SALES_PRODUCT_CARD_RENDERER_SOURCE = String.raw`')
+    expect(sharedCardSource).not.toContain('renderSalesProductCard.toString()')
+    expect(SALES_PRODUCT_CARD_RENDERER_SOURCE).not.toContain('[native code]')
+    expect(() => new Function(`return ${SALES_PRODUCT_CARD_RENDERER_SOURCE}`)).not.toThrow()
   })
 })

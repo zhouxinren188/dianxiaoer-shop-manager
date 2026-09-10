@@ -1,8 +1,10 @@
 'use strict'
 
 // 采购页与“搜同款”页都展示同一份销售订单商品信息。
-// 这里输出可直接注入 BrowserWindow 页面的纯函数源码，避免两个窗口各维护一套卡片。
-function renderSalesProductCard(options) {
+// 这里输出可直接注入 BrowserWindow 页面的静态函数源码，避免两个窗口各维护一套卡片。
+// 注意：主进程正式包会编译为 bytenode 字节码，运行时 Function#toString() 只能得到
+// "[native code]"，因此注入页面的源码必须直接保存为字符串，不能在运行时序列化函数。
+const SALES_PRODUCT_CARD_RENDERER_SOURCE = String.raw`(function renderSalesProductCard(options) {
   var info = options && options.info ? options.info : {}
   var overlay = options && options.overlay
   var body = options && options.body
@@ -110,9 +112,7 @@ function renderSalesProductCard(options) {
     }
     body.appendChild(contact)
   }
-}
-
-const SALES_PRODUCT_CARD_RENDERER_SOURCE = '(' + renderSalesProductCard.toString() + ')'
+})`
 
 module.exports = {
   SALES_PRODUCT_CARD_RENDERER_SOURCE
