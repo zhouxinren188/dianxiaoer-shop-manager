@@ -222,6 +222,7 @@ function getBusinessServerFiles() {
     { local: path.join(ROOT, 'server', 'routes', 'desktop-command-channel.js'), remote: `${BUSINESS_REMOTE_DIR}/routes/desktop-command-channel.js` },
     { local: path.join(ROOT, 'server', 'services', 'desktop-command-channel-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-channel-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'desktop-command-protocol.js'), remote: `${BUSINESS_REMOTE_DIR}/services/desktop-command-protocol.js` },
+    { local: path.join(ROOT, 'server', 'services', 'dashboard-overview-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/dashboard-overview-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-api-client.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-api-client.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-order-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-order-service.js` },
     { local: path.join(ROOT, 'server', 'services', 'cloud-warehouse-routing-service.js'), remote: `${BUSINESS_REMOTE_DIR}/services/cloud-warehouse-routing-service.js` },

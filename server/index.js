@@ -70,6 +70,7 @@ const {
   assertMachineCode,
   canManageMachineBinding
 } = require('./services/cloud-warehouse-protocol')
+const { buildDashboardOverviewPayload } = require('./services/dashboard-overview-service')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -3922,7 +3923,7 @@ app.post('/api/jd-express/spend-sync', async (req, res) => {
   }
 })
 
-app.get('/api/dashboard-stats', async (req, res) => {
+async function handleDashboardStats(req, res) {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
     let r1 = [{ amt: 0, cnt: 0 }]
@@ -4263,7 +4264,7 @@ app.get('/api/dashboard-stats', async (req, res) => {
       ...adShared
     }}
 
-    res.json(ok({
+    const dashboardPeriods = {
       today: fmt(r1, fmtWh(whToday), salesCost.today_amt, salesCost.today_cnt, actualPurchase.today_amt, actualPurchase.today_cnt, adSpend.today_amt),
       yesterday: fmt(r2, [], salesCost.yesterday_amt, salesCost.yesterday_cnt, actualPurchase.yesterday_amt, actualPurchase.yesterday_cnt, adSpend.yesterday_amt),
       yesterdayFull: fmt(r7, fmtWh(whYesterday), salesCost.yesterday_full_amt, salesCost.yesterday_full_cnt, actualPurchase.yesterday_full_amt, actualPurchase.yesterday_full_cnt, adSpend.yesterday_amt),
@@ -4271,12 +4272,17 @@ app.get('/api/dashboard-stats', async (req, res) => {
       lastMonth: fmt(r4, [], salesCost.last_month_amt, salesCost.last_month_cnt, actualPurchase.last_month_amt, actualPurchase.last_month_cnt, adSpend.last_month_amt),
       thisYear: fmt(r5, fmtWh(whYear), salesCost.year_amt, salesCost.year_cnt, actualPurchase.year_amt, actualPurchase.year_cnt, adSpend.year_amt),
       lastYear: fmt(r6, [], salesCost.last_year_amt, salesCost.last_year_cnt, actualPurchase.last_year_amt, actualPurchase.last_year_cnt, adSpend.last_year_amt)
-    }))
+    }
+    res.json(ok(buildDashboardOverviewPayload(dashboardPeriods)))
   } catch (err) {
     console.error('[Dashboard Stats] 错误:', err.message)
     res.status(500).json(fail(err.message))
   }
-})
+}
+
+// 桌面端保留原接口；小程序使用语义明确的新地址。两者共享查询与计算口径。
+app.get('/api/dashboard-stats', handleDashboardStats)
+app.get('/api/dashboard/operating-overview', handleDashboardStats)
 
 // 销售趋势（近30天每日销售额和订单数）
 app.get('/api/sales-trend', async (req, res) => {
