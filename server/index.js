@@ -71,6 +71,10 @@ const {
   canManageMachineBinding
 } = require('./services/cloud-warehouse-protocol')
 const { buildDashboardOverviewPayload } = require('./services/dashboard-overview-service')
+const {
+  buildSettlementOverview,
+  normalizeSettlementMetrics
+} = require('./services/settlement-overview-service')
 
 // 版本标记 - 用于验证代码是否更新
 const APP_VERSION = 'v1.0.34-inventory-identity'
@@ -4283,6 +4287,105 @@ async function handleDashboardStats(req, res) {
 // 桌面端保留原接口；小程序使用语义明确的新地址。两者共享查询与计算口径。
 app.get('/api/dashboard-stats', handleDashboardStats)
 app.get('/api/dashboard/operating-overview', handleDashboardStats)
+
+// 京东订单结算概览。首页始终读取服务端快照；已登录桌面端按需从京麦更新每店数据。
+app.post('/api/store-settlement-metrics/:storeId', async (req, res) => {
+  try {
+    const storeId = Number(req.params.storeId)
+    if (!Number.isSafeInteger(storeId) || storeId <= 0) {
+      return res.status(400).json(fail('无效的店铺编号'))
+    }
+
+    const accessibleStoreIds = await getAccessibleStoreIds(req.user)
+    if (!accessibleStoreIds.includes(storeId)) {
+      return res.status(403).json(fail('无权更新此店铺'))
+    }
+
+    const [[store]] = await pool.execute(
+      "SELECT id FROM stores WHERE id = ? AND LOWER(platform) = 'jd' LIMIT 1",
+      [storeId]
+    )
+    if (!store) return res.status(400).json(fail('订单结算概览仅支持京东店铺'))
+
+    const source = req.body || {}
+    const moneyFields = [
+      source.pendingAmount,
+      source.yesterdaySettledAmount,
+      source.walletBalance,
+      source.frozenAmount,
+      source.withdrawableAmount
+    ]
+    if (moneyFields.some(value => !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 1000000000000)) {
+      return res.status(400).json(fail('结算金额格式错误'))
+    }
+    if (!Number.isSafeInteger(Number(source.pendingOrderCount)) || Number(source.pendingOrderCount) < 0) {
+      return res.status(400).json(fail('待结算订单数格式错误'))
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(source.statisticsDate || ''))) {
+      return res.status(400).json(fail('结算统计日期格式错误'))
+    }
+
+    const metrics = normalizeSettlementMetrics(source)
+    await pool.execute(
+      `INSERT INTO store_settlement_metrics
+       (store_id, pending_amount, pending_order_count, yesterday_settled_amount,
+        wallet_balance, frozen_amount, withdrawable_amount, statistics_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       pending_amount=VALUES(pending_amount),
+       pending_order_count=VALUES(pending_order_count),
+       yesterday_settled_amount=VALUES(yesterday_settled_amount),
+       wallet_balance=VALUES(wallet_balance),
+       frozen_amount=VALUES(frozen_amount),
+       withdrawable_amount=VALUES(withdrawable_amount),
+       statistics_date=VALUES(statistics_date),
+       updated_at=NOW()`,
+      [
+        storeId,
+        metrics.pendingAmount,
+        metrics.pendingOrderCount,
+        metrics.yesterdaySettledAmount,
+        metrics.walletBalance,
+        metrics.frozenAmount,
+        metrics.withdrawableAmount,
+        metrics.statisticsDate
+      ]
+    )
+
+    res.json(ok({ storeId, ...metrics }))
+  } catch (err) {
+    console.error('[Settlement Overview] 写入错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
+
+app.get('/api/settlement-overview', async (req, res) => {
+  try {
+    const storeIds = await getAccessibleStoreIds(req.user)
+    if (!storeIds.length) return res.json(ok(buildSettlementOverview([])))
+
+    const placeholders = storeIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT s.id AS store_id, s.name AS store_name,
+              m.pending_amount, m.pending_order_count, m.yesterday_settled_amount,
+              m.wallet_balance, m.frozen_amount, m.withdrawable_amount,
+              m.statistics_date, m.updated_at
+       FROM stores s
+       LEFT JOIN store_settlement_metrics m ON m.store_id = s.id
+       WHERE s.id IN (${placeholders})
+         AND LOWER(s.platform) = 'jd'
+         AND s.status = 'enabled'
+         AND s.setup_status = 'active'
+       ORDER BY s.id`,
+      storeIds
+    )
+
+    res.json(ok(buildSettlementOverview(rows)))
+  } catch (err) {
+    console.error('[Settlement Overview] 查询错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+})
 
 // 销售趋势（近30天每日销售额和订单数）
 app.get('/api/sales-trend', async (req, res) => {

@@ -38,6 +38,10 @@ const {
   updateAftersaleAutoSyncAuth,
   stopAftersaleAutoSync
 } = require('./aftersale-fetch')
+const {
+  closeAllSettlementWindows,
+  registerSettlementFetchIpc
+} = require('./settlement-fetch')
 const { openStoreBackendBrowser, closeAllStoreBackendBrowsers } = require('./store-backend-browser')
 const { attachWarehouseRegionTool } = require('./store-backend-warehouse-tool')
 const {
@@ -126,6 +130,7 @@ function requestApplicationQuit(source = 'user') {
 
   desktopCommandChannel?.stop()
   stopAftersaleAutoSync()
+  closeAllSettlementWindows()
   closeAllJdExpressWindows()
 
   // 某些登录/采购窗口会用 preventDefault() 等待异步保存，网络异常时可能
@@ -1228,6 +1233,9 @@ app.whenReady().then(async () => {
 
   // 注册售后纠纷指标获取 IPC
   registerAftersaleFetchIpc(mainWindow)
+
+  // 注册京东订单结算概览同步 IPC
+  registerSettlementFetchIpc(mainWindow)
 
   // 注册采购账号登录窗口 IPC
   registerPurchaseAccountIpc(mainWindow)

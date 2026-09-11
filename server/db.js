@@ -763,6 +763,25 @@ async function initDB() {
     try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_consumer_invoices INT DEFAULT 0 AFTER pending_logistics_exceptions') } catch (e) { /* 字段已存在 */ }
     try { await connection.execute('ALTER TABLE store_aftersale_metrics ADD COLUMN pending_invoices_json LONGTEXT AFTER pending_consumer_invoices') } catch (e) { /* 字段已存在 */ }
 
+    // 京东订单结算概览（由已登录店小二客户端定时读取京麦后回传）
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS store_settlement_metrics (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        store_id INT NOT NULL,
+        pending_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+        pending_order_count INT NOT NULL DEFAULT 0,
+        yesterday_settled_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+        wallet_balance DECIMAL(16,2) NOT NULL DEFAULT 0,
+        frozen_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+        withdrawable_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
+        statistics_date DATE NOT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_settlement_store (store_id),
+        KEY idx_settlement_statistics_date (statistics_date),
+        CONSTRAINT fk_settlement_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+
     // ======== 采购相关索引优化 ========
     // purchase_orders 表缺少的关键索引（全表扫描是首页加载慢的主因）
     try { await connection.execute('CREATE INDEX idx_owner_id ON purchase_orders(owner_id)') } catch(e) { /* 索引已存在 */ }

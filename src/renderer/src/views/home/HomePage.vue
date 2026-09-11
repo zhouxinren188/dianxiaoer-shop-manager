@@ -256,54 +256,105 @@
         </div>
       </el-col>
       <el-col :span="8">
-        <div class="chart-card">
-          <div class="chart-header">
-            <div class="chart-header-left">
-              <span class="chart-title">待开发票（{{ pendingInvoiceTotal }}）</span>
+        <div class="home-side-stack">
+          <div class="chart-card settlement-card">
+            <div class="chart-header settlement-header">
+              <div class="chart-header-left">
+                <span class="chart-title">订单结算概览</span>
+                <span class="chart-subtitle">京东店铺</span>
+              </div>
+              <el-button
+                class="settlement-refresh"
+                circle
+                plain
+                size="small"
+                :icon="Refresh"
+                :loading="settlementSyncing"
+                aria-label="刷新订单结算概览"
+                title="从京麦重新获取"
+                @click="refreshSettlementOverview"
+              />
+            </div>
+            <div class="settlement-body" v-loading="settlementLoading">
+              <div v-if="settlementHasData" class="settlement-grid">
+                <div class="settlement-metric is-pending">
+                  <span class="settlement-label">待结算金额</span>
+                  <strong>¥{{ formatSettlementMoney(settlementSummary.pendingAmount) }}</strong>
+                  <small>{{ Number(settlementSummary.pendingOrderCount || 0).toLocaleString('zh-CN') }} 笔订单</small>
+                </div>
+                <div class="settlement-metric is-arrived">
+                  <span class="settlement-label">昨日结算到账</span>
+                  <strong v-if="settlementHasYesterdayData">¥{{ formatSettlementMoney(settlementSummary.yesterdaySettledAmount) }}</strong>
+                  <strong v-else class="is-placeholder">--</strong>
+                  <small>{{ settlementSummary.statisticsDate || '等待统计日期' }}</small>
+                </div>
+                <div class="settlement-metric is-wallet">
+                  <span class="settlement-label">钱包余额</span>
+                  <strong>¥{{ formatSettlementMoney(settlementSummary.walletBalance) }}</strong>
+                  <small>可提现 ¥{{ formatSettlementMoney(settlementSummary.withdrawableAmount) }}</small>
+                </div>
+                <div class="settlement-metric is-frozen">
+                  <span class="settlement-label">冻结金额</span>
+                  <strong>¥{{ formatSettlementMoney(settlementSummary.frozenAmount) }}</strong>
+                  <small>{{ settlementCoverageText }}</small>
+                </div>
+              </div>
+              <el-empty v-else description="结算数据等待首次同步" :image-size="48" />
+              <div class="settlement-footer" :class="{ 'is-stale': Number(settlementSummary.staleStoreCount || 0) > 0 }">
+                {{ settlementFreshnessText }}
+              </div>
             </div>
           </div>
-          <div class="chart-body invoice-summary" v-loading="invoiceLoading">
-            <div v-if="pendingInvoices.length" class="invoice-list">
-              <article
-                v-for="invoice in pendingInvoices"
-                :key="`${invoice.storeId}-${invoice.orderId}`"
-                class="invoice-item"
-              >
-                <div class="invoice-item-top">
-                  <div class="invoice-order-wrap">
-                    <span class="invoice-inline-label">订单编号</span>
-                    <button class="invoice-order-link" type="button" @click="openInvoiceOrder(invoice)">
-                      {{ invoice.orderId }}
-                    </button>
-                  </div>
-                  <div class="invoice-top-status">
-                    <div class="invoice-amount-wrap">
-                      <span class="invoice-inline-label">开票金额</span>
-                      <span class="invoice-amount" aria-label="发票金额">¥{{ formatInvoiceAmount(invoice.invoiceAmount) }}</span>
+
+          <div class="chart-card invoice-card">
+            <div class="chart-header">
+              <div class="chart-header-left">
+                <span class="chart-title">待开发票（{{ pendingInvoiceTotal }}）</span>
+              </div>
+            </div>
+            <div class="chart-body invoice-summary" v-loading="invoiceLoading">
+              <div v-if="pendingInvoices.length" class="invoice-list">
+                <article
+                  v-for="invoice in pendingInvoices"
+                  :key="`${invoice.storeId}-${invoice.orderId}`"
+                  class="invoice-item"
+                >
+                  <div class="invoice-item-top">
+                    <div class="invoice-order-wrap">
+                      <span class="invoice-inline-label">订单编号</span>
+                      <button class="invoice-order-link" type="button" @click="openInvoiceOrder(invoice)">
+                        {{ invoice.orderId }}
+                      </button>
                     </div>
-                    <span class="invoice-countdown" aria-label="倒计时" :class="countdownClass(invoice.countdownEndTime)">
-                      {{ formatInvoiceCountdown(invoice.countdownEndTime) }}
-                    </span>
+                    <div class="invoice-top-status">
+                      <div class="invoice-amount-wrap">
+                        <span class="invoice-inline-label">开票金额</span>
+                        <span class="invoice-amount" aria-label="发票金额">¥{{ formatInvoiceAmount(invoice.invoiceAmount) }}</span>
+                      </div>
+                      <span class="invoice-countdown" aria-label="倒计时" :class="countdownClass(invoice.countdownEndTime)">
+                        {{ formatInvoiceCountdown(invoice.countdownEndTime) }}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                <div class="invoice-details-line">
-                  <div class="invoice-company" :title="invoice.companyName || '-'">
-                    <span class="invoice-inline-label">开票主体</span>
-                    <span class="invoice-field-value">{{ invoice.companyName || '-' }}</span>
+                  <div class="invoice-details-line">
+                    <div class="invoice-company" :title="invoice.companyName || '-'">
+                      <span class="invoice-inline-label">开票主体</span>
+                      <span class="invoice-field-value">{{ invoice.companyName || '-' }}</span>
+                    </div>
+                    <div class="invoice-title" :title="invoice.invoiceTitle || '-'">
+                      <span class="invoice-inline-label">发票抬头</span>
+                      <span class="invoice-field-value">{{ invoice.invoiceTitle || '-' }}</span>
+                    </div>
                   </div>
-                  <div class="invoice-title" :title="invoice.invoiceTitle || '-'">
-                    <span class="invoice-inline-label">发票抬头</span>
-                    <span class="invoice-field-value">{{ invoice.invoiceTitle || '-' }}</span>
-                  </div>
-                </div>
-              </article>
+                </article>
+              </div>
+              <div v-else-if="pendingInvoiceTotal > 0" class="invoice-waiting">
+                <strong>{{ pendingInvoiceTotal }}</strong>
+                <span>个待开发票订单</span>
+                <small>明细将在店铺下次同步后显示</small>
+              </div>
+              <el-empty v-else description="暂无待开发票" :image-size="72" />
             </div>
-            <div v-else-if="pendingInvoiceTotal > 0" class="invoice-waiting">
-              <strong>{{ pendingInvoiceTotal }}</strong>
-              <span>个待开发票订单</span>
-              <small>明细将在店铺下次同步后显示</small>
-            </div>
-            <el-empty v-else description="暂无待开发票" :image-size="72" />
           </div>
         </div>
       </el-col>
@@ -317,6 +368,7 @@ import { UserFilled, ShoppingCart, DataLine, Goods, Wallet, Refresh } from '@ele
 import { ElMessage } from 'element-plus'
 import { get } from '@/api/request'
 import { fetchAftersaleMetrics } from '@/api/aftersale'
+import { fetchSettlementOverview } from '@/api/settlement'
 import { calculateDashboardProfit } from '@/utils/dashboard-profit'
 import { loadDashboardStatsWithRetry } from '@/utils/dashboard-stats'
 import { getLatestLocalJdExpressPeriods } from '@/services/jd-express-spend-sync'
@@ -338,6 +390,7 @@ let refreshTimer = null
 let countdownTimer = null
 let invoiceMetricRefreshTimer = null
 let unsubscribeMetricUpdated = null
+let unsubscribeSettlementUpdated = null
 let handleJdExpressSpendSynced = null
 
 async function loadUserInfo() {
@@ -515,6 +568,87 @@ async function refreshOverviewStats() {
   } finally {
     overviewRefreshing.value = false
   }
+}
+
+const emptySettlementSummary = () => ({
+  pendingAmount: 0,
+  pendingOrderCount: 0,
+  yesterdaySettledAmount: 0,
+  walletBalance: 0,
+  frozenAmount: 0,
+  withdrawableAmount: 0,
+  storeCount: 0,
+  matchedStoreCount: 0,
+  yesterdayMatchedStoreCount: 0,
+  staleStoreCount: 0,
+  statisticsDate: '',
+  updatedAt: null
+})
+const settlementSummary = ref(emptySettlementSummary())
+const settlementLoading = ref(false)
+const settlementSyncing = ref(false)
+const settlementHasData = computed(() => Number(settlementSummary.value.matchedStoreCount || 0) > 0)
+const settlementHasYesterdayData = computed(() => Number(settlementSummary.value.yesterdayMatchedStoreCount || 0) > 0)
+const settlementCoverageText = computed(() => {
+  const matched = Number(settlementSummary.value.matchedStoreCount || 0)
+  const total = Number(settlementSummary.value.storeCount || 0)
+  return total > 0 ? `已汇总 ${matched}/${total} 家店铺` : '暂无启用的京东店铺'
+})
+const settlementFreshnessText = computed(() => {
+  const summary = settlementSummary.value
+  const stale = Number(summary.staleStoreCount || 0)
+  if (!summary.updatedAt) return '进入首页后将在后台从京麦同步'
+  const updatedAt = new Date(summary.updatedAt)
+  const timeText = Number.isFinite(updatedAt.getTime())
+    ? updatedAt.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    : '时间未知'
+  return stale > 0 ? `${stale} 家待更新 · 最近 ${timeText}` : `数据已同步 · ${timeText}`
+})
+
+function formatSettlementMoney(value) {
+  return Number(value || 0).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })
+}
+
+async function loadSettlementOverview() {
+  settlementLoading.value = true
+  try {
+    const data = await fetchSettlementOverview({ _ts: Date.now() })
+    settlementSummary.value = { ...emptySettlementSummary(), ...(data?.summary || {}) }
+    return true
+  } catch (error) {
+    console.error('[HomePage] 加载结算概览失败:', error.message)
+    return false
+  } finally {
+    settlementLoading.value = false
+  }
+}
+
+async function syncSettlementOverview({ force = false, notify = false } = {}) {
+  if (!window.electronAPI?.invoke || settlementSyncing.value) return
+  settlementSyncing.value = true
+  try {
+    const result = await window.electronAPI.invoke('sync-settlement-overview', { force })
+    if (!result?.skipped) await loadSettlementOverview()
+    if (notify) {
+      if (result?.success) {
+        ElMessage.success(result.skipped ? '结算数据已是最新' : `结算数据已更新 ${Number(result.successCount || 0)} 家店铺`)
+      } else {
+        ElMessage.warning(result?.message || '没有店铺完成结算数据更新，请检查京东登录状态')
+      }
+    }
+  } catch (error) {
+    console.error('[HomePage] 同步结算概览失败:', error.message)
+    if (notify) ElMessage.error('结算数据刷新失败: ' + error.message)
+  } finally {
+    settlementSyncing.value = false
+  }
+}
+
+function refreshSettlementOverview() {
+  syncSettlementOverview({ force: true, notify: true })
 }
 
 const pendingInvoiceTotal = ref(0)
@@ -717,6 +851,10 @@ onMounted(() => {
   loadOverviewStats()
   loadTrend()
   loadPendingInvoiceTotal()
+  loadSettlementOverview().finally(() => {
+    // 已有缓存先立即展示；只有缓存过期或不完整时主进程才会回源京麦。
+    syncSettlementOverview()
+  })
   handleJdExpressSpendSynced = (event) => {
     const localPeriods = event?.detail?.localPeriods
     applyLocalJdExpressPeriods(localPeriods)
@@ -730,6 +868,9 @@ onMounted(() => {
       invoiceMetricRefreshTimer = setTimeout(() => {
         loadPendingInvoiceTotal()
       }, 100)
+    })
+    unsubscribeSettlementUpdated = window.electronAPI.onUpdate('settlement-overview-updated', () => {
+      loadSettlementOverview()
     })
   }
   countdownTimer = setInterval(() => {
@@ -751,6 +892,10 @@ onUnmounted(() => {
   if (unsubscribeMetricUpdated) {
     unsubscribeMetricUpdated()
     unsubscribeMetricUpdated = null
+  }
+  if (unsubscribeSettlementUpdated) {
+    unsubscribeSettlementUpdated()
+    unsubscribeSettlementUpdated = null
   }
   if (invoiceMetricRefreshTimer) {
     clearTimeout(invoiceMetricRefreshTimer)
@@ -1041,6 +1186,117 @@ onUnmounted(() => {
   border: 1px solid #f0f0f0;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   overflow: hidden;
+}
+
+.home-side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chart-header.settlement-header {
+  padding: 13px 16px;
+}
+
+.settlement-refresh {
+  color: #0f9f7a;
+  border-color: #b9eadc;
+}
+
+.settlement-refresh:hover {
+  color: #087c60;
+  border-color: #84d7bf;
+  background: #effbf7;
+}
+
+.settlement-body {
+  padding: 10px 12px 0;
+  min-height: 176px;
+}
+
+.settlement-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.settlement-metric {
+  position: relative;
+  min-width: 0;
+  padding: 9px 11px 8px 13px;
+  border: 1px solid #e9edf4;
+  border-radius: 9px;
+  background: #fbfcfe;
+  overflow: hidden;
+}
+
+.settlement-metric::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  border-radius: 9px 0 0 9px;
+  background: #10b981;
+}
+
+.settlement-metric.is-arrived::before { background: #2b5aed; }
+.settlement-metric.is-wallet::before { background: #8b5cf6; }
+.settlement-metric.is-frozen::before { background: #f59e0b; }
+
+.settlement-label,
+.settlement-metric small {
+  display: block;
+  color: #8b95a5;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settlement-metric strong {
+  display: block;
+  margin: 2px 0;
+  color: #273245;
+  font-size: 17px;
+  line-height: 22px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settlement-metric strong.is-placeholder {
+  color: #b6bdc9;
+}
+
+.settlement-footer {
+  margin-top: 9px;
+  padding: 7px 2px 8px;
+  color: #10a37f;
+  font-size: 11px;
+  text-align: center;
+}
+
+.settlement-footer.is-stale {
+  color: #b7791f;
+}
+
+.invoice-card .chart-header {
+  padding: 12px 16px;
+}
+
+.home-side-stack .invoice-summary {
+  min-height: 108px;
+  padding: 8px 10px;
+}
+
+.home-side-stack .invoice-list {
+  height: 112px;
+}
+
+.home-side-stack .invoice-item {
+  padding: 8px 10px;
 }
 
 .chart-header {

@@ -381,6 +381,7 @@ async function readTaobaoSearchAuthenticationPageState(
         needVerification: false,
         frameCount: inspected,
         frameHost,
+        authFrameIsMain: frame === mainFrame,
         mainReadyState
       }
     }
@@ -393,6 +394,7 @@ async function readTaobaoSearchAuthenticationPageState(
         needVerification: true,
         frameCount: inspected,
         frameHost,
+        authFrameIsMain: frame === mainFrame,
         mainReadyState
       }
     }
@@ -435,6 +437,7 @@ async function readTaobaoSearchAuthenticationPageState(
           needVerification: false,
           frameCount: inspected,
           frameHost,
+          authFrameIsMain: frame === mainFrame,
           readyState: snapshot.readyState || '',
           mainReadyState
         }
@@ -687,6 +690,7 @@ async function waitForDedicatedTaobaoLoginStable(
   const startedAt = Date.now()
   let stableSignature = ''
   let stableSince = 0
+  let ignoredEmbeddedAuthenticationLogged = false
   let latest = { ready: false, url: '', reason: 'login_pending' }
   while (Date.now() - startedAt < timeoutMs) {
     const win = state?.loginWin
@@ -694,16 +698,38 @@ async function waitForDedicatedTaobaoLoginStable(
     const url = win.webContents.getURL()
     const authenticationPage = await readTaobaoSearchAuthenticationPageState(win)
     latest = { ...latest, url }
+    const cookies = await state.ses.cookies.get({})
+    const token = await getTaobaoMtopToken(state.ses)
+    const pageReady = isTaobaoSearchDocumentReady(authenticationPage, win.webContents)
+    const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(win.webContents)
+    const embeddedAuthenticationIgnored = shouldIgnoreEmbeddedTaobaoAuthentication(authenticationPage, {
+      carrier: isTaobaoSearchCarrierUrl(url),
+      pageReady,
+      mainFrameLoading,
+      loginCookieReady: hasTaobaoLoginCookie(cookies),
+      token
+    })
+    const effectiveAuthenticationPage = embeddedAuthenticationIgnored
+      ? { ...authenticationPage, needLogin: false, needVerification: false }
+      : authenticationPage
+    if (embeddedAuthenticationIgnored && !ignoredEmbeddedAuthenticationLogged) {
+      ignoredEmbeddedAuthenticationLogged = true
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '快速登录回跳后忽略承载页残留认证子框架，继续稳定性复核: frameHost=' +
+          (authenticationPage.frameHost || 'unknown')
+      )
+    }
     const loginOrVerificationPending = isTaobaoLoginPageUrl(url) ||
       isTaobaoVerificationUrl(url) ||
-      authenticationPage.needLogin ||
-      authenticationPage.needVerification ||
-      authenticationPage.automaticLoginPending
+      effectiveAuthenticationPage.needLogin ||
+      effectiveAuthenticationPage.needVerification ||
+      effectiveAuthenticationPage.automaticLoginPending
     if (loginOrVerificationPending) {
       if (!win.isVisible()) {
         showDedicatedLoginWindow(
           state,
-          authenticationPage.needVerification || isTaobaoVerificationUrl(url)
+          effectiveAuthenticationPage.needVerification || isTaobaoVerificationUrl(url)
             ? '淘宝同款专用账号 - 请完成安全验证'
             : '淘宝同款专用账号 - 请登录淘宝'
         )
@@ -715,7 +741,7 @@ async function waitForDedicatedTaobaoLoginStable(
       continue
     }
 
-    if (shouldHideDedicatedLoginWindow(url, authenticationPage) && win.isVisible()) {
+    if (shouldHideDedicatedLoginWindow(url, effectiveAuthenticationPage) && win.isVisible()) {
       win.setTitle('淘宝同款专用账号 - 登录成功，正在准备搜索环境')
       win.hide()
       state.loginPromptVisible = false
@@ -726,11 +752,7 @@ async function waitForDedicatedTaobaoLoginStable(
       )
     }
 
-    const cookies = await state.ses.cookies.get({})
-    const token = await getTaobaoMtopToken(state.ses)
     const identity = buildTaobaoSessionIdentity(cookies, token)
-    const pageReady = isTaobaoSearchDocumentReady(authenticationPage, win.webContents)
-    const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(win.webContents)
     latest = {
       ready: false,
       url,
@@ -904,6 +926,22 @@ function buildTaobaoLoginResumeResponse(loginState = {}) {
   }
 }
 
+function shouldIgnoreEmbeddedTaobaoAuthentication(authenticationPage = {}, context = {}) {
+  const hasAuthenticationSignal = authenticationPage.needLogin === true ||
+    authenticationPage.needVerification === true
+  if (!hasAuthenticationSignal || authenticationPage.authFrameIsMain !== false) return false
+
+  // 快速登录回跳后，淘宝的承载页可能短暂保留一个已失效的登录/验证 iframe。
+  // 只有主页面已回到固定承载页、登录 Cookie 与 MTOP Token 都有效且主 frame
+  // 已停止加载时才忽略该子 frame。真正的主 frame 登录/风控页始终不能放行；
+  // 后续 MTOP 若返回风控码，也会继续走显式验证流程。
+  return context.carrier === true &&
+    context.pageReady === true &&
+    context.mainFrameLoading === false &&
+    context.loginCookieReady === true &&
+    !!String(context.token || '')
+}
+
 async function openDedicatedTaobaoSearchLogin(
   state,
   reason = 'login_required',
@@ -989,6 +1027,7 @@ async function waitForTaobaoSearchCarrierReady(
   const startedAt = Date.now()
   let stableSignature = ''
   let stableSince = 0
+  let ignoredEmbeddedAuthenticationLogged = false
   let latest = { ready: false, reason: 'carrier_not_ready', url: '' }
   while (Date.now() - startedAt < timeoutMs) {
     const win = state?.win
@@ -1001,6 +1040,21 @@ async function waitForTaobaoSearchCarrierReady(
     const carrier = isTaobaoSearchCarrierUrl(url)
     const pageReady = isTaobaoSearchDocumentReady(authenticationPage, win.webContents)
     const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(win.webContents)
+    const embeddedAuthenticationIgnored = shouldIgnoreEmbeddedTaobaoAuthentication(authenticationPage, {
+      carrier,
+      pageReady,
+      mainFrameLoading,
+      loginCookieReady,
+      token
+    })
+    if (embeddedAuthenticationIgnored && !ignoredEmbeddedAuthenticationLogged) {
+      ignoredEmbeddedAuthenticationLogged = true
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '搜索承载页忽略残留认证子框架并继续准备: frameHost=' +
+          (authenticationPage.frameHost || 'unknown')
+      )
+    }
     latest = {
       ready: false,
       reason: 'carrier_not_ready',
@@ -1012,10 +1066,12 @@ async function waitForTaobaoSearchCarrierReady(
       inspectionTimedOut: authenticationPage.inspectionTimedOut === true,
       loading,
       mainFrameLoading,
-      loginCookieReady
+      loginCookieReady,
+      embeddedAuthenticationIgnored
     }
     if (carrier && pageReady && !mainFrameLoading && loginCookieReady && token &&
-      !authenticationPage.needLogin && !authenticationPage.needVerification &&
+      (!authenticationPage.needLogin || embeddedAuthenticationIgnored) &&
+      (!authenticationPage.needVerification || embeddedAuthenticationIgnored) &&
       !authenticationPage.automaticLoginPending) {
       const tokenFingerprint = shortFingerprint(token)
       const signature = [url, tokenFingerprint, Number(state.sessionGeneration || 0)].join('|')
@@ -1329,6 +1385,7 @@ async function waitForTaobaoSearchAuthentication(
   let stableSignature = ''
   let stableSince = 0
   let automaticLoginDetectedAt = 0
+  let ignoredEmbeddedAuthenticationLogged = false
   let latest = {
     ready: false,
     needLogin: false,
@@ -1364,24 +1421,6 @@ async function waitForTaobaoSearchAuthentication(
       await sleep(200)
       continue
     }
-    if (authenticationPage.needLogin) {
-      return {
-        ...latest,
-        needLogin: true,
-        needVerification: false,
-        reason: 'login_frame',
-        frameHost: authenticationPage.frameHost || ''
-      }
-    }
-    if (authenticationPage.needVerification) {
-      return {
-        ...latest,
-        needLogin: false,
-        needVerification: true,
-        reason: 'verification_frame',
-        frameHost: authenticationPage.frameHost || ''
-      }
-    }
     if (automaticLoginDetectedAt) {
       runtimeLog.writeLog(
         'TaobaoSame',
@@ -1399,6 +1438,39 @@ async function waitForTaobaoSearchAuthentication(
     const { loading, mainFrameLoading } = getTaobaoWebContentsLoadingState(state.win.webContents)
     const pageReady = isTaobaoSearchDocumentReady(authenticationPage, state.win.webContents)
     const carrierPage = isTaobaoSearchCarrierUrl(url)
+    const embeddedAuthenticationIgnored = shouldIgnoreEmbeddedTaobaoAuthentication(authenticationPage, {
+      carrier: carrierPage,
+      pageReady,
+      mainFrameLoading,
+      loginCookieReady,
+      token
+    })
+    if (authenticationPage.needLogin && !embeddedAuthenticationIgnored) {
+      return {
+        ...latest,
+        needLogin: true,
+        needVerification: false,
+        reason: 'login_frame',
+        frameHost: authenticationPage.frameHost || ''
+      }
+    }
+    if (authenticationPage.needVerification && !embeddedAuthenticationIgnored) {
+      return {
+        ...latest,
+        needLogin: false,
+        needVerification: true,
+        reason: 'verification_frame',
+        frameHost: authenticationPage.frameHost || ''
+      }
+    }
+    if (embeddedAuthenticationIgnored && !ignoredEmbeddedAuthenticationLogged) {
+      ignoredEmbeddedAuthenticationLogged = true
+      runtimeLog.writeLog(
+        'TaobaoSame',
+        '搜索认证复核忽略承载页残留认证子框架: frameHost=' +
+          (authenticationPage.frameHost || 'unknown')
+      )
+    }
     latest = {
       ready: false,
       needLogin: !loginCookieReady,
@@ -1412,7 +1484,8 @@ async function waitForTaobaoSearchAuthentication(
       pageReady,
       loading,
       mainFrameLoading,
-      carrierPage
+      carrierPage,
+      embeddedAuthenticationIgnored
     }
 
     if (loginCookieReady && token && !mainFrameLoading && pageReady && carrierPage) {
@@ -3732,6 +3805,7 @@ module.exports = {
   mergeSafeRequestDiagnostics,
   classifyTaobaoAuthenticationSnapshot,
   readTaobaoSearchAuthenticationPageState,
+  shouldIgnoreEmbeddedTaobaoAuthentication,
   shouldHideDedicatedLoginWindow,
   shouldClearTaobaoRiskCooldownAfterLogin,
   shouldFinalizeDedicatedTaobaoLogin,

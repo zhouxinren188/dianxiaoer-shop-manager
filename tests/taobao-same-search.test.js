@@ -40,6 +40,7 @@ const {
   mergeSafeRequestDiagnostics,
   classifyTaobaoAuthenticationSnapshot,
   readTaobaoSearchAuthenticationPageState,
+  shouldIgnoreEmbeddedTaobaoAuthentication,
   shouldHideDedicatedLoginWindow,
   shouldClearTaobaoRiskCooldownAfterLogin,
   shouldFinalizeDedicatedTaobaoLogin,
@@ -474,15 +475,53 @@ describe('淘宝按图搜同款', () => {
     await expect(readTaobaoSearchAuthenticationPageState(win)).resolves.toMatchObject({
       needLogin: true,
       needVerification: false,
-      frameHost: 'login.taobao.com'
+      frameHost: 'login.taobao.com',
+      authFrameIsMain: false
     })
 
     loginFrame.url = 'https://sec.taobao.com/verify'
     await expect(readTaobaoSearchAuthenticationPageState(win)).resolves.toMatchObject({
       needLogin: false,
       needVerification: true,
-      frameHost: 'sec.taobao.com'
+      frameHost: 'sec.taobao.com',
+      authFrameIsMain: false
     })
+  })
+
+  it('快速登录成功后仅忽略固定承载页中残留的认证子框架', () => {
+    const healthyCarrier = {
+      carrier: true,
+      pageReady: true,
+      mainFrameLoading: false,
+      loginCookieReady: true,
+      token: 'mtop-token'
+    }
+    expect(shouldIgnoreEmbeddedTaobaoAuthentication({
+      needLogin: false,
+      needVerification: true,
+      authFrameIsMain: false
+    }, healthyCarrier)).toBe(true)
+    expect(shouldIgnoreEmbeddedTaobaoAuthentication({
+      needLogin: true,
+      needVerification: false,
+      authFrameIsMain: false
+    }, healthyCarrier)).toBe(true)
+
+    expect(shouldIgnoreEmbeddedTaobaoAuthentication({
+      needLogin: false,
+      needVerification: true,
+      authFrameIsMain: true
+    }, healthyCarrier)).toBe(false)
+    expect(shouldIgnoreEmbeddedTaobaoAuthentication({
+      needLogin: false,
+      needVerification: true,
+      authFrameIsMain: false
+    }, { ...healthyCarrier, token: '' })).toBe(false)
+    expect(shouldIgnoreEmbeddedTaobaoAuthentication({
+      needLogin: false,
+      needVerification: true,
+      authFrameIsMain: false
+    }, { ...healthyCarrier, carrier: false })).toBe(false)
   })
 
   it('损坏frame的页面脚本不再让承载状态检查永久挂起', async () => {
