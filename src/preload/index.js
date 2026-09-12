@@ -92,6 +92,7 @@ const validOnChannels = [
   'auto-sync-start',
   'auto-sync-result',
   'auto-sync-progress',
+  'auto-sync-cycle-finish',
   'aftersale-auto-sync-start',
   'aftersale-auto-sync-result',
   'aftersale-metric-updated',

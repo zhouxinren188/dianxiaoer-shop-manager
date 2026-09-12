@@ -3649,6 +3649,7 @@ let unsubPddProductLink = null
 let unsubTaobaoSameSource = null
 let unsubAutoSyncResult = null
 let unsubSyncProgress = null
+let unsubAutoSyncCycleFinish = null
 let unsubStoreStatusChanged = null
 let jdSyncAutoStartTimer = null
 
@@ -4427,7 +4428,6 @@ onMounted(async () => {
     })
     unsubAutoSyncResult = window.electronAPI.onUpdate('auto-sync-result', async (data) => {
       console.log('[自动同步] 收到 auto-sync-result:', JSON.stringify(data))
-      mainProcessSyncStatus.value = ''
       autoSyncStatus.value = ''
       if (data.skipped) {
         syncSkipStatus.value = data.message || `${data.storeName || '店铺'}已跳过`
@@ -4454,6 +4454,10 @@ onMounted(async () => {
       if (data.stage === 'secondary') {
         mainProcessSyncStatus.value = data.message || `${data.storeName || '店铺'}二次同步中...`
       }
+    })
+    unsubAutoSyncCycleFinish = window.electronAPI.onUpdate('auto-sync-cycle-finish', (data) => {
+      console.log('[自动同步] 收到 auto-sync-cycle-finish:', JSON.stringify(data))
+      mainProcessSyncStatus.value = ''
     })
     // 监听店铺在线状态变化（心跳检测）
     unsubStoreStatusChanged = window.electronAPI.onUpdate('store-status-changed', (data) => {
@@ -4486,6 +4490,7 @@ onUnmounted(() => {
   if (unsubAutoSyncStart) { unsubAutoSyncStart(); unsubAutoSyncStart = null }
   if (unsubAutoSyncResult) { unsubAutoSyncResult(); unsubAutoSyncResult = null }
   if (unsubSyncProgress) { unsubSyncProgress(); unsubSyncProgress = null }
+  if (unsubAutoSyncCycleFinish) { unsubAutoSyncCycleFinish(); unsubAutoSyncCycleFinish = null }
   if (unsubStoreStatusChanged) { unsubStoreStatusChanged(); unsubStoreStatusChanged = null }
   manualSyncStatus.value = ''
   autoSyncStatus.value = ''

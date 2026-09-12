@@ -10,6 +10,8 @@ const {
   DEFAULT_RESPONSE_CAPTURE_LIMIT,
   ORDER_PAGE_RESPONSE_CAPTURE_LIMIT
 } = require('./sales-order-capture-policy')
+const { runWithConcurrency } = require('./concurrency-pool')
+const { hasValidPlatformCookies } = require('./purchase-order-sync/common')
 
 let submitVendorRemarkImplementation = null
 let stockRemarkQueue = Promise.resolve()
@@ -3412,12 +3414,26 @@ function parseSensitiveInfo(json, orderId) {
 // ============ 自动定时同步 ============
 const AUTO_SYNC_INTERVAL = 10 * 60 * 1000 // 10 分钟
 const AUTO_SYNC_FIRST_DELAY = 60 * 1000   // 启动后 60 秒开始第一次
+const AUTO_SYNC_CONCURRENCY = 2            // 两路店铺并发；单店内部仍严格串行
+const AUTO_SYNC_LANE_STAGGER_MS = 2000     // 第二路错开启动，避免同时冲击京东
+const AUTO_SYNC_STORE_INTERVAL_MS = 5000   // 每条通道连续店铺之间保留原有间隔
 const LOCAL_SERVER = 'http://localhost:3002'
 
 let autoSyncTimer = null
 let autoSyncRunning = false
 let _mainWindow = null  // 存储 mainWindow 引用，供 IPC handler 使用
 const DEVICE_ID = getDeviceId()
+
+function sanitizeAutoSyncLogValue(value, maxLength = 80) {
+  return String(value ?? '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+    .slice(0, maxLength)
+}
+
+function writeAutoSyncRuntimeLog(cycleId, message) {
+  runtimeLog.writeLog('SALES_AUTO_SYNC', `cycle=${cycleId} ${message}`)
+}
 
 function httpGetJson(url) {
   const http = require('http')
@@ -3760,10 +3776,21 @@ async function releaseSyncLock(storeId, type = 'sales', success = true) {
 async function autoSyncAllStores(mainWindow) {
   if (autoSyncRunning) {
     console.log('[AutoSync] 上一次同步尚未完成，跳过')
+    runtimeLog.writeLog('SALES_AUTO_SYNC', 'phase=cycle_skip reason=previous_cycle_running')
     return
   }
   autoSyncRunning = true
+  const cycleId = `AS${Date.now().toString(36)}`
+  const cycleStartedAt = Date.now()
+  const cycleSummary = {
+    eligible: 0,
+    success: 0,
+    failed: 0,
+    skipped: 0,
+    cookieSkipped: 0
+  }
   console.log('[AutoSync] === 开始自动同步订单 ===')
+  writeAutoSyncRuntimeLog(cycleId, `phase=cycle_start concurrency=${AUTO_SYNC_CONCURRENCY}`)
 
   try {
     // 从远程服务器获取所有启用店铺（本地 server.js 的 /api/cookies 无数据）
@@ -3797,10 +3824,11 @@ async function autoSyncAllStores(mainWindow) {
       const ses = session.fromPartition(partitionName)
       const allCookies = await ses.cookies.get({})
       let jdCookies = allCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+      let hasValidJdCookies = hasValidPlatformCookies(jdCookies, 'jd')
       console.log(`[AutoSync] [Cookie检查] 店铺 ${s.name} Session中有 ${jdCookies.length} 个京东Cookie`)
-      // 如果Session无京东Cookie，尝试从数据库恢复（与心跳逻辑一致）
-      if (jdCookies.length === 0) {
-        console.log(`[AutoSync] 店铺 ${s.name} (ID:${s.id}) Session无京东Cookie，尝试从数据库恢复...`)
+      // Cookie 不存在或均已过期时都尝试从服务器恢复，不能只按数量判断。
+      if (!hasValidJdCookies) {
+        console.log(`[AutoSync] 店铺 ${s.name} (ID:${s.id}) Session无有效京东Cookie，尝试从数据库恢复...`)
         try {
           const { restoreCookiesFromDB } = require('./cookie-heartbeat')
           const restored = await restoreCookiesFromDB(s.id, { skipFlush: true })
@@ -3808,16 +3836,22 @@ async function autoSyncAllStores(mainWindow) {
           if (restored) {
             const restoredCookies = await ses.cookies.get({})
             jdCookies = restoredCookies.filter(c => c.domain && (c.domain.includes('jd.com') || c.domain.includes('jd.hk')))
+            hasValidJdCookies = hasValidPlatformCookies(jdCookies, 'jd')
             console.log(`[AutoSync] 店铺 ${s.name} 恢复后有 ${jdCookies.length} 个京东Cookie`)
           }
         } catch (e) {
           console.error(`[AutoSync] 从数据库恢复Cookie失败: ${e.message}`)
         }
       }
-      if (jdCookies.length > 0) {
+      if (hasValidJdCookies) {
         jdStores.push({ store_id: s.id, store_name: s.name })
       } else {
-        console.log(`[AutoSync] 跳过店铺 ${s.name} (ID:${s.id}): 无京东Cookie`)
+        cycleSummary.cookieSkipped += 1
+        console.log(`[AutoSync] 跳过店铺 ${s.name} (ID:${s.id}): 无有效京东Cookie`)
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=precheck_skip reason=no_valid_cookie store_id=${s.id} store_name=${sanitizeAutoSyncLogValue(s.name)} cookie_count=${jdCookies.length}`
+        )
       }
     }
 
@@ -3834,11 +3868,22 @@ async function autoSyncAllStores(mainWindow) {
     }
 
     console.log(`[AutoSync] 待同步店铺: ${jdStores.length} 个`, jdStores.map(s => s.store_name).join(', '))
+    cycleSummary.eligible = jdStores.length
+    writeAutoSyncRuntimeLog(cycleId, `phase=stores_ready eligible=${jdStores.length} total=${allStores.length}`)
 
-    // 逐个同步，避免并发风控
-    for (let i = 0; i < jdStores.length; i++) {
-      const store = jdStores[i]
-      console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 同步店铺: ${store.store_name} (ID:${store.store_id})`)
+    // 店铺之间固定两路并发；每家店内部的首次抓取和活跃订单复查仍按顺序执行。
+    const syncResults = await runWithConcurrency(
+      jdStores,
+      AUTO_SYNC_CONCURRENCY,
+      async (store, i, laneIndex) => {
+      const laneNo = laneIndex + 1
+      const storeStartedAt = Date.now()
+      const storeNameForLog = sanitizeAutoSyncLogValue(store.store_name)
+      console.log(`[AutoSync] [通道${laneNo}] [${i + 1}/${jdStores.length}] 同步店铺: ${store.store_name} (ID:${store.store_id})`)
+      writeAutoSyncRuntimeLog(
+        cycleId,
+        `phase=store_start lane=${laneNo} position=${i + 1}/${jdStores.length} store_id=${store.store_id} store_name=${storeNameForLog}`
+      )
 
       // 请求同步锁，避免多设备重复同步
       const lock = await requestSyncLock(store.store_id, 'sales')
@@ -3854,7 +3899,11 @@ async function autoSyncAllStores(mainWindow) {
             message: lock.message || '10分钟内已同步，跳过'
           })
         }
-        continue
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=lock_skip lane=${laneNo} store_id=${store.store_id} message=${sanitizeAutoSyncLogValue(lock.message, 160)} elapsed_ms=${Date.now() - storeStartedAt}`
+        )
+        return { outcome: 'skipped', storeId: store.store_id }
       }
 
       // 通知渲染进程开始同步
@@ -3866,8 +3915,13 @@ async function autoSyncAllStores(mainWindow) {
       }
 
       let result
+      let secondaryActiveCount = 0
+      let secondaryBatchCount = 0
+      let secondaryUpdatedCount = 0
+      let secondaryFailed = false
       try {
-        result = await fetchSalesOrders(store.store_id)
+        try {
+          result = await fetchSalesOrders(store.store_id)
         if (result.success) {
           const orders = result.data?.list || []
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${orders.length} 条订单`)
@@ -3881,10 +3935,18 @@ async function autoSyncAllStores(mainWindow) {
             }
           }
           // 更新同步时间
-          await updateSyncTimeOnServer(store.store_id)
+          const syncTimeUpdated = await updateSyncTimeOnServer(store.store_id)
+          if (!syncTimeUpdated) {
+            console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 同步时间回写失败`)
+          }
         } else {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 失败: ${result.message}`)
         }
+
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=primary_finish lane=${laneNo} store_id=${store.store_id} result=${result.success ? 'success' : 'failed'} order_count=${Number(result.data?.pageTotal || result.data?.list?.length || 0)} message=${sanitizeAutoSyncLogValue(result.message, 160)} elapsed_ms=${Date.now() - storeStartedAt}`
+        )
 
         // 通知渲染进程同步结果（不再传递 orders，避免双重保存）
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3899,20 +3961,32 @@ async function autoSyncAllStores(mainWindow) {
             cookieFailed
           })
         }
-      } catch (err) {
-        console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 异常: ${err.message}`)
-      } finally {
-        // 同步完成后释放锁，传递同步结果以决定是否更新历史
-        await releaseSyncLock(store.store_id, 'sales', result?.success ?? false)
-      }
+        } catch (err) {
+          result = { success: false, message: err.message }
+          console.log(`[AutoSync] [通道${laneNo}] [${i + 1}/${jdStores.length}] 异常: ${err.message}`)
+          writeAutoSyncRuntimeLog(
+            cycleId,
+            `phase=primary_exception lane=${laneNo} store_id=${store.store_id} message=${sanitizeAutoSyncLogValue(err.message, 160)} elapsed_ms=${Date.now() - storeStartedAt}`
+          )
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('auto-sync-result', {
+              storeId: store.store_id,
+              storeName: store.store_name,
+              success: false,
+              message: err.message || '店铺订单同步异常'
+            })
+          }
+        }
 
       // === 二次同步：更新活跃订单状态 ===
       try {
         const activeIds = await getActiveOrderIds(store.store_id)
+        secondaryActiveCount = activeIds.length
         if (activeIds.length > 0) {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 活跃订单: ${activeIds.length} 条，开始状态更新`)
           const BATCH_SIZE = 50
           const totalBatches = Math.ceil(activeIds.length / BATCH_SIZE)
+          secondaryBatchCount = totalBatches
           // 通知渲染进程二次同步开始
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('auto-sync-progress', {
@@ -3978,18 +4052,72 @@ async function autoSyncAllStores(mainWindow) {
               })
             }
           }
+          secondaryUpdatedCount = totalUpdated
         }
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=secondary_finish lane=${laneNo} store_id=${store.store_id} result=success active_count=${secondaryActiveCount} batch_count=${secondaryBatchCount} updated_count=${secondaryUpdatedCount} elapsed_ms=${Date.now() - storeStartedAt}`
+        )
       } catch (activeErr) {
+        secondaryFailed = true
         console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 活跃订单状态同步失败: ${activeErr.message}`)
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=secondary_finish lane=${laneNo} store_id=${store.store_id} result=failed active_count=${secondaryActiveCount} batch_count=${secondaryBatchCount} updated_count=${secondaryUpdatedCount} message=${sanitizeAutoSyncLogValue(activeErr.message, 160)} elapsed_ms=${Date.now() - storeStartedAt}`
+        )
         // 状态同步失败不影响主流程
       }
-
-      // 多店铺之间间隔 5 秒
-      if (i < jdStores.length - 1) {
-        console.log('[AutoSync] 等待 5 秒后同步下一个店铺...')
-        await new Promise(resolve => setTimeout(resolve, 5000))
+      } finally {
+        // 锁覆盖首次抓取和活跃订单复查，防止另一台设备在二次同步期间进入同一店铺。
+        await releaseSyncLock(store.store_id, 'sales', result?.success ?? false)
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=store_finish lane=${laneNo} store_id=${store.store_id} result=${result?.success ? 'success' : 'failed'} secondary_result=${secondaryFailed ? 'failed' : 'success'} elapsed_ms=${Date.now() - storeStartedAt}`
+        )
       }
+
+      return {
+        outcome: result?.success ? 'success' : 'failed',
+        storeId: store.store_id,
+        secondaryFailed
+      }
+      },
+      {
+        staggerMs: AUTO_SYNC_LANE_STAGGER_MS,
+        betweenTasksDelayMs: AUTO_SYNC_STORE_INTERVAL_MS,
+        onError: (error, store, index, laneIndex) => {
+          const laneNo = laneIndex + 1
+          console.error(`[AutoSync] [通道${laneNo}] [${index + 1}/${jdStores.length}] 未处理异常:`, error.message)
+          writeAutoSyncRuntimeLog(
+            cycleId,
+            `phase=store_unhandled_exception lane=${laneNo} position=${index + 1}/${jdStores.length} store_id=${store?.store_id || ''} store_name=${sanitizeAutoSyncLogValue(store?.store_name)} message=${sanitizeAutoSyncLogValue(error.message, 160)}`
+          )
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            try {
+              mainWindow.webContents.send('auto-sync-result', {
+                storeId: store?.store_id,
+                storeName: store?.store_name,
+                success: false,
+                message: error.message || '店铺订单同步异常'
+              })
+            } catch (sendError) {
+              writeAutoSyncRuntimeLog(
+                cycleId,
+                `phase=store_error_notify_failed lane=${laneNo} store_id=${store?.store_id || ''} message=${sanitizeAutoSyncLogValue(sendError.message, 160)}`
+              )
+            }
+          }
+          return { outcome: 'failed', storeId: store?.store_id, unhandled: true }
+        }
+      }
+    )
+
+    for (const item of syncResults) {
+      if (item?.outcome === 'success') cycleSummary.success += 1
+      else if (item?.outcome === 'skipped') cycleSummary.skipped += 1
+      else cycleSummary.failed += 1
     }
+    console.log(`[AutoSync] 两路同步完成: 成功 ${cycleSummary.success}, 失败 ${cycleSummary.failed}, 跳过 ${cycleSummary.skipped}`)
   } catch (err) {
     console.log('[AutoSync] 自动同步异常:', err.message)
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -4002,6 +4130,24 @@ async function autoSyncAllStores(mainWindow) {
   } finally {
     autoSyncRunning = false
     console.log('[AutoSync] === 自动同步结束 ===')
+    writeAutoSyncRuntimeLog(
+      cycleId,
+      `phase=cycle_finish eligible=${cycleSummary.eligible} success=${cycleSummary.success} failed=${cycleSummary.failed} skipped=${cycleSummary.skipped} cookie_skipped=${cycleSummary.cookieSkipped} elapsed_ms=${Date.now() - cycleStartedAt}`
+    )
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.webContents.send('auto-sync-cycle-finish', {
+          cycleId,
+          ...cycleSummary,
+          elapsedMs: Date.now() - cycleStartedAt
+        })
+      } catch (sendError) {
+        writeAutoSyncRuntimeLog(
+          cycleId,
+          `phase=cycle_finish_notify_failed message=${sanitizeAutoSyncLogValue(sendError.message, 160)}`
+        )
+      }
+    }
   }
 }
 
@@ -4025,13 +4171,17 @@ function startAutoSync(mainWindow) {
 // 立即执行首次同步（用户手动开启时调用，不等待延迟）
 function startAutoSyncNow(mainWindow) {
   stopAutoSync()
-  // 强制重置运行状态，防止上次卡住导致一直跳过
-  autoSyncRunning = false
+  const cycleAlreadyRunning = autoSyncRunning
 
-  console.log('[AutoSync] startAutoSyncNow 被调用，立即开始同步')
-
-  // 立即执行首次同步
-  autoSyncAllStores(mainWindow)
+  if (cycleAlreadyRunning) {
+    // 关闭开关只停止后续定时器，不强行中断正在抓取的店铺；重新开启时
+    // 继续等待原批次结束，避免把两路任务叠加成四路。
+    console.log('[AutoSync] startAutoSyncNow 被调用，当前批次仍在运行，不重复启动')
+    runtimeLog.writeLog('SALES_AUTO_SYNC', 'phase=enable_during_cycle action=keep_current_cycle')
+  } else {
+    console.log('[AutoSync] startAutoSyncNow 被调用，立即开始同步')
+    autoSyncAllStores(mainWindow)
+  }
 
   // 定时执行
   autoSyncTimer = setInterval(() => {
