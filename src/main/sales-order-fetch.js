@@ -10,6 +10,7 @@ const {
   DEFAULT_RESPONSE_CAPTURE_LIMIT,
   ORDER_PAGE_RESPONSE_CAPTURE_LIMIT
 } = require('./sales-order-capture-policy')
+const { isSuccessfulEmptySalesOrderResponse } = require('./sales-order-response')
 const { runWithConcurrency } = require('./concurrency-pool')
 const { hasValidPlatformCookies } = require('./purchase-order-sync/common')
 
@@ -665,6 +666,9 @@ function fetchSalesOrdersAttempt(storeId, options = {}) {
                 const total = json.totalCount || json.total || json.data?.total || orders.length
                 result = { orders, total, apiUrl: bestMatch.url, rawOrders: list }
               }
+            } else if (isSuccessfulEmptySalesOrderResponse(json)) {
+              console.log('[SalesFetch] Order API returned a valid empty result')
+              result = { orders: [], total: 0, apiUrl: bestMatch.url, rawOrders: [] }
             }
           } catch (e) {
             console.log('[SalesFetch] Parse order API failed:', e.message)
@@ -2850,12 +2854,12 @@ function registerSalesOrderIpc(mainWindow) {
     } else {
       stopAutoSync()
     }
-    return { success: true, running: !!autoSyncTimer }
+    return { success: true, running: autoSyncEnabled }
   })
 
   // 查询自动同步是否正在运行（组件重新挂载时恢复开关状态用）
   ipcMain.handle('jd-auto-sync-status', () => {
-    return { running: !!autoSyncTimer, syncing: autoSyncRunning }
+    return { running: autoSyncEnabled, syncing: autoSyncRunning }
   })
 
   // 保存买家真实信息到服务器（使用批量保存接口，已验证可靠）
@@ -3421,6 +3425,8 @@ const LOCAL_SERVER = 'http://localhost:3002'
 
 let autoSyncTimer = null
 let autoSyncRunning = false
+let autoSyncEnabled = false
+let autoSyncScheduleGeneration = 0
 let _mainWindow = null  // 存储 mainWindow 引用，供 IPC handler 使用
 const DEVICE_ID = getDeviceId()
 
@@ -3918,6 +3924,7 @@ async function autoSyncAllStores(mainWindow) {
       let secondaryActiveCount = 0
       let secondaryBatchCount = 0
       let secondaryUpdatedCount = 0
+      let secondaryFailedBatchCount = 0
       let secondaryFailed = false
       try {
         try {
@@ -4032,11 +4039,18 @@ async function autoSyncAllStores(mainWindow) {
                 }
                 // 保留脱敏买家信息，由服务端 SQL 层判断是否覆盖
                 const safeActiveOrders = orders
-                await saveOrdersToServer(store.store_id, safeActiveOrders)
+                const activeSaved = await saveOrdersToServer(store.store_id, safeActiveOrders)
+                if (!activeSaved) {
+                  secondaryFailed = true
+                  secondaryFailedBatchCount += 1
+                  console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: 保存服务器失败`)
+                }
               } else {
                 console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新批次 ${batchIdx}: JD返回0条（搜索了${batch.length}个订单号）`)
               }
             } else {
+              secondaryFailed = true
+              secondaryFailedBatchCount += 1
               console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 状态更新失败: ${activeResult.message}`)
             }
             // 通知渲染进程二次同步进度
@@ -4056,7 +4070,7 @@ async function autoSyncAllStores(mainWindow) {
         }
         writeAutoSyncRuntimeLog(
           cycleId,
-          `phase=secondary_finish lane=${laneNo} store_id=${store.store_id} result=success active_count=${secondaryActiveCount} batch_count=${secondaryBatchCount} updated_count=${secondaryUpdatedCount} elapsed_ms=${Date.now() - storeStartedAt}`
+          `phase=secondary_finish lane=${laneNo} store_id=${store.store_id} result=${secondaryFailed ? 'failed' : 'success'} active_count=${secondaryActiveCount} batch_count=${secondaryBatchCount} failed_batch_count=${secondaryFailedBatchCount} updated_count=${secondaryUpdatedCount} elapsed_ms=${Date.now() - storeStartedAt}`
         )
       } catch (activeErr) {
         secondaryFailed = true
@@ -4151,26 +4165,32 @@ async function autoSyncAllStores(mainWindow) {
   }
 }
 
+function scheduleAutoSync(mainWindow, delayMs, generation) {
+  if (!autoSyncEnabled || generation !== autoSyncScheduleGeneration) return
+  autoSyncTimer = setTimeout(async () => {
+    autoSyncTimer = null
+    await autoSyncAllStores(mainWindow)
+    // 以上一整轮结束时间为基准再等待 10 分钟，避免刚成功的店铺被同步锁跳过。
+    scheduleAutoSync(mainWindow, AUTO_SYNC_INTERVAL, generation)
+  }, delayMs)
+}
+
 function startAutoSync(mainWindow) {
   // 先清理已有定时器，防止重复创建
   stopAutoSync()
+  autoSyncEnabled = true
+  const generation = autoSyncScheduleGeneration
 
-  // 首次延迟执行
-  setTimeout(() => {
-    autoSyncAllStores(mainWindow)
-  }, AUTO_SYNC_FIRST_DELAY)
+  scheduleAutoSync(mainWindow, AUTO_SYNC_FIRST_DELAY, generation)
 
-  // 定时执行
-  autoSyncTimer = setInterval(() => {
-    autoSyncAllStores(mainWindow)
-  }, AUTO_SYNC_INTERVAL)
-
-  console.log('[AutoSync] 定时同步已启动，间隔: 10 分钟')
+  console.log('[AutoSync] 定时同步已启动：首次延迟 1 分钟，之后每轮完成后等待 10 分钟')
 }
 
 // 立即执行首次同步（用户手动开启时调用，不等待延迟）
 function startAutoSyncNow(mainWindow) {
   stopAutoSync()
+  autoSyncEnabled = true
+  const generation = autoSyncScheduleGeneration
   const cycleAlreadyRunning = autoSyncRunning
 
   if (cycleAlreadyRunning) {
@@ -4178,22 +4198,22 @@ function startAutoSyncNow(mainWindow) {
     // 继续等待原批次结束，避免把两路任务叠加成四路。
     console.log('[AutoSync] startAutoSyncNow 被调用，当前批次仍在运行，不重复启动')
     runtimeLog.writeLog('SALES_AUTO_SYNC', 'phase=enable_during_cycle action=keep_current_cycle')
+    scheduleAutoSync(mainWindow, AUTO_SYNC_INTERVAL, generation)
   } else {
     console.log('[AutoSync] startAutoSyncNow 被调用，立即开始同步')
-    autoSyncAllStores(mainWindow)
+    Promise.resolve(autoSyncAllStores(mainWindow)).finally(() => {
+      scheduleAutoSync(mainWindow, AUTO_SYNC_INTERVAL, generation)
+    })
   }
 
-  // 定时执行
-  autoSyncTimer = setInterval(() => {
-    autoSyncAllStores(mainWindow)
-  }, AUTO_SYNC_INTERVAL)
-
-  console.log('[AutoSync] 定时同步已启动（立即执行），间隔: 10 分钟')
+  console.log('[AutoSync] 定时同步已启动（立即执行），每轮完成后等待 10 分钟')
 }
 
 function stopAutoSync() {
+  autoSyncEnabled = false
+  autoSyncScheduleGeneration += 1
   if (autoSyncTimer) {
-    clearInterval(autoSyncTimer)
+    clearTimeout(autoSyncTimer)
     autoSyncTimer = null
   }
 }

@@ -25,6 +25,13 @@ describe('sales order auto sync concurrency wiring', () => {
     expect(source).toContain('phase=enable_during_cycle action=keep_current_cycle')
   })
 
+  it('starts the next timer only after the complete cycle has finished', () => {
+    expect(source).toContain('await autoSyncAllStores(mainWindow)')
+    expect(source).toContain('scheduleAutoSync(mainWindow, AUTO_SYNC_INTERVAL, generation)')
+    expect(source).toContain('running: autoSyncEnabled')
+    expect(source).not.toContain('autoSyncTimer = setInterval')
+  })
+
   it('keeps the store lock until after active-order secondary sync', () => {
     const secondaryStart = source.indexOf('// === 二次同步：更新活跃订单状态 ===')
     const secondaryEnd = source.indexOf('} catch (activeErr)', secondaryStart)
@@ -47,6 +54,8 @@ describe('sales order auto sync concurrency wiring', () => {
     ]) {
       expect(source).toContain(phase)
     }
+    expect(source).toContain("result=${secondaryFailed ? 'failed' : 'success'}")
+    expect(source).toContain('failed_batch_count=${secondaryFailedBatchCount}')
   })
 
   it('clears the UI status only after the complete concurrent cycle finishes', () => {
