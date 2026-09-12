@@ -592,6 +592,30 @@
 
       <!-- Step 1: idle 状态 - 信息+选账号 -->
       <div v-else-if="purchaseInfo.step === 1 && purchaseInfo.captureStatus === 'idle'" class="purchase-content">
+        <!-- 当前销售单上下文：帮助采购人员判断代发还是仓库转发 -->
+        <div class="sales-order-context-banner">
+          <div class="sales-order-context-title">
+            <span>销售单信息</span>
+            <span class="sales-order-context-no">{{ purchaseInfo.salesOrderNo }}</span>
+          </div>
+          <div class="sales-order-context-facts">
+            <div class="sales-order-context-item">
+              <span class="sales-order-context-label">销售单仓库</span>
+              <span
+                class="sales-order-context-value"
+                :style="{ color: purchaseInfo.salesWarehouseName === '商家全国仓' ? '#909399' : purchaseInfo.salesWarehouseName === '供应商仓库' ? '#67c23a' : '#409eff' }"
+              >{{ purchaseInfo.salesWarehouseName || '未设置' }}</span>
+            </div>
+            <div class="sales-order-context-item">
+              <span class="sales-order-context-label">订单状态</span>
+              <el-tag :type="orderStatusTagType(purchaseInfo.salesOrderStatus)" size="small" effect="light">
+                {{ purchaseInfo.salesOrderStatus || '未知' }}
+              </el-tag>
+            </div>
+            <span class="sales-order-context-hint">请据此确认下方选择三方代发或仓库转发</span>
+          </div>
+        </div>
+
         <!-- 顶部：收货地址 -->
         <div class="shipping-banner">
           <div class="card-body">
@@ -1926,6 +1950,8 @@ async function handlePurchase(order, item, itemIdx) {
   purchaseInfo.purchaseNo = ''
   purchaseInfo.salesOrderNo = order.orderNo
   purchaseInfo.salesOrderId = order.id
+  purchaseInfo.salesWarehouseName = order.warehouseName || ''
+  purchaseInfo.salesOrderStatus = order.orderStatus || ''
   purchaseInfo.storeId = order.storeId
   purchaseInfo.goodsName = item.name
   purchaseInfo.sku = String(item.sku || '').replace(/^SKU\s*[:：]?\s*/i, '')
@@ -2226,6 +2252,8 @@ const purchaseInfo = reactive({
   purchaseNo: '',
   salesOrderNo: '',
   salesOrderId: '',
+  salesWarehouseName: '',
+  salesOrderStatus: '',
   storeId: null,
   goodsName: '',
   sku: '',
@@ -6536,6 +6564,82 @@ onUnmounted(() => {
   padding: 16px 24px;
   border-top: 1px solid #e8eaed;
   background: #ffffff;
+}
+
+/* 销售单仓库与状态，与下方采购收货仓库明确区分 */
+.sales-order-context-banner {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid #d9e5ff;
+  border-radius: 8px;
+  background: #f5f8ff;
+}
+
+.sales-order-context-title {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  color: #303133;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sales-order-context-no {
+  max-width: 190px;
+  margin-top: 2px;
+  overflow: hidden;
+  color: #909399;
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sales-order-context-facts {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+}
+
+.sales-order-context-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.sales-order-context-label {
+  color: #909399;
+  font-size: 12px;
+}
+
+.sales-order-context-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sales-order-context-hint {
+  margin-left: auto;
+  color: #e6a23c;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .sales-order-context-banner,
+  .sales-order-context-facts {
+    flex-wrap: wrap;
+  }
+
+  .sales-order-context-hint {
+    width: 100%;
+    margin-left: 0;
+  }
 }
 
 /* 商品横幅 */
