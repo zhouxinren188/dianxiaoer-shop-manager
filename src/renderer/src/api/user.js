@@ -56,6 +56,10 @@ export function fetchUserPurchaseAccounts(userId) {
 
 // 退出登录（通知服务端删除 token，清除本地状态）
 export async function logout() {
+  // 先清除主进程鉴权并停止后台同步，不能等待远程退出请求完成后才停止。
+  if (window.electronAPI) {
+    window.electronAPI.invoke('set-auth-token', null).catch(() => {})
+  }
   // 先通知两个服务端删除 token（踢掉当前会话）
   try {
     await post('/api/auth/logout')
@@ -70,8 +74,4 @@ export async function logout() {
   localStorage.removeItem('currentUser')
   localStorage.removeItem('userInfo')
   // 保留 rememberedUser 和 rememberedPassword，方便下次登录
-  // 清除主进程 token
-  if (window.electronAPI) {
-    window.electronAPI.invoke('set-auth-token', null).catch(() => {})
-  }
 }

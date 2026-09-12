@@ -357,6 +357,17 @@ async function handleLogin() {
         }
         // 同步 auth token 到主进程（供 platform-window / cookie-heartbeat 等使用）
         try { await window.electronAPI?.invoke('set-auth-token', token) } catch {}
+        // 销售订单自动同步属于登录后的全局后台能力。若本机上次已开启，
+        // 登录成功后直接恢复，不再依赖用户先进入订单列表页面。
+        if (localStorage.getItem('jdAutoSyncEnabled') === 'true') {
+          try {
+            const autoSyncResult = await window.electronAPI?.invoke('toggle-jd-auto-sync', { enabled: true })
+            console.log('[Login] 销售订单自动同步恢复:', JSON.stringify(autoSyncResult))
+          } catch (autoSyncError) {
+            // 自动同步恢复失败不能阻断正常登录，订单页面仍可再次手动开启。
+            console.warn('[Login] 销售订单自动同步恢复失败:', autoSyncError.message)
+          }
+        }
         try { await window.electronAPI?.invoke('window-set-main-size') } catch {}
         ElMessage.success('登录成功')
 

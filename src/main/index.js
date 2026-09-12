@@ -31,7 +31,7 @@ const { registerPurchaseOrderSyncIpc } = require('./purchase-order-sync')
 const { closeAllJdExpressWindows, registerJdExpressIpc } = require('./jd-express')
 const { registerPacketCaptureIpc } = require('./packet-capture')
 const { registerSupplyOrderIpc } = require('./supply-order-fetch')
-const { registerSalesOrderIpc, startAutoSync } = require('./sales-order-fetch')
+const { registerSalesOrderIpc, startAutoSync, stopAutoSync } = require('./sales-order-fetch')
 const {
   registerAftersaleFetchIpc,
   registerStoreBackendMetricWebContents,
@@ -1086,6 +1086,10 @@ ipcMain.handle('window-set-main-size', (event) => {
 ipcMain.handle('set-auth-token', (event, token) => {
   setAuthToken(token || null)
   updateAftersaleAutoSyncAuth(token || null)
+  if (!token) {
+    // 退出、会话失效或渲染进程重新登录时，立即停止销售订单后台同步。
+    stopAutoSync()
+  }
   desktopCommandChannel?.notifyAuthChanged()
   console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')
 })
