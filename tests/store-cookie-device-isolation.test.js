@@ -87,6 +87,10 @@ describe('店铺 Cookie 多设备隔离', () => {
     expect(serverSource).toContain(
       'SELECT * FROM cookies WHERE store_id = ? AND source_device_id = ?'
     )
+    expect(serverSource).toContain("req.query?.allow_verified_fallback === '1'")
+    expect(serverSource).toContain('AND c.source_device_id <> ?')
+    expect(serverSource).toContain('AND c.last_verified_at IS NOT NULL')
+    expect(serverSource).toContain('target_revision: Number(currentDeviceCookie?.revision || 0)')
   })
 
   it('查询前先检查本机会话，不再按服务器 revision 自动覆盖', () => {
@@ -102,5 +106,36 @@ describe('店铺 Cookie 多设备隔离', () => {
     expect(functionSource.indexOf('hasLocalJdCookies(localCookies)'))
       .toBeLessThan(functionSource.indexOf('getServerCookieSnapshot(storeId'))
     expect(functionSource).not.toContain('snapshot.revision > localRevision')
+    expect(functionSource).toContain('allowVerifiedFallback: true')
+  })
+
+  it('本机 Cookie 已确认失效时排除当前设备并恢复其他设备已验证快照', () => {
+    const heartbeatSource = readFileSync(
+      fileURLToPath(new URL('../src/main/cookie-heartbeat.js', import.meta.url)),
+      'utf8'
+    )
+    const start = heartbeatSource.indexOf('async function clearAndRetryWithFreshCookies')
+    const end = heartbeatSource.indexOf('async function reportStoreDeviceStatus', start)
+    const functionSource = heartbeatSource.slice(start, end)
+
+    expect(functionSource).toContain('allowVerifiedFallback: true')
+    expect(functionSource).toContain('excludeCurrentDevice: true')
+    expect(heartbeatSource).toContain('targetRevision: Number(json.data.target_revision')
+    expect(heartbeatSource).toContain('resetCookieRevision(storeId)')
+  })
+
+  it('登录保存成功后立即禁止关窗逻辑回滚旧 Cookie', () => {
+    const platformWindowSource = readFileSync(
+      fileURLToPath(new URL('../src/main/platform-window.js', import.meta.url)),
+      'utf8'
+    )
+    const saveStart = platformWindowSource.indexOf('saveStoreInfo(mw, sid, plat')
+    const successBranch = platformWindowSource.slice(
+      saveStart,
+      platformWindowSource.indexOf('}).catch(error =>', saveStart)
+    )
+
+    expect(successBranch.indexOf('win._saveDone = true'))
+      .toBeLessThan(successBranch.indexOf('setTimeout(() =>'))
   })
 })

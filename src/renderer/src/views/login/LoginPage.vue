@@ -85,7 +85,7 @@
           <!-- 注册表单 -->
           <template v-else>
             <h2 class="login-title">注册账号</h2>
-            <p class="login-subtitle">创建一个新的子账号</p>
+            <p class="login-subtitle">创建一个独立主账号</p>
             <el-form
               ref="registerFormRef"
               :model="registerForm"

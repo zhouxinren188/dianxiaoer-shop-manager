@@ -23,10 +23,10 @@
         <el-input v-model="form.phone" placeholder="请输入手机号" maxlength="11" />
       </el-form-item>
       <el-form-item label="账号类型" prop="userType">
-        <el-radio-group v-model="form.userType" :disabled="isEdit">
-          <el-radio label="master">主账号</el-radio>
-          <el-radio label="sub">子账号</el-radio>
-        </el-radio-group>
+        <el-tag :type="form.userType === 'master' ? 'danger' : 'info'">
+          {{ form.userType === 'master' ? '主账号' : '子账号' }}
+        </el-tag>
+        <span v-if="!isEdit" class="account-type-tip">主账号请在登录页独立注册</span>
       </el-form-item>
       <el-form-item label="角色" prop="role">
         <el-select v-model="form.role" placeholder="请选择角色" style="width: 100%;" :disabled="!isAdmin">
@@ -125,15 +125,6 @@ async function handleSubmit() {
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
 
-  // 校验：只有主账号才能创建主账号
-  if (!isEdit.value && form.value.userType === 'master') {
-    const cur = props.currentUser || {}
-    if (cur.userType !== 'master') {
-      ElMessage.warning('只有主账号才能创建主账号')
-      return
-    }
-  }
-
   submitting.value = true
   try {
     if (isEdit.value) {
@@ -159,3 +150,11 @@ function handleClosed() {
   formRef.value?.resetFields()
 }
 </script>
+
+<style scoped>
+.account-type-tip {
+  margin-left: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+</style>

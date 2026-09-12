@@ -25,7 +25,11 @@
     .menu-item.active .menu-icon { color: #60a5fa; }
     .menu-icon { width: 18px; height: 18px; flex-shrink: 0; color: rgba(255,255,255,0.4); transition: color 0.2s; }
     .menu-item:hover .menu-icon { color: rgba(255,255,255,0.7); }
-    .sidebar-footer { padding: 12px; text-align: center; font-size: 12px; color: rgba(255,255,255,0.25); }
+    .sidebar-footer { padding: 12px; font-size: 12px; color: rgba(255,255,255,0.35); border-top: 1px solid rgba(255,255,255,0.06); }
+    .sidebar-account-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+    .sidebar-account-btn { flex: 1; padding: 7px 4px; border: 1px solid rgba(255,255,255,0.16); border-radius: 6px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.72); cursor: pointer; font-size: 12px; }
+    .sidebar-account-btn:hover { background: rgba(255,255,255,0.1); color: #fff; }
+    .sidebar-version { text-align: center; color: rgba(255,255,255,0.25); }
     .main-content { flex: 1; padding: 20px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
     .page-card { background: #fff; border-radius: 8px; border: 1px solid #f0f0f0; box-shadow: 0 1px 2px rgba(0,0,0,0.03); margin-bottom: 16px; }
 
@@ -175,8 +179,18 @@
           <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
           充值订单
         </div>
+        <div class="menu-item" :class="{active: tab==='audit'}" @click="switchTab('audit')">
+          <svg class="menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+          安全日志
+        </div>
       </div>
-      <div class="sidebar-footer">v1.1.0</div>
+      <div class="sidebar-footer">
+        <div class="sidebar-account-actions">
+          <button class="sidebar-account-btn" @click="openPasswordDialog">修改密码</button>
+          <button class="sidebar-account-btn" @click="doLogout">退出登录</button>
+        </div>
+        <div class="sidebar-version">v1.2.0</div>
+      </div>
     </div>
     <div class="main-content">
 
@@ -453,6 +467,57 @@
         </div>
       </div>
 
+      <!-- 管理后台安全审计 -->
+      <div v-show="tab==='audit'">
+        <div class="page-card">
+          <div class="toolbar">
+            <div class="toolbar-left">
+              <span class="toolbar-title">安全日志</span>
+              <span class="toolbar-count">共 {{ auditTotal }} 条</span>
+            </div>
+            <div class="toolbar-right">
+              <input class="search-input" v-model.trim="auditSearch.action" placeholder="操作类型" @keyup.enter="loadAuditLogs" />
+              <button class="btn-sm" @click="loadAuditLogs">刷新</button>
+            </div>
+          </div>
+          <div class="data-table-wrapper" style="min-height:200px;">
+            <div v-if="auditLoading" class="loading-mask"></div>
+            <table class="data-table" v-if="auditList.length">
+              <thead>
+                <tr>
+                  <th style="width:160px;">时间</th>
+                  <th style="width:180px;">操作</th>
+                  <th style="width:130px;">目标</th>
+                  <th style="width:130px;">来源 IP</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in auditList" :key="row.id">
+                  <td>{{ formatDateTime(row.createdAt) }}</td>
+                  <td>{{ auditActionLabel(row.action) }}</td>
+                  <td>{{ row.targetType || '-' }} {{ row.targetId || '' }}</td>
+                  <td>{{ row.ipAddress || '-' }}</td>
+                  <td style="word-break:break-all;color:#64748b;">{{ auditDetailsText(row.details) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else-if="!auditLoading" class="empty-state">暂无安全日志</div>
+          </div>
+          <div class="pagination-wrap">
+            <el-pagination
+              v-model:current-page="auditPage.page"
+              v-model:page-size="auditPage.pageSize"
+              :total="auditTotal"
+              :page-sizes="[30, 50, 100]"
+              layout="total, sizes, prev, pager, next"
+              @size-change="loadAuditLogs"
+              @current-change="loadAuditLogs"
+            />
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -561,6 +626,35 @@
       </div>
     </div>
   </div>
+
+  <!-- 修改管理后台密码 -->
+  <div v-if="passwordDialog" class="modal-overlay" @click.self="closePasswordDialog">
+    <div class="modal-box" style="width:440px;">
+      <div class="modal-header">
+        修改管理员密码
+        <button class="modal-close" @click="closePasswordDialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <label>当前密码</label>
+          <input class="text-input" type="password" v-model="passwordForm.currentPassword" maxlength="128" autocomplete="current-password" placeholder="请输入当前管理员密码" />
+        </div>
+        <div class="form-row">
+          <label>新密码</label>
+          <input class="text-input" type="password" v-model="passwordForm.newPassword" maxlength="128" autocomplete="new-password" placeholder="至少12位，包含三类字符" />
+          <div class="field-hint">至少包含大小写字母、数字、特殊字符中的三类。</div>
+        </div>
+        <div class="form-row">
+          <label>确认新密码</label>
+          <input class="text-input" type="password" v-model="passwordForm.confirmPassword" maxlength="128" autocomplete="new-password" placeholder="请再次输入新密码" @keyup.enter="changeAdminPassword" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-sm" @click="closePasswordDialog">取消</button>
+        <button class="btn-sm btn-primary" @click="changeAdminPassword" :disabled="passwordSaving">{{ passwordSaving ? '修改中...' : '确认修改' }}</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/vue@3.4.15/dist/vue.global.prod.js"></script>
@@ -570,10 +664,10 @@ const { createApp, ref, reactive, computed, onMounted } = Vue
 
 createApp({
   setup() {
-    // 从 localStorage 恢复登录状态
-    const savedPw = localStorage.getItem('admin_pw') || ''
-    const loggedIn = ref(!!savedPw)
-    const adminPassword = ref(savedPw)
+    // 清理旧版遗留的明文密码。新版只使用服务端 HttpOnly 会话 Cookie。
+    localStorage.removeItem('admin_pw')
+    const loggedIn = ref(false)
+    const adminPassword = ref('')
     const loginLoading = ref(false)
     const tab = ref('stores')
 
@@ -586,6 +680,7 @@ createApp({
       tab.value = t
       if (t === 'orders' && orderList.value.length === 0) loadOrders()
       if (t === 'users' && userList.value.length === 0) loadUsers()
+      if (t === 'audit' && auditList.value.length === 0) loadAuditLogs()
       if (t === 'vault' && vaultList.value.length === 0) {
         if (userList.value.length === 0) loadUsers()
         loadVault()
@@ -621,6 +716,13 @@ createApp({
     const orderTotalAmount = ref(0)
     const orderPaidCount = ref(0)
 
+    // Security audit state
+    const auditList = ref([])
+    const auditTotal = ref(0)
+    const auditLoading = ref(false)
+    const auditPage = reactive({ page: 1, pageSize: 30 })
+    const auditSearch = reactive({ action: '' })
+
     // Edit dialog
     const editExpiryDialog = ref(false)
     const editTarget = ref(null)
@@ -628,6 +730,9 @@ createApp({
     const showBatchDialog = ref(false)
     const batchExpiryDate = ref('')
     const saveLoading = ref(false)
+    const passwordDialog = ref(false)
+    const passwordSaving = ref(false)
+    const passwordForm = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
 
     // Debounce
     let searchTimer = null
@@ -652,34 +757,113 @@ createApp({
 
     // API helper
     async function api(url, options = {}) {
-      const headers = { 'Content-Type': 'application/json', 'x-admin-password': adminPassword.value }
-      const res = await fetch(url, { ...options, headers })
-      const json = await res.json()
+      const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+      const res = await fetch(url, { ...options, headers, credentials: 'same-origin' })
+      let json = null
+      try { json = await res.json() } catch (_) {}
+      if (res.status === 401) {
+        loggedIn.value = false
+        adminPassword.value = ''
+      }
+      if (!json) throw new Error('服务器返回格式错误')
       if (!json.success) throw new Error(json.message || '请求失败')
       return json.data
     }
 
-    function doLogin() {
+    async function doLogin() {
       if (!adminPassword.value) {
         ElementPlus.ElMessage.warning('请输入管理员密码')
         return
       }
       loginLoading.value = true
-      fetch('/api/admin/users', { headers: { 'x-admin-password': adminPassword.value } })
-        .then(r => r.json())
-        .then(json => {
-          if (json.success) {
-            loggedIn.value = true
-            localStorage.setItem('admin_pw', adminPassword.value)
-            ElementPlus.ElMessage.success('登录成功')
-            loadStores()
-            userList.value = json.data.list
-          } else {
-            ElementPlus.ElMessage.error(json.message || '密码错误')
-          }
+      try {
+        const res = await fetch('/api/admin/session/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: adminPassword.value })
         })
-        .catch(() => ElementPlus.ElMessage.error('网络错误'))
-        .finally(() => { loginLoading.value = false })
+        const json = await res.json()
+        if (!json.success) throw new Error(json.message || '登录失败')
+        adminPassword.value = ''
+        loggedIn.value = true
+        ElementPlus.ElMessage.success('登录成功')
+        await Promise.all([loadStores(), loadUsers()])
+      } catch (error) {
+        ElementPlus.ElMessage.error(error.message || '网络错误')
+      } finally {
+        loginLoading.value = false
+      }
+    }
+
+    async function restoreAdminSession() {
+      try {
+        const res = await fetch('/api/admin/session', { credentials: 'same-origin' })
+        const json = await res.json()
+        if (!res.ok || !json.success) return
+        loggedIn.value = true
+        await Promise.all([loadStores(), loadUsers()])
+      } catch (_) {}
+    }
+
+    async function doLogout() {
+      try {
+        await fetch('/api/admin/session/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }
+        })
+      } catch (_) {
+        // 即使网络异常，也必须立即退出本地界面。
+      } finally {
+        loggedIn.value = false
+        adminPassword.value = ''
+        storeList.value = []
+        userList.value = []
+        ElementPlus.ElMessage.success('已退出登录')
+      }
+    }
+
+    function openPasswordDialog() {
+      passwordForm.currentPassword = ''
+      passwordForm.newPassword = ''
+      passwordForm.confirmPassword = ''
+      passwordDialog.value = true
+    }
+
+    function closePasswordDialog() {
+      passwordDialog.value = false
+      passwordForm.currentPassword = ''
+      passwordForm.newPassword = ''
+      passwordForm.confirmPassword = ''
+    }
+
+    async function changeAdminPassword() {
+      if (!passwordForm.currentPassword || !passwordForm.newPassword) {
+        ElementPlus.ElMessage.warning('请填写当前密码和新密码')
+        return
+      }
+      if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+        ElementPlus.ElMessage.warning('两次输入的新密码不一致')
+        return
+      }
+      passwordSaving.value = true
+      try {
+        await api('/api/admin/session/password', {
+          method: 'PUT',
+          body: JSON.stringify({
+            currentPassword: passwordForm.currentPassword,
+            newPassword: passwordForm.newPassword
+          })
+        })
+        closePasswordDialog()
+        loggedIn.value = false
+        ElementPlus.ElMessage.success('密码已修改，请使用新密码重新登录')
+      } catch (error) {
+        ElementPlus.ElMessage.error(error.message || '修改失败')
+      } finally {
+        passwordSaving.value = false
+      }
     }
 
     async function loadStores() {
@@ -922,6 +1106,23 @@ createApp({
       }
     }
 
+    async function loadAuditLogs() {
+      auditLoading.value = true
+      try {
+        const params = new URLSearchParams()
+        params.set('page', auditPage.page)
+        params.set('pageSize', auditPage.pageSize)
+        if (auditSearch.action) params.set('action', auditSearch.action)
+        const data = await api('/api/admin/audit-logs?' + params.toString())
+        auditList.value = data.list || []
+        auditTotal.value = data.total || 0
+      } catch (error) {
+        ElementPlus.ElMessage.error(error.message || '安全日志加载失败')
+      } finally {
+        auditLoading.value = false
+      }
+    }
+
     // 快捷设置到期时间
     function quickExpiry(days, type) {
       const baseDate = type === 'single'
@@ -972,18 +1173,31 @@ createApp({
       const m = { monthly: '月付', quarterly: '季付', half_yearly: '半年付', yearly: '年付' }
       return m[p] || p
     }
-
-    // 页面加载时如果已登录，自动拉取数据
-    onMounted(() => {
-      if (loggedIn.value) {
-        loadStores()
-        // 静默加载用户列表
-        fetch('/api/admin/users', { headers: { 'x-admin-password': adminPassword.value } })
-          .then(r => r.json())
-          .then(json => { if (json.success) userList.value = json.data.list })
-          .catch(() => {})
+    function auditActionLabel(action) {
+      const labels = {
+        'admin.login.succeeded': '管理后台登录成功',
+        'admin.login.failed': '管理后台登录失败',
+        'admin.logout': '退出管理后台',
+        'admin.password.changed': '修改管理员密码',
+        'admin.password.change_failed': '修改密码失败',
+        'store.subscription_end.changed': '修改店铺到期时间',
+        'store.subscription_end.batch_changed': '批量修改店铺到期时间',
+        'user.status.changed': '修改用户状态',
+        'user.deleted': '删除用户',
+        'payment_vault.created': '新增支付密码记录',
+        'payment_vault.updated': '修改支付密码记录',
+        'payment_vault.deleted': '删除支付密码记录'
       }
-    })
+      return labels[action] || action || '-'
+    }
+    function auditDetailsText(details) {
+      if (!details || !Object.keys(details).length) return '-'
+      const text = JSON.stringify(details)
+      return text.length > 260 ? text.slice(0, 260) + '…' : text
+    }
+
+    // 刷新页面时只恢复短期服务端会话，不再从浏览器存储读取原始密码。
+    onMounted(restoreAdminSession)
 
     return {
       loggedIn, adminPassword, loginLoading, tab,
@@ -992,10 +1206,14 @@ createApp({
       userList, userLoading, showDeleteUserDialog, deleteUserTarget,
       vaultList, vaultLoading, vaultDialog, vaultForm,
       orderList, orderTotal, orderLoading, orderPage, orderSearch, orderTotalAmount, orderPaidCount,
+      auditList, auditTotal, auditLoading, auditPage, auditSearch,
       editExpiryDialog, editTarget, newExpiryDate, showBatchDialog, batchExpiryDate, saveLoading,
+      passwordDialog, passwordSaving, passwordForm,
       doLogin, loadStores, switchTab, debounceSearch, doSearch, toggleSelectAll, openEditExpiry, saveExpiry, saveBatchExpiry, loadUsers, loadOrders, quickExpiry,
       toggleUserStatus, confirmDeleteUser, doDeleteUser, doOrderSearch,
       loadVault, openVaultDialog, saveVault, deleteVault,
+      doLogout, openPasswordDialog, closePasswordDialog, changeAdminPassword,
+      loadAuditLogs, auditActionLabel, auditDetailsText,
       formatDate, formatDateTime, expiryClass, platformLabel, platformClass, tierText, planText
     }
   }

@@ -64,7 +64,8 @@ const dbPool = mysql.createPool(dbConfig)
 async function getUserFromDB(username) {
   try {
     const [rows] = await dbPool.execute(
-      'SELECT id, username, phone, role, password_hash FROM users WHERE username = ? AND status = "enabled"',
+      `SELECT id, username, phone, role, user_type, parent_id, created_at, password_hash
+       FROM users WHERE username = ? AND status = "enabled"`,
       [username]
     )
     return rows[0] || null
@@ -94,6 +95,9 @@ const UPDATE_DIR = path.join(__dirname, 'updates')
 const HOT_DIR = path.join(UPDATE_DIR, 'hot')
 const META_FILE = path.join(UPDATE_DIR, 'update-meta.json')
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD
+const ADMIN_SESSION_COOKIE = 'dxe_admin_session'
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000
+const adminSessions = new Map()
 const PAYMENT_VAULT_HTTPS_PORT = Math.max(1, parseInt(process.env.PAYMENT_VAULT_HTTPS_PORT || '443', 10) || 443)
 const PAYMENT_VAULT_KEY_SECRET = process.env.PAYMENT_VAULT_KEY || ''
 if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 8) {
@@ -307,6 +311,25 @@ const loginLimiter = rateLimit({
   skipSuccessfulRequests: false
 })
 
+// 管理后台登录限制更严格。成功登录不占失败额度，避免正常刷新误触发锁定。
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { success: false, message: '管理后台登录失败次数过多，请15分钟后再试' }
+})
+
+// 防止已登录会话被异常高频调用；正常管理操作远低于该阈值。
+const adminApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: '管理接口请求过于频繁，请稍后重试' }
+})
+
 // 支付密码读取限流：只允许付款页按需读取，防止账号枚举和高频尝试
 const paymentVaultResolveLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -373,27 +396,41 @@ app.post('/api/register', registerLimiter, async (req, res) => {
     return res.status(400).json({ success: false, message: '手机号格式不正确' })
   }
 
+  let connection
   try {
-    // 检查数据库中是否已存在
-    const [existing] = await dbPool.execute('SELECT id FROM users WHERE username = ?', [username])
-    if (existing.length) {
-      return res.status(409).json({ success: false, message: '该账号已存在' })
-    }
-
     const hashedPassword = bcrypt.hashSync(password, 10)
+    connection = await dbPool.getConnection()
+    await connection.beginTransaction()
 
-    // 写入MySQL数据库（注册用户默认为子账号 staff，防止注册即获得管理权限）
-    const [result] = await dbPool.execute(
+    // 登录页的公开注册代表创建一个全新的租户，因此必须是独立主账号。
+    // 子账号只能由已登录主账号从 /api/users 创建，避免出现 parent_id 为空
+    // 或被初始化脚本误挂到其他租户的“孤儿子账号”。
+    const [result] = await connection.execute(
       `INSERT INTO users (username, phone, password_hash, user_type, role, parent_id, status, real_name)
-       VALUES (?, ?, ?, 'sub', 'staff', NULL, 'enabled', ?)`,
+       VALUES (?, ?, ?, 'master', 'admin', NULL, 'enabled', ?)`,
       [username, phone, hashedPassword, username]
     )
 
-    console.log(`[API] 新用户注册: ${username} (id=${result.insertId})`)
+    // 主账号注册时同步建立自己的试用订阅，不能借用其他主账号的订阅归属。
+    await connection.execute(
+      `INSERT INTO subscriptions
+         (owner_id, username, trial_end, subscription_end, subscription_tier, status)
+       VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY), NULL, NULL, 'trial')`,
+      [result.insertId, username]
+    )
+
+    await connection.commit()
+    console.log(`[API] 新主账号注册: ${username} (id=${result.insertId})`)
     res.json({ success: true, message: '注册成功' })
   } catch (err) {
+    if (connection) await connection.rollback().catch(() => {})
     console.error('[API] 注册失败:', err.message)
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: '该账号已存在' })
+    }
     res.status(500).json({ success: false, message: '注册失败，请稍后重试' })
+  } finally {
+    connection?.release()
   }
 })
 
@@ -456,7 +493,9 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       user: {
         username,
         phone: user.phone || '',
-        role: user.role || 'staff'
+        role: user.role || 'staff',
+        userType: user.user_type,
+        createdAt: user.created_at
       }
     })
   } catch (err) {
@@ -538,7 +577,9 @@ app.get('/api/me', authMiddleware, async (req, res) => {
       user: {
         username,
         phone: user.phone || '',
-        role: user.role || 'staff'
+        role: user.role || 'staff',
+        userType: user.user_type,
+        createdAt: user.created_at
       }
     })
   } catch (err) {
@@ -1122,14 +1163,164 @@ app.use('/admin', express.static(path.join(__dirname, 'public', 'admin')))
 
 // ========== 管理后台 API ==========
 
-// 管理员密码校验中间件
-function adminAuth(req, res, next) {
-  const password = req.headers['x-admin-password']
-  if (!password || password !== ADMIN_PASSWORD) {
-    return res.status(403).json({ success: false, message: '管理员密码错误' })
-  }
-  next()
+function getAdminRequestIp(req) {
+  return String(req.socket?.remoteAddress || '').slice(0, 64)
 }
+
+function readCookie(req, name) {
+  const prefix = `${name}=`
+  const entry = String(req.headers.cookie || '')
+    .split(';')
+    .map(value => value.trim())
+    .find(value => value.startsWith(prefix))
+  if (!entry) return ''
+  try {
+    return decodeURIComponent(entry.slice(prefix.length))
+  } catch (_) {
+    return ''
+  }
+}
+
+function hashAdminSessionToken(token) {
+  return crypto.createHash('sha256').update(String(token), 'utf8').digest('hex')
+}
+
+function setAdminSessionCookie(req, res, token, maxAgeSeconds) {
+  const secure = req.secure || req.socket?.encrypted ? '; Secure' : ''
+  res.append(
+    'Set-Cookie',
+    `${ADMIN_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/api/admin; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure}`
+  )
+}
+
+function pruneAdminSessions() {
+  const now = Date.now()
+  for (const [tokenHash, session] of adminSessions.entries()) {
+    if (session.expiresAt <= now) adminSessions.delete(tokenHash)
+  }
+}
+
+async function verifyAdminPassword(password) {
+  const [rows] = await dbPool.execute(
+    'SELECT password_hash FROM admin_credentials WHERE id = 1 LIMIT 1'
+  )
+  return Boolean(rows.length && await bcrypt.compare(String(password || ''), rows[0].password_hash))
+}
+
+async function logAdminAudit(req, action, targetType = null, targetId = null, details = {}, executor = dbPool) {
+  try {
+    await executor.execute(
+      `INSERT INTO admin_audit_logs
+         (action, target_type, target_id, ip_address, user_agent, details_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        String(action).slice(0, 100),
+        targetType ? String(targetType).slice(0, 50) : null,
+        targetId == null ? null : String(targetId).slice(0, 100),
+        getAdminRequestIp(req),
+        String(req.headers['user-agent'] || '').slice(0, 500),
+        JSON.stringify(details || {})
+      ]
+    )
+  } catch (error) {
+    console.error('[AdminAudit] 写入失败:', error.message)
+  }
+}
+
+// 管理后台只接受短期 HttpOnly 会话，不再让浏览器在每次请求中发送原始密码。
+async function adminAuth(req, res, next) {
+  try {
+    pruneAdminSessions()
+    const token = readCookie(req, ADMIN_SESSION_COOKIE)
+    const tokenHash = token ? hashAdminSessionToken(token) : ''
+    const session = tokenHash ? adminSessions.get(tokenHash) : null
+    if (!session || session.expiresAt <= Date.now()) {
+      if (tokenHash) adminSessions.delete(tokenHash)
+      setAdminSessionCookie(req, res, '', 0)
+      return res.status(401).json({ success: false, message: '管理会话已失效，请重新登录' })
+    }
+    session.lastSeenAt = Date.now()
+    req.adminSessionHash = tokenHash
+    req.adminSession = session
+    res.set('Cache-Control', 'no-store')
+    next()
+  } catch (error) {
+    console.error('[AdminAuth] 会话校验失败:', error.message)
+    res.status(500).json({ success: false, message: '管理会话校验失败' })
+  }
+}
+
+app.use('/api/admin', adminApiLimiter)
+
+app.post('/api/admin/session/login', adminLoginLimiter, async (req, res) => {
+  res.set('Cache-Control', 'no-store')
+  try {
+    const password = String(req.body?.password || '')
+    if (!password || !await verifyAdminPassword(password)) {
+      await logAdminAudit(req, 'admin.login.failed', 'admin_session', null, { reason: 'invalid_password' })
+      return res.status(401).json({ success: false, message: '管理员密码错误' })
+    }
+
+    pruneAdminSessions()
+    const token = crypto.randomBytes(32).toString('base64url')
+    const now = Date.now()
+    adminSessions.set(hashAdminSessionToken(token), {
+      createdAt: now,
+      lastSeenAt: now,
+      expiresAt: now + ADMIN_SESSION_TTL_MS,
+      ipAddress: getAdminRequestIp(req)
+    })
+    setAdminSessionCookie(req, res, token, Math.floor(ADMIN_SESSION_TTL_MS / 1000))
+    await logAdminAudit(req, 'admin.login.succeeded', 'admin_session', null, { expiresInSeconds: Math.floor(ADMIN_SESSION_TTL_MS / 1000) })
+    res.json({ success: true, data: { expiresIn: Math.floor(ADMIN_SESSION_TTL_MS / 1000) } })
+  } catch (error) {
+    console.error('[AdminAuth] 登录失败:', error.message)
+    res.status(500).json({ success: false, message: '管理后台登录失败' })
+  }
+})
+
+app.get('/api/admin/session', adminAuth, (req, res) => {
+  res.json({ success: true, data: { authenticated: true, expiresAt: new Date(req.adminSession.expiresAt).toISOString() } })
+})
+
+app.post('/api/admin/session/logout', adminAuth, async (req, res) => {
+  await logAdminAudit(req, 'admin.logout', 'admin_session')
+  adminSessions.delete(req.adminSessionHash)
+  setAdminSessionCookie(req, res, '', 0)
+  res.json({ success: true, data: { loggedOut: true } })
+})
+
+app.put('/api/admin/session/password', adminAuth, async (req, res) => {
+  try {
+    const currentPassword = String(req.body?.currentPassword || '')
+    const newPassword = String(req.body?.newPassword || '')
+    if (!await verifyAdminPassword(currentPassword)) {
+      await logAdminAudit(req, 'admin.password.change_failed', 'admin_credential', '1', { reason: 'invalid_current_password' })
+      return res.status(400).json({ success: false, message: '当前密码不正确' })
+    }
+    const characterClasses = [/[a-z]/, /[A-Z]/, /\d/, /[^A-Za-z0-9]/]
+      .filter(pattern => pattern.test(newPassword)).length
+    if (newPassword.length < 12 || newPassword.length > 128 || characterClasses < 3) {
+      return res.status(400).json({ success: false, message: '新密码需为12至128位，并至少包含大小写字母、数字、特殊字符中的三类' })
+    }
+    if (await bcrypt.compare(newPassword, (await dbPool.execute('SELECT password_hash FROM admin_credentials WHERE id = 1'))[0][0].password_hash)) {
+      return res.status(400).json({ success: false, message: '新密码不能与当前密码相同' })
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12)
+    await dbPool.execute(
+      'UPDATE admin_credentials SET password_hash = ?, password_version = password_version + 1, updated_at = NOW() WHERE id = 1',
+      [passwordHash]
+    )
+    await logAdminAudit(req, 'admin.password.changed', 'admin_credential', '1')
+    adminSessions.clear()
+    setAdminSessionCookie(req, res, '', 0)
+    res.json({ success: true, data: { passwordChanged: true, reloginRequired: true } })
+  } catch (error) {
+    console.error('[AdminAuth] 修改密码失败:', error.message)
+    res.status(500).json({ success: false, message: '修改管理员密码失败' })
+  }
+})
 
 // 获取所有店铺（含到期时间、归属用户）
 app.get('/api/admin/stores', adminAuth, async (req, res) => {
@@ -1200,11 +1391,20 @@ app.put('/api/admin/stores/batch-subscription-end', adminAuth, async (req, res) 
     if (!numericIds.length) return res.json({ success: false, message: '店铺ID无效' })
     const placeholders = numericIds.map(() => '?').join(',')
 
+    const [beforeRows] = await dbPool.query(
+      `SELECT id, subscription_end, status FROM stores WHERE id IN (${placeholders}) ORDER BY id`,
+      numericIds
+    )
     console.log('[Admin] 批量修改到期:', { ids: numericIds, dateStr })
     await dbPool.query(`UPDATE stores SET subscription_end = ? WHERE id IN (${placeholders})`, [dateStr, ...numericIds])
     if (date < new Date()) {
       await dbPool.query(`UPDATE stores SET status = 'disabled' WHERE id IN (${placeholders}) AND status = 'enabled'`, numericIds)
     }
+    await logAdminAudit(req, 'store.subscription_end.batch_changed', 'store', numericIds.join(','), {
+      stores: beforeRows.map(row => ({ id: row.id, previousSubscriptionEnd: row.subscription_end, previousStatus: row.status })),
+      subscriptionEnd: dateStr,
+      automaticallyDisabled: date < new Date()
+    })
     res.json({ success: true, data: { updated: numericIds.length, subscriptionEnd: dateStr } })
   } catch (err) {
     console.error('[Admin] 批量修改失败:', err)
@@ -1221,10 +1421,21 @@ app.put('/api/admin/stores/:id/subscription-end', adminAuth, async (req, res) =>
     if (isNaN(date.getTime())) return res.json({ success: false, message: '日期格式无效' })
     const dateStr = date.toISOString().slice(0, 10)
 
+    const [beforeRows] = await dbPool.execute(
+      'SELECT id, subscription_end, status FROM stores WHERE id = ? LIMIT 1',
+      [req.params.id]
+    )
+    if (!beforeRows.length) return res.status(404).json({ success: false, message: '店铺不存在' })
     await dbPool.execute('UPDATE stores SET subscription_end = ? WHERE id = ?', [dateStr, req.params.id])
     if (date < new Date()) {
       await dbPool.execute("UPDATE stores SET status = 'disabled' WHERE id = ? AND status = 'enabled'", [req.params.id])
     }
+    await logAdminAudit(req, 'store.subscription_end.changed', 'store', req.params.id, {
+      previousSubscriptionEnd: beforeRows[0].subscription_end,
+      previousStatus: beforeRows[0].status,
+      subscriptionEnd: dateStr,
+      automaticallyDisabled: date < new Date()
+    })
     res.json({ success: true, data: { id: req.params.id, subscriptionEnd: dateStr } })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
@@ -1242,6 +1453,48 @@ app.get('/api/admin/users', adminAuth, async (req, res) => {
     res.json({ success: true, data: { list: rows } })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+// 管理后台安全审计日志（不记录密码、令牌或支付密码明文）。
+app.get('/api/admin/audit-logs', adminAuth, async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1)
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 30))
+    const offset = (page - 1) * pageSize
+    const action = String(req.query.action || '').trim()
+    const params = []
+    let where = 'WHERE 1=1'
+    if (action) {
+      where += ' AND action LIKE ?'
+      params.push(`%${action}%`)
+    }
+    const [countRows] = await dbPool.execute(`SELECT COUNT(*) AS total FROM admin_audit_logs ${where}`, params)
+    const [rows] = await dbPool.execute(
+      `SELECT id, action, target_type, target_id, ip_address, user_agent, details_json, created_at
+       FROM admin_audit_logs ${where}
+       ORDER BY id DESC LIMIT ${pageSize} OFFSET ${offset}`,
+      params
+    )
+    res.json({
+      success: true,
+      data: {
+        total: Number(countRows[0]?.total || 0),
+        list: rows.map(row => ({
+          id: row.id,
+          action: row.action,
+          targetType: row.target_type,
+          targetId: row.target_id,
+          ipAddress: row.ip_address,
+          userAgent: row.user_agent,
+          details: typeof row.details_json === 'string' ? JSON.parse(row.details_json || '{}') : (row.details_json || {}),
+          createdAt: row.created_at
+        }))
+      }
+    })
+  } catch (err) {
+    console.error('[AdminAudit] 查询失败:', err.message)
+    res.status(500).json({ success: false, message: '获取安全日志失败' })
   }
 })
 
@@ -1310,6 +1563,12 @@ app.post('/api/admin/payment-vault', requireSecureVaultTransport, adminAuth, asy
       [ownerId, label, payerAccount, encrypted.passwordCiphertext, encrypted.passwordIv, encrypted.passwordTag, status]
     )
     console.log(`[PaymentVault] 已创建: id=${result.insertId}, ownerId=${ownerId}, payer=${maskPayerAccount(payerAccount)}`)
+    await logAdminAudit(req, 'payment_vault.created', 'payment_vault', result.insertId, {
+      ownerId,
+      label,
+      payerAccount: maskPayerAccount(payerAccount),
+      status
+    })
     res.json({ success: true, data: { id: result.insertId } })
   } catch (err) {
     console.error('[PaymentVault] 创建失败:', err.message)
@@ -1346,7 +1605,10 @@ app.put('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAuth, 
     if (!ownerRows.length) {
       return res.status(400).json({ success: false, message: '归属主账号不存在' })
     }
-    const [existingRows] = await dbPool.execute('SELECT id FROM payment_vault WHERE id = ? LIMIT 1', [id])
+    const [existingRows] = await dbPool.execute(
+      'SELECT id, owner_id, label, payer_account, status FROM payment_vault WHERE id = ? LIMIT 1',
+      [id]
+    )
     if (!existingRows.length) {
       return res.status(404).json({ success: false, message: '密码记录不存在' })
     }
@@ -1376,6 +1638,16 @@ app.put('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAuth, 
       )
     }
     console.log(`[PaymentVault] 已更新: id=${id}, ownerId=${ownerId}, payer=${maskPayerAccount(payerAccount)}`)
+    await logAdminAudit(req, 'payment_vault.updated', 'payment_vault', id, {
+      previous: {
+        ownerId: existingRows[0].owner_id,
+        label: existingRows[0].label,
+        payerAccount: maskPayerAccount(existingRows[0].payer_account),
+        status: existingRows[0].status
+      },
+      current: { ownerId, label, payerAccount: maskPayerAccount(payerAccount), status },
+      passwordChanged: Boolean(password)
+    })
     res.json({ success: true, data: { id } })
   } catch (err) {
     console.error('[PaymentVault] 更新失败:', err.message)
@@ -1394,9 +1666,19 @@ app.delete('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAut
   try {
     const id = parseInt(req.params.id, 10)
     if (!id) return res.status(400).json({ success: false, message: '密码记录ID无效' })
+    const [beforeRows] = await dbPool.execute(
+      'SELECT id, owner_id, label, payer_account, status FROM payment_vault WHERE id = ? LIMIT 1',
+      [id]
+    )
     const [result] = await dbPool.execute('DELETE FROM payment_vault WHERE id = ?', [id])
     if (!result.affectedRows) return res.status(404).json({ success: false, message: '密码记录不存在' })
     console.log(`[PaymentVault] 已删除: id=${id}`)
+    await logAdminAudit(req, 'payment_vault.deleted', 'payment_vault', id, beforeRows.length ? {
+      ownerId: beforeRows[0].owner_id,
+      label: beforeRows[0].label,
+      payerAccount: maskPayerAccount(beforeRows[0].payer_account),
+      status: beforeRows[0].status
+    } : {})
     res.json({ success: true, data: { id } })
   } catch (err) {
     console.error('[PaymentVault] 删除失败:', err.message)
@@ -1406,6 +1688,7 @@ app.delete('/api/admin/payment-vault/:id', requireSecureVaultTransport, adminAut
 
 // 修改用户状态（启用/停用）
 app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
+  let connection
   try {
     const userId = parseInt(req.params.id, 10)
     if (isNaN(userId)) return res.status(400).json({ success: false, message: '无效的用户ID' })
@@ -1413,13 +1696,74 @@ app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
     if (!['enabled', 'disabled'].includes(status)) {
       return res.status(400).json({ success: false, message: '状态值无效，应为 enabled 或 disabled' })
     }
-    const [result] = await dbPool.execute('UPDATE users SET status = ? WHERE id = ?', [status, userId])
-    if (result.affectedRows === 0) {
+
+    connection = await dbPool.getConnection()
+    await connection.beginTransaction()
+    const [userRows] = await connection.execute(
+      'SELECT id, username, user_type, status FROM users WHERE id = ? FOR UPDATE',
+      [userId]
+    )
+    if (!userRows.length) {
+      await connection.rollback()
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
-    res.json({ success: true, data: { id: userId, status } })
+    const user = userRows[0]
+    const isMaster = user.user_type === 'master'
+    const [beforeStores] = isMaster
+      ? await connection.execute('SELECT id, status FROM stores WHERE owner_id = ? ORDER BY id FOR UPDATE', [userId])
+      : [[]]
+    const [childUsers] = isMaster
+      ? await connection.execute('SELECT id, status FROM users WHERE parent_id = ? ORDER BY id FOR UPDATE', [userId])
+      : [[]]
+
+    let storesDisabled = 0
+    let usersDisabled = 0
+    let tokensDeleted = 0
+    if (status === 'disabled') {
+      if (isMaster) {
+        const [userResult] = await connection.execute(
+          'UPDATE users SET status = ? WHERE id = ? OR parent_id = ?',
+          ['disabled', userId, userId]
+        )
+        usersDisabled = userResult.affectedRows
+        const [storeResult] = await connection.execute(
+          'UPDATE stores SET status = ? WHERE owner_id = ?',
+          ['disabled', userId]
+        )
+        storesDisabled = storeResult.affectedRows
+      } else {
+        const [userResult] = await connection.execute('UPDATE users SET status = ? WHERE id = ?', ['disabled', userId])
+        usersDisabled = userResult.affectedRows
+      }
+
+      const affectedUserIds = [userId, ...childUsers.map(row => Number(row.id))]
+      const placeholders = affectedUserIds.map(() => '?').join(',')
+      const [tokenResult] = await connection.execute(
+        `DELETE FROM user_tokens WHERE user_id IN (${placeholders})`,
+        affectedUserIds
+      )
+      tokensDeleted = tokenResult.affectedRows
+    } else {
+      await connection.execute('UPDATE users SET status = ? WHERE id = ?', ['enabled', userId])
+    }
+
+    await logAdminAudit(req, 'user.status.changed', 'user', userId, {
+      username: user.username,
+      previousStatus: user.status,
+      status,
+      cascadedChildUsers: status === 'disabled' ? childUsers.map(row => ({ id: row.id, previousStatus: row.status })) : [],
+      cascadedStores: status === 'disabled' ? beforeStores.map(row => ({ id: row.id, previousStatus: row.status })) : [],
+      usersDisabled,
+      storesDisabled,
+      tokensDeleted
+    }, connection)
+    await connection.commit()
+    res.json({ success: true, data: { id: userId, status, usersDisabled, storesDisabled, tokensDeleted } })
   } catch (err) {
+    if (connection) await connection.rollback().catch(() => {})
     res.status(500).json({ success: false, message: err.message })
+  } finally {
+    connection?.release()
   }
 })
 
@@ -1445,6 +1789,10 @@ app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
     if (result.affectedRows === 0) {
       return res.status(404).json({ success: false, message: '用户不存在' })
     }
+    await logAdminAudit(req, 'user.deleted', 'user', userId, {
+      username: userRows[0].username,
+      userType: userRows[0].user_type
+    })
     res.json({ success: true, data: { id: userId } })
   } catch (err) {
     res.status(500).json({ success: false, message: err.message })
@@ -1535,6 +1883,47 @@ app.use((err, req, res, next) => {
 
 // ========== 数据库迁移：subscription_orders 表添加 store_ids 列 ==========
 async function runMigrations() {
+  try {
+    await dbPool.execute(`
+      CREATE TABLE IF NOT EXISTS admin_credentials (
+        id TINYINT PRIMARY KEY,
+        password_hash VARCHAR(255) NOT NULL,
+        password_version INT NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    const [credentialRows] = await dbPool.execute('SELECT id FROM admin_credentials WHERE id = 1 LIMIT 1')
+    if (!credentialRows.length) {
+      const initialHash = await bcrypt.hash(ADMIN_PASSWORD, 12)
+      await dbPool.execute(
+        'INSERT INTO admin_credentials (id, password_hash, password_version) VALUES (1, ?, 1)',
+        [initialHash]
+      )
+      console.log('[迁移] 管理后台密码已转换为哈希存储')
+    }
+
+    await dbPool.execute(`
+      CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        action VARCHAR(100) NOT NULL,
+        target_type VARCHAR(50) DEFAULT NULL,
+        target_id VARCHAR(100) DEFAULT NULL,
+        ip_address VARCHAR(64) DEFAULT '',
+        user_agent VARCHAR(500) DEFAULT '',
+        details_json JSON DEFAULT NULL,
+        created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
+        KEY idx_admin_audit_created (created_at),
+        KEY idx_admin_audit_action (action, created_at),
+        KEY idx_admin_audit_target (target_type, target_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `)
+    console.log('[迁移] 管理后台会话凭据和操作审计表已就绪')
+  } catch (e) {
+    console.error('[迁移] 管理后台安全表创建失败:', e.message)
+    throw e
+  }
+
   try {
     await dbPool.execute(`
       CREATE TABLE IF NOT EXISTS user_tokens (

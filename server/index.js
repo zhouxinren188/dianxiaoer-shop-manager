@@ -735,17 +735,17 @@ app.get('/api/users', async (req, res) => {
       const [stores] = await pool.execute(
         `SELECT s.id, s.name FROM stores s
          INNER JOIN user_stores us ON s.id = us.store_id
-         WHERE us.user_id = ?`, [user.id]
+         WHERE us.user_id = ? AND s.owner_id = ?`, [user.id, ownerId]
       )
       const [warehouses] = await pool.execute(
         `SELECT w.id, w.name FROM warehouses w
          INNER JOIN user_warehouses uw ON w.id = uw.warehouse_id
-         WHERE uw.user_id = ?`, [user.id]
+         WHERE uw.user_id = ? AND w.owner_id = ?`, [user.id, ownerId]
       )
       const [purchaseAccounts] = await pool.execute(
         `SELECT pa.id, pa.account, pa.platform FROM purchase_accounts pa
          INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
-         WHERE upa.user_id = ?`, [user.id]
+         WHERE upa.user_id = ? AND pa.owner_id = ?`, [user.id, ownerId]
       )
       user.assignedStores = stores
       user.assignedWarehouses = warehouses
@@ -798,14 +798,15 @@ app.post('/api/users', async (req, res) => {
       return res.status(403).json(fail('只有主账号才能创建用户'))
     }
 
-    const { username, phone, password, userType, role, status } = req.body
+    const { username, phone, password, role, status } = req.body
     if (!username) return res.json(fail('用户名不能为空'))
 
     const [exists] = await pool.execute('SELECT id FROM users WHERE username = ?', [username])
     if (exists.length) return res.json(fail('用户名已存在'))
 
-    // 主账号创建的子账号，parent_id 指向自己
-    const parentId = (userType === 'master') ? null : req.user.id
+    // 用户管理只创建当前租户的子账号；独立主账号必须走公开注册入口。
+    const userType = 'sub'
+    const parentId = req.user.id
 
     // 使用 bcrypt 加密密码
     const passwordHash = password ? bcrypt.hashSync(password, 10) : ''
@@ -828,7 +829,7 @@ app.put('/api/users/:id', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     // 验证目标用户属于同组
     const [check] = await pool.execute(
-      'SELECT id FROM users WHERE id = ? AND (id = ? OR parent_id = ?)',
+      'SELECT id, user_type FROM users WHERE id = ? AND (id = ? OR parent_id = ?)',
       [req.params.id, ownerId, ownerId]
     )
     if (!check.length) return res.status(403).json(fail('无权操作此用户'))
@@ -843,7 +844,9 @@ app.put('/api/users/:id', async (req, res) => {
     }
 
     if (phone !== undefined) { fields.push('phone = ?'); values.push(phone) }
-    if (userType !== undefined) { fields.push('user_type = ?'); values.push(userType) }
+    if (userType !== undefined && userType !== check[0].user_type) {
+      return res.status(400).json(fail('账号类型不能在编辑用户时变更'))
+    }
     if (role !== undefined) { fields.push('role = ?'); values.push(role) }
     if (status !== undefined) { fields.push('status = ?'); values.push(status) }
     if (password !== undefined && password) {
@@ -1025,7 +1028,7 @@ app.get('/api/users/:id/stores', async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT s.* FROM stores s
        INNER JOIN user_stores us ON s.id = us.store_id
-       WHERE us.user_id = ?`, [req.params.id]
+       WHERE us.user_id = ? AND s.owner_id = ?`, [req.params.id, ownerId]
     )
     res.json(ok(rows))
   } catch (err) {
@@ -1046,7 +1049,7 @@ app.get('/api/users/:id/warehouses', async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT w.* FROM warehouses w
        INNER JOIN user_warehouses uw ON w.id = uw.warehouse_id
-       WHERE uw.user_id = ?`, [req.params.id]
+       WHERE uw.user_id = ? AND w.owner_id = ?`, [req.params.id, ownerId]
     )
     res.json(ok(rows))
   } catch (err) {
@@ -1114,7 +1117,7 @@ app.get('/api/users/:id/purchase-accounts', async (req, res) => {
     const [rows] = await pool.execute(
       `SELECT pa.id, pa.account, pa.platform, pa.online FROM purchase_accounts pa
        INNER JOIN user_purchase_accounts upa ON pa.id = upa.account_id
-       WHERE upa.user_id = ?`, [req.params.id]
+       WHERE upa.user_id = ? AND pa.owner_id = ?`, [req.params.id, ownerId]
     )
     res.json(ok(rows))
   } catch (err) {
@@ -2033,8 +2036,9 @@ app.get('/api/cookies', async (req, res) => {
   }
 })
 
-// 获取指定店铺、指定设备的 Cookie（权限校验）。新版客户端必须传 device_id，
-// 未传时只读取 legacy 槽位，绝不随机拿另一台电脑的会话。
+// 获取指定店铺、指定设备的 Cookie（权限校验）。默认仍严格读取当前设备；
+// 客户端只有在本机无 Cookie 或已确认本机 Cookie 失效时，才显式请求其他设备
+// 最近验证有效的快照。跨设备快照只用于恢复，客户端验证通过后会保存为本机副本。
 app.get('/api/cookies/:storeId', async (req, res) => {
   try {
     const storeIds = await getAccessibleStoreIds(req.user)
@@ -2048,12 +2052,52 @@ app.get('/api/cookies/:storeId', async (req, res) => {
       return res.status(400).json(fail('device_id 无效'))
     }
 
+    const allowVerifiedFallback = req.query?.allow_verified_fallback === '1'
+    const excludeCurrentDevice = req.query?.exclude_current_device === '1'
     const [rows] = await pool.execute(
       'SELECT * FROM cookies WHERE store_id = ? AND source_device_id = ?',
       [storeId, normalizedDeviceId]
     )
-    if (!rows.length) return res.status(404).json(fail('该店铺无 Cookie 数据'))
-    res.json(ok(rows[0]))
+    const currentDeviceCookie = rows[0] || null
+
+    if (currentDeviceCookie && !excludeCurrentDevice) {
+      return res.json(ok({
+        ...currentDeviceCookie,
+        fallback_used: false,
+        target_revision: Number(currentDeviceCookie.revision || 0)
+      }))
+    }
+
+    if (allowVerifiedFallback && normalizedDeviceId) {
+      const [fallbackRows] = await pool.execute(
+        `SELECT c.*
+         FROM cookies c
+         LEFT JOIN store_device_status sds
+           ON sds.store_id = c.store_id AND sds.device_id = c.source_device_id
+         WHERE c.store_id = ?
+           AND c.source_device_id <> ?
+           AND c.last_verified_at IS NOT NULL
+         ORDER BY
+           CASE
+             WHEN sds.online = 1
+              AND sds.updated_at >= DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+             THEN 0 ELSE 1
+           END,
+           c.last_verified_at DESC,
+           c.saved_at DESC
+         LIMIT 1`,
+        [storeId, normalizedDeviceId]
+      )
+      if (fallbackRows.length) {
+        return res.json(ok({
+          ...fallbackRows[0],
+          fallback_used: true,
+          target_revision: Number(currentDeviceCookie?.revision || 0)
+        }))
+      }
+    }
+
+    return res.status(404).json(fail('该店铺无可用 Cookie 数据'))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }

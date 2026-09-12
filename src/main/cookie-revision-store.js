@@ -41,4 +41,14 @@ function setCookieRevision(storeId, revision) {
   }
 }
 
-module.exports = { getCookieRevision, setCookieRevision }
+function resetCookieRevision(storeId) {
+  loadRevisions()
+  delete revisions[String(storeId)]
+  try {
+    fs.writeFileSync(getRevisionFile(), JSON.stringify(revisions, null, 2), { encoding: 'utf8', mode: 0o600 })
+  } catch (error) {
+    console.warn('[CookieRevision] 清除版本失败:', error.message)
+  }
+}
+
+module.exports = { getCookieRevision, resetCookieRevision, setCookieRevision }

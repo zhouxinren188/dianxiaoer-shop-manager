@@ -516,9 +516,9 @@ async function initDB() {
     const [rows] = await connection.execute("SELECT COUNT(*) as count FROM users")
     if (rows[0].count === 0) {
       await connection.execute(`
-        INSERT INTO users (id, username, real_name, phone, password_hash, user_type, role, status, created_at)
-        VALUES (1, 'admin', '', '13800138000', 'admin', 'master', 'admin', 'enabled', NOW()),
-               (2, 'staff01', '', '13900139000', '123456', 'sub', 'staff', 'enabled', NOW())
+        INSERT INTO users (id, username, real_name, phone, password_hash, user_type, role, parent_id, status, created_at)
+        VALUES (1, 'admin', '', '13800138000', 'admin', 'master', 'admin', NULL, 'enabled', NOW()),
+               (2, 'staff01', '', '13900139000', '123456', 'sub', 'staff', 1, 'enabled', NOW())
       `)
     }
 
@@ -551,9 +551,8 @@ async function initDB() {
       INSERT IGNORE INTO user_warehouses (user_id, warehouse_id) VALUES (2, 1)
     `)
 
-    // 数据迁移：为已有数据设置归属关系
-    // 子账号默认挂载到 id=1 的主账号下
-    await connection.execute(`UPDATE users SET parent_id = 1 WHERE user_type = 'sub' AND parent_id IS NULL`)
+    // 禁止把未知来源的无归属子账号自动挂到 id=1，避免跨租户授权。
+    // 新建子账号必须由主账号接口显式写入 parent_id。
     // 已有店铺和仓库默认归属 id=1 的主账号
     await connection.execute(`UPDATE stores SET owner_id = 1 WHERE owner_id IS NULL`)
     await connection.execute(`UPDATE warehouses SET owner_id = 1 WHERE owner_id IS NULL`)

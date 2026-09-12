@@ -4,7 +4,7 @@ const { session } = require('electron')
 const { getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 const { getDeviceId, getShortDeviceId } = require('./device-identity')
-const { getCookieRevision, setCookieRevision } = require('./cookie-revision-store')
+const { getCookieRevision, resetCookieRevision, setCookieRevision } = require('./cookie-revision-store')
 const {
   buildDeviceCookieSnapshotUrl,
   fingerprintCookies,
@@ -121,8 +121,14 @@ function cookiesToHeader(cookies) {
   }
 }
 
-async function getServerCookieSnapshot(storeId, context = 'read', { timeoutMs } = {}) {
-  const cookieUrl = buildDeviceCookieSnapshotUrl(BUSINESS_SERVER, storeId, getDeviceId())
+async function getServerCookieSnapshot(storeId, context = 'read', {
+  timeoutMs,
+  allowVerifiedFallback = false,
+  excludeCurrentDevice = false
+} = {}) {
+  let cookieUrl = buildDeviceCookieSnapshotUrl(BUSINESS_SERVER, storeId, getDeviceId())
+  if (allowVerifiedFallback) cookieUrl += '&allow_verified_fallback=1'
+  if (excludeCurrentDevice) cookieUrl += '&exclude_current_device=1'
   const res = await httpRequest(cookieUrl, { timeoutMs })
   if (res.statusCode !== 200) {
     writeCookieDiagnostic(storeId, context, `server_read=failed http=${res.statusCode}`)
@@ -137,9 +143,11 @@ async function getServerCookieSnapshot(storeId, context = 'read', { timeoutMs } 
   return {
     cookies,
     revision: Number(json.data.revision || 0),
+    targetRevision: Number(json.data.target_revision ?? json.data.revision ?? 0),
     fingerprint: json.data.fingerprint || fingerprintCookies(cookies),
     sourceDeviceId: json.data.source_device_id || '',
-    sourceType: json.data.source_type || 'legacy'
+    sourceType: json.data.source_type || 'legacy',
+    fallbackUsed: json.data.fallback_used === true
   }
 }
 
@@ -180,11 +188,15 @@ async function applyServerCookieSnapshot(storeId, snapshot, { skipFlush = false,
     }
   }
 
-  if (restored > 0 && snapshot.revision > 0) setCookieRevision(storeId, snapshot.revision)
+  const targetRevision = Number(snapshot.targetRevision ?? snapshot.revision ?? 0)
+  if (restored > 0) {
+    if (targetRevision > 0) setCookieRevision(storeId, targetRevision)
+    else if (snapshot.fallbackUsed) resetCookieRevision(storeId)
+  }
   writeCookieDiagnostic(
     storeId,
     context,
-    `action=server_replace removed=${removed} restored=${restored}/${snapshot.cookies.length} server_rev=${snapshot.revision || 0} fp=${shortFingerprint(snapshot.fingerprint)} source=${snapshot.sourceType}`
+    `action=server_replace removed=${removed} restored=${restored}/${snapshot.cookies.length} server_rev=${snapshot.revision || 0} target_rev=${targetRevision} fallback=${snapshot.fallbackUsed === true} fp=${shortFingerprint(snapshot.fingerprint)} source=${snapshot.sourceType} source_device=${String(snapshot.sourceDeviceId || '').slice(0, 18)}`
   )
 
   if (restored > 0 && !skipFlush) {
@@ -201,9 +213,17 @@ async function applyServerCookieSnapshot(storeId, snapshot, { skipFlush = false,
 }
 
 // 从服务器查询店铺 Cookie，并先清理分区中的旧 Cookie 后完整恢复。
-async function restoreCookiesFromDB(storeId, { skipFlush = false, context = 'restore' } = {}) {
+async function restoreCookiesFromDB(storeId, {
+  skipFlush = false,
+  context = 'restore',
+  allowVerifiedFallback = true,
+  excludeCurrentDevice = false
+} = {}) {
   try {
-    const snapshot = await getServerCookieSnapshot(storeId, context)
+    const snapshot = await getServerCookieSnapshot(storeId, context, {
+      allowVerifiedFallback,
+      excludeCurrentDevice
+    })
     if (!snapshot) return false
     return await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
   } catch (error) {
@@ -213,7 +233,8 @@ async function restoreCookiesFromDB(storeId, { skipFlush = false, context = 'res
 }
 
 // 本机 Cookie 永远优先：只要本地还有京东 Cookie，查询/心跳前就不从服务器覆盖。
-// 仅当本地完全没有京东 Cookie 时，才恢复当前设备自己的服务器备份；
+// 仅当本地完全没有京东 Cookie 时，先恢复当前设备备份；若本机尚无备份，
+// 再使用同一店铺其他设备最近验证有效的快照；
 // 本地被真实请求明确判定失效后的强制恢复由 clearAndRetryWithFreshCookies 处理。
 async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, context = 'precheck', timeoutMs } = {}) {
   try {
@@ -232,7 +253,10 @@ async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, cont
       return { success: true, action: 'kept_local', serverRevision: 0 }
     }
 
-    const snapshot = await getServerCookieSnapshot(storeId, context, { timeoutMs })
+    const snapshot = await getServerCookieSnapshot(storeId, context, {
+      timeoutMs,
+      allowVerifiedFallback: true
+    })
     if (!snapshot) return { success: false, action: 'server_unavailable' }
     const restored = await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
     return { success: restored, action: 'restored_empty_local', serverRevision: snapshot.revision }
@@ -503,7 +527,11 @@ async function clearAndRetryWithFreshCookies(storeId, platform, expectedMerchant
     writeCookieDiagnostic(storeId, 'forced_recovery', 'phase=start')
 
     // restoreCookiesFromDB 内部会先清理分区，避免同名旧 Cookie 与服务器版本并存。
-    const restored = await restoreCookiesFromDB(storeId, { context: 'forced_recovery' })
+    const restored = await restoreCookiesFromDB(storeId, {
+      context: 'forced_recovery',
+      allowVerifiedFallback: true,
+      excludeCurrentDevice: true
+    })
     if (!restored) {
       writeCookieDiagnostic(storeId, 'forced_recovery', 'result=server_restore_failed')
       return false

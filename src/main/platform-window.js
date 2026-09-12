@@ -559,10 +559,12 @@ function registerPlatformWindowIpc(mainWindow) {
                 }
                 return
               }
+              // 保存一成功就立即禁止 close 处理器恢复登录前 Cookie。此前这里要等
+              // 3 秒后才置位，用户在提示成功后马上关窗会把刚保存的新会话回滚。
+              win._saveDone = true
               setTimeout(() => {
                 if (!win.isDestroyed()) {
                   console.log('[PlatformWindow] 登录保存成功，3秒后自动关闭平台窗口')
-                  win._saveDone = true
                   win.close()
                 }
               }, 3000)
