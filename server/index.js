@@ -65,7 +65,11 @@ const {
   purchaseAccountMetadataChanged
 } = require('./services/purchase-account-policy')
 const { buildReturnPackageLookup } = require('./services/return-package-purchase-matcher')
-const { mergePurchaseOrderStatus } = require('./services/purchase-order-status-service')
+const {
+  mergePurchaseOrderStatus,
+  parseTrackingItems,
+  refinePurchaseOrderStatusByTracking
+} = require('./services/purchase-order-status-service')
 const {
   assertMachineCode,
   canManageMachineBinding
@@ -7583,7 +7587,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
 
     // 查找本地采购订单
     const [localOrders] = await pool.execute(
-      'SELECT id, owner_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price, total_amount FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
+      'SELECT id, owner_id, purchase_no, platform_order_no, platform, source_url, shipping_address, created_at, status, logistics_no, logistics_company, logistics_tracking, pickup_code, pickup_address, goods_name, goods_image, sku, quantity, purchase_price, total_amount FROM purchase_orders WHERE owner_id=? AND platform_order_no=?',
       [ownerId, platform_order_no]
     )
 
@@ -7592,6 +7596,18 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
     }
 
     const localOrder = localOrders[0]
+    const incomingTracking = parseTrackingItems(order_info.logistics_tracking)
+    const storedTracking = parseTrackingItems(localOrder.logistics_tracking)
+    const effectiveTracking = incomingTracking.length > 0 ? incomingTracking : storedTracking
+    const statusBeforeTrackingRefine = newStatus || localOrder.status
+    newStatus = refinePurchaseOrderStatusByTracking(
+      statusBeforeTrackingRefine,
+      effectiveTracking,
+      order_info.logistics_status
+    )
+    if (newStatus !== statusBeforeTrackingRefine) {
+      console.log(`[Browser-Sync-Update] 物流证据修正状态: ${statusBeforeTrackingRefine} -> ${newStatus}（${incomingTracking.length > 0 ? '本次轨迹' : '已保存轨迹'}）`)
+    }
     newStatus = mergePurchaseOrderStatus(localOrder.status, newStatus)
 
     // 更新状态和物流信息
@@ -7694,7 +7710,7 @@ app.post('/api/purchase-orders/browser-sync-update', async (req, res) => {
       const learned = await recordTimelinessObservation(
         pool,
         localOrder,
-        order_info.logistics_tracking || [],
+        effectiveTracking,
         { status: newStatus || localOrder.status, verifiedByPlatformSync: true }
       )
       if (learned.recorded && learned.outcome === 'delivered') {

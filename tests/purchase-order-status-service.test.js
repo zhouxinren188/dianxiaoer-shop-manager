@@ -4,7 +4,9 @@ import statusService from '../server/services/purchase-order-status-service.js'
 const {
   markForwardedAfterCloudOutbound,
   markPendingPrintAfterExceptionResolution,
-  mergePurchaseOrderStatus
+  mergePurchaseOrderStatus,
+  parseTrackingItems,
+  refinePurchaseOrderStatusByTracking
 } = statusService
 
 describe('purchase order workflow status', () => {
@@ -17,6 +19,28 @@ describe('purchase order workflow status', () => {
   it('allows platform terminal states to close a local workflow order', () => {
     expect(mergePurchaseOrderStatus('pending_print', 'cancelled')).toBe('cancelled')
     expect(mergePurchaseOrderStatus('forwarded', 'refunded')).toBe('refunded')
+  })
+
+  it('uses previously stored tracking JSON to correct a stale ordered status', () => {
+    const storedTracking = JSON.stringify([
+      { time: '2026-09-12 15:18', context: '快件已由本人签收' }
+    ])
+
+    expect(parseTrackingItems(storedTracking)).toHaveLength(1)
+    expect(refinePurchaseOrderStatusByTracking('ordered', storedTracking, '')).toBe('received')
+  })
+
+  it('uses logistics progress to promote stale platform states', () => {
+    expect(refinePurchaseOrderStatusByTracking('ordered', [
+      { desc: '快件已到达南京转运中心' }
+    ], '')).toBe('in_transit')
+    expect(refinePurchaseOrderStatusByTracking('pending', [], '已发货')).toBe('shipped')
+  })
+
+  it('does not overwrite local workflow or terminal states with tracking', () => {
+    const signed = [{ message: '已签收' }]
+    expect(refinePurchaseOrderStatusByTracking('pending_print', signed, '')).toBe('pending_print')
+    expect(refinePurchaseOrderStatusByTracking('cancelled', signed, '')).toBe('cancelled')
   })
 
   it('moves a received order to pending print inside the same tenant only', async () => {
