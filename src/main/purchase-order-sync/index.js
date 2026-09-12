@@ -64,8 +64,8 @@ async function syncSingleAndUpdate(platformModule, accountId, platformOrderNo, p
         mappedOrderInfo.logistics_tracking = normalizeTrackingItems(mappedOrderInfo.logistics_tracking) || []
       }
 
-      // 根据物流轨迹修正状态：shipped/in_transit → received/rejected/in_transit
-      if (['shipped', 'in_transit'].includes(mappedOrderInfo.status)) {
+      // 平台状态可能滞后；真实物流轨迹可把已下单/待发货继续修正到运输或签收状态
+      if (SYNC_STATUSES.includes(mappedOrderInfo.status)) {
         const refined = refineStatusByTracking(
           mappedOrderInfo.status,
           mappedOrderInfo.logistics_tracking,

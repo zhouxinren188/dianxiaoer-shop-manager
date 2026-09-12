@@ -6,6 +6,10 @@ const { getDeviceId, getShortDeviceId } = require('./device-identity')
 const runtimeLog = require('./runtime-logger')
 const { extractJdSalesOrderLogistics } = require('./jd-sales-order-logistics')
 const { extractJdSalesOrderSkuSpec } = require('./jd-sales-order-item')
+const {
+  DEFAULT_RESPONSE_CAPTURE_LIMIT,
+  ORDER_PAGE_RESPONSE_CAPTURE_LIMIT
+} = require('./sales-order-capture-policy')
 
 let submitVendorRemarkImplementation = null
 let stockRemarkQueue = Promise.resolve()
@@ -65,6 +69,16 @@ const API_INTERCEPTOR = `
 
   var ORDER_PAGE_SIZE = 50;
   var SORT_ORDER = 'desc';  // 按下单时间倒序，获取最新订单
+  var DEFAULT_RESPONSE_CAPTURE_LIMIT = ${DEFAULT_RESPONSE_CAPTURE_LIMIT};
+  var ORDER_PAGE_RESPONSE_CAPTURE_LIMIT = ${ORDER_PAGE_RESPONSE_CAPTURE_LIMIT};
+
+  function limitCapturedResponseBody(url, body) {
+    var normalizedUrl = (url || '').toString().toLowerCase();
+    var limit = normalizedUrl.indexOf('queryorderpage') !== -1
+      ? ORDER_PAGE_RESPONSE_CAPTURE_LIMIT
+      : DEFAULT_RESPONSE_CAPTURE_LIMIT;
+    return body.substring(0, limit);
+  }
 
   function patchUrlPageSize(url) {
     if (!url || typeof url !== 'string') return url;
@@ -170,7 +184,7 @@ const API_INTERCEPTOR = `
               url: urlStr.substring(0, 1000),
               status: response.status,
               bodyLen: body.length,
-              body: body.substring(0, 200000),
+              body: limitCapturedResponseBody(urlStr, body),
               time: Date.now()
             });
           }
@@ -271,7 +285,7 @@ const API_INTERCEPTOR = `
             url: xhr.__captureUrl,
             status: xhr.status,
             bodyLen: respBody.length,
-            body: respBody.substring(0, 200000),
+            body: limitCapturedResponseBody(xhr.__captureUrl, respBody),
             time: Date.now()
           });
         }

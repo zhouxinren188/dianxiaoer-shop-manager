@@ -11,7 +11,11 @@ const {
   resolveLogisticsCompany, extractTrackingFromData, normalizeTrackingItems,
   looksLikeTrackingArray, mapOrderStatus, richTextToPlain, restoreCookiesFromServer, hasValidPlatformCookies
 } = require('./common')
-const { extractTaobaoPickupInfo } = require('./taobao-logistics')
+const {
+  extractTaobaoPickupInfo,
+  shouldFetchTaobaoLogisticsDetails,
+  isRelevantTaobaoLogisticsResult
+} = require('./taobao-logistics')
 const { validateTaobaoPurchaseAccount } = require('../taobao-account-validation')
 
 // ============ 平台配置 ============
@@ -506,8 +510,7 @@ function syncSingle(accountId, platformOrderNo) {
         if (found) {
           // 首页找到订单，检查是否需要物流轨迹
           const mappedStatus = mapOrderStatus(found.status)
-          const needLogisticsDetails = (mappedStatus === 'shipped' || mappedStatus === 'in_transit') &&
-            (!found.logistics_tracking || !found.pickup_code || !found.pickup_address)
+          const needLogisticsDetails = shouldFetchTaobaoLogisticsDetails(found, mappedStatus)
           if (needLogisticsDetails) {
             // 已发货/运输中需要访问物流页，补齐轨迹及取件信息
             detailResult = found
@@ -542,7 +545,7 @@ function syncSingle(accountId, platformOrderNo) {
         const found = orders.find(o => o.order_no === platformOrderNo)
         if (found) {
           const mappedStatus = mapOrderStatus(found.status)
-          const needLogisticsDetails = mappedStatus === 'shipped' || mappedStatus === 'in_transit'
+          const needLogisticsDetails = shouldFetchTaobaoLogisticsDetails(found, mappedStatus)
           // 已发货订单必须进入物流详情页，才能读取取件码和取件地址。
           if (needLogisticsDetails) {
             detailResult = found
@@ -687,17 +690,12 @@ function syncSingle(accountId, platformOrderNo) {
             let data = typeof response.data === 'string' ? tryParseJson(response.data) : response.data
             if (!data) continue
 
-            const dataStr = JSON.stringify(data)
-            if (!dataStr.includes(platformOrderNo)) continue
-
-            console.log('[PurchaseSync-Taobao] 物流页API含目标订单号, data顶层keys:', Object.keys(data).slice(0, 10).join(','))
-
-            // 调试：输出物流页数据结构（便于确认轨迹数据格式）
-            console.log('[PurchaseSync-Taobao-Tracking-Debug] 物流页数据:', JSON.stringify(data).substring(0, 10000))
-
             // 物流页面可能用组件格式或其他格式
             const parsed = parseLogisticsPageData(data, platformOrderNo)
-            if (parsed) {
+            if (isRelevantTaobaoLogisticsResult(parsed, data, platformOrderNo, detailResult?.logistics_no)) {
+              console.log('[PurchaseSync-Taobao] 物流页命中目标物流响应, data顶层keys:', Object.keys(data).slice(0, 10).join(','))
+              // 调试：输出物流页数据结构（便于确认轨迹数据格式）
+              console.log('[PurchaseSync-Taobao-Tracking-Debug] 物流页数据:', JSON.stringify(data).substring(0, 10000))
               console.log(`[PurchaseSync-Taobao] 物流页解析到第 ${parsedResults.length + 1} 个结果:`, JSON.stringify(parsed).substring(0, 500))
               parsedResults.push(parsed)
             }

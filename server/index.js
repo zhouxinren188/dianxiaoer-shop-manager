@@ -9167,7 +9167,7 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
 
     // 1. 获取采购订单信息（包含account_id和logistics_tracking）
     const [rows] = await pool.execute(
-      'SELECT logistics_no, logistics_company, platform, account_id, logistics_tracking FROM purchase_orders WHERE id=? AND owner_id=?',
+      'SELECT platform_order_no, logistics_no, logistics_company, platform, account_id, logistics_tracking FROM purchase_orders WHERE id=? AND owner_id=?',
       [req.params.id, ownerId]
     )
 
@@ -9206,11 +9206,11 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
     // 尝试从平台API获取物流轨迹（使用订单关联的account_id）
     try {
       if (order.platform === 'taobao') {
-        trackingData = await queryTaobaoLogistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
+        trackingData = await queryTaobaoLogistics(order.platform_order_no, order.logistics_no, order.logistics_company, order.account_id, ownerId)
       } else if (order.platform === '1688') {
-        trackingData = await query1688Logistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
+        trackingData = await query1688Logistics(order.platform_order_no, order.logistics_no, order.logistics_company, order.account_id, ownerId)
       } else if (order.platform === 'pinduoduo') {
-        trackingData = await queryPddLogistics(order.logistics_no, order.logistics_company, order.account_id, ownerId)
+        trackingData = await queryPddLogistics(order.platform_order_no, order.logistics_no, order.logistics_company, order.account_id, ownerId)
       }
     } catch (e) {
       console.log(`[Logistics] 平台物流查询失败: ${e.message}，尝试第三方API`)
@@ -9241,14 +9241,14 @@ app.get('/api/purchase-orders/:id/logistics', async (req, res) => {
 /**
  * 查询淘宝物流轨迹
  */
-async function queryTaobaoLogistics(logisticsNo, company, accountId, ownerId) {
+async function queryTaobaoLogistics(platformOrderNo, logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
   let cookieRows = []
   
   // 优先使用订单关联的account_id获取Cookie
   if (accountId) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
       [accountId, ownerId]
     )
@@ -9259,7 +9259,7 @@ async function queryTaobaoLogistics(logisticsNo, company, accountId, ownerId) {
   
   // 如果account_id无效或Cookie不存在，fallback到该用户名下最近的淘宝账号
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "taobao" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
       [ownerId]
     )
@@ -9279,13 +9279,13 @@ async function queryTaobaoLogistics(logisticsNo, company, accountId, ownerId) {
 
   const options = {
     hostname: 'buyertrade.taobao.com',
-    path: `/trade/detail/query_logistics.htm?orderId=${logisticsNo}`,
+    path: `/trade/detail/query_logistics.htm?orderId=${encodeURIComponent(platformOrderNo)}`,
     method: 'GET',
     headers: {
       'Cookie': cookieStr,
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Accept': 'application/json',
-      'Referer': `https://buyertrade.taobao.com/trade/detail?orderId=${logisticsNo}`
+      'Referer': `https://buyertrade.taobao.com/trade/detail?orderId=${encodeURIComponent(platformOrderNo)}`
     }
   }
 
@@ -9320,14 +9320,14 @@ async function queryTaobaoLogistics(logisticsNo, company, accountId, ownerId) {
 /**
  * 查询1688物流轨迹
  */
-async function query1688Logistics(logisticsNo, company, accountId, ownerId) {
+async function query1688Logistics(platformOrderNo, logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
   let cookieRows = []
   
   // 优先使用订单关联的account_id获取Cookie
   if (accountId) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
       [accountId, ownerId]
     )
@@ -9338,7 +9338,7 @@ async function query1688Logistics(logisticsNo, company, accountId, ownerId) {
   
   // 如果account_id无效或Cookie不存在，fallback
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "1688" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
       [ownerId]
     )
@@ -9358,7 +9358,7 @@ async function query1688Logistics(logisticsNo, company, accountId, ownerId) {
 
   const options = {
     hostname: 'trade.1688.com',
-    path: `/order/detail.htm?orderId=${logisticsNo}`,
+    path: `/order/detail.htm?orderId=${encodeURIComponent(platformOrderNo)}`,
     method: 'GET',
     headers: {
       'Cookie': cookieStr,
@@ -9401,14 +9401,14 @@ async function query1688Logistics(logisticsNo, company, accountId, ownerId) {
 /**
  * 查询拼多多物流轨迹
  */
-async function queryPddLogistics(logisticsNo, company, accountId, ownerId) {
+async function queryPddLogistics(platformOrderNo, logisticsNo, company, accountId, ownerId) {
   const https = require('https')
 
   let cookieRows = []
   
   // 优先使用订单关联的account_id获取Cookie
   if (accountId) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pc.account_id = ? AND pa.owner_id = ?',
       [accountId, ownerId]
     )
@@ -9419,7 +9419,7 @@ async function queryPddLogistics(logisticsNo, company, accountId, ownerId) {
   
   // 如果account_id无效或Cookie不存在，fallback
   if (!cookieRows.length || !cookieRows[0].cookie_data) {
-    cookieRows = await pool.execute(
+    ;[cookieRows] = await pool.execute(
       'SELECT pc.cookie_data, pa.account FROM purchase_cookies pc JOIN purchase_accounts pa ON pc.account_id = pa.id WHERE pa.platform = "pinduoduo" AND pa.owner_id = ? ORDER BY pc.saved_at DESC LIMIT 1',
       [ownerId]
     )
@@ -9439,7 +9439,7 @@ async function queryPddLogistics(logisticsNo, company, accountId, ownerId) {
 
   const options = {
     hostname: 'mms.pinduoduo.com',
-    path: `/order/detail?orderSn=${logisticsNo}`,
+    path: `/order/detail?orderSn=${encodeURIComponent(platformOrderNo)}`,
     method: 'GET',
     headers: {
       'Cookie': cookieStr,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import common from '../src/main/purchase-order-sync/common.js'
 
-const { normalizeTrackingTime, normalizeTrackingItems } = common
+const { normalizeTrackingTime, normalizeTrackingItems, refineStatusByTracking } = common
 
 describe('物流轨迹时间绝对化', () => {
   const reference = new Date(2026, 0, 1, 10, 0, 0)
@@ -26,5 +26,31 @@ describe('物流轨迹时间绝对化', () => {
       { time: '2026-01-01 00:41', context: '快件离开转运中心' },
       { time: '2025-12-31 22:29', context: '快件到达转运中心' }
     ])
+  })
+})
+
+describe('采购单状态按真实物流轨迹修正', () => {
+  it('平台仍返回已下单时，明确签收轨迹可修正为已签收', () => {
+    expect(refineStatusByTracking('ordered', [
+      { time: '2026-09-12 15:18', context: '您的包裹已送达签收，由本人签收' }
+    ], '')).toBe('received')
+  })
+
+  it('平台仍返回待发货时，真实运输轨迹可修正为运输中', () => {
+    expect(refineStatusByTracking('pending', [
+      { time: '2026-09-12 09:20', context: '快件已到达宿迁转运中心' }
+    ], '')).toBe('in_transit')
+  })
+
+  it('不会用物流轨迹覆盖取消等业务终态', () => {
+    expect(refineStatusByTracking('cancelled', [
+      { time: '2026-09-12 15:18', context: '您的包裹已由本人签收' }
+    ], '已签收')).toBe('cancelled')
+  })
+
+  it('仅有通知快递取件的文案不会误判为运输中', () => {
+    expect(refineStatusByTracking('ordered', [
+      { time: '2026-09-12 08:00', context: '商家正在通知中通快递取件' }
+    ], '')).toBe('ordered')
   })
 })

@@ -443,18 +443,27 @@ function httpPostJson(url, body) {
  * 1. logisticsStatus（平台原始物流状态字段，最可靠）
  *    - 拒收关键词 → rejected
  *    - 签收关键词 → received
- * 2. tracking 轨迹文本（逐条检查，匹配即返回）
+ * 2. tracking 轨迹文本（逐条检查）
  *    - 拒收关键词 → rejected
  *    - 签收关键词 → received
- *    - 揽收关键词（仅 shipped → in_transit）
+ *    - 运输关键词 → in_transit
+ *    - 发货关键词 → shipped
  *
- * @param {string} status - 当前英文状态码 (shipped/in_transit)
+ * 平台订单状态偶尔会滞后：物流已有真实轨迹时，允许把
+ * ordered/pending 修正为 shipped/in_transit/received/rejected；
+ * 取消、退款、入库等终态不会被物流覆盖。
+ *
+ * @param {string} status - 当前英文状态码
  * @param {Array} tracking - 归一化轨迹数组 [{time, context}]
  * @param {string} logisticsStatus - 平台原始物流状态（中文，如"已签收"）
  * @returns {string} 修正后的状态码
  */
 function refineStatusByTracking(status, tracking, logisticsStatus) {
-  if (status !== 'shipped' && status !== 'in_transit') return status
+  const refinableStatuses = new Set(['ordered', 'pending', 'shipped', 'in_transit'])
+  if (!refinableStatuses.has(status)) return status
+
+  let hasTransitEvidence = false
+  let hasShippedEvidence = false
 
   // 优先检查 logisticsStatus（平台原始字段，最可靠）
   if (logisticsStatus) {
@@ -466,31 +475,47 @@ function refineStatusByTracking(status, tracking, logisticsStatus) {
       console.log(`[StatusRefine] ${status} → received (物流状态: ${logisticsStatus})`)
       return 'received'
     }
+    if (/运输中|派送中|配送中|正在派送|已揽收|揽件成功|已取件|已出库|分拣中|已发往|到达.*(?:中心|网点|站点)/.test(logisticsStatus)) {
+      hasTransitEvidence = true
+    } else if (/已发货|卖家已发货|等待揽收|待揽收/.test(logisticsStatus)) {
+      hasShippedEvidence = true
+    }
   }
 
   // 其次检查轨迹文本
-  if (!Array.isArray(tracking) || tracking.length === 0) return status
+  if (Array.isArray(tracking)) {
+    for (const item of tracking) {
+      const ctx = (item.context || '') + (item.desc || '')
 
-  for (const item of tracking) {
-    const ctx = (item.context || '') + (item.desc || '')
-    // 排除"通知取件"类伪揽收（如"正在通知中通快递取件"）
-    if (/通知.*取件|取件.*通知/.test(ctx)) continue
+      // 拒收检测
+      if (/拒收|拒签|拒绝签收|退回/.test(ctx)) {
+        console.log(`[StatusRefine] ${status} → rejected (轨迹: ${ctx.substring(0, 50)})`)
+        return 'rejected'
+      }
+      // 签收检测
+      if (/已签收|已投递|已妥投|家人签收|代收|本人签收/.test(ctx)) {
+        console.log(`[StatusRefine] ${status} → received (轨迹: ${ctx.substring(0, 50)})`)
+        return 'received'
+      }
 
-    // 拒收检测
-    if (/拒收|拒签|拒绝签收|退回/.test(ctx)) {
-      console.log(`[StatusRefine] ${status} → rejected (轨迹: ${ctx.substring(0, 50)})`)
-      return 'rejected'
+      // 排除"通知取件"类伪揽收（如"正在通知中通快递取件"）
+      if (/通知.*取件|取件.*通知/.test(ctx)) continue
+
+      if (/运输中|派送中|配送中|正在派送|已揽收|揽件成功|已取件|已出库|分拣|发往|到达.*(?:中心|网点|站点)|离开.*(?:中心|网点|站点)/.test(ctx)) {
+        hasTransitEvidence = true
+      } else if (/已发货|卖家已发货|等待揽收|待揽收/.test(ctx)) {
+        hasShippedEvidence = true
+      }
     }
-    // 签收检测
-    if (/已签收|已投递|已妥投|家人签收|代收|本人签收/.test(ctx)) {
-      console.log(`[StatusRefine] ${status} → received (轨迹: ${ctx.substring(0, 50)})`)
-      return 'received'
-    }
-    // 揽收检测（仅 shipped → in_transit）
-    if (status === 'shipped' && /揽收|已取件/.test(ctx)) {
-      console.log(`[StatusRefine] shipped → in_transit (真实揽收: ${ctx.substring(0, 50)})`)
-      return 'in_transit'
-    }
+  }
+
+  if (hasTransitEvidence && status !== 'in_transit') {
+    console.log(`[StatusRefine] ${status} → in_transit (检测到真实运输轨迹)`)
+    return 'in_transit'
+  }
+  if (hasShippedEvidence && (status === 'ordered' || status === 'pending')) {
+    console.log(`[StatusRefine] ${status} → shipped (检测到真实发货轨迹)`)
+    return 'shipped'
   }
   return status
 }

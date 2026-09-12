@@ -59,8 +59,48 @@ function extractTaobaoPickupInfo(input, toPlain = taobaoRichTextToPlain) {
   }
 }
 
+/**
+ * 只要订单已经出现运单号，就应进入物流页补齐轨迹。
+ * 淘宝列表偶尔会把已发货订单的步骤状态仍显示为“拍下宝贝/已下单”，
+ * 不能只依赖订单状态判断是否需要读取物流详情。
+ */
+function shouldFetchTaobaoLogisticsDetails(orderInfo, mappedStatus = '') {
+  if (!orderInfo || typeof orderInfo !== 'object') return false
+
+  const hasTrackingNo = Boolean(String(orderInfo.logistics_no || '').trim())
+  const isShippingStatus = mappedStatus === 'shipped' || mappedStatus === 'in_transit'
+  if (!hasTrackingNo && !isShippingStatus) return false
+
+  const hasTracking = Array.isArray(orderInfo.logistics_tracking) && orderInfo.logistics_tracking.length > 0
+  return !hasTracking || !orderInfo.pickup_code || !orderInfo.pickup_address
+}
+
+/**
+ * 淘宝新版物流详情响应通常不再携带平台订单号。当前窗口已经固定打开
+ * 目标订单的物流页，因此可通过订单号、预期运单号或真实轨迹/取件信息确认响应。
+ */
+function isRelevantTaobaoLogisticsResult(parsed, rawData, targetOrderNo, expectedTrackingNo = '') {
+  if (!parsed || typeof parsed !== 'object') return false
+
+  let rawText = ''
+  try {
+    rawText = typeof rawData === 'string' ? rawData : JSON.stringify(rawData || {})
+  } catch (_) {}
+
+  if (targetOrderNo && rawText.includes(String(targetOrderNo))) return true
+
+  const actualTrackingNo = String(parsed.logistics_no || '').trim()
+  const normalizedExpectedNo = String(expectedTrackingNo || '').trim()
+  if (normalizedExpectedNo && actualTrackingNo === normalizedExpectedNo) return true
+
+  const hasTracking = Array.isArray(parsed.logistics_tracking) && parsed.logistics_tracking.length > 0
+  return hasTracking || Boolean(parsed.pickup_code || parsed.pickup_address)
+}
+
 module.exports = {
   taobaoRichTextToPlain,
   parseTaobaoPickupCode,
-  extractTaobaoPickupInfo
+  extractTaobaoPickupInfo,
+  shouldFetchTaobaoLogisticsDetails,
+  isRelevantTaobaoLogisticsResult
 }
