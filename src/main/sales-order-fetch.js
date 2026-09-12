@@ -3931,6 +3931,7 @@ async function autoSyncAllStores(mainWindow) {
           result = await fetchSalesOrders(store.store_id)
         if (result.success) {
           const orders = result.data?.list || []
+          let primarySaved = true
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 成功: ${orders.length} 条订单`)
           // 主进程直接保存订单到服务器，避免通过 IPC 传递导致双重保存
           if (orders.length > 0) {
@@ -3938,13 +3939,22 @@ async function autoSyncAllStores(mainWindow) {
             const safeOrders = orders
             const saved = await saveOrdersToServer(store.store_id, safeOrders)
             if (!saved) {
+              primarySaved = false
               console.error(`[AutoSync] [${i + 1}/${jdStores.length}] 保存订单到服务器失败！`)
             }
           }
-          // 更新同步时间
-          const syncTimeUpdated = await updateSyncTimeOnServer(store.store_id)
-          if (!syncTimeUpdated) {
-            console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 同步时间回写失败`)
+          if (primarySaved) {
+            // 只有零订单确认成功或订单已经可靠落库后才能更新时间。
+            const syncTimeUpdated = await updateSyncTimeOnServer(store.store_id)
+            if (!syncTimeUpdated) {
+              console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 同步时间回写失败`)
+            }
+          } else {
+            result = {
+              ...result,
+              success: false,
+              message: '订单已获取，但保存到服务器失败'
+            }
           }
         } else {
           console.log(`[AutoSync] [${i + 1}/${jdStores.length}] 失败: ${result.message}`)

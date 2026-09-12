@@ -58,6 +58,13 @@ describe('sales order auto sync concurrency wiring', () => {
     expect(source).toContain('failed_batch_count=${secondaryFailedBatchCount}')
   })
 
+  it('does not report success or update sync time when primary persistence fails', () => {
+    expect(source).toContain('let primarySaved = true')
+    expect(source).toContain('primarySaved = false')
+    expect(source).toContain('if (primarySaved)')
+    expect(source).toContain("message: '订单已获取，但保存到服务器失败'")
+  })
+
   it('clears the UI status only after the complete concurrent cycle finishes', () => {
     expect(preloadSource).toContain("'auto-sync-cycle-finish'")
     expect(source).toContain("webContents.send('auto-sync-cycle-finish'")
