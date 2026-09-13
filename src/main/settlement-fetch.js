@@ -3,6 +3,7 @@ const http = require('http')
 const { getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 const { hasValidPlatformCookies } = require('./purchase-order-sync/common')
+const { SETTLEMENT_QUERY_RENDERER_SOURCE } = require('./finance-page-query-scripts')
 
 const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const FINANCE_PAGE_URL = 'https://shop.jd.com/jdm/fin/billManage/MonthlyBill'
@@ -63,111 +64,9 @@ function httpRequest(url, options = {}) {
 }
 
 function buildSettlementQueryScript(statisticsDate) {
-  async function querySettlement(config) {
-    const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
-
-    async function waitForSecuritySdk(timeoutMs = 12000) {
-      const deadline = Date.now() + timeoutMs
-      while (Date.now() < deadline) {
-        const securityConfig = window.__DSM_SECURITY_CONFIG || {}
-        if (securityConfig.securitySdkReady) {
-          try { await securityConfig.securitySdkReady } catch {}
-        }
-        if (typeof window.ParamsSign === 'function' && window.CryptoJS?.SHA256) return securityConfig
-        await sleep(150)
-      }
-      throw new Error('京麦页面签名组件未就绪')
-    }
-
-    function getJsToken() {
-      if (typeof window.getJsToken !== 'function') return Promise.resolve('')
-      return new Promise(resolve => {
-        let settled = false
-        const timer = setTimeout(() => {
-          if (settled) return
-          settled = true
-          resolve('')
-        }, 1500)
-        try {
-          window.getJsToken(result => {
-            if (settled) return
-            settled = true
-            clearTimeout(timer)
-            resolve(result?.jsToken || '')
-          }, 1200)
-        } catch {
-          clearTimeout(timer)
-          resolve('')
-        }
-      })
-    }
-
-    function traceId() {
-      if (window.crypto?.randomUUID) return window.crypto.randomUUID()
-      return `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    }
-
-    const securityConfig = await waitForSecuritySdk()
-    const eid = await getJsToken()
-
-    async function post(api, body) {
-      const businessId = securityConfig.securityWhiteList?.[api] || securityConfig.defaultBusinessId || '0248a'
-      const signer = new window.ParamsSign({ appId: businessId, preRequest: false, debug: false, onSign() {} })
-      const bodyText = JSON.stringify(body)
-      const bodyHash = window.CryptoJS.SHA256(bodyText).toString().toUpperCase()
-      const signed = await signer.sign({ body: bodyHash, appId: config.appId, api, v: '1.0' })
-      if (!signed?.h5st) throw new Error('京麦未能生成结算接口签名')
-
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 15000)
-      try {
-        const response = await fetch(`https://sff.jd.com/api?v=1.0&appId=${config.appId}&api=${encodeURIComponent(api)}`, {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            accept: 'application/json, text/plain, */*',
-            'content-type': 'application/json;charset=UTF-8',
-            'dsm-lang': 'zh_CN',
-            'dsm-language': 'zh_CN',
-            'dsm-platform': 'pc',
-            'dsm-trace-id': traceId(),
-            h5st: encodeURI(signed.h5st),
-            'x-requested-with': 'XMLHttpRequest',
-            ...(eid ? { 'dsm-eid': eid } : {})
-          },
-          body: bodyText,
-          signal: controller.signal
-        })
-        const result = await response.json()
-        if (!response.ok) throw new Error(result?.msg || `HTTP ${response.status}`)
-        if (String(result?.code) !== '200') throw new Error(result?.msg || `接口返回 ${result?.code}`)
-        return result
-      } finally {
-        clearTimeout(timer)
-      }
-    }
-
-    const pendingBody = { queryVo: { settleStatus: 1 }, accessContext: { source: 'web' } }
-    const yesterdayBody = {
-      queryVo: {
-        settleStatus: 2,
-        happenTimeE: `${config.statisticsDate} 23:59:59`,
-        finishTimeS: `${config.statisticsDate} 00:00:00`
-      },
-      accessContext: { source: 'web' }
-    }
-    const walletBody = { accessContext: { source: 'web' } }
-    const [pending, yesterday, wallet] = await Promise.all([
-      post(config.pendingApi, pendingBody),
-      post(config.pendingApi, yesterdayBody),
-      post(config.walletApi, walletBody)
-    ])
-    return { pending, yesterday, wallet }
-  }
-
   return `(async function() {
     try {
-      var response = await (${querySettlement.toString()})(${JSON.stringify({
+      var response = await ${SETTLEMENT_QUERY_RENDERER_SOURCE}(${JSON.stringify({
         appId: FINANCE_APP_ID,
         pendingApi: PENDING_API,
         walletApi: WALLET_API,

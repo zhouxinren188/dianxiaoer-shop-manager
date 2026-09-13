@@ -73,7 +73,10 @@ describe('settlement overview aggregation', () => {
 
 describe('settlement integration contract', () => {
   it('uses the three verified Jingmai finance requests and persists server snapshots', () => {
-    const source = readFileSync(new URL('../src/main/settlement-fetch.js', import.meta.url), 'utf8')
+    const source = [
+      readFileSync(new URL('../src/main/settlement-fetch.js', import.meta.url), 'utf8'),
+      readFileSync(new URL('../src/main/finance-page-query-scripts.js', import.meta.url), 'utf8')
+    ].join('\n')
     expect(source).toContain('querySumBalAndCount')
     expect(source).toContain('queryEnterpriseBalanceByVenderId')
     expect(source).toContain('settleStatus: 1')
