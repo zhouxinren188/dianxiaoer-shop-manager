@@ -154,6 +154,9 @@ app.use(cors({
   },
   credentials: true
 }))
+// 销售订单同步会携带平台原始数据，默认 100KB 会导致订单较多的店铺整批被拒绝。
+// 只放宽这个接口，其他接口继续使用默认限制，避免无关请求占用过多内存。
+app.use('/api/sales-orders/batch', express.json({ limit: '10mb' }))
 app.use(express.json())
 app.use(INVENTORY_IMAGE_PUBLIC_PATH, express.static(inventoryImageRoot, {
   dotfiles: 'deny',
