@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const {
+  buildSettlementDashboardPayload,
   buildSettlementOverview,
   normalizeSettlementMetrics
 } = require('../server/services/settlement-overview-service')
@@ -69,6 +70,53 @@ describe('settlement overview aggregation', () => {
       withdrawableAmount: 0
     })
   })
+
+  it('builds a compact four-metric payload for the miniprogram dashboard', () => {
+    const fullOverview = buildSettlementOverview([
+      {
+        store_id: 1,
+        store_name: '店铺A',
+        pending_amount: '12.30',
+        pending_order_count: 2,
+        yesterday_settled_amount: '4.50',
+        wallet_balance: '20.00',
+        frozen_amount: '1.00',
+        withdrawable_amount: '19.00',
+        statistics_date: '2026-09-13',
+        updated_at: '2026-09-14T01:00:00.000Z'
+      }
+    ], {
+      now: new Date('2026-09-14T02:00:00.000Z'),
+      statisticsDate: '2026-09-13'
+    })
+    const payload = buildSettlementDashboardPayload(fullOverview)
+
+    expect(payload.summary).toMatchObject({
+      pendingAmount: 12.3,
+      pendingOrderCount: 2,
+      yesterdaySettledAmount: 4.5,
+      walletBalance: 20,
+      frozenAmount: 1,
+      withdrawableAmount: 19
+    })
+    expect(payload.overview).toMatchObject({
+      contractVersion: 1,
+      currency: 'CNY',
+      metricOrder: [
+        'pendingAmount',
+        'yesterdaySettledAmount',
+        'walletBalance',
+        'frozenAmount'
+      ]
+    })
+    expect(payload.overview.metrics.map(item => item.label)).toEqual([
+      '待结算金额',
+      '昨日结算到账',
+      '钱包余额',
+      '冻结金额'
+    ])
+    expect(payload).not.toHaveProperty('list')
+  })
 })
 
 describe('settlement integration contract', () => {
@@ -88,7 +136,8 @@ describe('settlement integration contract', () => {
   it('exposes authenticated overview routes and a safe preload channel', () => {
     const serverSource = readFileSync(new URL('../server/index.js', import.meta.url), 'utf8')
     const preloadSource = readFileSync(new URL('../src/preload/index.js', import.meta.url), 'utf8')
-    expect(serverSource).toContain("app.get('/api/settlement-overview'")
+    expect(serverSource).toContain("app.get('/api/settlement-overview', handleSettlementOverview)")
+    expect(serverSource).toContain("app.get('/api/dashboard/settlement-overview', handleDashboardSettlementOverview)")
     expect(serverSource).toContain("app.post('/api/store-settlement-metrics/:storeId'")
     expect(preloadSource).toContain("'sync-settlement-overview'")
   })

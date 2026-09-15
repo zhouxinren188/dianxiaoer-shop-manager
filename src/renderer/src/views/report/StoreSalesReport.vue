@@ -8,7 +8,7 @@
         </div>
         <div class="header-info">
           <h2 class="header-title">店铺销售报表</h2>
-          <p class="header-desc">按店铺维度统计销售数据、订单量（已剔除待付款和已取消订单）</p>
+          <p class="header-desc">按店铺维度统计销售额、订单量、快车消耗和京准通余额（已剔除待付款和已取消订单）</p>
         </div>
       </div>
     </div>
@@ -147,6 +147,20 @@
             <span>¥{{ row.avgOrderValue.toFixed(2) }}</span>
           </template>
         </el-table-column>
+        <el-table-column prop="adSpend" label="快车消耗" width="120" align="right">
+          <template #default="{ row }">
+            <span :style="{ color: row.adSpend == null ? '#c0c4cc' : '#e6a23c', fontWeight: 600 }">
+              {{ formatOptionalCurrency(row.adSpend) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="jztBalance" label="京准通余额" width="130" align="right">
+          <template #default="{ row }">
+            <span :style="{ color: row.jztBalance == null ? '#c0c4cc' : '#67c23a', fontWeight: 600 }">
+              {{ formatOptionalCurrency(row.jztBalance) }}
+            </span>
+          </template>
+        </el-table-column>
         <el-table-column label="销售占比" width="160" align="center">
           <template #default="{ row }">
             <el-progress :percentage="row.ratio" :color="progressColor" :stroke-width="10" />
@@ -182,6 +196,12 @@ const filterForm = reactive({
 const sortBy = ref('sales')
 
 const tableData = ref([])
+
+function formatOptionalCurrency(value) {
+  if (value == null || value === '') return '--'
+  const amount = Number(value)
+  return Number.isFinite(amount) ? `¥${amount.toFixed(2)}` : '--'
+}
 
 // 从店铺列表提取所有唯一标签
 const tagOptions = computed(() => {

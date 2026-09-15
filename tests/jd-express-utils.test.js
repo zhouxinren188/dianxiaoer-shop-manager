@@ -10,9 +10,11 @@ const {
   buildProductQuery,
   buildRoiPlanStructure,
   buildScopedRoiPlanStructure,
+  collectExistingPromotionIds,
   extractBusinessWisdomKeywords,
   extractSpuList,
   extractTotal,
+  filterExistingPromotionProducts,
   mergeProductKeywordRows,
   normalizeAreaTree,
   normalizeImageUrl,
@@ -81,8 +83,13 @@ describe('京东快车 SKU 选择和详情', () => {
 
     expect(result.skuIds).toEqual(['12', '13'])
     expect(result.selectedSkus).toEqual([
-      { skuId: '12', jdPrice: 9.9 },
-      { skuId: '13', jdPrice: 15 }
+      { skuId: '12', spuId: '1001', jdPrice: 9.9 },
+      { skuId: '13', spuId: '1003', jdPrice: 15 }
+    ])
+    expect(result.skuSpuMappings).toEqual([
+      { skuId: '11', spuId: '1001' },
+      { skuId: '12', spuId: '1001' },
+      { skuId: '13', spuId: '1003' }
     ])
     expect(result.invalidSpuIds).toEqual(['1002'])
   })
@@ -128,6 +135,42 @@ describe('京东快车 SKU 选择和详情', () => {
     const products = normalizeSkuDetails({ skuDetails: [{ skuId: 12, skuName: '测试商品' }] })
     expect(products[0].price).toBeNull()
     expect(products[0].stock).toBeNull()
+  })
+})
+
+describe('京东快车已有推广商品过滤', () => {
+  it('从推广创意列表去重收集 SKU 和 SPU', () => {
+    expect(collectExistingPromotionIds([
+      { skuId: 11, spuId: 101 },
+      { skuId: '11', wareId: 101 },
+      { sku: { id: 12 }, productId: 102 },
+      null
+    ])).toEqual({
+      skuIds: ['11', '12'],
+      spuIds: ['101', '102']
+    })
+  })
+
+  it('按 SKU 只过滤已经推广的具体规格', () => {
+    const result = filterExistingPromotionProducts([
+      { skuId: '11', spuId: '101' },
+      { skuId: '12', spuId: '101' },
+      { skuId: '13', spuId: '102' }
+    ], { skuIds: ['11'], spuIds: ['101'] }, 'sku')
+
+    expect(result.products.map((item) => item.skuId)).toEqual(['12', '13'])
+    expect(result.filteredIds).toEqual(['11'])
+  })
+
+  it('按 SPU 过滤同一商品下的全部规格，并能由已有 SKU 补出 SPU', () => {
+    const result = filterExistingPromotionProducts([
+      { skuId: '11', spuId: '101' },
+      { skuId: '12', spuId: '101' },
+      { skuId: '13', spuId: '102' }
+    ], { skuIds: ['11'], spuIds: [] }, 'spu')
+
+    expect(result.products.map((item) => item.skuId)).toEqual(['13'])
+    expect(result.filteredIds).toEqual(['11', '12'])
   })
 })
 
@@ -213,7 +256,7 @@ describe('京东快车投产比计划预览', () => {
     expect(config.areaIds).toEqual(['1', '2'])
   })
 
-  it('规范化一键自定义时使用原工具默认投放参数和推荐人群', () => {
+  it('规范化一键自定义时使用原工具默认投放参数且不强制勾选人群', () => {
     const config = normalizeRoiConfig({
       createMode: 'custom',
       automatedBiddingType: 32768,
@@ -227,10 +270,45 @@ describe('京东快车投产比计划预览', () => {
       orientationRangeOption: [1, 2],
       premiumType: 2,
       premiumCoef: 30,
-      inSearchFee: 0.1
+      inSearchFee: 0.1,
+      useMinKeywordBid: true,
+      customKeywordBid: 0.1,
+      keywordMatchType: 8
     })
-    expect(config.dmpCrowdSettings.map((item) => item.crowdId)).toEqual([100, 101])
-    expect(config.dmpCrowdSettings.every((item) => item.adGroupPrice === 30 && item.isUsed === 1)).toBe(true)
+    expect(config.dmpCrowdSettings).toEqual([])
+  })
+
+  it('规范化一键自定义选中的实时人群并限制人群数与溢价', () => {
+    const config = normalizeRoiConfig({
+      createMode: 'custom',
+      dmpCrowdSettings: [
+        { crowdId: 100, crowdName: '默认购买人群', adGroupPrice: 8, source: 'recommended' },
+        { crowdId: 100, crowdName: '重复人群', adGroupPrice: 30 },
+        { crowdId: 90210, crowdName: '店铺高价值人群', adGroupPrice: 500, editing: true }
+      ]
+    })
+    expect(config.dmpCrowdSettings).toEqual([
+      { crowdId: 100, crowdName: '默认购买人群', adGroupPrice: 10, isUsed: 1 },
+      { crowdId: 90210, crowdName: '店铺高价值人群', adGroupPrice: 300, isUsed: 1 }
+    ])
+  })
+
+  it('规范化一键自定义的固定关键词出价', () => {
+    expect(normalizeRoiConfig({
+      createMode: 'custom',
+      useMinKeywordBid: false,
+      customKeywordBid: 0.3
+    })).toMatchObject({
+      useMinKeywordBid: false,
+      customKeywordBid: 0.3
+    })
+  })
+
+  it('支持精确、短语、切词匹配，无效值回退切词', () => {
+    expect(normalizeRoiConfig({ keywordMatchType: 1 }).keywordMatchType).toBe(1)
+    expect(normalizeRoiConfig({ keywordMatchType: 4 }).keywordMatchType).toBe(4)
+    expect(normalizeRoiConfig({ keywordMatchType: 8 }).keywordMatchType).toBe(8)
+    expect(normalizeRoiConfig({ keywordMatchType: 99 }).keywordMatchType).toBe(8)
   })
 
   it('为京东无 ID 的地域根节点补充稳定 ID 并保留叶子 ID', () => {

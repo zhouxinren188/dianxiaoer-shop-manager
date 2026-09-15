@@ -51,6 +51,7 @@ const {
 const { ensureStoreBackendComplianceExtension } = require('./store-backend-compliance-extension')
 const {
   startHeartbeat,
+  invalidateStoreSessionCookies,
   recoverStoreSessionFromServer,
   refreshCookiesFromServerIfNewer,
   reportStoreDeviceStatus
@@ -1255,7 +1256,9 @@ app.whenReady().then(async () => {
 
   // 注册京东快车工具 IPC（复用每个店铺独立的登录 Session）
   registerJdExpressIpc(ipcMain, {
-    refreshCookies: refreshCookiesFromServerIfNewer
+    refreshCookies: refreshCookiesFromServerIfNewer,
+    recoverSession: recoverStoreSessionFromServer,
+    invalidateSession: invalidateStoreSessionCookies
   })
 
   // 启动心跳检测

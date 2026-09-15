@@ -247,17 +247,34 @@ async function fetchProductKeywords(
   return { keywords: mergeProductKeywordRows(rows), errors }
 }
 
-function defaultKeywordBidList(keywords, increment) {
+function normalizeMatchType(value) {
+  const matchType = Number(value)
+  return [1, 4, 8].includes(matchType) ? matchType : 8
+}
+
+function defaultKeywordBidList(keywords, increment, matchType = 8) {
   const price = 0.1 + Number(increment || 0)
+  const type = normalizeMatchType(matchType)
   return keywords.map((keyword) => ({
     reqType: 6,
-    type: 8,
+    type,
     keywordMobilePrice: price,
     keywordName: keyword
   }))
 }
 
-async function fetchKeywordMinBids(platformSession, keywords, increment, requestJson, delay, onProgress, unitIndex, totalUnits) {
+function buildFixedKeywordBidList(keywords, bid, matchType = 8) {
+  const price = Math.round(Math.max(0.1, Number(bid) || 0.1) * 10) / 10
+  const type = normalizeMatchType(matchType)
+  return keywords.map((keyword) => ({
+    reqType: 6,
+    type,
+    keywordMobilePrice: price,
+    keywordName: keyword
+  }))
+}
+
+async function fetchKeywordMinBids(platformSession, keywords, increment, requestJson, delay, onProgress, unitIndex, totalUnits, matchType = 8) {
   if (!keywords.length) return []
   const body = { requestFrom: 0, keywords }
   let retries = 3
@@ -275,9 +292,10 @@ async function fetchKeywordMinBids(platformSession, keywords, increment, request
       if (Number(payload?.code) !== 1 || !Array.isArray(payload?.data)) {
         throw new Error(getResponseMessage(payload, '获取关键词最低出价失败'))
       }
+      const type = normalizeMatchType(matchType)
       const result = payload.data.map((item) => ({
         reqType: 6,
-        type: 8,
+        type,
         keywordMobilePrice: Math.floor((Number(item?.minBidPrice) + Number(increment || 0)) * 10) / 10,
         keywordName: item?.keywordName
       }))
@@ -290,7 +308,7 @@ async function fetchKeywordMinBids(platformSession, keywords, increment, request
     } catch (error) {
       const retryable = error?.code === 'JD_RATE_LIMIT' ||
         /Read timed out|Operation limit exceeded|超时|次数|上限/i.test(error?.message || '')
-      if (!retryable || retries <= 0) return defaultKeywordBidList(keywords, increment)
+      if (!retryable || retries <= 0) return defaultKeywordBidList(keywords, increment, matchType)
       retries -= 1
       await waitWithProgress(delay, onProgress, {
         phase: 'keyword_bid_retry_wait',
@@ -427,9 +445,10 @@ async function prepareRoiKeywords(options = {}) {
         delay,
         onProgress,
         index + 1,
-        preparedUnits.length
+        preparedUnits.length,
+        config.keywordMatchType
       )
-      : defaultKeywordBidList(unit.unitKws, config.keywordBidIncrement)
+      : buildFixedKeywordBidList(unit.unitKws, config.customKeywordBid, config.keywordMatchType)
   }
 
   const unitMap = new Map(preparedUnits.map((unit) => [unit.unitName, unit]))
@@ -454,6 +473,7 @@ async function prepareRoiKeywords(options = {}) {
 module.exports = {
   PRIVATE_BUSINESS_KEYWORDS_URL,
   PRIVATE_TITLE_KEYWORDS_URL,
+  buildFixedKeywordBidList,
   fetchDropdownKeywords,
   fetchPrivateBusinessKeywords,
   fetchProductKeywords,

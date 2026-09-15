@@ -2,6 +2,9 @@
 
 const KUAICHE_ACCOUNT_REPORT_URL = 'https://jzt-api.jd.com/reweb/kuaiche/account/user/list'
 const KUAICHE_ACCOUNT_REPORT_REFERER = 'https://jzt.jd.com/jdkc/survey.html#/report/account'
+const JZT_BALANCE_URL = 'https://jzt-api.jd.com/common/balance'
+const JZT_BALANCE_REFERER = 'https://jzt.jd.com/jdkc/survey.html'
+const JZT_BUSINESS_TYPE = 2
 
 // 保留原版搜索快车账户报表的关键统计字段，当前首页只请求 cost。
 const KUAICHE_ACCOUNT_REPORT_FIELDS = Object.freeze({
@@ -141,14 +144,60 @@ async function fetchHomeSpend(options = {}) {
   return extractHomeSpend(payload, now)
 }
 
+function extractJztBalance(payload) {
+  assertReportResponse(payload)
+  const rawBalance = payload?.data?.jztBalance ?? payload?.jztBalance
+  if (rawBalance == null || rawBalance === '') {
+    throw new Error('京准通余额接口未返回余额')
+  }
+  const balance = Number(String(rawBalance).replace(/[￥¥,\s]/g, ''))
+  if (!Number.isFinite(balance) || balance < 0 || balance > 100000000) {
+    throw new Error('京准通余额格式异常')
+  }
+  return Math.round(balance * 100) / 100
+}
+
+function buildJztBalanceRequestOptions() {
+  return {
+    method: 'POST',
+    referer: JZT_BALANCE_REFERER,
+    headers: {
+      origin: 'https://jzt.jd.com',
+      loginmode: '0',
+      siteid: '0'
+    },
+    body: { businessType: JZT_BUSINESS_TYPE },
+    timeoutMs: 15000
+  }
+}
+
+async function fetchJztBalance(options = {}) {
+  const { platformSession, requestJson } = options
+  if (!platformSession || typeof requestJson !== 'function') {
+    throw new Error('京准通余额查询缺少京东请求能力')
+  }
+  const payload = await requestJson(
+    platformSession,
+    JZT_BALANCE_URL,
+    buildJztBalanceRequestOptions()
+  )
+  return extractJztBalance(payload)
+}
+
 module.exports = {
   HOME_REPORT_COLUMNS,
+  JZT_BALANCE_REFERER,
+  JZT_BALANCE_URL,
+  JZT_BUSINESS_TYPE,
   KUAICHE_ACCOUNT_REPORT_FIELDS,
   KUAICHE_ACCOUNT_REPORT_REFERER,
   KUAICHE_ACCOUNT_REPORT_URL,
   buildHomeSpendReportBody,
   buildHomeSpendRequestOptions,
+  buildJztBalanceRequestOptions,
   extractHomeSpend,
+  extractJztBalance,
   fetchHomeSpend,
+  fetchJztBalance,
   formatLocalDate
 }

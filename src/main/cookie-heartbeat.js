@@ -29,6 +29,9 @@ const storeStatusMap = {}
 const httpFailCount = {}
 const lastRestoreTime = {} // storeId -> 上次从服务器恢复Cookie的时间戳
 const RESTORE_RETRY_INTERVAL = 10 * 60 * 1000 // 10分钟内不重复恢复
+// 真实接口已明确拒绝的 Cookie 指纹。保留到本进程结束，避免查询按钮反复恢复并使用
+// 同一份失效云端快照；若本机重新登录或其他设备产生了新指纹，会自动解除拦截。
+const invalidCookieFingerprints = new Map()
 
 function writeCookieDiagnostic(storeId, context, message) {
   const line = `store_id=${storeId} device=${getShortDeviceId()} context=${context} ${message}`
@@ -151,7 +154,26 @@ async function getServerCookieSnapshot(storeId, context = 'read', {
   }
 }
 
+function rememberInvalidCookieFingerprint(storeId, fingerprint) {
+  if (!fingerprint) return
+  const key = String(storeId)
+  const fingerprints = invalidCookieFingerprints.get(key) || new Set()
+  fingerprints.add(fingerprint)
+  invalidCookieFingerprints.set(key, fingerprints)
+}
+
+function getInvalidCookieFingerprints(storeId) {
+  return invalidCookieFingerprints.get(String(storeId)) || null
+}
+
 async function applyServerCookieSnapshot(storeId, snapshot, { skipFlush = false, context = 'restore' } = {}) {
+  // 心跳/强制恢复等入口也必须遵守失效快照拦截，不能绕过查询前的检查。
+  const rejectedFingerprints = getInvalidCookieFingerprints(storeId)
+  if (rejectedFingerprints?.has(snapshot.fingerprint)
+    || rejectedFingerprints?.has(fingerprintCookies(snapshot.cookies))) {
+    writeCookieDiagnostic(storeId, context, `action=reject_known_invalid_snapshot fp=${shortFingerprint(snapshot.fingerprint)}`)
+    return false
+  }
   const ses = session.fromPartition(`persist:platform-${storeId}`)
   const existing = await ses.cookies.get({})
   let removed = 0
@@ -243,14 +265,50 @@ async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, cont
     const localJdCount = localCookies.filter(isJdCookie).length
     const localFingerprint = fingerprintCookies(localCookies)
     const localRevision = getCookieRevision(storeId)
+    const rejectedFingerprints = getInvalidCookieFingerprints(storeId)
 
     if (hasLocalJdCookies(localCookies)) {
-      writeCookieDiagnostic(
-        storeId,
-        context,
-        `action=keep_local local_rev=${localRevision} fp=${shortFingerprint(localFingerprint)} jd_count=${localJdCount}`
-      )
-      return { success: true, action: 'kept_local', serverRevision: 0 }
+      if (rejectedFingerprints?.has(localFingerprint)) {
+        writeCookieDiagnostic(
+          storeId,
+          context,
+          `action=reject_known_invalid_local local_rev=${localRevision} fp=${shortFingerprint(localFingerprint)} jd_count=${localJdCount}`
+        )
+      } else {
+        // 新指纹允许正常使用，但保留已失效指纹，防止其他恢复入口再次拿回旧快照。
+        writeCookieDiagnostic(
+          storeId,
+          context,
+          `action=keep_local local_rev=${localRevision} fp=${shortFingerprint(localFingerprint)} jd_count=${localJdCount}`
+        )
+        return { success: true, action: 'kept_local', serverRevision: 0 }
+      }
+    }
+
+    if (rejectedFingerprints) {
+      const snapshot = await getServerCookieSnapshot(storeId, context, {
+        timeoutMs,
+        allowVerifiedFallback: true,
+        excludeCurrentDevice: true
+      })
+      if (!snapshot) {
+        writeCookieDiagnostic(storeId, context, 'action=relogin_required reason=no_alternate_snapshot')
+        return { success: false, action: 'relogin_required' }
+      }
+      if (rejectedFingerprints.has(snapshot.fingerprint)) {
+        writeCookieDiagnostic(
+          storeId,
+          context,
+          `action=relogin_required reason=known_invalid_snapshot fp=${shortFingerprint(snapshot.fingerprint)}`
+        )
+        return { success: false, action: 'relogin_required' }
+      }
+      const restored = await applyServerCookieSnapshot(storeId, snapshot, { skipFlush, context })
+      return {
+        success: restored,
+        action: restored ? 'restored_new_candidate' : 'relogin_required',
+        serverRevision: snapshot.revision
+      }
     }
 
     const snapshot = await getServerCookieSnapshot(storeId, context, {
@@ -264,6 +322,55 @@ async function refreshCookiesFromServerIfNewer(storeId, { skipFlush = true, cont
     writeCookieDiagnostic(storeId, context, `refresh=failed reason=${error.message}`)
     return { success: false, action: 'error' }
   }
+}
+
+// 真实业务接口在云端恢复后仍返回未登录时，清除当前分区内的京东 Cookie，
+// 记录该快照指纹并上报本机离线，避免后续查询继续使用同一份已确认失效的快照。
+async function invalidateStoreSessionCookies(storeId, {
+  context = 'session_invalid',
+  reason = 'session_invalid_after_recovery'
+} = {}) {
+  const ses = session.fromPartition(`persist:platform-${storeId}`)
+  const cookies = await ses.cookies.get({})
+  const fingerprint = fingerprintCookies(cookies)
+  const jdCookies = cookies.filter(isJdCookie)
+  rememberInvalidCookieFingerprint(storeId, fingerprint)
+
+  let removed = 0
+  for (const cookie of jdCookies) {
+    try {
+      await ses.cookies.remove(buildCookieUrl(cookie), cookie.name)
+      removed++
+    } catch (error) {
+      writeCookieDiagnostic(
+        storeId,
+        context,
+        `cookie_remove=failed name=${cookie.name || 'unknown'} reason=${error.message}`
+      )
+    }
+  }
+
+  try {
+    await Promise.race([
+      new Promise(resolve => ses.flushStorageData(resolve)),
+      new Promise(resolve => setTimeout(resolve, 5000))
+    ])
+  } catch (error) {
+    writeCookieDiagnostic(storeId, context, `flush=failed reason=${error.message}`)
+  }
+
+  writeCookieDiagnostic(
+    storeId,
+    context,
+    `action=invalidated removed=${removed}/${jdCookies.length} fp=${shortFingerprint(fingerprint)} reason=${reason}`
+  )
+  await reportStoreDeviceStatus(storeId, {
+    online: false,
+    verified: false,
+    reason,
+    context
+  })
+  return { success: true, removed, fingerprint }
 }
 
 // 根据 Cookie 的 domain 和 secure 属性构建 URL
@@ -525,6 +632,13 @@ async function clearAndRetryWithFreshCookies(storeId, platform, expectedMerchant
     const ses = session.fromPartition(partitionName)
 
     writeCookieDiagnostic(storeId, 'forced_recovery', 'phase=start')
+
+    if (platform === 'jd') {
+      const rejectedCookies = await ses.cookies.get({})
+      if (hasLocalJdCookies(rejectedCookies)) {
+        rememberInvalidCookieFingerprint(storeId, fingerprintCookies(rejectedCookies))
+      }
+    }
 
     // restoreCookiesFromDB 内部会先清理分区，避免同名旧 Cookie 与服务器版本并存。
     const restored = await restoreCookiesFromDB(storeId, {
@@ -831,6 +945,7 @@ function stopHeartbeat() {
 }
 
 module.exports = {
+  invalidateStoreSessionCookies,
   startHeartbeat,
   stopHeartbeat,
   restoreCookiesFromDB,

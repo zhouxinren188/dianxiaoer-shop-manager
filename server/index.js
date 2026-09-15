@@ -76,6 +76,7 @@ const {
 } = require('./services/cloud-warehouse-protocol')
 const { buildDashboardOverviewPayload } = require('./services/dashboard-overview-service')
 const {
+  buildSettlementDashboardPayload,
   buildSettlementOverview,
   normalizeSettlementMetrics
 } = require('./services/settlement-overview-service')
@@ -3776,6 +3777,7 @@ app.get('/api/store-sales-stats', async (req, res) => {
   try {
     const { store_id, period, start_date, end_date } = req.query
     const storeIds = await getAccessibleStoreIds(req.user)
+    const ownerId = getOwnerId(req.user)
 
     if (!storeIds.length) {
       return res.json(ok({ summary: { totalSales: 0, totalOrders: 0, avgOrderValue: 0, totalVisitorCount: 0, totalOverdueOrders: 0, totalPendingFollowUps: 0 }, list: [] }))
@@ -3797,22 +3799,30 @@ app.get('/api/store-sales-stats', async (req, res) => {
     // 时间筛选
     let dateJoin = ''
     const dateParams = []
+    let spendDateWhere = ''
+    const spendDateParams = []
     if (start_date && end_date) {
       dateJoin = "AND so.order_time >= ? AND so.order_time < DATE_ADD(?, INTERVAL 1 DAY)"
       dateParams.push(start_date, end_date)
+      spendDateWhere = 'AND spend.spend_date >= ? AND spend.spend_date <= ?'
+      spendDateParams.push(start_date, end_date)
     } else if (period) {
       switch (period) {
         case 'today':
           dateJoin = "AND DATE(so.order_time) = CURDATE()"
+          spendDateWhere = 'AND spend.spend_date = CURDATE()'
           break
         case 'week':
           dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)"
+          spendDateWhere = 'AND spend.spend_date >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)'
           break
         case 'month':
           dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)"
+          spendDateWhere = 'AND spend.spend_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)'
           break
         case 'quarter':
           dateJoin = "AND so.order_time >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)"
+          spendDateWhere = 'AND spend.spend_date >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)'
           break
       }
     }
@@ -3822,13 +3832,30 @@ app.get('/api/store-sales-stats', async (req, res) => {
     const [storeRows] = await pool.execute(
       `SELECT s.id as storeId, s.name as storeName, s.platform, s.tags,
               COALESCE(SUM(so.total_amount), 0) as salesAmount,
-              COUNT(so.id) as orderCount
+              COUNT(so.id) as orderCount,
+              MAX(express_spend.ad_spend) as adSpend,
+              MAX(express_spend.day_count) as adSpendDayCount,
+              MAX(express_spend.synced_at) as adSpendSyncedAt,
+              MAX(express_status.is_activated) as isJdExpressActivated,
+              MAX(express_status.jzt_balance) as jztBalance,
+              MAX(express_status.balance_synced_at) as jztBalanceSyncedAt
        FROM stores s
        LEFT JOIN sales_orders so ON s.id = so.store_id AND so.status_text NOT IN (${excludePlaceholders}) ${dateJoin}
+       LEFT JOIN (
+         SELECT spend.store_id,
+                SUM(spend.spend) as ad_spend,
+                COUNT(*) as day_count,
+                MAX(spend.synced_at) as synced_at
+         FROM jd_express_daily_spend spend
+         WHERE spend.owner_id = ? ${spendDateWhere}
+         GROUP BY spend.store_id
+       ) express_spend ON express_spend.store_id = s.id
+       LEFT JOIN jd_express_store_sync_status express_status
+         ON express_status.owner_id = ? AND express_status.store_id = s.id
        WHERE s.id IN (${storePlaceholders})
        GROUP BY s.id, s.name, s.platform, s.tags
        ORDER BY salesAmount DESC`,
-      [...excludeStatuses, ...dateParams, ...targetStoreIds]
+      [...excludeStatuses, ...dateParams, ownerId, ...spendDateParams, ownerId, ...targetStoreIds]
     )
 
     // 计算总销售额（用于占比）
@@ -3841,6 +3868,14 @@ app.get('/api/store-sales-stats', async (req, res) => {
       tags: typeof r.tags === 'string' ? JSON.parse(r.tags || '[]') : (r.tags || []),
       salesAmount: Number(r.salesAmount),
       orderCount: Number(r.orderCount),
+      adSpend: Number(r.adSpendDayCount) > 0
+        ? Number(r.adSpend)
+        : (r.isJdExpressActivated != null && Number(r.isJdExpressActivated) === 0 ? 0 : null),
+      adSpendSyncedAt: r.adSpendSyncedAt || null,
+      jztBalance: r.jztBalance == null || !Number.isFinite(Number(r.jztBalance))
+        ? null
+        : Number(r.jztBalance),
+      jztBalanceSyncedAt: r.jztBalanceSyncedAt || null,
       avgOrderValue: Number(r.orderCount) > 0 ? Math.round(Number(r.salesAmount) / Number(r.orderCount) * 100) / 100 : 0,
       ratio: totalSales > 0 ? Math.round(Number(r.salesAmount) / totalSales * 1000) / 10 : 0,
       // 运营指标（暂从平台API获取，目前默认0）
@@ -3892,6 +3927,13 @@ function normalizeJdExpressDailySpend(value) {
   return { date, spend: Math.round(spend * 100) / 100 }
 }
 
+function normalizeJztBalance(value) {
+  if (value == null || value === '') return null
+  const balance = Number(value)
+  if (!Number.isFinite(balance) || balance < 0 || balance > 100000000) return null
+  return Math.round(balance * 100) / 100
+}
+
 // 客户端使用各店铺现有京准通登录态读取本月逐日消耗后，在服务端幂等登记。
 app.post('/api/jd-express/spend-sync', async (req, res) => {
   const results = Array.isArray(req.body?.results) ? req.body.results.slice(0, 1000) : null
@@ -3904,6 +3946,7 @@ app.post('/api/jd-express/spend-sync', async (req, res) => {
   let successStoreCount = 0
   let inactiveStoreCount = 0
   let failedStoreCount = 0
+  let balanceSavedStoreCount = 0
 
   try {
     await connection.beginTransaction()
@@ -3912,6 +3955,7 @@ app.post('/api/jd-express/spend-sync', async (req, res) => {
       if (!Number.isSafeInteger(storeId) || !accessibleStoreIds.has(storeId)) continue
       const status = ['success', 'inactive', 'error'].includes(item?.status) ? item.status : 'error'
       const message = String(item?.message || '').trim().slice(0, 255)
+      const jztBalance = normalizeJztBalance(item?.jztBalance)
 
       if (status === 'success') {
         const dailySpends = Array.isArray(item?.dailySpends)
@@ -3966,9 +4010,19 @@ app.post('/api/jd-express/spend-sync', async (req, res) => {
         )
         failedStoreCount += 1
       }
+      // 余额与快车开通/报表状态相互独立；余额查询成功时都应保存，失败则保留历史值。
+      if (jztBalance != null) {
+        await connection.execute(
+          `UPDATE jd_express_store_sync_status
+           SET jzt_balance = ?, balance_synced_at = NOW()
+           WHERE owner_id = ? AND store_id = ?`,
+          [jztBalance, ownerId, storeId]
+        )
+        balanceSavedStoreCount += 1
+      }
     }
     await connection.commit()
-    res.json(ok({ savedDayCount, successStoreCount, inactiveStoreCount, failedStoreCount }))
+    res.json(ok({ savedDayCount, successStoreCount, inactiveStoreCount, failedStoreCount, balanceSavedStoreCount }))
   } catch (err) {
     await connection.rollback()
     console.error('[JD Express Spend Sync] 错误:', err.message)
@@ -4410,33 +4464,51 @@ app.post('/api/store-settlement-metrics/:storeId', async (req, res) => {
   }
 })
 
-app.get('/api/settlement-overview', async (req, res) => {
+async function querySettlementOverview(user) {
+  const storeIds = await getAccessibleStoreIds(user)
+  if (!storeIds.length) return buildSettlementOverview([])
+
+  const placeholders = storeIds.map(() => '?').join(',')
+  const [rows] = await pool.execute(
+    `SELECT s.id AS store_id, s.name AS store_name,
+            m.pending_amount, m.pending_order_count, m.yesterday_settled_amount,
+            m.wallet_balance, m.frozen_amount, m.withdrawable_amount,
+            m.statistics_date, m.updated_at
+     FROM stores s
+     LEFT JOIN store_settlement_metrics m ON m.store_id = s.id
+     WHERE s.id IN (${placeholders})
+       AND LOWER(s.platform) = 'jd'
+       AND s.status = 'enabled'
+       AND s.setup_status = 'active'
+     ORDER BY s.id`,
+    storeIds
+  )
+
+  return buildSettlementOverview(rows)
+}
+
+async function handleSettlementOverview(req, res) {
   try {
-    const storeIds = await getAccessibleStoreIds(req.user)
-    if (!storeIds.length) return res.json(ok(buildSettlementOverview([])))
-
-    const placeholders = storeIds.map(() => '?').join(',')
-    const [rows] = await pool.execute(
-      `SELECT s.id AS store_id, s.name AS store_name,
-              m.pending_amount, m.pending_order_count, m.yesterday_settled_amount,
-              m.wallet_balance, m.frozen_amount, m.withdrawable_amount,
-              m.statistics_date, m.updated_at
-       FROM stores s
-       LEFT JOIN store_settlement_metrics m ON m.store_id = s.id
-       WHERE s.id IN (${placeholders})
-         AND LOWER(s.platform) = 'jd'
-         AND s.status = 'enabled'
-         AND s.setup_status = 'active'
-       ORDER BY s.id`,
-      storeIds
-    )
-
-    res.json(ok(buildSettlementOverview(rows)))
+    res.json(ok(await querySettlementOverview(req.user)))
   } catch (err) {
     console.error('[Settlement Overview] 查询错误:', err.message)
     res.status(500).json(fail(err.message))
   }
-})
+}
+
+async function handleDashboardSettlementOverview(req, res) {
+  try {
+    const settlementOverview = await querySettlementOverview(req.user)
+    // 小程序只展示四项汇总，不返回逐店明细，避免数百家店铺时响应体无谓膨胀。
+    res.json(ok(buildSettlementDashboardPayload(settlementOverview)))
+  } catch (err) {
+    console.error('[Dashboard Settlement Overview] 查询错误:', err.message)
+    res.status(500).json(fail(err.message))
+  }
+}
+
+app.get('/api/settlement-overview', handleSettlementOverview)
+app.get('/api/dashboard/settlement-overview', handleDashboardSettlementOverview)
 
 // 销售趋势（近30天每日销售额和订单数）
 app.get('/api/sales-trend', async (req, res) => {

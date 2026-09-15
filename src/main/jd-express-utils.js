@@ -1,5 +1,7 @@
 'use strict'
 
+const { normalizeCrowdSettings } = require('./jd-express-crowds')
+
 const JD_EXPRESS_READ_POLICY = Object.freeze({
   pageSize: 100,
   initialDelayMs: 1000,
@@ -84,6 +86,7 @@ function extractTotal(response, fallback = 0) {
 function selectLowestPricedSkuIds(groups = []) {
   const skuIds = []
   const selectedSkus = []
+  const skuSpuMappings = []
   const invalidSpuIds = []
   const entries = Array.isArray(groups)
     ? groups.map((group) => [group?.spuId ?? group?.wareId ?? group?.id, group])
@@ -110,16 +113,26 @@ function selectLowestPricedSkuIds(groups = []) {
       .filter((sku) => sku.id != null && Number.isFinite(sku.price))
       .sort((a, b) => a.price - b.price)
 
+    for (const sku of skus) {
+      const candidateSkuId = sku?.skuId ?? sku?.id ?? sku?.itemId
+      const candidateSpuId = sku?.spuId ?? sku?.wareId ?? sku?.productId ?? spuId
+      if (candidateSkuId != null && candidateSpuId != null) {
+        skuSpuMappings.push({ skuId: String(candidateSkuId), spuId: String(candidateSpuId) })
+      }
+    }
+
     if (candidates.length) {
       const selected = candidates[0]
+      const selectedSpuId = selected.raw?.spuId ?? selected.raw?.wareId ?? selected.raw?.productId ?? spuId
       skuIds.push(String(selected.id))
-      selectedSkus.push({ ...selected.raw, skuId: String(selected.id) })
+      selectedSkus.push({ ...selected.raw, skuId: String(selected.id), spuId: String(selectedSpuId ?? '') })
     }
     else if (spuId != null) invalidSpuIds.push(String(spuId))
   }
 
   const uniqueSelectedSkus = Array.from(new Map(selectedSkus.map((item) => [String(item.skuId), item])).values())
-  return { skuIds: [...new Set(skuIds)], selectedSkus: uniqueSelectedSkus, invalidSpuIds }
+  const uniqueMappings = Array.from(new Map(skuSpuMappings.map((item) => [`${item.skuId}:${item.spuId}`, item])).values())
+  return { skuIds: [...new Set(skuIds)], selectedSkus: uniqueSelectedSkus, skuSpuMappings: uniqueMappings, invalidSpuIds }
 }
 
 function normalizeImageUrl(value) {
@@ -214,49 +227,54 @@ function clampDecimal(value, min, max, fallback) {
   return Math.min(Math.max(parsed, min), max)
 }
 
-const CUSTOM_DEFAULT_CROWDS = Object.freeze([
-  Object.freeze({
-    crowdId: 100,
-    crowdName: '默认购买人群',
-    crowdType: 1,
-    senceFirstCategory: '默认推荐人群',
-    senceSecondCategory: '默认购买人群',
-    estimateUv: 48220,
-    estimatePv: 693340,
-    senceCrowdDesc: '近6个月购买过本单元sku扩展至三级类目（快车搜索位扩展至品牌+三级类目），或者扩展至店铺任意商品的人群',
-    crowdTabType: 3,
-    recommendCrowdType: 0,
-    crowdValidStatus: 0,
-    expiredTime: 67090175999000,
-    remainTime: 756772,
-    canExport: false,
-    adGroupPrice: 30,
-    editing: false,
-    isUsed: 1
-  }),
-  Object.freeze({
-    crowdId: 101,
-    crowdName: '默认浏览人群',
-    crowdType: 1,
-    senceFirstCategory: '默认推荐人群',
-    senceSecondCategory: '默认浏览人群',
-    estimateUv: 131980,
-    estimatePv: 1927880,
-    senceCrowdDesc: '近30天浏览过本单元sku扩展至三级类目（快车搜索位扩展至品牌+三级类目），或者扩展至店铺任意商品的人群',
-    crowdTabType: 3,
-    recommendCrowdType: 0,
-    crowdValidStatus: 0,
-    expiredTime: 67090175999000,
-    remainTime: 756772,
-    canExport: false,
-    adGroupPrice: 30,
-    editing: false,
-    isUsed: 1
-  })
-])
+function normalizeKeywordMatchType(value) {
+  const matchType = Number(value)
+  return [1, 4, 8].includes(matchType) ? matchType : 8
+}
 
-function cloneCustomDefaultCrowds() {
-  return CUSTOM_DEFAULT_CROWDS.map((item) => ({ ...item }))
+function collectExistingPromotionIds(rows = []) {
+  const skuIds = new Set()
+  const spuIds = new Set()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const skuId = String(row?.skuId ?? row?.sku?.id ?? '').trim()
+    const spuId = String(row?.spuId ?? row?.wareId ?? row?.productId ?? '').trim()
+    if (skuId) skuIds.add(skuId)
+    if (spuId) spuIds.add(spuId)
+  }
+  return { skuIds: [...skuIds], spuIds: [...spuIds] }
+}
+
+function filterExistingPromotionProducts(products = [], existing = {}, mode = 'sku') {
+  const source = Array.isArray(products) ? products : []
+  const filterMode = mode === 'spu' ? 'spu' : 'sku'
+  const existingSkuIds = new Set((existing.skuIds || []).map((value) => String(value)).filter(Boolean))
+  const existingSpuIds = new Set((existing.spuIds || []).map((value) => String(value)).filter(Boolean))
+
+  // 部分京准通返回只带 SKU。若该 SKU 正好在本批商品内，补出其 SPU，
+  // 保证“按 SPU 过滤”不会因为返回字段缺失而漏掉同款商品。
+  if (filterMode === 'spu') {
+    for (const product of source) {
+      const skuId = String(product?.skuId ?? '').trim()
+      const spuId = String(product?.spuId ?? '').trim()
+      if (skuId && spuId && existingSkuIds.has(skuId)) existingSpuIds.add(spuId)
+    }
+  }
+
+  const filteredIds = []
+  const keptProducts = source.filter((product) => {
+    const skuId = String(product?.skuId ?? '').trim()
+    const spuId = String(product?.spuId ?? '').trim()
+    const matched = filterMode === 'spu'
+      ? Boolean(spuId && existingSpuIds.has(spuId))
+      : Boolean(skuId && existingSkuIds.has(skuId))
+    if (matched && skuId) filteredIds.push(skuId)
+    return !matched
+  })
+  return {
+    products: keptProducts,
+    filteredIds,
+    mode: filterMode
+  }
 }
 
 function normalizeRoiConfig(input = {}) {
@@ -295,7 +313,9 @@ function normalizeRoiConfig(input = {}) {
       ? clampInteger(input.keywordTotalUsage, 1, Number.MAX_SAFE_INTEGER, 1)
       : null,
     keywordBidIncrement: clampDecimal(input.keywordBidIncrement, 0, 100, 0),
+    customKeywordBid: clampDecimal(input.customKeywordBid, 0.1, 9999, 0.1),
     useMinKeywordBid: input.useMinKeywordBid !== false,
+    keywordMatchType: normalizeKeywordMatchType(input.keywordMatchType),
     keywordSources,
     keywordSortType: clampInteger(input.keywordSortType, 1, 7, 4),
     businessWisdomPercent: clampInteger(input.businessWisdomPercent, 0, 100, 0),
@@ -316,7 +336,7 @@ function normalizeRoiConfig(input = {}) {
     premiumType: createMode === 'custom' ? 2 : ([1, 2].includes(Number(input.premiumType)) ? Number(input.premiumType) : 2),
     premiumCoef: clampInteger(input.premiumCoef, 30, 300, 30),
     inSearchFee: clampDecimal(input.inSearchFee, 0.1, 9999, 0.1),
-    dmpCrowdSettings: cloneCustomDefaultCrowds(),
+    dmpCrowdSettings: createMode === 'custom' ? normalizeCrowdSettings(input.dmpCrowdSettings) : [],
     areaType,
     areaIds,
     bidType,
@@ -616,7 +636,6 @@ function assembleUnitKeywords(sources = {}, inputConfig = {}, limit = 0) {
 }
 
 module.exports = {
-  CUSTOM_DEFAULT_CROWDS,
   JD_EXPRESS_READ_POLICY,
   adjustRoiBid,
   assembleUnitKeywords,
@@ -624,6 +643,7 @@ module.exports = {
   buildProductQuery,
   buildRoiPlanStructure,
   buildScopedRoiPlanStructure,
+  collectExistingPromotionIds,
   extractBusinessWisdomKeywords,
   extractSpuList,
   extractTotal,
@@ -632,10 +652,12 @@ module.exports = {
   normalizeAreaTree,
   normalizeImageUrl,
   normalizeKeyword,
+  normalizeKeywordMatchType,
   normalizePositiveInteger,
   normalizeRoiConfig,
   normalizeSkuDetails,
   normalizeStoreId,
+  filterExistingPromotionProducts,
   selectProductKeywordSkuIds,
   selectLowestPricedSkuIds
 }

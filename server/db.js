@@ -293,6 +293,8 @@ async function initDB() {
         last_error VARCHAR(255) DEFAULT '',
         last_attempt_at DATETIME DEFAULT NULL,
         last_success_at DATETIME DEFAULT NULL,
+        jzt_balance DECIMAL(14,2) DEFAULT NULL,
+        balance_synced_at DATETIME DEFAULT NULL,
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (owner_id, store_id),
         KEY idx_jd_express_status_owner (owner_id, is_activated, last_result),
@@ -300,6 +302,8 @@ async function initDB() {
         CONSTRAINT fk_jd_express_status_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `)
+    try { await connection.execute(`ALTER TABLE jd_express_store_sync_status ADD COLUMN jzt_balance DECIMAL(14,2) DEFAULT NULL AFTER last_success_at`) } catch (e) { /* 字段已存在 */ }
+    try { await connection.execute(`ALTER TABLE jd_express_store_sync_status ADD COLUMN balance_synced_at DATETIME DEFAULT NULL AFTER jzt_balance`) } catch (e) { /* 字段已存在 */ }
 
     // 商家ID归并锁：按主账号+商家ID串行完成“查询并归并”，避免并发登录产生重复店铺。
     await connection.execute(`

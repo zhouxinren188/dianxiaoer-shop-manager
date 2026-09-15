@@ -66,6 +66,7 @@ const validInvokeChannels = [
   'jd-express-all-products',
   'jd-express-retry-pages',
   'jd-express-areas',
+  'jd-express-crowds',
   'jd-express-signing-probe',
   'jd-express-prepare-creation',
   'jd-express-create-single-test',

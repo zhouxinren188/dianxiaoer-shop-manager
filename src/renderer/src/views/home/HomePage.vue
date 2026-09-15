@@ -141,9 +141,9 @@
 
 
     <!-- 图表区域 -->
-    <el-row :gutter="24">
-      <el-col :span="16">
-        <div class="chart-card">
+    <el-row :gutter="24" class="dashboard-chart-row">
+      <el-col :span="16" class="dashboard-chart-column">
+        <div class="chart-card sales-trend-card">
           <div class="chart-header">
             <div class="chart-header-left">
               <span class="chart-title">销售趋势</span>
@@ -255,7 +255,7 @@
           </div>
         </div>
       </el-col>
-      <el-col :span="8">
+      <el-col :span="8" class="dashboard-chart-column dashboard-side-column">
         <div class="home-side-stack">
           <div class="chart-card settlement-card">
             <div class="chart-header settlement-header">
@@ -1188,10 +1188,41 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
+.dashboard-chart-row {
+  align-items: stretch;
+}
+
+.dashboard-chart-column {
+  display: flex;
+}
+
+.sales-trend-card,
+.home-side-stack {
+  width: 100%;
+  height: 100%;
+  flex: 1;
+}
+
+.sales-trend-card,
+.home-side-stack .invoice-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.sales-trend-body,
+.home-side-stack .invoice-summary {
+  flex: 1;
+}
+
 .home-side-stack {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.home-side-stack .invoice-card {
+  min-height: 0;
+  flex: 1;
 }
 
 .chart-header.settlement-header {
@@ -1287,12 +1318,16 @@ onUnmounted(() => {
 }
 
 .home-side-stack .invoice-summary {
+  display: flex;
+  flex-direction: column;
   min-height: 108px;
   padding: 8px 10px;
 }
 
 .home-side-stack .invoice-list {
-  height: 112px;
+  flex: 1;
+  height: 0;
+  min-height: 0;
 }
 
 .home-side-stack .invoice-item {

@@ -32,18 +32,24 @@ export function isJdExpressInactiveResult(result) {
   return /(?:code\s*=\s*-?3012|\/settled\/#\/information|未开通(?:京准通|快车)?)/i.test(text)
 }
 
-function normalizeSyncResult(store, result) {
+export function normalizeSyncResult(store, result) {
+  const parsedBalance = result?.balanceAvailable === true && result?.jztBalance != null
+    ? Number(result.jztBalance)
+    : null
+  const jztBalance = Number.isFinite(parsedBalance) && parsedBalance >= 0 ? parsedBalance : null
   if (result?.success) {
     return {
       storeId: Number(store.id),
       status: 'success',
-      dailySpends: Array.isArray(result.dailySpends) ? result.dailySpends : []
+      dailySpends: Array.isArray(result.dailySpends) ? result.dailySpends : [],
+      jztBalance
     }
   }
   return {
     storeId: Number(store.id),
     status: isJdExpressInactiveResult(result) ? 'inactive' : 'error',
-    message: result?.message || '京准通消耗查询失败'
+    message: result?.message || '京准通消耗查询失败',
+    jztBalance
   }
 }
 

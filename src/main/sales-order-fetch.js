@@ -6,6 +6,7 @@ const { getDeviceId, getShortDeviceId } = require('./device-identity')
 const runtimeLog = require('./runtime-logger')
 const { extractJdSalesOrderLogistics } = require('./jd-sales-order-logistics')
 const { extractJdSalesOrderSkuSpec } = require('./jd-sales-order-item')
+const { normalizeJdSalesOrderAmounts } = require('./jd-sales-order-money')
 const {
   DEFAULT_RESPONSE_CAPTURE_LIMIT,
   ORDER_PAGE_RESPONSE_CAPTURE_LIMIT
@@ -892,11 +893,9 @@ function fetchSalesOrdersAttempt(storeId, options = {}) {
         order.finishTime = formatTimestamp(raw.finishTime || raw.completeTime || raw.orderCompleteTime)
 
         // 金额（从 orderPaymentInfo 嵌套对象取）
-        // totalAmount: 应付总额（含运费）
+        // totalAmount: 京麦“商家应收”；字段缺失时才兼容回退 shouldPay
         // goodsAmount: 商品总额（不含运费）
-        order.totalAmount = parseFloat(payInfo.shouldPay || 0) || 0
-        order.goodsAmount = parseFloat(payInfo.orderSum || payInfo.goodsAmount || payInfo.shouldPay || 0) || 0
-        order.shippingFee = parseFloat(payInfo.freight || 0) || 0
+        Object.assign(order, normalizeJdSalesOrderAmounts(payInfo))
 
         // 支付方式
         order.paymentMethod = payInfo.paymentTypeName || ''

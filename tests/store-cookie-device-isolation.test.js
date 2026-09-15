@@ -124,6 +124,26 @@ describe('店铺 Cookie 多设备隔离', () => {
     expect(heartbeatSource).toContain('resetCookieRevision(storeId)')
   })
 
+  it('云端恢复后仍失效的 Cookie 会被清除并阻止重复恢复同一指纹', () => {
+    const heartbeatSource = readFileSync(
+      fileURLToPath(new URL('../src/main/cookie-heartbeat.js', import.meta.url)),
+      'utf8'
+    )
+    const refreshStart = heartbeatSource.indexOf('async function refreshCookiesFromServerIfNewer')
+    const refreshEnd = heartbeatSource.indexOf('// 真实业务接口在云端恢复后仍返回未登录时', refreshStart)
+    const refreshSource = heartbeatSource.slice(refreshStart, refreshEnd)
+    const invalidateStart = heartbeatSource.indexOf('async function invalidateStoreSessionCookies')
+    const invalidateEnd = heartbeatSource.indexOf('// 根据 Cookie 的 domain', invalidateStart)
+    const invalidateSource = heartbeatSource.slice(invalidateStart, invalidateEnd)
+
+    expect(refreshSource).toContain('excludeCurrentDevice: true')
+    expect(refreshSource).toContain('rejectedFingerprints.has(snapshot.fingerprint)')
+    expect(refreshSource).toContain("action: 'relogin_required'")
+    expect(invalidateSource).toContain('rememberInvalidCookieFingerprint(storeId, fingerprint)')
+    expect(invalidateSource).toContain('await ses.cookies.remove')
+    expect(invalidateSource).toContain('online: false')
+  })
+
   it('登录保存成功后立即禁止关窗逻辑回滚旧 Cookie', () => {
     const platformWindowSource = readFileSync(
       fileURLToPath(new URL('../src/main/platform-window.js', import.meta.url)),
@@ -137,5 +157,16 @@ describe('店铺 Cookie 多设备隔离', () => {
 
     expect(successBranch.indexOf('win._saveDone = true'))
       .toBeLessThan(successBranch.indexOf('setTimeout(() =>'))
+  })
+
+  it('所有云端恢复入口都拒绝已经确认失效的快照，且新登录不会忘记旧失效指纹', () => {
+    const source = readFileSync(new URL('../src/main/cookie-heartbeat.js', import.meta.url), 'utf8')
+    const start = source.indexOf('async function applyServerCookieSnapshot')
+    const end = source.indexOf('// 从服务器查询店铺 Cookie', start)
+    const applySource = source.slice(start, end)
+    expect(applySource.indexOf('rejectedFingerprints?.has(snapshot.fingerprint)'))
+      .toBeLessThan(applySource.indexOf('session.fromPartition'))
+    expect(source).toContain('rememberInvalidCookieFingerprint(storeId, fingerprintCookies(rejectedCookies))')
+    expect(source).not.toContain('invalidCookieFingerprints.delete(String(storeId))')
   })
 })

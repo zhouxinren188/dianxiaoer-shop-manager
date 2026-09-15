@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildLocalJdExpressPeriods,
   fetchAllEnabledJdStores,
-  isJdExpressInactiveResult
+  isJdExpressInactiveResult,
+  normalizeSyncResult
 } from '../src/renderer/src/services/jd-express-spend-sync'
 
 describe('京准通消耗后台同步', () => {
@@ -37,5 +38,20 @@ describe('京准通消耗后台同步', () => {
       : { list: [{ id: 3, platform: 'jd', status: 'enabled' }], total: 3 }
     const stores = await fetchAllEnabledJdStores(fetchPage)
     expect(stores.map(store => store.id)).toEqual([1, 2, 3])
+  })
+
+  it('仅在余额接口明确成功时提交京准通余额，未知值不覆盖历史余额', () => {
+    expect(normalizeSyncResult(
+      { id: 8 },
+      { success: true, dailySpends: [], balanceAvailable: true, jztBalance: 66.88 }
+    )).toMatchObject({ storeId: 8, status: 'success', jztBalance: 66.88 })
+    expect(normalizeSyncResult(
+      { id: 9 },
+      { success: true, dailySpends: [], balanceAvailable: false, jztBalance: 0 }
+    )).toMatchObject({ storeId: 9, status: 'success', jztBalance: null })
+    expect(normalizeSyncResult(
+      { id: 10 },
+      { success: false, message: '该店铺未开通快车', balanceAvailable: true, jztBalance: 20 }
+    )).toMatchObject({ storeId: 10, status: 'inactive', jztBalance: 20 })
   })
 })

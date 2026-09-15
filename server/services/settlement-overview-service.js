@@ -2,6 +2,35 @@
 
 const DEFAULT_FRESHNESS_MS = 3 * 60 * 60 * 1000
 
+const SETTLEMENT_DASHBOARD_METRICS = Object.freeze([
+  {
+    key: 'pendingAmount',
+    label: '待结算金额',
+    secondaryKey: 'pendingOrderCount',
+    secondaryType: 'order_count'
+  },
+  {
+    key: 'yesterdaySettledAmount',
+    label: '昨日结算到账',
+    secondaryKey: 'statisticsDate',
+    secondaryType: 'date'
+  },
+  {
+    key: 'walletBalance',
+    label: '钱包余额',
+    secondaryKey: 'withdrawableAmount',
+    secondaryType: 'money',
+    secondaryLabel: '可提现'
+  },
+  {
+    key: 'frozenAmount',
+    label: '冻结金额',
+    secondaryKey: 'matchedStoreCount',
+    secondaryTotalKey: 'storeCount',
+    secondaryType: 'store_coverage'
+  }
+])
+
 function toNonNegativeNumber(value, fallback = 0) {
   const number = Number(value)
   return Number.isFinite(number) && number >= 0 ? number : fallback
@@ -108,8 +137,23 @@ function buildSettlementOverview(rows = [], options = {}) {
   }
 }
 
+function buildSettlementDashboardPayload(settlementOverview = {}) {
+  const summary = settlementOverview.summary || buildSettlementOverview([]).summary
+  return {
+    summary,
+    overview: {
+      contractVersion: 1,
+      currency: 'CNY',
+      metricOrder: SETTLEMENT_DASHBOARD_METRICS.map(item => item.key),
+      metrics: SETTLEMENT_DASHBOARD_METRICS.map(item => ({ ...item }))
+    }
+  }
+}
+
 module.exports = {
   DEFAULT_FRESHNESS_MS,
+  SETTLEMENT_DASHBOARD_METRICS,
+  buildSettlementDashboardPayload,
   buildSettlementOverview,
   getYesterdayYmd,
   normalizeSettlementMetrics

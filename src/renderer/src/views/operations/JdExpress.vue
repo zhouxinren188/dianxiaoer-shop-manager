@@ -108,6 +108,19 @@
                 end-placeholder="结束时间"
               />
             </el-form-item>
+            <el-form-item label="过滤已有推广">
+              <div class="existing-promotion-filter">
+                <el-switch v-model="filters.filterExistingPromotion" />
+                <el-select
+                  v-if="filters.filterExistingPromotion"
+                  v-model="filters.existingPromotionFilterMode"
+                  class="existing-promotion-mode"
+                >
+                  <el-option label="按 SKU 过滤" value="sku" />
+                  <el-option label="按 SPU 过滤" value="spu" />
+                </el-select>
+              </div>
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="allProductLoading" @click="searchProducts">查询商品</el-button>
               <el-button @click="resetFilters">重置</el-button>
@@ -116,6 +129,10 @@
 
           <div class="selection-summary">
             <span>待推广 <strong>{{ selectedProducts.size }}</strong> 个商品</span>
+            <span v-if="existingPromotionFilterResult.filteredCount">
+              已按 {{ existingPromotionFilterResult.mode === 'spu' ? 'SPU' : 'SKU' }} 过滤
+              <strong>{{ existingPromotionFilterResult.filteredCount }}</strong> 个已有推广商品
+            </span>
             <span v-if="excludedProducts.size">已删除 {{ excludedProducts.size }} 个</span>
             <span v-if="allProductLoading" class="progress-text">
               {{ progressText }}
@@ -241,19 +258,19 @@
                         :min="50"
                         :max="999999"
                         :precision="0"
-                        class="block-control"
+                        class="block-control compact-number-control"
                       />
                     </el-form-item>
                   </div>
-                  <div class="form-grid form-grid-2 compact-fields">
+                  <div class="form-grid planning-rule-grid">
                     <el-form-item label="计划分配模式" prop="planGroupMode">
                       <el-radio-group v-model="config.planGroupMode">
                         <el-radio value="quantity">按数量</el-radio>
                         <el-radio value="category">按二级类目分配</el-radio>
                       </el-radio-group>
                     </el-form-item>
-                    <el-form-item label="每计划单元数" prop="unitsPerCampaign">
-                      <el-input-number v-model="config.unitsPerCampaign" :min="1" :max="100" :precision="0" />
+                    <el-form-item label="每计划单元数" prop="unitsPerCampaign" class="compact-number-item">
+                      <el-input-number v-model="config.unitsPerCampaign" :min="1" :max="100" :precision="0" class="compact-number-control" />
                     </el-form-item>
                   </div>
                 </section>
@@ -267,18 +284,19 @@
                     </div>
                   </div>
 
-                  <div class="form-grid form-grid-2">
-                  <el-form-item label="关键词总用量" prop="keywordTotalUsage">
+                  <div class="form-grid compact-number-grid">
+                  <el-form-item label="关键词总用量" prop="keywordTotalUsage" class="compact-number-item">
                     <el-input-number
                       v-model="config.keywordTotalUsage"
                       :min="1"
                       :max="keywordUsageMax"
                       :precision="0"
+                      class="compact-number-control"
                     />
                     <div class="field-help">不可超过当前剩余关键词额度</div>
                   </el-form-item>
-                  <el-form-item label="每单元创意数" prop="skuPerUnit">
-                    <el-input-number v-model="config.skuPerUnit" :min="1" :max="100" :precision="0" />
+                  <el-form-item label="每单元创意数" prop="skuPerUnit" class="compact-number-item">
+                    <el-input-number v-model="config.skuPerUnit" :min="1" :max="100" :precision="0" class="compact-number-control" />
                     <div class="field-help">同一三级类目内按该数量拆分单元</div>
                   </el-form-item>
                   </div>
@@ -302,21 +320,47 @@
                   <div class="keyword-strategy-grid">
                     <div class="strategy-box">
                       <div class="strategy-box-title">关键词出价</div>
-                      <div class="bid-base-row">
-                        <span>出价基准</span>
-                        <strong>查询到的最低出价</strong>
+                      <div v-if="activeTool === 'custom'" class="keyword-bid-mode-row">
+                        <el-radio-group v-model="config.useMinKeywordBid">
+                          <el-radio :value="true">查询到的最低出价＋加价</el-radio>
+                          <el-radio :value="false">自定义出价</el-radio>
+                        </el-radio-group>
                       </div>
-                      <div class="bid-increment-row">
-                        <span>额外增加</span>
+                      <template v-if="activeTool !== 'custom' || config.useMinKeywordBid">
+                        <div class="bid-base-row">
+                          <span>出价基准</span>
+                          <strong>查询到的最低出价</strong>
+                        </div>
+                        <div class="bid-increment-row">
+                          <span>额外增加</span>
+                          <el-input-number
+                            v-model="config.keywordBidIncrement"
+                            :min="0"
+                            :max="100"
+                            :step="0.1"
+                            :precision="1"
+                          />
+                          <span>元</span>
+                        </div>
+                      </template>
+                      <el-form-item v-else label="固定出价" prop="customKeywordBid" class="fixed-keyword-bid-item">
                         <el-input-number
-                          v-model="config.keywordBidIncrement"
-                          :min="0"
-                          :max="100"
+                          v-model="config.customKeywordBid"
+                          :min="0.1"
+                          :max="9999"
                           :step="0.1"
                           :precision="1"
                         />
                         <span>元</span>
-                      </div>
+                        <div class="field-help">每个关键词统一使用该出价，不查询京东最低出价</div>
+                      </el-form-item>
+                      <el-form-item label="关键词匹配方式" prop="keywordMatchType" class="keyword-match-type-item">
+                        <el-radio-group v-model="config.keywordMatchType">
+                          <el-radio :value="1">精确匹配</el-radio>
+                          <el-radio :value="4">短语匹配</el-radio>
+                          <el-radio :value="8">切词匹配</el-radio>
+                        </el-radio-group>
+                      </el-form-item>
                     </div>
 
                     <div class="strategy-box keyword-source-box">
@@ -368,6 +412,7 @@
                       :key="option.value"
                       :label="`${option.label}（建议 ${option.recommended}%）`"
                       :prop="option.ratioKey"
+                      class="compact-number-with-unit-item"
                     >
                       <el-input-number
                         v-model="config[option.ratioKey]"
@@ -393,7 +438,7 @@
                     <span class="section-number">04</span>
                     <div>
                       <h3>投放目标与出价</h3>
-                      <p>以成交和投产比为目标控制出价</p>
+                      <p>{{ activeTool === 'custom' ? '设置关键词、智能匹配与人群出价策略' : '以成交和投产比为目标控制出价' }}</p>
                     </div>
                   </div>
 
@@ -426,7 +471,7 @@
                   </el-form-item>
                   <template v-if="config.bidType !== 4">
                     <div class="form-grid form-grid-3">
-                      <el-form-item>
+                      <el-form-item class="compact-number-with-unit-item">
                         <template #label>
                           <span class="field-label-with-help">
                             调价方向
@@ -467,7 +512,7 @@
                         />
                         <span class="unit-suffix">%</span>
                       </el-form-item>
-                      <el-form-item prop="bottomLimit">
+                      <el-form-item prop="bottomLimit" class="compact-number-item">
                         <template #label>
                           <span class="field-label-with-help">
                             保底 ROI
@@ -480,14 +525,14 @@
                             </el-tooltip>
                           </span>
                         </template>
-                        <el-input-number v-model="config.bottomLimit" :min="0.1" :max="1000" :step="0.1" :precision="1" />
+                        <el-input-number v-model="config.bottomLimit" :min="0.1" :max="1000" :step="0.1" :precision="1" class="compact-number-control" />
                       </el-form-item>
                     </div>
                   </template>
                   <template v-else>
                     <div class="form-grid form-grid-2 compact-fields">
-                      <el-form-item label="自定义数值" prop="customRoi">
-                        <el-input-number v-model="config.customRoi" :min="0.1" :max="1000" :step="0.1" :precision="1" />
+                      <el-form-item label="自定义数值" prop="customRoi" class="compact-number-item">
+                        <el-input-number v-model="config.customRoi" :min="0.1" :max="1000" :step="0.1" :precision="1" class="compact-number-control" />
                       </el-form-item>
                       <el-form-item>
                         <template #label>
@@ -512,11 +557,11 @@
                     <div class="fixed-setting-row fixed-setting-row-3">
                       <div><span>投放目标</span><strong>自定义</strong></div>
                       <div><span>投放定向</span><strong>{{ customOrientationLabel }}</strong></div>
-                      <div><span>默认人群</span><strong>购买人群、浏览人群</strong></div>
+                      <div><span>已选人群</span><strong>{{ selectedCrowdSummary }}</strong></div>
                     </div>
 
-                    <div class="form-grid form-grid-2 custom-bid-grid">
-                      <el-form-item label="全能调价" prop="automatedBiddingType">
+                    <div class="form-grid custom-control-grid">
+                      <el-form-item label="全能调价" prop="automatedBiddingType" class="custom-control-switch">
                         <div class="switch-row">
                           <el-switch
                             v-model="config.automatedBiddingType"
@@ -528,7 +573,20 @@
                         <div class="field-help">对应原工具“全能调价”，关闭时按关键词出价投放</div>
                       </el-form-item>
 
-                      <el-form-item label="智能匹配出价" prop="inSearchFee">
+                      <el-form-item
+                        v-if="config.automatedBiddingType === 32768"
+                        label="生效范围"
+                        prop="orientationRangeOption"
+                        class="custom-control-range"
+                      >
+                        <el-checkbox-group v-model="config.orientationRangeOption">
+                          <el-checkbox :value="1" disabled>关键词定向</el-checkbox>
+                          <el-checkbox :value="2">商品定向</el-checkbox>
+                        </el-checkbox-group>
+                        <div class="field-help">关键词定向固定生效；勾选后同时启用商品定向</div>
+                      </el-form-item>
+
+                      <el-form-item label="智能匹配出价" prop="inSearchFee" class="custom-control-search-fee compact-number-with-unit-item">
                         <el-input-number
                           v-model="config.inSearchFee"
                           :min="0.1"
@@ -538,10 +596,13 @@
                         />
                         <span class="unit-suffix">元</span>
                       </el-form-item>
-                    </div>
 
-                    <div v-if="config.automatedBiddingType === 32768" class="form-grid form-grid-2 custom-bid-grid">
-                      <el-form-item label="溢价比例" prop="premiumCoef">
+                      <el-form-item
+                        v-if="config.automatedBiddingType === 32768"
+                        label="溢价比例"
+                        prop="premiumCoef"
+                        class="custom-control-premium compact-number-with-unit-item"
+                      >
                         <el-input-number
                           v-model="config.premiumCoef"
                           :min="30"
@@ -553,26 +614,65 @@
                       </el-form-item>
                     </div>
 
-                    <el-form-item
-                      v-if="config.automatedBiddingType === 32768"
-                      label="生效范围"
-                      prop="orientationRangeOption"
-                      class="compact-control"
-                    >
-                      <el-checkbox-group v-model="config.orientationRangeOption">
-                        <el-checkbox :value="1" disabled>关键词定向</el-checkbox>
-                        <el-checkbox :value="2">商品定向</el-checkbox>
-                      </el-checkbox-group>
-                      <div class="field-help">关键词定向为原工具固定项；勾选商品定向后提交范围值为 3</div>
-                    </el-form-item>
+                    <el-form-item label="人群定向" prop="dmpCrowdSettings" class="crowd-form-item">
+                      <div class="crowd-setting-panel" v-loading="crowdLoading">
+                        <div class="crowd-setting-header">
+                          <div>
+                            <strong>搜索人群</strong>
+                            <small>与浩辰一致：默认不勾选，勾选后设置 10%～300% 溢价</small>
+                          </div>
+                          <div class="crowd-header-actions">
+                            <el-button size="small" :loading="crowdLoading" @click="loadCrowds(false)">刷新人群</el-button>
+                            <el-button
+                              size="small"
+                              plain
+                              :disabled="!crowdDisplayOptions.length"
+                              @click="openCrowdDialog"
+                            >
+                              选择人群（{{ config.dmpCrowdSettings.length }}/30）
+                            </el-button>
+                          </div>
+                        </div>
 
-                    <el-alert
-                      title="默认推荐人群"
-                      description="提交时与原工具一致，默认携带购买人群和浏览人群，溢价均为 30。"
-                      type="info"
-                      :closable="false"
-                      show-icon
-                    />
+                        <el-alert
+                          v-if="crowdError"
+                          :title="crowdError"
+                          type="warning"
+                          :closable="false"
+                          show-icon
+                        />
+
+                        <div v-if="defaultCrowdOptions.length" class="default-crowd-list">
+                          <div v-for="crowd in defaultCrowdOptions" :key="crowdKey(crowd)" class="crowd-option-row">
+                            <el-checkbox
+                              :model-value="isCrowdSelected(crowd)"
+                              @change="toggleCrowd(crowd, $event)"
+                            >
+                              {{ crowd.crowdName }}
+                            </el-checkbox>
+                            <span class="crowd-reach">覆盖 {{ formatCrowdReach(crowd) }}</span>
+                            <el-input-number
+                              :model-value="getCrowdPremium(crowd)"
+                              :disabled="!isCrowdSelected(crowd)"
+                              :min="10"
+                              :max="300"
+                              :step="10"
+                              :precision="0"
+                              size="small"
+                              @update:model-value="updateCrowdPremium(crowd, $event)"
+                            />
+                            <span class="crowd-percent">%</span>
+                          </div>
+                        </div>
+                        <div v-else-if="!crowdLoading && !crowdError" class="crowd-empty-hint">
+                          京东未返回默认购买/浏览人群，可使用右上角“选择人群”添加其他已加载人群
+                        </div>
+
+                        <div v-if="crowdPartial" class="crowd-setting-actions">
+                          <span>部分人群加载失败，可刷新后重试</span>
+                        </div>
+                      </div>
+                    </el-form-item>
                   </template>
                 </section>
 
@@ -626,6 +726,8 @@
                   <div><span>每日预算</span><strong>{{ config.unlimitedBudget ? '不限' : `¥${config.dailyBudget}` }}</strong></div>
                   <div><span>{{ activeTool === 'custom' ? '出价控制' : '投产模式' }}</span><strong>{{ deliveryModeLabel }}</strong></div>
                   <div><span>关键词来源</span><strong>{{ keywordSourceSummary }}</strong></div>
+                  <div><span>匹配方式</span><strong>{{ keywordMatchTypeLabel }}</strong></div>
+                  <div v-if="activeTool === 'custom'"><span>搜索人群</span><strong>{{ selectedCrowdSummary }}</strong></div>
                   <div><span>投放地域</span><strong>{{ areaSummary }}</strong></div>
                 </div>
                 <el-alert
@@ -652,6 +754,8 @@
 
           <el-descriptions :column="3" border class="preview-config-summary">
             <el-descriptions-item label="关键词来源">{{ keywordSourceSummary }}</el-descriptions-item>
+            <el-descriptions-item v-if="activeTool === 'custom'" label="搜索人群">{{ selectedCrowdSummary }}</el-descriptions-item>
+            <el-descriptions-item label="匹配方式">{{ keywordMatchTypeLabel }}</el-descriptions-item>
             <el-descriptions-item label="地域">{{ areaSummary }}</el-descriptions-item>
             <el-descriptions-item label="计划分配">{{ config.planGroupMode === 'category' ? '按二级类目' : '按数量' }}</el-descriptions-item>
           </el-descriptions>
@@ -738,6 +842,61 @@
     </div>
 
     <el-dialog
+      v-model="crowdDialogVisible"
+      title="选择搜索人群"
+      width="820px"
+      align-center
+      append-to-body
+    >
+      <div class="crowd-dialog-toolbar">
+        <el-input v-model="crowdKeyword" clearable placeholder="搜索人群名称" />
+        <el-select v-model="crowdCategory" clearable placeholder="全部分类">
+          <el-option v-for="category in crowdCategoryOptions" :key="category" :label="category" :value="category" />
+        </el-select>
+        <el-button :loading="crowdLoading" @click="loadCrowds(false)">重新加载</el-button>
+      </div>
+      <el-table :data="filteredCrowdOptions" height="460" empty-text="没有符合条件的人群">
+        <el-table-column label="选择" width="66" align="center">
+          <template #default="{ row }">
+            <el-checkbox :model-value="isCrowdSelected(row)" @change="toggleCrowd(row, $event)" />
+          </template>
+        </el-table-column>
+        <el-table-column prop="crowdName" label="人群名称" min-width="210" show-overflow-tooltip />
+        <el-table-column label="来源" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.source === 'recommended' ? 'success' : 'info'">
+              {{ row.source === 'recommended' ? '推荐人群' : 'DMP人群' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="分类" min-width="150" show-overflow-tooltip>
+          <template #default="{ row }">{{ crowdCategoryLabel(row) }}</template>
+        </el-table-column>
+        <el-table-column label="覆盖人数" width="110" align="right">
+          <template #default="{ row }">{{ formatCrowdReach(row) }}</template>
+        </el-table-column>
+        <el-table-column label="溢价" width="160" align="right">
+          <template #default="{ row }">
+            <el-input-number
+              :model-value="getCrowdPremium(row)"
+              :disabled="!isCrowdSelected(row)"
+              :min="10"
+              :max="300"
+              :step="10"
+              :precision="0"
+              size="small"
+              @update:model-value="updateCrowdPremium(row, $event)"
+            />
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <span class="crowd-dialog-count">已选 {{ config.dmpCrowdSettings.length }}/30 个人群</span>
+        <el-button type="primary" @click="crowdDialogVisible = false">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="rateLimit.visible"
       title="京东接口限流保护"
       width="420px"
@@ -763,7 +922,7 @@ import { Aim, EditPen, MagicStick, QuestionFilled, TrendCharts } from '@element-
 import { fetchStores } from '@/api/store'
 
 const JZT_URL = 'https://jzt.jd.com/msa/#/list/shopSmart?objective=item&scenario=normal&targetingType=shopSmart'
-const CONFIG_SCHEMA_VERSION = 3
+const CONFIG_SCHEMA_VERSION = 6
 const keywordSourceOptions = [
   { value: 1, label: '商智关键词', ratioKey: 'businessWisdomPercent', recommended: 20 },
   { value: 2, label: '商品推词', ratioKey: 'productPercent', recommended: 50 },
@@ -778,6 +937,11 @@ const keywordSortOptions = [
   { value: 5, label: '成交单量指数' },
   { value: 6, label: '成交转化率' },
   { value: 7, label: '蓝海值' }
+]
+const keywordMatchTypeOptions = [
+  { value: 1, label: '精确匹配' },
+  { value: 4, label: '短语匹配' },
+  { value: 8, label: '切词匹配' }
 ]
 
 const tools = [
@@ -824,6 +988,15 @@ const areaTreeRef = ref(null)
 const areaTree = ref([])
 const areaLoading = ref(false)
 const allAreasSelected = ref(false)
+const crowdOptions = ref([])
+const crowdLoading = ref(false)
+const crowdError = ref('')
+const crowdPartial = ref(false)
+const crowdDialogVisible = ref(false)
+const crowdKeyword = ref('')
+const crowdCategory = ref('')
+const crowdLoadedStoreId = ref('')
+let crowdRequestSeq = 0
 const products = ref([])
 const productTotal = ref(0)
 const selectedProducts = reactive(new Map())
@@ -831,6 +1004,7 @@ const excludedProducts = reactive(new Map())
 const allProgress = reactive({ phase: '', page: 0, totalPages: 0, loaded: 0, waitSeconds: 0 })
 const rateLimit = reactive({ visible: false, reason: '', secondsRemaining: 0 })
 const readIssues = reactive({ failedPages: [], errorProducts: [] })
+const existingPromotionFilterResult = reactive({ enabled: false, mode: 'sku', filteredCount: 0, filteredSkuIds: [] })
 let removeProgressListener = null
 let removeCreationProgressListener = null
 let removeVerificationListener = null
@@ -851,6 +1025,8 @@ const filters = reactive({
   minPrice: null,
   maxPrice: null,
   onlineRange: [],
+  filterExistingPromotion: true,
+  existingPromotionFilterMode: 'sku',
   pageNo: 1,
   pageSize: 100
 })
@@ -861,6 +1037,7 @@ const configRules = {
   namePrefix: [{ required: true, message: '请输入计划名称前缀', trigger: 'blur' }],
   bidType: [{ required: true, message: '请选择目标投产比', trigger: 'change' }],
   automatedBiddingType: [{ required: true, message: '请选择是否开启全能调价', trigger: 'change' }],
+  keywordMatchType: [{ required: true, message: '请选择关键词匹配方式', trigger: 'change' }],
   premiumCoef: [{
     validator: (_rule, value, callback) => {
       if (activeTool.value === 'custom' && config.automatedBiddingType === 32768 &&
@@ -877,11 +1054,35 @@ const configRules = {
     },
     trigger: 'change'
   }],
+  customKeywordBid: [{
+    validator: (_rule, value, callback) => {
+      if (activeTool.value === 'custom' && config.useMinKeywordBid === false &&
+        (!Number.isFinite(value) || value < 0.1 || value > 9999)) {
+        callback(new Error('关键词固定出价须为 0.1～9999 元'))
+      } else callback()
+    },
+    trigger: 'change'
+  }],
   orientationRangeOption: [{
     validator: (_rule, value, callback) => {
       if (activeTool.value === 'custom' && (!Array.isArray(value) || !value.map(Number).includes(1))) {
         callback(new Error('关键词定向为必选项'))
       } else callback()
+    },
+    trigger: 'change'
+  }],
+  dmpCrowdSettings: [{
+    validator: (_rule, value, callback) => {
+      const items = Array.isArray(value) ? value : []
+      if (items.length > 30) {
+        callback(new Error('一个推广单元最多选择 30 个人群'))
+        return
+      }
+      if (items.some((item) => !Number.isFinite(Number(item?.adGroupPrice)) || Number(item.adGroupPrice) < 10 || Number(item.adGroupPrice) > 300)) {
+        callback(new Error('人群溢价须为 10%～300%'))
+        return
+      }
+      callback()
     },
     trigger: 'change'
   }],
@@ -980,6 +1181,35 @@ const bidModeLabel = computed(() => {
 const customOrientationLabel = computed(() => config.orientationRangeOption.map(Number).includes(2)
   ? '关键词定向 + 商品定向'
   : '关键词定向')
+const selectedCrowdSummary = computed(() => {
+  const items = Array.isArray(config.dmpCrowdSettings) ? config.dmpCrowdSettings : []
+  if (!items.length) return '未选择'
+  const names = items.slice(0, 2).map((item) => item.crowdName || `人群${item.crowdId}`)
+  return `${names.join('、')}${items.length > 2 ? ` 等 ${items.length} 个` : ''}`
+})
+const crowdDisplayOptions = computed(() => {
+  const result = [...crowdOptions.value]
+  const known = new Set(result.map((item) => crowdKey(item)))
+  for (const item of config.dmpCrowdSettings || []) {
+    if (!known.has(crowdKey(item))) result.push({ ...item, source: item.source || 'saved' })
+  }
+  return result
+})
+const defaultCrowdOptions = computed(() => crowdDisplayOptions.value.filter((item) => ['100', '101'].includes(crowdKey(item))))
+const crowdCategoryOptions = computed(() => [...new Set(crowdDisplayOptions.value
+  .map((item) => crowdCategoryLabel(item))
+  .filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
+const filteredCrowdOptions = computed(() => {
+  const keyword = crowdKeyword.value.trim().toLowerCase()
+  return crowdDisplayOptions.value.filter((item) => {
+    const matchesKeyword = !keyword || String(item.crowdName || '').toLowerCase().includes(keyword)
+    const matchesCategory = !crowdCategory.value || crowdCategoryLabel(item) === crowdCategory.value
+    return matchesKeyword && matchesCategory
+  })
+})
+const keywordMatchTypeLabel = computed(() => keywordMatchTypeOptions.find(
+  (option) => option.value === Number(config.keywordMatchType)
+)?.label || '切词匹配')
 const deliveryModeLabel = computed(() => {
   if (activeTool.value !== 'custom') return bidModeLabel.value
   if (Number(config.automatedBiddingType) === 0) return `关闭全能调价 · 匹配出价 ¥${Number(config.inSearchFee || 0).toFixed(1)}`
@@ -988,6 +1218,12 @@ const deliveryModeLabel = computed(() => {
 const progressText = computed(() => {
   if (allProgress.phase === 'initial_wait') {
     return '正在准备读取全店商品…'
+  }
+  if (allProgress.phase === 'existing_promotion_start') {
+    return '正在读取京准通已有推广商品…'
+  }
+  if (allProgress.phase === 'existing_promotion_page_complete') {
+    return `正在读取已有推广商品：第 ${allProgress.page || 1}/${allProgress.totalPages || '?'} 页，已获取 ${allProgress.loaded || 0} 条`
   }
   if (allProgress.phase === 'batch_interval') {
     return `正在后台读取全店商品：已完成 ${allProgress.page}/${allProgress.totalPages || allProgress.page} 页，已获取 ${allProgress.loaded || 0} 个`
@@ -1222,6 +1458,9 @@ onBeforeUnmount(() => {
 watch(activeStep, (step) => {
   if (step === 0) updateProductTableHeight()
   if (step === 2) updatePreviewTableHeight()
+  if (step === 1 && activeTool.value === 'custom' && storeId.value && crowdLoadedStoreId.value !== String(storeId.value)) {
+    void loadCrowds(true)
+  }
 })
 
 watch(config, () => {
@@ -1241,6 +1480,8 @@ function createDefaultConfig(mode = 'roi') {
     skuPerUnit: 50,
     useMinKeywordBid: true,
     keywordBidIncrement: 0,
+    customKeywordBid: 0.1,
+    keywordMatchType: 8,
     keywordSources: [],
     keywordSortType: 4,
     businessWisdomPercent: null,
@@ -1254,6 +1495,7 @@ function createDefaultConfig(mode = 'roi') {
     premiumType: 2,
     premiumCoef: 30,
     inSearchFee: 0.1,
+    dmpCrowdSettings: [],
     bidType: 3,
     bottomLimit: 3,
     customRoi: 3,
@@ -1291,6 +1533,7 @@ function selectTool(tool) {
     config.keywordTotalUsage = Number(preflight.limits.keyword.surplus)
   }
   if (config.areaType === 2) void loadAreas()
+  if (activeTool.value === 'custom' && storeId.value) void loadCrowds(true)
 }
 
 function createKeywordRatioRule(sourceType, sourceLabel) {
@@ -1335,6 +1578,112 @@ function validateKeywordRatios() {
   nextTick(() => {
     configFormRef.value?.validateField(keywordSourceOptions.map((option) => option.ratioKey)).catch(() => {})
   })
+}
+
+function crowdKey(crowd) {
+  return String(crowd?.crowdId ?? crowd?.id ?? '').trim()
+}
+
+function crowdCategoryLabel(crowd) {
+  const first = String(crowd?.senceFirstCategory || '').trim()
+  const second = String(crowd?.senceSecondCategory || '').trim()
+  if (first && second && first !== second) return `${first} / ${second}`
+  return second || first || (crowd?.source === 'recommended' ? '默认推荐人群' : '自定义人群')
+}
+
+function formatCrowdReach(crowd) {
+  const value = Number(crowd?.estimateUv ?? crowd?.uv ?? crowd?.globalUv)
+  if (!Number.isFinite(value) || value < 0) return '--'
+  if (value >= 10000) return `${(value / 10000).toFixed(value >= 100000 ? 0 : 1)}万`
+  return Math.round(value).toLocaleString('zh-CN')
+}
+
+function findSelectedCrowd(crowd) {
+  const key = crowdKey(crowd)
+  return (config.dmpCrowdSettings || []).find((item) => crowdKey(item) === key)
+}
+
+function isCrowdSelected(crowd) {
+  return Boolean(findSelectedCrowd(crowd))
+}
+
+function getCrowdPremium(crowd) {
+  return Number(findSelectedCrowd(crowd)?.adGroupPrice ?? crowd?.adGroupPrice ?? 10)
+}
+
+function toggleCrowd(crowd, checked) {
+  const key = crowdKey(crowd)
+  if (!key) return
+  const selected = [...(config.dmpCrowdSettings || [])]
+  const index = selected.findIndex((item) => crowdKey(item) === key)
+  if (!checked) {
+    if (index >= 0) selected.splice(index, 1)
+    config.dmpCrowdSettings = selected
+    configFormRef.value?.validateField('dmpCrowdSettings').catch(() => {})
+    return
+  }
+  if (index >= 0) return
+  if (selected.length >= 30) {
+    showCenteredMessage('warning', '一个推广单元最多选择 30 个人群')
+    return
+  }
+  selected.push({
+    ...crowd,
+    adGroupPrice: Math.min(Math.max(Math.round(Number(crowd?.adGroupPrice) || 10), 10), 300),
+    isUsed: 1
+  })
+  config.dmpCrowdSettings = selected
+  configFormRef.value?.validateField('dmpCrowdSettings').catch(() => {})
+}
+
+function updateCrowdPremium(crowd, value) {
+  const key = crowdKey(crowd)
+  config.dmpCrowdSettings = (config.dmpCrowdSettings || []).map((item) => crowdKey(item) === key
+    ? { ...item, adGroupPrice: Math.min(Math.max(Math.round(Number(value) || 10), 10), 300), isUsed: 1 }
+    : item)
+  configFormRef.value?.validateField('dmpCrowdSettings').catch(() => {})
+}
+
+function openCrowdDialog() {
+  if (!crowdDisplayOptions.value.length && !crowdLoading.value) void loadCrowds(false)
+  crowdDialogVisible.value = true
+}
+
+async function loadCrowds(silent = false) {
+  if (!ensureStoreSelected() || crowdLoading.value) return
+  const requestSeq = ++crowdRequestSeq
+  const requestedStoreId = String(storeId.value)
+  crowdLoading.value = true
+  crowdError.value = ''
+  crowdPartial.value = false
+  try {
+    const result = await window.electronAPI.invoke('jd-express-crowds', { storeId: storeId.value })
+    if (!result?.success) throw new Error(result?.message || '读取京东人群失败')
+    if (requestSeq !== crowdRequestSeq || requestedStoreId !== String(storeId.value)) return
+    crowdOptions.value = Array.isArray(result.crowds) ? result.crowds : []
+    crowdLoadedStoreId.value = requestedStoreId
+    crowdPartial.value = result.partial === true
+    const currentSelections = new Map((config.dmpCrowdSettings || []).map((item) => [crowdKey(item), item]))
+    config.dmpCrowdSettings = (config.dmpCrowdSettings || []).map((item) => {
+      const fresh = crowdOptions.value.find((option) => crowdKey(option) === crowdKey(item))
+      return fresh
+        ? { ...fresh, adGroupPrice: getCrowdPremium(currentSelections.get(crowdKey(item))), isUsed: 1 }
+        : item
+    })
+    if (result.partial) {
+      crowdError.value = (result.errors || []).map((item) => item.message).filter(Boolean).join('；') || '部分人群加载失败'
+    } else if (!crowdOptions.value.length) {
+      crowdError.value = '当前店铺未返回可用人群'
+    } else if (!silent) {
+      showCenteredMessage('success', `已加载 ${crowdOptions.value.length} 个人群`)
+    }
+  } catch (error) {
+    if (requestSeq !== crowdRequestSeq || requestedStoreId !== String(storeId.value)) return
+    crowdError.value = error.message || '读取京东人群失败'
+    if (!silent) showCenteredMessage('error', crowdError.value)
+  } finally {
+    if (requestSeq === crowdRequestSeq && requestedStoreId === String(storeId.value)) crowdLoading.value = false
+  }
 }
 
 async function handleAreaTypeChange(value) {
@@ -1423,9 +1772,19 @@ async function handleStoreChange(value) {
   selectedProducts.clear()
   excludedProducts.clear()
   Object.assign(readIssues, { failedPages: [], errorProducts: [] })
+  Object.assign(existingPromotionFilterResult, { enabled: false, mode: filters.existingPromotionFilterMode, filteredCount: 0, filteredSkuIds: [] })
   rateLimit.visible = false
   areaTree.value = []
   allAreasSelected.value = false
+  crowdOptions.value = []
+  crowdRequestSeq += 1
+  crowdLoading.value = false
+  crowdError.value = ''
+  crowdPartial.value = false
+  crowdDialogVisible.value = false
+  crowdKeyword.value = ''
+  crowdCategory.value = ''
+  crowdLoadedStoreId.value = ''
   activeStep.value = 0
   signingReady.value = false
   keywordPrepareLoading.value = false
@@ -1444,6 +1803,7 @@ async function handleStoreChange(value) {
   restoreConfig(value)
   await runPreflight({ silent: true })
   if (config.areaType === 2) await loadAreas()
+  if (activeTool.value === 'custom') await loadCrowds(true)
 }
 
 async function checkSigningEnvironment() {
@@ -1577,8 +1937,11 @@ async function createAllPlans() {
   const summary = preview.value
   const savedPreparationToken = readPreparationToken()
   const budgetText = config.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${config.dailyBudget}`
+  const keywordBidText = config.useMinKeywordBid
+    ? `关键词按京东最低出价＋¥${Number(config.keywordBidIncrement || 0).toFixed(1)}`
+    : `关键词固定出价 ¥${Number(config.customKeywordBid || 0.1).toFixed(1)}`
   const createModeText = activeTool.value === 'custom'
-    ? `自定义投放（${deliveryModeLabel.value}，智能匹配出价 ¥${Number(config.inSearchFee || 0).toFixed(1)}）`
+    ? `自定义投放（${keywordBidText}，${deliveryModeLabel.value}，智能匹配出价 ¥${Number(config.inSearchFee || 0).toFixed(1)}）`
     : `目标投产比 ${bidModeLabel.value}`
   try {
     await ElMessageBox.confirm(
@@ -1751,7 +2114,9 @@ async function loadAllProducts() {
         minPrice: filters.minPrice,
         maxPrice: filters.maxPrice,
         startOnlineTime: filters.onlineRange?.[0] || '',
-        endOnlineTime: filters.onlineRange?.[1] || ''
+        endOnlineTime: filters.onlineRange?.[1] || '',
+        filterExistingPromotion: filters.filterExistingPromotion,
+        existingPromotionFilterMode: filters.existingPromotionFilterMode
       }
     })
     if (!result?.success) throw new Error(result?.message || '全店商品读取失败')
@@ -1762,10 +2127,19 @@ async function loadAllProducts() {
     for (const product of loadedProducts) selectedProducts.set(product.skuId, product)
     readIssues.failedPages = result.failedPages || []
     readIssues.errorProducts = result.errorProducts || []
+    Object.assign(existingPromotionFilterResult, result.existingPromotionFilter || {
+      enabled: false,
+      mode: filters.existingPromotionFilterMode,
+      filteredCount: 0,
+      filteredSkuIds: []
+    })
+    const filteredTip = existingPromotionFilterResult.filteredCount
+      ? `，已过滤 ${existingPromotionFilterResult.filteredCount} 个已有推广商品`
+      : ''
     if (readIssues.failedPages.length || readIssues.errorProducts.length) {
-      showCenteredMessage('warning', `已读取 ${selectedProducts.size} 个商品，部分数据需要补查`)
+      showCenteredMessage('warning', `已读取 ${selectedProducts.size} 个商品${filteredTip}，部分数据需要补查`)
     } else {
-      showCenteredMessage('success', `查询完成，共 ${selectedProducts.size} 个待推广商品`)
+      showCenteredMessage('success', `查询完成，共 ${selectedProducts.size} 个待推广商品${filteredTip}`)
     }
   } catch (error) {
     showCenteredMessage('error', error.message || '全店商品读取失败')
@@ -1788,7 +2162,9 @@ async function retryFailedPages() {
         minPrice: filters.minPrice,
         maxPrice: filters.maxPrice,
         startOnlineTime: filters.onlineRange?.[0] || '',
-        endOnlineTime: filters.onlineRange?.[1] || ''
+        endOnlineTime: filters.onlineRange?.[1] || '',
+        filterExistingPromotion: filters.filterExistingPromotion,
+        existingPromotionFilterMode: filters.existingPromotionFilterMode
       }
     })
     if (!result?.success) throw new Error(result?.message || '失败页补查失败')
@@ -1803,6 +2179,19 @@ async function retryFailedPages() {
     productTotal.value = products.value.length
     readIssues.failedPages = result.failedPages || []
     readIssues.errorProducts = result.errorProducts || []
+    if (result.existingPromotionFilter) {
+      const filteredSkuIds = [...new Set([
+        ...(existingPromotionFilterResult.filteredSkuIds || []),
+        ...(result.existingPromotionFilter.filteredSkuIds || [])
+      ].map(String))]
+      existingPromotionFilterResult.enabled = result.existingPromotionFilter.enabled
+      existingPromotionFilterResult.mode = result.existingPromotionFilter.mode || filters.existingPromotionFilterMode
+      existingPromotionFilterResult.filteredSkuIds = filteredSkuIds
+      existingPromotionFilterResult.filteredCount = filteredSkuIds.length || Math.max(
+        existingPromotionFilterResult.filteredCount,
+        Number(result.existingPromotionFilter.filteredCount || 0)
+      )
+    }
     if (readIssues.failedPages.length) {
       ElMessage.warning(`补查完成，仍有 ${readIssues.failedPages.length} 页失败，可稍后再次补查`)
     } else {
@@ -1826,6 +2215,7 @@ async function searchProducts() {
   productTotal.value = 0
   selectedProducts.clear()
   excludedProducts.clear()
+  Object.assign(existingPromotionFilterResult, { enabled: false, mode: filters.existingPromotionFilterMode, filteredCount: 0, filteredSkuIds: [] })
   await loadAllProducts()
 }
 
@@ -1866,8 +2256,16 @@ function resetFilters() {
     minPrice: null,
     maxPrice: null,
     onlineRange: [],
+    filterExistingPromotion: true,
+    existingPromotionFilterMode: 'sku',
     pageNo: 1,
     pageSize: filters.pageSize
+  })
+  Object.assign(existingPromotionFilterResult, {
+    enabled: false,
+    mode: 'sku',
+    filteredCount: 0,
+    filteredSkuIds: []
   })
 }
 
@@ -2011,10 +2409,23 @@ function restoreConfig(value, mode = activeTool.value) {
     config.keywordSources = [...new Set((Array.isArray(config.keywordSources) ? config.keywordSources : [])
       .map(Number)
       .filter((source) => keywordSourceOptions.some((option) => option.value === source)))]
+    config.keywordMatchType = keywordMatchTypeOptions.some((option) => option.value === Number(config.keywordMatchType))
+      ? Number(config.keywordMatchType)
+      : 8
     if (!config.keywordSources.includes(3)) config.keywordSources = config.keywordSources.filter((source) => source !== 4)
     config.orientationRangeOption = config.createMode === 'custom' && Array.isArray(config.orientationRangeOption) && config.orientationRangeOption.map(Number).includes(2)
       ? [1, 2]
       : [1]
+    config.dmpCrowdSettings = config.createMode === 'custom' && Array.isArray(config.dmpCrowdSettings)
+      ? config.dmpCrowdSettings
+        .filter((item) => crowdKey(item))
+        .slice(0, 30)
+        .map((item) => ({
+          ...item,
+          adGroupPrice: Math.min(Math.max(Math.round(Number(item.adGroupPrice) || 10), 10), 300),
+          isUsed: 1
+        }))
+      : []
     config.areaIds = Array.isArray(config.areaIds) ? [...new Set(config.areaIds.map(String).filter(Boolean))] : []
     return Number(saved.schemaVersion) >= CONFIG_SCHEMA_VERSION
   } catch {
@@ -2440,6 +2851,16 @@ function formatDuration(milliseconds) {
   width: 135px;
 }
 
+.existing-promotion-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.filter-form .existing-promotion-mode {
+  width: 130px;
+}
+
 .range-separator {
   padding: 0 7px;
   color: #9aa2b1;
@@ -2678,6 +3099,14 @@ function formatDuration(milliseconds) {
   max-width: 760px;
 }
 
+.planning-rule-grid {
+  grid-template-columns: minmax(300px, 420px) minmax(180px, 220px);
+}
+
+.compact-number-grid {
+  grid-template-columns: repeat(2, minmax(220px, 360px));
+}
+
 .fixed-setting-row {
   display: flex;
   align-items: center;
@@ -2713,6 +3142,124 @@ function formatDuration(milliseconds) {
   flex: 1;
 }
 
+.crowd-form-item :deep(.el-form-item__content) {
+  display: block;
+}
+
+.crowd-setting-panel {
+  width: 100%;
+  padding: 14px;
+  box-sizing: border-box;
+  background: #f8faff;
+  border: 1px solid #e3e9f6;
+  border-radius: 8px;
+}
+
+.crowd-setting-header,
+.crowd-setting-actions,
+.crowd-option-row {
+  display: flex;
+  align-items: center;
+}
+
+.crowd-setting-header {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.crowd-setting-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.crowd-setting-header .crowd-header-actions {
+  align-items: center;
+  flex-direction: row;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.crowd-header-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.crowd-setting-header strong {
+  color: #344054;
+  font-size: 14px;
+}
+
+.crowd-setting-header small,
+.crowd-setting-actions span {
+  color: #8a94a5;
+  font-size: 12px;
+}
+
+.default-crowd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.crowd-option-row {
+  min-height: 42px;
+  gap: 10px;
+  padding: 0 10px;
+  background: #fff;
+  border: 1px solid #e8ecf4;
+  border-radius: 6px;
+}
+
+.crowd-option-row :deep(.el-checkbox) {
+  min-width: 150px;
+}
+
+.crowd-option-row :deep(.el-input-number) {
+  width: 120px;
+}
+
+.crowd-reach {
+  flex: 1;
+  color: #8a94a5;
+  font-size: 12px;
+}
+
+.crowd-percent {
+  color: #667085;
+  font-size: 13px;
+}
+
+.crowd-setting-actions {
+  justify-content: flex-start;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.crowd-empty-hint {
+  padding: 9px 12px;
+  color: #8a94a5;
+  background: #fff;
+  border: 1px dashed #dfe5ef;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+:global(.crowd-dialog-toolbar) {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 220px auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+:global(.crowd-dialog-count) {
+  float: left;
+  color: #667085;
+  font-size: 13px;
+  line-height: 32px;
+}
+
 .strategy-box {
   min-width: 0;
   padding: 14px 16px;
@@ -2744,6 +3291,29 @@ function formatDuration(milliseconds) {
   font-size: 12px;
 }
 
+.keyword-bid-mode-row {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+  color: #687386;
+  font-size: 12px;
+}
+
+.keyword-bid-mode-row :deep(.el-radio-group) {
+  flex-wrap: nowrap;
+  gap: 18px;
+}
+
+.keyword-bid-mode-row :deep(.el-radio) {
+  height: 24px;
+  margin-right: 0;
+}
+
+.keyword-bid-mode-row :deep(.el-radio__label) {
+  padding-left: 6px;
+  font-size: 12px;
+}
+
 .bid-base-row strong {
   color: #344157;
   font-size: 13px;
@@ -2754,6 +3324,35 @@ function formatDuration(milliseconds) {
   grid-template-columns: 72px minmax(130px, 190px) auto;
   gap: 8px;
   margin-top: 8px;
+}
+
+.fixed-keyword-bid-item {
+  margin-top: 10px;
+  margin-bottom: 0 !important;
+}
+
+.fixed-keyword-bid-item :deep(.el-form-item__content) {
+  display: grid;
+  grid-template-columns: minmax(130px, 190px) auto;
+  gap: 8px;
+}
+
+.fixed-keyword-bid-item .field-help {
+  grid-column: 1 / -1;
+}
+
+.keyword-match-type-item {
+  margin-top: 12px;
+  margin-bottom: 0 !important;
+}
+
+.keyword-match-type-item :deep(.el-radio-group) {
+  flex-wrap: nowrap;
+  gap: 12px;
+}
+
+.keyword-match-type-item :deep(.el-radio) {
+  margin-right: 0;
 }
 
 .field-help {
@@ -2821,6 +3420,41 @@ function formatDuration(milliseconds) {
 
 .compact-control :deep(.el-form-item__content) {
   display: block;
+}
+
+.custom-control-grid {
+  align-items: start;
+  grid-template-columns: minmax(190px, 1fr) minmax(240px, 1.2fr) minmax(170px, 0.8fr) minmax(170px, 0.8fr);
+  gap: 0 18px;
+}
+
+.custom-control-grid :deep(.el-form-item__content) {
+  align-content: flex-start;
+}
+
+.compact-number-control,
+.config-section :deep(.compact-number-control.el-input-number) {
+  width: min(100%, 200px);
+}
+
+.compact-number-item :deep(.el-form-item__content) {
+  display: block;
+}
+
+.compact-number-with-unit-item :deep(.el-form-item__content) {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) auto;
+  align-items: center;
+  justify-content: start;
+  column-gap: 6px;
+}
+
+.compact-number-with-unit-item .field-help {
+  grid-column: 1 / -1;
+}
+
+.compact-number-with-unit-item .unit-suffix {
+  margin-left: 0;
 }
 
 .switch-row {
@@ -3160,6 +3794,10 @@ function formatDuration(milliseconds) {
   .keyword-source-group {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .custom-control-grid {
+    grid-template-columns: repeat(2, minmax(240px, 1fr));
+  }
 }
 
 @media (max-width: 820px) {
@@ -3177,6 +3815,9 @@ function formatDuration(milliseconds) {
   .form-grid-4,
   .form-grid-3,
   .form-grid-2,
+  .planning-rule-grid,
+  .compact-number-grid,
+  .custom-control-grid,
   .ratio-grid,
   .keyword-strategy-grid,
   .roi-radio-grid {
@@ -3191,6 +3832,11 @@ function formatDuration(milliseconds) {
 
   .fixed-setting-row .el-tag {
     margin-left: 0;
+  }
+
+  .crowd-setting-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .summary-metrics {

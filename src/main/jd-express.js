@@ -12,8 +12,10 @@ const {
   JD_EXPRESS_READ_POLICY,
   buildScopedRoiPlanStructure,
   buildProductQuery,
+  collectExistingPromotionIds,
   extractSpuList,
   extractTotal,
+  filterExistingPromotionProducts,
   normalizeAreaTree,
   normalizeSkuDetails,
   normalizeStoreId,
@@ -31,10 +33,29 @@ const {
   normalizeCampaignList
 } = require('./jd-express-delete')
 const {
+  VERIFY_LIST_URLS,
+  buildVerificationListBody,
+  extractVerificationPage,
   formatVerificationDifference,
   verifyCreatedRoiCampaigns
 } = require('./jd-express-verify')
-const { fetchHomeSpend } = require('./jd-express-report')
+const { fetchHomeSpend, fetchJztBalance } = require('./jd-express-report')
+const {
+  CROWD_MAX_PAGES,
+  CROWD_PAGE_SIZE,
+  DMP_CROWD_URL,
+  RECOMMENDED_CROWD_URL,
+  buildDmpCrowdBody,
+  buildRecommendedCrowdBody,
+  extractDmpCrowdPage,
+  extractRecommendedCrowds,
+  mergeCrowdOptions
+} = require('./jd-express-crowds')
+const {
+  isJdSessionExpiredPayload,
+  isJdSessionFailure,
+  runJdReadWithSessionRecovery
+} = require('./jd-session-recovery')
 
 const JZT_LOGIN_URL = 'https://jzt-api.jd.com/common/logininfo?businessFrom=26'
 const PRODUCT_QUERY_URL = 'https://data.shop.jd.com/fullQuery/querySpu'
@@ -66,6 +87,8 @@ const LIMIT_REQUESTS = {
 const SKU_PAGE_SIZE = JD_EXPRESS_READ_POLICY.pageSize
 const SKU_BATCH_INTERVAL_MS = JD_EXPRESS_READ_POLICY.batchIntervalMs
 const SKU_RATE_LIMIT_WAIT_MS = JD_EXPRESS_READ_POLICY.rateLimitWaitMs
+const EXISTING_PROMOTION_PAGE_SIZE = 1000
+const EXISTING_PROMOTION_MAX_PAGES = 500
 const activeProbeWindows = new Set()
 const preparedRoiJobs = new Map()
 const PREPARED_JOB_TTL_MS = 2 * 60 * 60 * 1000
@@ -102,16 +125,21 @@ function logSafe(value) {
 function assertSuccess(payload, expectedCode) {
   const responseCode = payload?.code ?? payload?.subCode
   const codeMatches = expectedCode == null || Number(responseCode) === Number(expectedCode)
-  if (payload?.success === false || !codeMatches) {
+  const sessionExpired = isJdSessionExpiredPayload(payload)
+  if (sessionExpired || payload?.success === false || !codeMatches) {
     const jdCode = Number(responseCode)
-    const code = jdCode === -3010
-      ? 'JD_RATE_LIMIT'
-      : jdCode === -301 || jdCode === -3012
-        ? 'JD_JZT_NOT_OPEN'
-        : 'JD_EXPRESS_REQUEST_FAILED'
+    const code = sessionExpired
+      ? 'JD_SESSION_EXPIRED'
+      : jdCode === -3010
+        ? 'JD_RATE_LIMIT'
+        : jdCode === -301 || jdCode === -3012
+          ? 'JD_JZT_NOT_OPEN'
+          : 'JD_EXPRESS_REQUEST_FAILED'
     const message = code === 'JD_JZT_NOT_OPEN'
       ? '当前店铺尚未开通或未完成京准通授权，请先点击“打开京准通”完成授权后重试'
-      : getMessage(payload, '京东接口返回失败')
+      : code === 'JD_SESSION_EXPIRED'
+        ? '店铺登录已失效，正在尝试恢复登录状态'
+        : getMessage(payload, '京东接口返回失败')
     const error = createRequestError(message, code)
     error.jdCode = Number.isFinite(jdCode) ? jdCode : null
     throw error
@@ -323,10 +351,13 @@ async function fetchSkuDetails(platformSession, skuIds, onProgress = () => {}, f
 async function prepareStore(storeId, refreshCookies) {
   const normalizedStoreId = normalizeStoreId(storeId)
   if (typeof refreshCookies === 'function') {
-    await refreshCookies(normalizedStoreId, {
+    const refreshResult = await refreshCookies(normalizedStoreId, {
       context: 'jd_express',
       timeoutMs: 8000
     })
+    if (refreshResult?.action === 'relogin_required') {
+      throw createRequestError('店铺登录已失效，请重新登录', 'JD_SESSION_RELOGIN_REQUIRED')
+    }
   }
   return {
     storeId: normalizedStoreId,
@@ -352,11 +383,15 @@ async function preflightStore(storeId, dependencies = {}) {
         method: 'GET',
         body: request.body
       })
+      if (isJdSessionExpiredPayload(payload)) {
+        throw createRequestError('店铺登录已失效，正在尝试恢复登录状态', 'JD_SESSION_EXPIRED')
+      }
       if (payload?.success === false || !payload?.ext) {
         throw createRequestError(getMessage(payload, `读取${key}额度失败`))
       }
       limitEntries.push([key, readLimit(payload)])
     } catch (error) {
+      if (isJdSessionFailure(error)) throw error
       limitEntries.push([key, readLimit({})])
       limitErrors.push({ key, message: error?.message || '读取失败' })
       runtimeLog.writeLog(
@@ -461,6 +496,97 @@ async function fetchAreas(storeId, dependencies = {}) {
   return { success: true, storeId: normalizedStoreId, areas }
 }
 
+function assertCrowdPayload(payload, fallback) {
+  if (isJdSessionExpiredPayload(payload)) {
+    throw createRequestError('店铺登录已失效，正在尝试恢复登录状态', 'JD_SESSION_EXPIRED')
+  }
+  if (payload?.success === false) {
+    throw createRequestError(getMessage(payload, fallback))
+  }
+  return payload
+}
+
+function getCrowdRequestOptions(body) {
+  return {
+    method: 'POST',
+    referer: 'https://sinan-agent.jd.com/',
+    headers: { origin: 'https://jzt.jd.com' },
+    body
+  }
+}
+
+async function fetchRecommendedCrowds(platformSession) {
+  const payload = assertCrowdPayload(await requestJson(
+    platformSession,
+    RECOMMENDED_CROWD_URL,
+    getCrowdRequestOptions(buildRecommendedCrowdBody())
+  ), '读取京东推荐人群失败')
+  return extractRecommendedCrowds(payload)
+}
+
+async function fetchDmpCrowds(platformSession) {
+  const crowds = []
+  let total = null
+  let pagesRead = 0
+  for (let page = 1; page <= CROWD_MAX_PAGES; page += 1) {
+    const payload = assertCrowdPayload(await requestJson(
+      platformSession,
+      DMP_CROWD_URL,
+      getCrowdRequestOptions(buildDmpCrowdBody(page, CROWD_PAGE_SIZE))
+    ), '读取京东 DMP 人群失败')
+    const result = extractDmpCrowdPage(payload)
+    crowds.push(...result.crowds)
+    total = result.total ?? total
+    pagesRead = page
+    if (!result.crowds.length || (total != null && crowds.length >= total) || (total == null && result.crowds.length < CROWD_PAGE_SIZE)) break
+  }
+  return { crowds, total, pagesRead, truncated: total != null && crowds.length < total }
+}
+
+async function fetchCrowdOptions(storeId, dependencies = {}) {
+  const { storeId: normalizedStoreId, platformSession } = await prepareStore(
+    storeId,
+    dependencies.refreshCookies
+  )
+  const [recommendedResult, dmpResult] = await Promise.allSettled([
+    fetchRecommendedCrowds(platformSession),
+    fetchDmpCrowds(platformSession)
+  ])
+  // 任一查询明确返回未登录，都必须交给上层恢复一次，不能伪装成部分加载成功。
+  const sessionFailure = [recommendedResult, dmpResult].find(
+    (result) => result.status === 'rejected' && isJdSessionFailure(result.reason)
+  )
+  if (sessionFailure) throw sessionFailure.reason
+  const recommended = recommendedResult.status === 'fulfilled' ? recommendedResult.value : []
+  const dmp = dmpResult.status === 'fulfilled' ? dmpResult.value.crowds : []
+  const errors = []
+  if (recommendedResult.status === 'rejected') {
+    errors.push({ source: 'recommended', message: recommendedResult.reason?.message || '推荐人群读取失败' })
+  }
+  if (dmpResult.status === 'rejected') {
+    errors.push({ source: 'dmp', message: dmpResult.reason?.message || 'DMP 人群读取失败' })
+  } else if (dmpResult.value.truncated) {
+    errors.push({
+      source: 'dmp',
+      message: `京东返回的人群超过本次加载上限，已加载 ${dmpResult.value.crowds.length}/${dmpResult.value.total} 个`
+    })
+  }
+  if (recommendedResult.status === 'rejected' && dmpResult.status === 'rejected') {
+    throw recommendedResult.reason || dmpResult.reason
+  }
+  return {
+    success: true,
+    storeId: normalizedStoreId,
+    crowds: mergeCrowdOptions(recommended, dmp),
+    recommendedCount: recommended.length,
+    dmpCount: dmp.length,
+    dmpTotal: dmpResult.status === 'fulfilled' ? dmpResult.value.total : null,
+    pagesRead: dmpResult.status === 'fulfilled' ? dmpResult.value.pagesRead : 0,
+    partial: errors.length > 0,
+    errors
+  }
+}
+
 async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
   const { storeId: normalizedStoreId, platformSession } = await prepareStore(
     storeId,
@@ -488,6 +614,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       pageSize: query.pageSize,
       total,
       products: [],
+      skuSpuMappings: [],
       invalidSpuIds: [],
       errorProducts: [],
       pageFailure: total > 0
@@ -509,7 +636,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       body: { spuIdList: spuIds, xnztQuery: false }
     }), 200)
   } catch (error) {
-    if (error?.code === 'JD_SESSION_EXPIRED' || error?.code === 'JD_JZT_NOT_OPEN') throw error
+    if (isJdSessionFailure(error) || error?.code === 'JD_JZT_NOT_OPEN') throw error
     return {
       success: true,
       storeId: normalizedStoreId,
@@ -517,6 +644,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       pageSize: query.pageSize,
       total: extractTotal(spuPayload, spus.length),
       products: [],
+      skuSpuMappings: [],
       invalidSpuIds: [],
       errorProducts: [],
       pageFailure: {
@@ -526,7 +654,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       }
     }
   }
-  const { skuIds, selectedSkus, invalidSpuIds } = selectLowestPricedSkuIds(skuPayload.data)
+  const { skuIds, selectedSkus, skuSpuMappings, invalidSpuIds } = selectLowestPricedSkuIds(skuPayload.data)
 
   if (!skuIds.length) {
     return {
@@ -536,6 +664,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       pageSize: query.pageSize,
       total: extractTotal(spuPayload, 0),
       products: [],
+      skuSpuMappings,
       invalidSpuIds
     }
   }
@@ -549,7 +678,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       selectedSkus
     )
   } catch (error) {
-    if (error?.code === 'JD_SESSION_EXPIRED' || error?.code === 'JD_JZT_NOT_OPEN') throw error
+    if (isJdSessionFailure(error) || error?.code === 'JD_JZT_NOT_OPEN') throw error
     return {
       success: true,
       storeId: normalizedStoreId,
@@ -557,6 +686,7 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
       pageSize: query.pageSize,
       total: extractTotal(spuPayload, spus.length),
       products: [],
+      skuSpuMappings,
       invalidSpuIds,
       errorProducts: [],
       pageFailure: {
@@ -574,10 +704,111 @@ async function fetchProductPage(storeId, payload = {}, dependencies = {}) {
     pageSize: query.pageSize,
     total: extractTotal(spuPayload, spus.length),
     products: details.products,
+    skuSpuMappings,
     invalidSpuIds,
     errorProducts: details.errorProducts,
     retryRecommended: details.errorProducts.some((item) => Number(item.code) === -3010)
   }
+}
+
+async function fetchExistingPromotedProductIds(storeId, dependencies = {}, onProgress = () => {}) {
+  const { storeId: normalizedStoreId, platformSession } = await prepareStore(
+    storeId,
+    dependencies.refreshCookies
+  )
+  const rows = []
+  let total = null
+  onProgress({ phase: 'existing_promotion_start', storeId: normalizedStoreId, page: 0, totalPages: 0 })
+
+  for (let page = 1; page <= EXISTING_PROMOTION_MAX_PAGES; page += 1) {
+    const body = buildVerificationListBody('ad', page, EXISTING_PROMOTION_PAGE_SIZE)
+    const payload = assertSuccess(await requestJson(
+      platformSession,
+      VERIFY_LIST_URLS.ad,
+      {
+        method: 'POST',
+        referer: 'https://jzt.jd.com/msa/#/list/tab/plan?objective=item&scenario=normal&targetingType=keyword',
+        headers: {
+          origin: 'https://jzt.jd.com',
+          loginmode: '0',
+          siteid: '0'
+        },
+        body,
+        timeoutMs: 30000
+      }
+    ))
+    const result = extractVerificationPage(payload)
+    rows.push(...result.items)
+    if (result.total != null) total = result.total
+    const effectivePageSize = result.pageSize || EXISTING_PROMOTION_PAGE_SIZE
+    const totalPages = total == null ? 0 : Math.max(Math.ceil(total / effectivePageSize), 1)
+    onProgress({
+      phase: 'existing_promotion_page_complete',
+      storeId: normalizedStoreId,
+      page,
+      totalPages,
+      loaded: rows.length,
+      total
+    })
+    if (!result.items.length) break
+    if (total != null && page * effectivePageSize >= total) break
+    if (total == null && result.items.length < effectivePageSize) break
+  }
+
+  const ids = collectExistingPromotionIds(rows)
+  onProgress({
+    phase: 'existing_promotion_complete',
+    storeId: normalizedStoreId,
+    loaded: rows.length,
+    existingSkuCount: ids.skuIds.length,
+    existingSpuCount: ids.spuIds.length
+  })
+  runtimeLog.writeLog(
+    'JD_EXPRESS',
+    `action=existing_promotion_scan store_id=${normalizedStoreId} rows=${rows.length} sku=${ids.skuIds.length} spu=${ids.spuIds.length} result=success`
+  )
+  return { storeId: normalizedStoreId, ...ids, rowCount: rows.length }
+}
+
+function createPromotionFilter(existing, mode) {
+  const promotionIds = {
+    skuIds: [...existing.skuIds],
+    spuIds: [...existing.spuIds]
+  }
+  const promotedSkuIds = new Set(promotionIds.skuIds)
+  const promotedSpuIds = new Set(promotionIds.spuIds)
+  const filteredIds = new Set()
+  return {
+    apply(products, skuSpuMappings = []) {
+      if (mode === 'spu') {
+        for (const mapping of skuSpuMappings) {
+          if (promotedSkuIds.has(String(mapping?.skuId || '')) && mapping?.spuId != null) {
+            promotedSpuIds.add(String(mapping.spuId))
+          }
+        }
+        promotionIds.spuIds = [...promotedSpuIds]
+      }
+      const result = filterExistingPromotionProducts(products, promotionIds, mode)
+      result.filteredIds.forEach((id) => filteredIds.add(id))
+      return result.products
+    },
+    summary() {
+      return {
+        enabled: true,
+        mode: mode === 'spu' ? 'spu' : 'sku',
+        existingSkuCount: promotionIds.skuIds.length,
+        existingSpuCount: promotionIds.spuIds.length,
+        filteredCount: filteredIds.size,
+        filteredSkuIds: [...filteredIds]
+      }
+    }
+  }
+}
+
+async function preparePromotionFilter(storeId, payload, dependencies, onProgress) {
+  if (payload?.filterExistingPromotion !== true) return null
+  const existing = await fetchExistingPromotedProductIds(storeId, dependencies, onProgress)
+  return createPromotionFilter(existing, payload?.existingPromotionFilterMode)
 }
 
 function delay(ms) {
@@ -585,6 +816,7 @@ function delay(ms) {
 }
 
 async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProgress = () => {}) {
+  const promotionFilter = await preparePromotionFilter(storeId, payload, dependencies, onProgress)
   onProgress({ phase: 'initial_wait', waitSeconds: JD_EXPRESS_READ_POLICY.initialDelayMs / 1000 })
   await delay(JD_EXPRESS_READ_POLICY.initialDelayMs)
   const firstPage = await fetchProductPage(storeId, {
@@ -593,7 +825,10 @@ async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProg
     pageSize: SKU_PAGE_SIZE
   }, { ...dependencies, onProgress })
   const totalPages = Math.max(Math.ceil(firstPage.total / SKU_PAGE_SIZE), 1)
-  const products = new Map(firstPage.products.map((item) => [item.skuId, item]))
+  const firstBatchProducts = promotionFilter
+    ? promotionFilter.apply(firstPage.products, firstPage.skuSpuMappings)
+    : firstPage.products
+  const products = new Map(firstBatchProducts.map((item) => [item.skuId, item]))
   const invalidSpuIds = [...firstPage.invalidSpuIds]
   const errorProducts = [...(firstPage.errorProducts || [])]
   const failedPages = []
@@ -608,7 +843,7 @@ async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProg
     totalPages,
     loaded: products.size,
     total: firstPage.total,
-    batchProducts: firstPage.products
+    batchProducts: firstBatchProducts
   })
 
   for (let page = 2; page <= totalPages; page += 1) {
@@ -628,8 +863,10 @@ async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProg
         pageNo: page,
         pageSize: SKU_PAGE_SIZE
       }, { ...dependencies, onProgress })
-      batchProducts = result.products
-      for (const item of result.products) products.set(item.skuId, item)
+      batchProducts = promotionFilter
+        ? promotionFilter.apply(result.products, result.skuSpuMappings)
+        : result.products
+      for (const item of batchProducts) products.set(item.skuId, item)
       invalidSpuIds.push(...result.invalidSpuIds)
       errorProducts.push(...(result.errorProducts || []))
       if (result.pageFailure) failedPages.push(result.pageFailure)
@@ -641,6 +878,7 @@ async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProg
         })
       }
     } catch (error) {
+      if (isJdSessionFailure(error)) throw error
       failedPages.push({
         page,
         code: error?.code || 'JD_EXPRESS_REQUEST_FAILED',
@@ -666,7 +904,8 @@ async function fetchAllProducts(storeId, payload = {}, dependencies = {}, onProg
     products: Array.from(products.values()),
     invalidSpuIds: [...new Set(invalidSpuIds)],
     errorProducts,
-    failedPages
+    failedPages,
+    existingPromotionFilter: promotionFilter?.summary() || { enabled: false, filteredCount: 0 }
   }
 }
 
@@ -678,6 +917,7 @@ async function retryProductPages(storeId, payload = {}, dependencies = {}, onPro
   const invalidSpuIds = []
   const errorProducts = []
   const failedPages = []
+  const promotionFilter = await preparePromotionFilter(storeId, payload.filters || {}, dependencies, onProgress)
 
   if (pages.length) {
     onProgress({ phase: 'initial_wait', waitSeconds: JD_EXPRESS_READ_POLICY.initialDelayMs / 1000 })
@@ -703,7 +943,10 @@ async function retryProductPages(storeId, payload = {}, dependencies = {}, onPro
         pageNo: page,
         pageSize: SKU_PAGE_SIZE
       }, { ...dependencies, onProgress })
-      for (const item of result.products) products.set(item.skuId, item)
+      const batchProducts = promotionFilter
+        ? promotionFilter.apply(result.products, result.skuSpuMappings)
+        : result.products
+      for (const item of batchProducts) products.set(item.skuId, item)
       invalidSpuIds.push(...result.invalidSpuIds)
       errorProducts.push(...(result.errorProducts || []))
       if (result.pageFailure) failedPages.push(result.pageFailure)
@@ -715,6 +958,7 @@ async function retryProductPages(storeId, payload = {}, dependencies = {}, onPro
         })
       }
     } catch (error) {
+      if (isJdSessionFailure(error)) throw error
       failedPages.push({
         page,
         code: error?.code || 'JD_EXPRESS_REQUEST_FAILED',
@@ -736,7 +980,8 @@ async function retryProductPages(storeId, payload = {}, dependencies = {}, onPro
     products: Array.from(products.values()),
     invalidSpuIds: [...new Set(invalidSpuIds)],
     errorProducts,
-    failedPages
+    failedPages,
+    existingPromotionFilter: promotionFilter?.summary() || { enabled: false, filteredCount: 0 }
   }
 }
 
@@ -863,6 +1108,15 @@ async function prepareRoiCreation(storeId, payload = {}, dependencies = {}, onPr
   if (!sourceProducts.length) throw createRequestError('没有可准备的推广商品')
 
   const structure = buildScopedRoiPlanStructure(sourceProducts, payload.config || {}, scope)
+  if (structure.config.createMode === 'custom') {
+    const crowdSummary = structure.config.dmpCrowdSettings
+      .map((item) => `${item.crowdId}:${item.adGroupPrice}`)
+      .join(',')
+    runtimeLog.writeLog(
+      'JD_EXPRESS',
+      `action=crowd_selection store_id=${normalizedStoreId} count=${structure.config.dmpCrowdSettings.length}${crowdSummary ? ` crowds=${logSafe(crowdSummary)}` : ''}`
+    )
+  }
   if (!structure.config.keywordSources.length) {
     throw createRequestError('请至少选择一种关键词来源')
   }
@@ -1403,21 +1657,67 @@ async function runPostCreationVerification(storeId, created, sender) {
 }
 
 function registerJdExpressIpc(ipcMain, dependencies = {}) {
+  const runRecoverableRead = (action, storeId, operation) => runJdReadWithSessionRecovery({
+    storeId,
+    operation,
+    recoverSession: dependencies.recoverSession,
+    invalidateSession: dependencies.invalidateSession,
+    onEvent: ({ phase, recovered, error }) => {
+      const recoveryResult = recovered === true
+        ? 'verified'
+        : recovered === null
+          ? 'verification_uncertain'
+          : recovered === false
+            ? 'failed'
+            : ''
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=${action} store_id=${storeId || 0} phase=${phase}${recoveryResult ? ` recovery=${recoveryResult}` : ''}${error?.message ? ` message=${logSafe(error.message)}` : ''}`
+      )
+    }
+  })
+
   ipcMain.handle('jd-express-home-spend', async (_event, payload = {}) => {
     const startedAt = Date.now()
     let normalizedStoreId = null
     try {
       const prepared = await prepareStore(payload.storeId)
       normalizedStoreId = prepared.storeId
-      const result = await fetchHomeSpend({
-        platformSession: prepared.platformSession,
-        requestJson
-      })
+      const [spendResult, balanceResult] = await Promise.all([
+        fetchHomeSpend({
+          platformSession: prepared.platformSession,
+          requestJson
+        }).then(result => ({ success: true, result })).catch(error => ({ success: false, error })),
+        fetchJztBalance({
+          platformSession: prepared.platformSession,
+          requestJson
+        }).then(jztBalance => ({ jztBalance, balanceAvailable: true })).catch(balanceError => {
+          runtimeLog.writeLog(
+            'JD_EXPRESS',
+            `action=home_balance store_id=${normalizedStoreId} status=unavailable message=${logSafe(balanceError?.message)}`
+          )
+          return { jztBalance: null, balanceAvailable: false }
+        })
+      ])
+      const { jztBalance, balanceAvailable } = balanceResult
+      if (!spendResult.success) {
+        runtimeLog.writeLog(
+          'JD_EXPRESS',
+          `action=home_spend store_id=${normalizedStoreId} status=unavailable balance=${balanceAvailable ? jztBalance : 'unavailable'} duration_ms=${Date.now() - startedAt} message=${logSafe(spendResult.error?.message)}`
+        )
+        return {
+          ...serializeError(spendResult.error),
+          storeId: normalizedStoreId,
+          jztBalance,
+          balanceAvailable
+        }
+      }
+      const { result } = spendResult
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=home_spend store_id=${normalizedStoreId} status=success today=${result.todaySpend} month=${result.monthSpend} days=${result.dailySpends.length} duration_ms=${Date.now() - startedAt}`
+        `action=home_spend store_id=${normalizedStoreId} status=success today=${result.todaySpend} month=${result.monthSpend} days=${result.dailySpends.length} balance=${balanceAvailable ? jztBalance : 'unavailable'} duration_ms=${Date.now() - startedAt}`
       )
-      return { success: true, storeId: normalizedStoreId, ...result }
+      return { success: true, storeId: normalizedStoreId, ...result, jztBalance, balanceAvailable }
     } catch (error) {
       runtimeLog.writeLog(
         'JD_EXPRESS',
@@ -1430,7 +1730,11 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
   ipcMain.handle('jd-express-preflight', async (_event, payload = {}) => {
     const startedAt = Date.now()
     try {
-      const result = await preflightStore(payload.storeId, dependencies)
+      const result = await runRecoverableRead(
+        'preflight',
+        payload.storeId,
+        () => preflightStore(payload.storeId, dependencies)
+      )
       runtimeLog.writeLog(
         'JD_EXPRESS',
         `action=preflight store_id=${result.storeId} result=success elapsed_ms=${Date.now() - startedAt}`
@@ -1484,14 +1788,18 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
   ipcMain.handle('jd-express-products', async (event, payload = {}) => {
     const startedAt = Date.now()
     try {
-      const result = await fetchProductPage(payload.storeId, payload.filters, {
-        ...dependencies,
-        onProgress: (progress) => {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('jd-express-products-progress', { ...progress, storeId: payload.storeId })
+      const result = await runRecoverableRead(
+        'products',
+        payload.storeId,
+        () => fetchProductPage(payload.storeId, payload.filters, {
+          ...dependencies,
+          onProgress: (progress) => {
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('jd-express-products-progress', { ...progress, storeId: payload.storeId })
+            }
           }
-        }
-      })
+        })
+      )
       runtimeLog.writeLog(
         'JD_EXPRESS',
         `action=products store_id=${result.storeId} result=success count=${result.products.length} elapsed_ms=${Date.now() - startedAt}`
@@ -1509,19 +1817,23 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
   ipcMain.handle('jd-express-all-products', async (event, payload = {}) => {
     const startedAt = Date.now()
     try {
-      const result = await fetchAllProducts(
+      const result = await runRecoverableRead(
+        'all_products',
         payload.storeId,
-        payload.filters,
-        dependencies,
-        (progress) => {
-          if (!event.sender.isDestroyed()) {
-            event.sender.send('jd-express-products-progress', { ...progress, storeId: payload.storeId })
+        () => fetchAllProducts(
+          payload.storeId,
+          payload.filters,
+          dependencies,
+          (progress) => {
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('jd-express-products-progress', { ...progress, storeId: payload.storeId })
+            }
           }
-        }
+        )
       )
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=all_products store_id=${result.storeId} result=success count=${result.products.length} elapsed_ms=${Date.now() - startedAt}`
+        `action=all_products store_id=${result.storeId} result=success count=${result.products.length} existing_filter=${result.existingPromotionFilter?.enabled === true ? result.existingPromotionFilter.mode : 'off'} filtered=${result.existingPromotionFilter?.filteredCount || 0} elapsed_ms=${Date.now() - startedAt}`
       )
       return result
     } catch (error) {
@@ -1541,10 +1853,14 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
       }
     }
     try {
-      const result = await retryProductPages(payload.storeId, payload, dependencies, sendProgress)
+      const result = await runRecoverableRead(
+        'retry_pages',
+        payload.storeId,
+        () => retryProductPages(payload.storeId, payload, dependencies, sendProgress)
+      )
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=retry_pages store_id=${result.storeId} result=success recovered=${result.products.length} remaining_pages=${result.failedPages.length} elapsed_ms=${Date.now() - startedAt}`
+        `action=retry_pages store_id=${result.storeId} result=success recovered=${result.products.length} remaining_pages=${result.failedPages.length} existing_filter=${result.existingPromotionFilter?.enabled === true ? result.existingPromotionFilter.mode : 'off'} filtered=${result.existingPromotionFilter?.filteredCount || 0} elapsed_ms=${Date.now() - startedAt}`
       )
       return result
     } catch (error) {
@@ -1569,6 +1885,28 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
       runtimeLog.writeLog(
         'JD_EXPRESS',
         `action=areas store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${logSafe(error.message)}`
+      )
+      return serializeError(error)
+    }
+  })
+
+  ipcMain.handle('jd-express-crowds', async (_event, payload = {}) => {
+    const startedAt = Date.now()
+    try {
+      const result = await runRecoverableRead(
+        'crowds',
+        payload.storeId,
+        () => fetchCrowdOptions(payload.storeId, dependencies)
+      )
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=crowds store_id=${result.storeId} result=${result.partial ? 'partial' : 'success'} recommended=${result.recommendedCount} dmp=${result.dmpCount}${result.dmpTotal != null ? ` dmp_total=${result.dmpTotal}` : ''} pages=${result.pagesRead} elapsed_ms=${Date.now() - startedAt}${result.errors.length ? ` message=${logSafe(result.errors.map((item) => item.message).join('；'))}` : ''}`
+      )
+      return result
+    } catch (error) {
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=crowds store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${logSafe(error.message)}`
       )
       return serializeError(error)
     }
@@ -1694,6 +2032,7 @@ module.exports = {
   fetchProductPage,
   fetchSkuDetails,
   fetchHomeSpend,
+  fetchCrowdOptions,
   preflightStore,
   prepareRoiCreation,
   probeSigning,
