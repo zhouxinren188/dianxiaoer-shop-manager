@@ -1,6 +1,6 @@
 'use strict'
 
-const { normalizeCrowdSettings } = require('./jd-express-crowds')
+const { normalizeCrowdSettings, assertCrowdSettings } = require('./jd-express-crowds')
 
 const JD_EXPRESS_READ_POLICY = Object.freeze({
   pageSize: 100,
@@ -277,8 +277,70 @@ function filterExistingPromotionProducts(products = [], existing = {}, mode = 's
   }
 }
 
+function formatPlanDate(date = new Date()) {
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')].join('-')
+}
+
+function isValidPlanDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    formatPlanDate(new Date(`${value}T00:00:00`)) === value
+}
+
+function assertCreationDates(config = {}, now = new Date()) {
+  const today = formatPlanDate(now)
+  const startDate = config.startDate == null || config.startDate === '' ? today : config.startDate
+  let message = ''
+  if (!isValidPlanDate(startDate)) message = '请选择有效的开始日期'
+  else if (startDate < today) message = '开始日期不能早于今天，请选择今天或未来日期'
+  else if (config.unlimitedEndDate === false) {
+    if (!isValidPlanDate(config.endDate)) message = '请选择有效的结束日期'
+    else if (config.endDate < startDate) message = '结束日期不能早于开始日期'
+  }
+  if (message) {
+    const error = new Error(message)
+    error.code = 'JD_EXPRESS_DATE_INVALID'
+    error.creationStage = 'date_validation'
+    throw error
+  }
+  return startDate
+}
+
+const CREATION_DATE_FIELDS = Object.freeze(['startDate', 'endDate', 'unlimitedEndDate'])
+
+function withPreparedCreationDates(prepared, dates = {}) {
+  const config = { ...prepared.config }
+  // 日期不参与关键词准备；只能覆盖日期，不能借恢复令牌更改出价或商品。
+  for (const field of CREATION_DATE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(dates, field)) config[field] = dates[field]
+  }
+  config.startDate = assertCreationDates(config)
+  return { ...prepared, config }
+}
+
+function assertPreparedInputsMatch(prepared, payload = {}) {
+  const configSignature = (input) => {
+    const normalized = normalizeRoiConfig(input)
+    for (const field of CREATION_DATE_FIELDS) delete normalized[field]
+    return JSON.stringify(normalized)
+  }
+  const skuSignature = (products) => JSON.stringify([...new Set(products
+    .map((product) => String(product?.skuId || '').trim()).filter(Boolean))].sort())
+  const mode = prepared.config?.createMode === 'custom' ? 'custom' : 'roi'
+  const mismatch = (payload.createMode != null && payload.createMode !== mode) ||
+    (payload.config && configSignature({ ...prepared.config, ...payload.config }) !== configSignature(prepared.config)) ||
+    (Array.isArray(payload.products) && skuSignature(payload.products) !== skuSignature(prepared.products || []))
+  if (mismatch) {
+    const error = new Error('已准备的关键词与当前商品或投放配置不匹配，请重新准备')
+    error.code = 'JD_EXPRESS_PREPARATION_MISMATCH'
+    error.creationStage = 'preparation_validation'
+    throw error
+  }
+}
+
 function normalizeRoiConfig(input = {}) {
   const createMode = input.createMode === 'custom' ? 'custom' : 'roi'
+  if (createMode === 'custom') assertCrowdSettings(input.dmpCrowdSettings)
   const bidType = [1, 2, 3, 4].includes(Number(input.bidType)) ? Number(input.bidType) : 3
   const adjustDirection = [-1, 0, 1].includes(Number(input.adjustDirection))
     ? Number(input.adjustDirection)
@@ -298,10 +360,9 @@ function normalizeRoiConfig(input = {}) {
     ? [...new Set(input.areaIds.map((value) => String(value)).filter(Boolean))]
     : []
   const hasKeywordTotalUsage = input.keywordTotalUsage !== '' && input.keywordTotalUsage != null
-  const today = new Date()
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(String(input.startDate || ''))
     ? String(input.startDate)
-    : [today.getFullYear(), String(today.getMonth() + 1).padStart(2, '0'), String(today.getDate()).padStart(2, '0')].join('-')
+    : formatPlanDate()
 
   return {
     namePrefix: String(input.namePrefix || '店小二_ROI').trim().slice(0, 20),
@@ -314,6 +375,8 @@ function normalizeRoiConfig(input = {}) {
       : null,
     keywordBidIncrement: clampDecimal(input.keywordBidIncrement, 0, 100, 0),
     customKeywordBid: clampDecimal(input.customKeywordBid, 0.1, 9999, 0.1),
+    maxCustomKeywordBid: input.maxCustomKeywordBid == null || input.maxCustomKeywordBid === ''
+      ? null : Number(input.maxCustomKeywordBid),
     useMinKeywordBid: input.useMinKeywordBid !== false,
     keywordMatchType: normalizeKeywordMatchType(input.keywordMatchType),
     keywordSources,
@@ -350,6 +413,20 @@ function normalizeRoiConfig(input = {}) {
     startDate,
     unlimitedEndDate,
     endDate: unlimitedEndDate ? null : String(input.endDate || '')
+  }
+}
+
+function assertCustomKeywordBidConfig(config = {}) {
+  if (config.createMode !== 'custom' || config.useMinKeywordBid !== false) return
+  const base = Number(config.customKeywordBid)
+  const maximum = Number(config.maxCustomKeywordBid)
+  if (!Number.isFinite(base) || base < 0.1 || base > 9999 ||
+      !Number.isFinite(maximum) || maximum < 0.1 || maximum > 9999 ||
+      Math.abs(maximum * 10 - Math.round(maximum * 10)) > 1e-8 || maximum < base) {
+    const error = new Error('请设置关键词最高出价（0.1～9999 元，保留一位小数），且不能低于起始出价')
+    error.code = 'JD_EXPRESS_KEYWORD_BID_INVALID'
+    error.creationStage = 'preparation_validation'
+    throw error
   }
 }
 
@@ -638,6 +715,10 @@ function assembleUnitKeywords(sources = {}, inputConfig = {}, limit = 0) {
 module.exports = {
   JD_EXPRESS_READ_POLICY,
   adjustRoiBid,
+  assertCreationDates,
+  assertCustomKeywordBidConfig,
+  assertPreparedInputsMatch,
+  withPreparedCreationDates,
   assembleUnitKeywords,
   buildTitleKeywordResult,
   buildProductQuery,
@@ -658,6 +739,8 @@ module.exports = {
   normalizeSkuDetails,
   normalizeStoreId,
   filterExistingPromotionProducts,
+  formatPlanDate,
+  isValidPlanDate,
   selectProductKeywordSkuIds,
   selectLowestPricedSkuIds
 }

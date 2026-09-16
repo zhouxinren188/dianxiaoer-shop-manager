@@ -7,9 +7,15 @@ const path = require('node:path')
 const zlib = require('node:zlib')
 const { BrowserWindow, session } = require('electron')
 const runtimeLog = require('./runtime-logger')
+const {
+  safeEndpoint, creationErrorDetails, creationOutcome, createCreationLogger, emitCreationDiagnostic
+} = require('./jd-express-creation-log')
 const { getManagedTempDirectory } = require('./storage-manager')
 const {
   JD_EXPRESS_READ_POLICY,
+  assertCreationDates,
+  assertPreparedInputsMatch,
+  withPreparedCreationDates,
   buildScopedRoiPlanStructure,
   buildProductQuery,
   collectExistingPromotionIds,
@@ -42,14 +48,18 @@ const {
 const { fetchHomeSpend, fetchJztBalance } = require('./jd-express-report')
 const {
   CROWD_MAX_PAGES,
-  CROWD_PAGE_SIZE,
-  DMP_CROWD_URL,
-  RECOMMENDED_CROWD_URL,
-  buildDmpCrowdBody,
-  buildRecommendedCrowdBody,
-  extractDmpCrowdPage,
-  extractRecommendedCrowds,
-  mergeCrowdOptions
+  SCENE_CATEGORY_URL,
+  SCENE_CROWD_URL,
+  SCENE_CROWD_PAGE_SIZE,
+  buildSceneCategoryBody,
+  buildSceneCrowdBody,
+  buildSceneCrowdSignature,
+  assertCrowdSettings,
+  defaultSceneCrowds,
+  extractSceneCategories,
+  extractSceneCrowdPage,
+  mergeCrowdOptions,
+  requiresCrowdSeed
 } = require('./jd-express-crowds')
 const {
   isJdSessionExpiredPayload,
@@ -91,7 +101,8 @@ const EXISTING_PROMOTION_PAGE_SIZE = 1000
 const EXISTING_PROMOTION_MAX_PAGES = 500
 const activeProbeWindows = new Set()
 const preparedRoiJobs = new Map()
-const PREPARED_JOB_TTL_MS = 2 * 60 * 60 * 1000
+// 未真实提交的关键词允许跨夜恢复；最低出价等结果不无限期复用。
+const PREPARED_JOB_TTL_MS = 24 * 60 * 60 * 1000
 const PREPARED_JOB_FILE_PATTERN = /^[0-9a-f-]{16,64}\.json$/i
 
 function createRequestError(message, code = 'JD_EXPRESS_REQUEST_FAILED') {
@@ -207,6 +218,7 @@ function nativeGetWithBody(url, headers, body, signal) {
 async function requestJson(platformSession, url, options = {}) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 20000)
+  let httpStatus
 
   try {
     const cookieHeader = await buildCookieHeader(platformSession, url)
@@ -234,13 +246,24 @@ async function requestJson(platformSession, url, options = {}) {
         signal: controller.signal
       })
 
+    httpStatus = response.status
     if (isLoginUrl(response.url)) {
       throw createRequestError('京东店铺登录已失效，请先重新登录店铺', 'JD_SESSION_EXPIRED')
     }
 
     const text = await response.text()
     if (!response.ok) {
-      throw createRequestError(`京东接口请求失败（HTTP ${response.status}）`)
+      const error = createRequestError(`京东接口请求失败（HTTP ${response.status}）`)
+      try {
+        const payload = JSON.parse(text)
+        error.jdCode = payload?.code
+        error.jdSubCode = payload?.subCode
+        error.traceId = payload?.traceId ?? payload?.requestId
+        error.jdMessage = getMessage(payload, '')
+      } catch {
+        // Never log raw HTML/text responses, which may contain login credentials.
+      }
+      throw error
     }
     if (/^\s*</.test(text)) {
       throw createRequestError('京东返回了登录页面，请先重新登录店铺', 'JD_SESSION_EXPIRED')
@@ -252,18 +275,20 @@ async function requestJson(platformSession, url, options = {}) {
       throw createRequestError('京东接口返回格式异常')
     }
   } catch (error) {
+    let requestError = error
     if (error?.name === 'AbortError') {
-      throw createRequestError('京东接口请求超时，请稍后重试', 'JD_EXPRESS_TIMEOUT')
-    }
-    if (!error?.code || /^UND_ERR_|^E(?:CONN|HOST|NET|AI_)/.test(error.code)) {
-      const requestError = createRequestError(
+      requestError = createRequestError('京东接口请求超时，请稍后重试', 'JD_EXPRESS_TIMEOUT')
+      requestError.cause = error
+    } else if (!error?.code || /^UND_ERR_|^E(?:CONN|HOST|NET|AI_)/.test(error.code)) {
+      requestError = createRequestError(
         '京东接口网络请求失败：' + (error?.message || '未知错误'),
         'JD_EXPRESS_NETWORK_ERROR'
       )
       requestError.cause = error
-      throw requestError
     }
-    throw error
+    requestError.httpStatus = httpStatus
+    requestError.endpoint = safeEndpoint(url)
+    throw requestError
   } finally {
     clearTimeout(timeout)
   }
@@ -500,7 +525,7 @@ function assertCrowdPayload(payload, fallback) {
   if (isJdSessionExpiredPayload(payload)) {
     throw createRequestError('店铺登录已失效，正在尝试恢复登录状态', 'JD_SESSION_EXPIRED')
   }
-  if (payload?.success === false) {
+  if (payload?.success === false || (payload?.code != null && Number(payload.code) !== 1)) {
     throw createRequestError(getMessage(payload, fallback))
   }
   return payload
@@ -515,73 +540,78 @@ function getCrowdRequestOptions(body) {
   }
 }
 
-async function fetchRecommendedCrowds(platformSession) {
-  const payload = assertCrowdPayload(await requestJson(
-    platformSession,
-    RECOMMENDED_CROWD_URL,
-    getCrowdRequestOptions(buildRecommendedCrowdBody())
-  ), '读取京东推荐人群失败')
-  return extractRecommendedCrowds(payload)
-}
-
-async function fetchDmpCrowds(platformSession) {
-  const crowds = []
-  let total = null
-  let pagesRead = 0
-  for (let page = 1; page <= CROWD_MAX_PAGES; page += 1) {
-    const payload = assertCrowdPayload(await requestJson(
-      platformSession,
-      DMP_CROWD_URL,
-      getCrowdRequestOptions(buildDmpCrowdBody(page, CROWD_PAGE_SIZE))
-    ), '读取京东 DMP 人群失败')
-    const result = extractDmpCrowdPage(payload)
-    crowds.push(...result.crowds)
-    total = result.total ?? total
-    pagesRead = page
-    if (!result.crowds.length || (total != null && crowds.length >= total) || (total == null && result.crowds.length < CROWD_PAGE_SIZE)) break
-  }
-  return { crowds, total, pagesRead, truncated: total != null && crowds.length < total }
-}
-
 async function fetchCrowdOptions(storeId, dependencies = {}) {
   const { storeId: normalizedStoreId, platformSession } = await prepareStore(
     storeId,
     dependencies.refreshCookies
   )
-  const [recommendedResult, dmpResult] = await Promise.allSettled([
-    fetchRecommendedCrowds(platformSession),
-    fetchDmpCrowds(platformSession)
-  ])
-  // 任一查询明确返回未登录，都必须交给上层恢复一次，不能伪装成部分加载成功。
-  const sessionFailure = [recommendedResult, dmpResult].find(
-    (result) => result.status === 'rejected' && isJdSessionFailure(result.reason)
-  )
-  if (sessionFailure) throw sessionFailure.reason
-  const recommended = recommendedResult.status === 'fulfilled' ? recommendedResult.value : []
-  const dmp = dmpResult.status === 'fulfilled' ? dmpResult.value.crowds : []
+  const signingWindow = await openReadySigningWindow(normalizedStoreId)
+  const sceneCrowds = []
   const errors = []
-  if (recommendedResult.status === 'rejected') {
-    errors.push({ source: 'recommended', message: recommendedResult.reason?.message || '推荐人群读取失败' })
+  let categories = []
+  let pagesRead = 0
+  let excludedCount = 0
+  const query = async (url, body, message) => {
+    const headers = await signSceneCrowdRequestInWindow(signingWindow, body)
+    return assertCrowdPayload(await requestJson(platformSession, url, {
+      ...getCrowdRequestOptions(body), referer: 'https://www.jd.com/', headers
+    }), message)
   }
-  if (dmpResult.status === 'rejected') {
-    errors.push({ source: 'dmp', message: dmpResult.reason?.message || 'DMP 人群读取失败' })
-  } else if (dmpResult.value.truncated) {
-    errors.push({
-      source: 'dmp',
-      message: `京东返回的人群超过本次加载上限，已加载 ${dmpResult.value.crowds.length}/${dmpResult.value.total} 个`
-    })
+  try {
+    categories = extractSceneCategories(await query(
+      SCENE_CATEGORY_URL, buildSceneCategoryBody(), '读取京东场景人群分类失败'
+    ))
+    for (const category of categories) {
+      const seen = new Set()
+      let count = 0
+      try {
+        for (let page = 1; page <= CROWD_MAX_PAGES; page += 1) {
+          if (pagesRead) await delay(300)
+          const result = extractSceneCrowdPage(await query(
+            SCENE_CROWD_URL, buildSceneCrowdBody(category.categoryCode, page), '读取京东场景人群失败'
+          ))
+          pagesRead += 1
+          count += result.crowds.length
+          let newCount = 0
+          for (const item of result.crowds) {
+            const key = String(item?.crowdId ?? item?.id ?? '')
+            if (!key || seen.has(key)) continue
+            seen.add(key)
+            newCount += 1
+            if (requiresCrowdSeed(item)) { excludedCount += 1; continue }
+            sceneCrowds.push({ ...item, sceneCategoryName: category.categoryName })
+          }
+          if (!result.crowds.length || (result.total != null && count >= result.total) ||
+              (result.total == null && result.crowds.length < SCENE_CROWD_PAGE_SIZE)) break
+          if (!newCount || page === CROWD_MAX_PAGES) {
+            errors.push({ source: 'scene', message: `${category.categoryName}人群分页未完成，请刷新后重试` })
+            break
+          }
+        }
+      } catch (error) {
+        // 未登录必须立即交给上层恢复一次，不能继续用无效 Cookie 查询其他分类。
+        if (isJdSessionFailure(error)) throw error
+        errors.push({ source: 'scene', message: `${category.categoryName}：${error.message || '加载失败'}` })
+      }
+    }
+    if (categories.length && !sceneCrowds.length && errors.length) {
+      throw createRequestError(errors.map(item => item.message).join('；'))
+    }
+  } finally {
+    activeProbeWindows.delete(signingWindow)
+    if (!signingWindow.isDestroyed()) signingWindow.destroy()
   }
-  if (recommendedResult.status === 'rejected' && dmpResult.status === 'rejected') {
-    throw recommendedResult.reason || dmpResult.reason
-  }
+  const crowds = mergeCrowdOptions(defaultSceneCrowds(), sceneCrowds).map(item => ({
+    ...item, source: ['100', '101'].includes(String(item.crowdId)) ? 'default' : 'scene'
+  }))
   return {
     success: true,
     storeId: normalizedStoreId,
-    crowds: mergeCrowdOptions(recommended, dmp),
-    recommendedCount: recommended.length,
-    dmpCount: dmp.length,
-    dmpTotal: dmpResult.status === 'fulfilled' ? dmpResult.value.total : null,
-    pagesRead: dmpResult.status === 'fulfilled' ? dmpResult.value.pagesRead : 0,
+    crowds,
+    categories,
+    excludedCount,
+    sceneCount: crowds.filter(item => item.source === 'scene').length,
+    pagesRead,
     partial: errors.length > 0,
     errors
   }
@@ -1024,7 +1054,7 @@ function loadPreparedJob(token, now = Date.now()) {
   if (!filePath || !fs.existsSync(filePath)) return null
   try {
     const job = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    if (!job?.expiresAt || job.expiresAt <= now) {
+    if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) {
       fs.unlinkSync(filePath)
       return null
     }
@@ -1044,7 +1074,7 @@ function loadPreparedJob(token, now = Date.now()) {
 function getPreparedJob(token, now = Date.now()) {
   const normalizedToken = String(token || '')
   const memoryJob = preparedRoiJobs.get(normalizedToken)
-  if (memoryJob?.expiresAt > now) return memoryJob
+  if (!memoryJob?.consumed && memoryJob?.expiresAt > now) return memoryJob
   if (memoryJob) preparedRoiJobs.delete(normalizedToken)
   return loadPreparedJob(normalizedToken, now)
 }
@@ -1061,9 +1091,20 @@ function deletePreparedJob(token) {
   }
 }
 
+function consumePreparedJob(token) {
+  const job = getPreparedJob(token)
+  if (!job) throw createRequestError('关键词准备结果已过期或已提交，请先核对京准通', 'JD_EXPRESS_PREPARATION_EXPIRED')
+  const filePath = getPreparedJobFilePath(token)
+  // 删除失败也不能让重启后的客户端重用已提交令牌；先持久化消费标记。
+  if (filePath && fs.existsSync(filePath) && !persistPreparedJob(token, { ...job, consumed: true })) {
+    throw createRequestError('无法保存提交状态，请检查数据盘空间和权限；尚未提交计划', 'JD_EXPRESS_PREPARATION_CACHE_FAILED')
+  }
+  deletePreparedJob(token)
+}
+
 function clearExpiredPreparedJobs(now = Date.now()) {
   for (const [token, job] of preparedRoiJobs.entries()) {
-    if (!job?.expiresAt || job.expiresAt <= now) deletePreparedJob(token)
+    if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) deletePreparedJob(token)
   }
   const directory = getPreparedJobCacheDirectory()
   if (!directory) return
@@ -1073,7 +1114,7 @@ function clearExpiredPreparedJobs(now = Date.now()) {
       const filePath = path.join(directory, entry.name)
       try {
         const job = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-        if (!job?.expiresAt || job.expiresAt <= now) fs.unlinkSync(filePath)
+        if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) fs.unlinkSync(filePath)
       } catch {
         fs.unlinkSync(filePath)
       }
@@ -1099,6 +1140,8 @@ function summarizePreparedUnits(units = []) {
 }
 
 async function prepareRoiCreation(storeId, payload = {}, dependencies = {}, onProgress = () => {}) {
+  assertCreationDates(payload.config || {})
+  if (payload.config?.createMode === 'custom') assertCrowdSettings(payload.config.dmpCrowdSettings)
   const { storeId: normalizedStoreId, platformSession } = await prepareStore(
     storeId,
     dependencies.refreshCookies
@@ -1173,7 +1216,8 @@ async function prepareRoiCreation(storeId, payload = {}, dependencies = {}, onPr
       data: prepared
     }
     preparedRoiJobs.set(preparationToken, preparedJob)
-    persistPreparedJob(preparationToken, preparedJob)
+    const persisted = persistPreparedJob(preparationToken, preparedJob)
+    runtimeLog.writeLog('JD_EXPRESS', `action=prepared_cache_save store_id=${normalizedStoreId} scope=${scope} ttl_ms=${PREPARED_JOB_TTL_MS} persisted=${persisted} units=${prepared.units.length}`)
 
     return {
       success: true,
@@ -1322,6 +1366,31 @@ async function signBodyInWindow(signingWindow, body) {
   }
 }
 
+async function signSceneCrowdRequestInWindow(signingWindow, body) {
+  const signature = buildSceneCrowdSignature(body)
+  const encodedInput = Buffer.from(JSON.stringify(signature), 'utf8').toString('base64')
+  let timer
+  try {
+    const h5st = await Promise.race([
+      signingWindow.webContents.executeJavaScript(`
+        (async () => {
+          const bytes = Uint8Array.from(atob('${encodedInput}'), char => char.charCodeAt(0))
+          const input = JSON.parse(new TextDecoder().decode(bytes))
+          if (typeof fetchToken !== 'function') throw new Error('场景人群签名组件未就绪')
+          return await fetchToken(input.appId, input.text)
+        })()
+      `, true),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(createRequestError('京东场景人群签名超时', 'JD_EXPRESS_TIMEOUT')), 20000)
+      })
+    ])
+    if (typeof h5st !== 'string' || !h5st) throw createRequestError('京东场景人群签名为空')
+    return { h5st, stk: signature.stk }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function buildBusinessWisdomRequestInWindow(signingWindow, cid2Id, categoryId) {
   const encodedInput = Buffer.from(JSON.stringify({ cid2Id, categoryId }), 'utf8').toString('base64')
   let timer
@@ -1420,6 +1489,7 @@ async function createPreparedSingleProductTest(storeId, payload = {}, dependenci
   const preparationToken = String(payload.preparationToken || '')
   const job = getPreparedJob(preparationToken)
   if (!job) throw createRequestError('关键词准备结果已失效，请重新执行单商品关键词测试')
+  const prepared = withPreparedCreationDates(job.data, payload.creationDates || {})
   const { storeId: normalizedStoreId, platformSession } = await prepareStore(
     storeId,
     dependencies.refreshCookies
@@ -1430,14 +1500,16 @@ async function createPreparedSingleProductTest(storeId, payload = {}, dependenci
   const eid = await getJdEidCookie(platformSession)
   const signingWindow = await openReadySigningWindow(normalizedStoreId)
   try {
+    assertCreationDates(prepared.config)
+    consumePreparedJob(preparationToken)
     const result = await createSingleProductTest({
       platformSession,
-      prepared: job.data,
+      prepared,
       requestJson,
       signBody: (body) => signBodyInWindow(signingWindow, body),
-      eid
+      eid,
+      onDiagnostic: dependencies.onCreationDiagnostic
     })
-    deletePreparedJob(preparationToken)
     return {
       success: true,
       storeId: normalizedStoreId,
@@ -1458,6 +1530,8 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
   const preparationToken = String(payload.preparationToken || '')
   const job = getPreparedJob(preparationToken)
   if (!job) throw createRequestError('完整关键词准备结果已失效，请重新准备全部关键词')
+  assertPreparedInputsMatch(job.data, payload)
+  const prepared = withPreparedCreationDates(job.data, payload.config || {})
   const { storeId: normalizedStoreId, platformSession } = await prepareStore(
     storeId,
     dependencies.refreshCookies
@@ -1469,11 +1543,13 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
   if (payload.confirmation !== expectedFullCreateConfirmation(createMode)) {
     throw createRequestError('创建确认与已准备的投放模式不匹配', 'JD_EXPRESS_CONFIRMATION_REQUIRED')
   }
+  if (createMode === 'custom') assertCrowdSettings(prepared.config.dmpCrowdSettings)
   const eid = await getJdEidCookie(platformSession)
   const signingWindow = await openReadySigningWindow(normalizedStoreId)
   try {
     // 一旦开始真实批量提交即消费令牌，避免网络返回不确定时重复创建计划。
-    deletePreparedJob(preparationToken)
+    assertCreationDates(prepared.config)
+    consumePreparedJob(preparationToken)
     onProgress({
       phase: 'creation_submission_start',
       totalCampaigns: job.data.summary?.campaignCount || job.data.campaigns?.length || 0,
@@ -1482,12 +1558,13 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
     const createCampaigns = createMode === 'custom' ? createCustomCampaigns : createRoiCampaigns
     const result = await createCampaigns({
       platformSession,
-      prepared: job.data,
+      prepared,
       requestJson,
       signBody: (body) => signBodyInWindow(signingWindow, body),
       eid,
       delay,
-      onProgress
+      onProgress,
+      onDiagnostic: dependencies.onCreationDiagnostic
     })
     return {
       success: true,
@@ -1504,9 +1581,25 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
 
 async function runFullRoiCreation(storeId, payload = {}, dependencies = {}, onProgress = () => {}) {
   const createMode = resolveCreateMode(payload)
+  if (createMode === 'custom') assertCrowdSettings(payload.config?.dmpCrowdSettings)
   const requiredConfirmation = expectedFullCreateConfirmation(createMode)
   if (payload.confirmation !== requiredConfirmation) {
     throw createRequestError('缺少完整批量创建确认', 'JD_EXPRESS_CONFIRMATION_REQUIRED')
+  }
+
+  const cachedJob = payload.preparationToken ? getPreparedJob(String(payload.preparationToken)) : null
+  if (payload.preparationToken && !cachedJob) {
+    throw createRequestError('已保存的关键词准备结果已失效，请重新准备', 'JD_EXPRESS_PREPARATION_EXPIRED')
+  }
+  if (cachedJob) {
+    if (cachedJob.storeId !== normalizeStoreId(storeId) || cachedJob.scope !== 'full') {
+      throw createRequestError('关键词准备结果与当前店铺或完整创建范围不匹配', 'JD_EXPRESS_PREPARATION_MISMATCH')
+    }
+    assertPreparedInputsMatch(cachedJob.data, payload)
+    withPreparedCreationDates(cachedJob.data, payload.config || {})
+    runtimeLog.writeLog('JD_EXPRESS', `action=prepared_cache_resume store_id=${cachedJob.storeId} age_ms=${Date.now() - cachedJob.createdAt} start_date=${payload.config?.startDate || cachedJob.data.config.startDate}`)
+  } else {
+    assertCreationDates(payload.config || {})
   }
 
   // 在耗时的关键词准备之前先验证真实创建所依赖的登录、EID 和签名组件。
@@ -1570,7 +1663,7 @@ async function runFullRoiCreation(storeId, payload = {}, dependencies = {}, onPr
     )
     onProgress({
       phase: 'creation_complete',
-      completedUnits: created.successUnitCount + created.failureCount,
+      completedUnits: created.successUnitCount + created.failureCount + (created.skippedUnitCount || 0),
       totalUnits: created.unitCount,
       totalCampaigns: created.campaignCount
     })
@@ -1900,7 +1993,7 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
       )
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=crowds store_id=${result.storeId} result=${result.partial ? 'partial' : 'success'} recommended=${result.recommendedCount} dmp=${result.dmpCount}${result.dmpTotal != null ? ` dmp_total=${result.dmpTotal}` : ''} pages=${result.pagesRead} elapsed_ms=${Date.now() - startedAt}${result.errors.length ? ` message=${logSafe(result.errors.map((item) => item.message).join('；'))}` : ''}`
+        `action=crowds store_id=${result.storeId} result=${result.partial ? 'partial' : 'success'} source=scene categories=${result.categories.length} scene=${result.sceneCount} excluded_seed_crowds=${result.excludedCount} pages=${result.pagesRead} elapsed_ms=${Date.now() - startedAt}${result.errors.length ? ` message=${logSafe(result.errors.map((item) => item.message).join('；'))}` : ''}`
       )
       return result
     } catch (error) {
@@ -1964,17 +2057,22 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
 
   ipcMain.handle('jd-express-create-single-test', async (_event, payload = {}) => {
     const startedAt = Date.now()
+    const runId = randomUUID()
+    const onCreationDiagnostic = createCreationLogger({
+      storeId: payload.storeId, runId, createMode: 'roi', writeLog: runtimeLog.writeLog
+    })
     try {
-      const result = await createPreparedSingleProductTest(payload.storeId, payload, dependencies)
+      const result = await createPreparedSingleProductTest(payload.storeId, payload, { ...dependencies, onCreationDiagnostic })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_single_test store_id=${result.storeId} campaign_id=${result.campaignId || ''} sku_id=${result.skuId || ''} result=success elapsed_ms=${Date.now() - startedAt}`
+        `action=create_single_test run_id=${runId} store_id=${result.storeId} campaign_id=${result.campaignId || ''} sku_id=${result.skuId || ''} result=success elapsed_ms=${Date.now() - startedAt}`
       )
       return result
     } catch (error) {
+      emitCreationDiagnostic(onCreationDiagnostic, { ...creationErrorDetails(error), result: 'failed' })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_single_test store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${logSafe(error.message)}`
+        `action=create_single_test run_id=${runId} store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${creationErrorDetails(error).message}`
       )
       return serializeError(error)
     }
@@ -1982,10 +2080,19 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
 
   ipcMain.handle('jd-express-create-full', async (event, payload = {}) => {
     const startedAt = Date.now()
+    const runId = randomUUID()
+    const onCreationDiagnostic = createCreationLogger({
+      storeId: payload.storeId, runId, createMode: resolveCreateMode(payload), writeLog: runtimeLog.writeLog
+    })
     const sendProgress = (progress) => {
+      if (['submission_preflight_start', 'submission_preflight_complete', 'keyword_prepare_complete',
+        'creation_submission_start', 'creation_complete'].includes(progress.phase)) {
+        emitCreationDiagnostic(onCreationDiagnostic, { stage: progress.phase, result: 'progress' })
+      }
       if (!event.sender.isDestroyed()) {
         event.sender.send('jd-express-creation-progress', {
           ...progress,
+          runId,
           storeId: payload.storeId,
           createMode: resolveCreateMode(payload)
         })
@@ -1994,27 +2101,30 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
     try {
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full store_id=${payload.storeId || 0} create_mode=${resolveCreateMode(payload)} phase=start mode=${payload.preparationToken ? 'resume' : 'automatic'}`
+        `action=create_full run_id=${runId} store_id=${payload.storeId || 0} create_mode=${resolveCreateMode(payload)} phase=start mode=${payload.preparationToken ? 'resume' : 'automatic'}`
       )
       const result = await runFullRoiCreation(
         payload.storeId,
         payload,
-        dependencies,
+        { ...dependencies, onCreationDiagnostic },
         sendProgress
       )
+      const outcome = creationOutcome(result)
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full store_id=${result.storeId} campaigns=${result.successCampaignCount}/${result.campaignCount} units=${result.successUnitCount}/${result.unitCount} failures=${result.failureCount} result=success elapsed_ms=${Date.now() - startedAt}`
+        `action=create_full run_id=${runId} store_id=${result.storeId} campaigns=${result.successCampaignCount}/${result.campaignCount} units=${result.successUnitCount}/${result.unitCount} failures=${result.failureCount} skipped_units=${result.skippedUnitCount || 0} skipped_keywords=${result.skippedKeywordCount || 0} adjusted_keywords=${result.adjustedKeywordCount || 0} result=${outcome} elapsed_ms=${Date.now() - startedAt}`
       )
       if (result.successCampaignCount > 0) {
         // 核验与创建结果解耦：不等待、不改变创建结果，也绝不自动补建。
         void runPostCreationVerification(result.storeId, result, event.sender)
       }
-      return result
+      // success remains the IPC execution envelope so failed unit details are retained by the UI.
+      return { ...result, outcome, runId }
     } catch (error) {
+      emitCreationDiagnostic(onCreationDiagnostic, { ...creationErrorDetails(error), result: 'failed' })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${logSafe(error.message)}`
+        `action=create_full run_id=${runId} store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${creationErrorDetails(error).message}`
       )
       return serializeError(error)
     }

@@ -1,7 +1,9 @@
 import { createRequire } from 'node:module'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
+beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 8, 5, 12)) })
+afterEach(() => vi.useRealTimers())
 const {
   ADD_ADGROUP_URL,
   CREATE_CAMPAIGN_URL,

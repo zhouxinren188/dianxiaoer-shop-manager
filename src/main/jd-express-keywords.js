@@ -2,6 +2,7 @@
 
 const {
   assembleUnitKeywords,
+  assertCustomKeywordBidConfig,
   buildTitleKeywordResult,
   extractBusinessWisdomKeywords,
   mergeProductKeywordRows,
@@ -14,6 +15,8 @@ const PRIVATE_BUSINESS_KEYWORDS_URL = 'http://inner.dou-live.com/jd_brand/jdKeyw
 const PRODUCT_KEYWORDS_URL = 'https://jzt-api.jd.com/dspad/keyword/sku/recommend'
 const KEYWORD_MIN_BID_URL = 'https://jzt-api.jd.com/dspad/keyword/normal/min/bid'
 const DROPDOWN_KEYWORDS_URL = 'https://dd-search.jd.com/'
+const { isJdSessionExpiredPayload, isJdSessionFailure } = require('./jd-session-recovery')
+const { creationResponseError } = require('./jd-express-creation-log')
 
 function chunkText(value, size = 980) {
   const text = String(value || '')
@@ -274,6 +277,76 @@ function buildFixedKeywordBidList(keywords, bid, matchType = 8) {
   }))
 }
 
+// Only read floor prices here; never retry an advertising creation request.
+async function fetchKeywordFloors(options = {}) {
+  const { platformSession, keywords, requestJson, delay, onProgress = () => {}, context = {} } = options
+  const floors = new Map()
+  const requested = [...new Set(keywords)]
+  for (let offset = 0; offset < requested.length; offset += 100) {
+    const batch = requested.slice(offset, offset + 100)
+    let payload
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        payload = await requestJson(platformSession, KEYWORD_MIN_BID_URL, {
+          method: 'POST', body: { requestFrom: 0, keywords: batch }
+        })
+        if (Number(payload?.code) === -100 || isJdSessionExpiredPayload(payload)) {
+          throw Object.assign(creationResponseError('店铺登录已失效，请重新登录', payload, 'keyword_floor', KEYWORD_MIN_BID_URL), { code: 'JD_SESSION_EXPIRED' })
+        }
+        if (Number(payload?.code) === -3010) {
+          throw Object.assign(creationResponseError('京东关键词底价查询限流', payload, 'keyword_floor', KEYWORD_MIN_BID_URL), { code: 'JD_RATE_LIMIT' })
+        }
+        if (Number(payload?.code) !== 1 || payload?.success === false || !Array.isArray(payload?.data)) {
+          throw creationResponseError(getResponseMessage(payload, '获取关键词最低出价失败'), payload, 'keyword_floor', KEYWORD_MIN_BID_URL)
+        }
+        break
+      } catch (error) {
+        const retryable = error?.code === 'JD_RATE_LIMIT' ||
+          /Read timed out|Operation limit exceeded|超时|次数|上限/i.test(error?.message || '')
+        if (isJdSessionFailure(error) || !retryable || attempt >= 3) throw error
+        await waitWithProgress(delay, onProgress, { ...context, phase: 'keyword_bid_retry_wait' }, 5000)
+      }
+    }
+    const batchSet = new Set(batch)
+    for (const item of payload.data) {
+      const keyword = String(item?.keywordName || '')
+      const floor = Number(item?.minBidPrice)
+      if (batchSet.has(keyword) && Number.isFinite(floor) && floor >= 0.1) {
+        floors.set(keyword, Math.max(floors.get(keyword) || 0, floor))
+      }
+    }
+    await waitWithProgress(delay, onProgress, { ...context, phase: 'keyword_bid_interval' }, 3000)
+  }
+  return floors
+}
+
+async function applyCustomKeywordBidLimit(options = {}) {
+  const { unit, config, onProgress = () => {}, context = {} } = options
+  assertCustomKeywordBidConfig({ ...config, createMode: 'custom' })
+  const keywords = [...new Set((unit.keywordList || []).map(row => String(row.keywordName || '').trim()).filter(Boolean))]
+  const floors = await fetchKeywordFloors({ ...options, keywords })
+  const keywordList = []
+  const adjustedKeywords = []
+  const skippedKeywords = []
+  const baseBid = Number(config.customKeywordBid)
+  const maxBid = Number(config.maxCustomKeywordBid)
+  for (const keywordName of keywords) {
+    const floorBid = floors.get(keywordName)
+    // Round UP to the supported 0.1 step, never below the floor or above the user's cap.
+    const submittedBid = Math.max(baseBid, Math.ceil(floorBid * 10 - 1e-8) / 10)
+    if (floorBid == null || submittedBid > maxBid) {
+      skippedKeywords.push({ keywordName, baseBid, floorBid, maxBid,
+        reason: floorBid == null ? '京东未返回有效最低出价' : '京东最低出价超过最高出价' })
+      continue
+    }
+    keywordList.push(...buildFixedKeywordBidList([keywordName], submittedBid, config.keywordMatchType))
+    if (submittedBid > baseBid) adjustedKeywords.push({ keywordName, baseBid, floorBid, maxBid, submittedBid })
+  }
+  onProgress({ ...context, phase: 'keyword_bid_policy_complete', keywordCount: keywordList.length,
+    adjustedKeywordCount: adjustedKeywords.length, skippedKeywordCount: skippedKeywords.length })
+  return { keywordList, adjustedKeywords, skippedKeywords }
+}
+
 async function fetchKeywordMinBids(platformSession, keywords, increment, requestJson, delay, onProgress, unitIndex, totalUnits, matchType = 8) {
   if (!keywords.length) return []
   const body = { requestFrom: 0, keywords }
@@ -330,6 +403,7 @@ async function prepareRoiKeywords(options = {}) {
   } = options
   if (!structure?.units?.length) throw new Error('没有可处理的推广单元')
   const config = structure.config
+  assertCustomKeywordBidConfig(config)
   const preparedUnits = []
 
   for (let index = 0; index < structure.units.length; index += 1) {
@@ -474,6 +548,8 @@ module.exports = {
   PRIVATE_BUSINESS_KEYWORDS_URL,
   PRIVATE_TITLE_KEYWORDS_URL,
   buildFixedKeywordBidList,
+  applyCustomKeywordBidLimit,
+  KEYWORD_MIN_BID_URL,
   fetchDropdownKeywords,
   fetchPrivateBusinessKeywords,
   fetchProductKeywords,

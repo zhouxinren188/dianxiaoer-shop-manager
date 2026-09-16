@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { describe, expect, it, vi } from 'vitest'
 import recovery from '../src/main/jd-session-recovery.js'
+import crowds from '../src/main/jd-express-crowds.js'
 
 const mainSource = readFileSync(new URL('../src/main/jd-express.js', import.meta.url), 'utf8')
 const viewSource = readFileSync(new URL('../src/renderer/src/views/operations/JdExpress.vue', import.meta.url), 'utf8')
@@ -59,16 +60,31 @@ describe('快车只读查询的登录失效边界', () => {
     expect(fetchProductPage).toHaveBeenCalledTimes(1)
   })
 
-  it('一类人群接口返回 NotLogin 时，不能因另一类成功而伪装成部分成功', async () => {
+  it('场景人群返回 NotLogin 时立即停止其他分类，关闭签名窗口并交给上层恢复', async () => {
     const error = sessionError()
+    const signingWindow = { isDestroyed: () => false, destroy: vi.fn() }
+    const requestJson = vi.fn()
+      .mockResolvedValueOnce({ data: [
+        { categoryCode: 0, categoryName: '默认', level: 0 },
+        { categoryCode: 1, categoryName: '其他', level: 0 }
+      ] })
+      .mockRejectedValueOnce(error)
     const read = readFunction('fetchCrowdOptions', 'async function fetchProductPage', {
+      ...crowds,
       prepareStore: async () => ({ storeId: 12, platformSession: {} }),
-      fetchRecommendedCrowds: async () => { throw error },
-      fetchDmpCrowds: async () => ({ crowds: [{ crowdId: 1 }], total: 1, pagesRead: 1 }),
+      openReadySigningWindow: async () => signingWindow,
+      activeProbeWindows: new Set([signingWindow]),
+      signSceneCrowdRequestInWindow: async () => ({}),
+      getCrowdRequestOptions: body => ({ body }),
+      assertCrowdPayload: payload => payload,
+      requestJson,
+      createRequestError: message => new Error(message),
+      delay: async () => {},
       isJdSessionFailure: recovery.isJdSessionFailure,
-      mergeCrowdOptions: vi.fn()
     })
     await expect(read(12)).rejects.toBe(error)
+    expect(requestJson).toHaveBeenCalledTimes(2)
+    expect(signingWindow.destroy).toHaveBeenCalledOnce()
   })
 })
 

@@ -232,7 +232,14 @@
                       <el-input v-model="config.namePrefix" maxlength="20" show-word-limit />
                     </el-form-item>
                     <el-form-item label="起始时间" prop="startDate">
-                      <el-date-picker v-model="config.startDate" type="date" value-format="YYYY-MM-DD" />
+                      <el-date-picker
+                        v-model="config.startDate"
+                        type="date"
+                        value-format="YYYY-MM-DD"
+                        :disabled-date="disabledStartDate"
+                        :editable="false"
+                        :clearable="false"
+                      />
                     </el-form-item>
                     <el-form-item label="截止时间" prop="endDate">
                       <el-radio-group v-model="config.unlimitedEndDate">
@@ -244,6 +251,8 @@
                         v-model="config.endDate"
                         type="date"
                         value-format="YYYY-MM-DD"
+                        :disabled-date="disabledEndDate"
+                        :editable="false"
                         class="block-control"
                       />
                     </el-form-item>
@@ -343,17 +352,30 @@
                           <span>元</span>
                         </div>
                       </template>
-                      <el-form-item v-else label="固定出价" prop="customKeywordBid" class="fixed-keyword-bid-item">
-                        <el-input-number
-                          v-model="config.customKeywordBid"
-                          :min="0.1"
-                          :max="9999"
-                          :step="0.1"
-                          :precision="1"
-                        />
-                        <span>元</span>
-                        <div class="field-help">每个关键词统一使用该出价，不查询京东最低出价</div>
-                      </el-form-item>
+                      <div v-else class="custom-keyword-bid-row">
+                        <el-form-item label="起始出价" prop="customKeywordBid" class="fixed-keyword-bid-item">
+                          <el-input-number
+                            v-model="config.customKeywordBid"
+                            :min="0.1"
+                            :max="9999"
+                            :step="0.1"
+                            :precision="1"
+                          />
+                          <span>元</span>
+                        </el-form-item>
+                        <el-form-item label="最高出价" prop="maxCustomKeywordBid" class="fixed-keyword-bid-item">
+                          <el-input-number
+                            v-model="config.maxCustomKeywordBid"
+                            :min="0.1"
+                            :max="9999"
+                            :step="0.1"
+                            :precision="1"
+                            placeholder="请设置上限"
+                          />
+                          <span>元</span>
+                        </el-form-item>
+                        <div class="field-help">提交前查询京东底价；在上限内自动抬价，超过上限或未返回有效底价的关键词跳过。此上限不影响智能匹配出价。</div>
+                      </div>
                       <el-form-item label="关键词匹配方式" prop="keywordMatchType" class="keyword-match-type-item">
                         <el-radio-group v-model="config.keywordMatchType">
                           <el-radio :value="1">精确匹配</el-radio>
@@ -619,7 +641,7 @@
                         <div class="crowd-setting-header">
                           <div>
                             <strong>搜索人群</strong>
-                            <small>与浩辰一致：默认不勾选，勾选后设置 10%～300% 溢价</small>
+                            <small>按场景类型选择人群；新选人群默认溢价 30%，可调整为 10%～300%</small>
                           </div>
                           <div class="crowd-header-actions">
                             <el-button size="small" :loading="crowdLoading" @click="loadCrowds(false)">刷新人群</el-button>
@@ -641,6 +663,15 @@
                           :closable="false"
                           show-icon
                         />
+                        <el-alert
+                          v-if="unsupportedSelectedCrowds.length"
+                          title="旧选择中有人群需要种子，不能直接创建。请取消后按场景类型重新选择"
+                          type="error"
+                          :closable="false"
+                          show-icon
+                        >
+                          <el-button size="small" link type="danger" @click="removeUnsupportedCrowds">取消不可用人群</el-button>
+                        </el-alert>
 
                         <div v-if="defaultCrowdOptions.length" class="default-crowd-list">
                           <div v-for="crowd in defaultCrowdOptions" :key="crowdKey(crowd)" class="crowd-option-row">
@@ -743,6 +774,24 @@
         </div>
 
         <div v-show="activeStep === 2" class="step-panel">
+          <div v-if="creationResultSummary" ref="creationResultRef" class="creation-result-panel" tabindex="-1" role="status" aria-live="polite">
+            <el-alert
+              :title="creationResultSummary.title"
+              :description="creationResultSummary.description"
+              :type="creationResultSummary.type"
+              :closable="false"
+              show-icon
+            />
+            <p class="creation-result-hint">{{ creationResultSummary.safetyHint }}</p>
+            <p v-if="creationVerificationMessage" class="creation-result-verification">{{ creationVerificationMessage }}</p>
+            <p v-if="creationQuotaRefreshFailed" class="creation-result-verification">最新额度暂未刷新，不影响本轮创建结果，可稍后重新检测。</p>
+            <div class="creation-result-actions">
+              <el-button v-if="creationFailureRows.length" size="small" @click="showCreationDetails('failures')">查看失败明细（{{ creationFailureRows.length }}）</el-button>
+              <el-button v-if="createdFullResult.skips?.length" size="small" @click="showCreationDetails('skips')">查看跳过明细（{{ createdFullResult.skips.length }}）</el-button>
+              <el-button size="small" plain @click="startNewCreationDraft">重新选品，开始下一轮</el-button>
+              <span v-if="createdFullResult.runId" class="creation-run-id">任务编号：{{ createdFullResult.runId }}</span>
+            </div>
+          </div>
           <div class="preview-metrics">
             <div><span>商品</span><strong>{{ preview.productCount }}</strong></div>
             <div><span>计划</span><strong>{{ preview.campaignCount }}</strong></div>
@@ -761,7 +810,7 @@
           </el-descriptions>
 
           <el-alert
-            v-if="preview.limitWarnings.length"
+            v-if="!createdFullResult && !fullCreateLoading && preview.limitWarnings.length"
             :title="preview.limitWarnings.join('；')"
             type="error"
             show-icon
@@ -785,26 +834,32 @@
           <div class="submit-placeholder">
             <el-button
               type="primary"
-              :disabled="fullCreateLoading || preview.limitWarnings.length > 0"
+              :disabled="fullCreateLoading || Boolean(createdFullResult) || preview.limitWarnings.length > 0"
               @click="createAllPlans"
-            >确认创建全部计划</el-button>
-            <el-tag v-if="createdFullResult" :type="createdFullResult.failureCount ? 'warning' : 'success'">
-              已创建 {{ createdFullResult.successCampaignCount }}/{{ createdFullResult.campaignCount }} 个计划，
-              {{ createdFullResult.successUnitCount }}/{{ createdFullResult.unitCount }} 个单元
-            </el-tag>
-            <el-tag v-if="creationVerification.status === 'checking'" type="info" effect="plain">
-              正在后台核验
-            </el-tag>
-            <el-tag v-else-if="creationVerification.status === 'matched'" type="success" effect="plain">
-              四层核验通过
-            </el-tag>
-            <el-tag v-else-if="creationVerification.status === 'mismatch'" type="warning" effect="plain">
-              核验发现缺少
-            </el-tag>
-            <el-tag v-else-if="creationVerification.status === 'unavailable'" type="info" effect="plain">
-              核验暂未完成
-            </el-tag>
+            >{{ createdFullResult ? '本轮任务已结束' : '确认创建全部计划' }}</el-button>
           </div>
+          <el-collapse v-if="creationFailureRows.length" ref="creationFailureDetailsRef" v-model="creationDetailPanels" class="creation-failures">
+            <el-collapse-item :title="`失败明细（${creationFailureRows.length} 个单元）`" name="failures">
+              <p v-if="createdFullResult.runId" class="creation-run-id">任务编号：{{ createdFullResult.runId }}</p>
+              <el-table :data="creationFailureRows" border :max-height="260">
+                <el-table-column prop="planName" label="计划" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="unitName" label="单元" min-width="150" show-overflow-tooltip />
+                <el-table-column prop="stageLabel" label="失败阶段" width="150" />
+                <el-table-column prop="returnCode" label="返回码" width="140" show-overflow-tooltip />
+                <el-table-column prop="message" label="失败原因" min-width="320" show-overflow-tooltip />
+              </el-table>
+              <p class="creation-run-id">请先到京准通核对实际创建情况，再决定是否重试，避免重复计划。</p>
+            </el-collapse-item>
+          </el-collapse>
+          <el-collapse v-if="createdFullResult?.skips?.length" ref="creationSkipDetailsRef" v-model="creationDetailPanels" class="creation-failures">
+            <el-collapse-item :title="`跳过明细（${createdFullResult.skips.length} 个单元）`" name="skips">
+              <el-table :data="createdFullResult.skips" border :max-height="260">
+                <el-table-column prop="planName" label="计划" min-width="180" show-overflow-tooltip />
+                <el-table-column prop="unitName" label="单元" min-width="150" show-overflow-tooltip />
+                <el-table-column prop="message" label="跳过原因" min-width="320" show-overflow-tooltip />
+              </el-table>
+            </el-collapse-item>
+          </el-collapse>
         </div>
 
         <div v-if="activeStep > 0" class="step-actions">
@@ -850,7 +905,7 @@
     >
       <div class="crowd-dialog-toolbar">
         <el-input v-model="crowdKeyword" clearable placeholder="搜索人群名称" />
-        <el-select v-model="crowdCategory" clearable placeholder="全部分类">
+        <el-select v-model="crowdCategory" clearable placeholder="全部场景类型">
           <el-option v-for="category in crowdCategoryOptions" :key="category" :label="category" :value="category" />
         </el-select>
         <el-button :loading="crowdLoading" @click="loadCrowds(false)">重新加载</el-button>
@@ -858,14 +913,18 @@
       <el-table :data="filteredCrowdOptions" height="460" empty-text="没有符合条件的人群">
         <el-table-column label="选择" width="66" align="center">
           <template #default="{ row }">
-            <el-checkbox :model-value="isCrowdSelected(row)" @change="toggleCrowd(row, $event)" />
+            <el-checkbox
+              :model-value="isCrowdSelected(row)"
+              :disabled="requiresCrowdSeed(row) && !isCrowdSelected(row)"
+              @change="toggleCrowd(row, $event)"
+            />
           </template>
         </el-table-column>
         <el-table-column prop="crowdName" label="人群名称" min-width="210" show-overflow-tooltip />
         <el-table-column label="来源" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.source === 'recommended' ? 'success' : 'info'">
-              {{ row.source === 'recommended' ? '推荐人群' : 'DMP人群' }}
+            <el-tag size="small" :type="requiresCrowdSeed(row) ? 'danger' : row.source === 'default' ? 'success' : 'info'">
+              {{ requiresCrowdSeed(row) ? '需重新选择' : row.source === 'default' ? '默认人群' : row.source === 'scene' ? '场景人群' : '已有选择' }}
             </el-tag>
           </template>
         </el-table-column>
@@ -916,10 +975,11 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, EditPen, MagicStick, QuestionFilled, TrendCharts } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
+import { summarizeCreationResult, creationVerificationHint } from '@/utils/jdExpressCreationResult'
 
 const JZT_URL = 'https://jzt.jd.com/msa/#/list/shopSmart?objective=item&scenario=normal&targetingType=shopSmart'
 const CONFIG_SCHEMA_VERSION = 6
@@ -953,7 +1013,7 @@ const tools = [
 const workflowSteps = computed(() => [
   { title: '选择商品', description: '读取在售商品' },
   { title: '投放配置', description: activeTool.value === 'custom' ? '设置计划与自定义出价' : '设置计划与投产比' },
-  { title: '创建预览', description: '核对数量与额度' }
+  { title: createdFullResult.value ? '创建结果' : '创建预览', description: createdFullResult.value ? '查看本轮结果与明细' : '核对数量与额度' }
 ])
 
 const activeTool = ref('roi')
@@ -973,7 +1033,14 @@ const fullPrepareLoading = ref(false)
 const preparedFullResult = ref(null)
 const fullCreateLoading = ref(false)
 const createdFullResult = ref(null)
+const creationResultRef = ref(null)
+const creationFailureDetailsRef = ref(null)
+const creationSkipDetailsRef = ref(null)
+const creationDetailPanels = ref([])
+const creationQuotaRefreshFailed = ref(false)
 const creationVerification = reactive({ status: 'idle', expected: null, actual: null, missing: null, message: '' })
+const creationResultSummary = computed(() => summarizeCreationResult(createdFullResult.value))
+const creationVerificationMessage = computed(() => creationVerificationHint(creationVerification))
 const keywordPrepareProgress = reactive({ phase: '', unitIndex: 0, totalUnits: 0, secondsRemaining: 0 })
 const resumePreparationToken = ref('')
 const creationStartedAt = ref(0)
@@ -1058,7 +1125,16 @@ const configRules = {
     validator: (_rule, value, callback) => {
       if (activeTool.value === 'custom' && config.useMinKeywordBid === false &&
         (!Number.isFinite(value) || value < 0.1 || value > 9999)) {
-        callback(new Error('关键词固定出价须为 0.1～9999 元'))
+        callback(new Error('关键词起始出价须为 0.1～9999 元'))
+      } else callback()
+    },
+    trigger: 'change'
+  }],
+  maxCustomKeywordBid: [{
+    validator: (_rule, value, callback) => {
+      if (activeTool.value === 'custom' && config.useMinKeywordBid === false &&
+        (!Number.isFinite(value) || value < 0.1 || value > 9999 || value < Number(config.customKeywordBid))) {
+        callback(new Error('请设置最高出价，且不能低于起始出价'))
       } else callback()
     },
     trigger: 'change'
@@ -1076,6 +1152,10 @@ const configRules = {
       const items = Array.isArray(value) ? value : []
       if (items.length > 30) {
         callback(new Error('一个推广单元最多选择 30 个人群'))
+        return
+      }
+      if (items.some(requiresCrowdSeed)) {
+        callback(new Error('选择的人群需要种子，请取消不可用人群，按场景类型重新选择'))
         return
       }
       if (items.some((item) => !Number.isFinite(Number(item?.adGroupPrice)) || Number(item.adGroupPrice) < 10 || Number(item.adGroupPrice) > 300)) {
@@ -1128,7 +1208,13 @@ const configRules = {
     },
     trigger: 'change'
   }],
-  startDate: [{ required: true, message: '请选择开始日期', trigger: 'change' }],
+  startDate: [{
+    validator: (_rule, value, callback) => {
+      const error = startDateError(value)
+      callback(error ? new Error(error) : undefined)
+    },
+    trigger: 'change'
+  }],
   endDate: [{
     validator: (_rule, value, callback) => {
       if (!config.unlimitedEndDate && !value) callback(new Error('请选择结束日期'))
@@ -1187,6 +1273,7 @@ const selectedCrowdSummary = computed(() => {
   const names = items.slice(0, 2).map((item) => item.crowdName || `人群${item.crowdId}`)
   return `${names.join('、')}${items.length > 2 ? ` 等 ${items.length} 个` : ''}`
 })
+const unsupportedSelectedCrowds = computed(() => (config.dmpCrowdSettings || []).filter(requiresCrowdSeed))
 const crowdDisplayOptions = computed(() => {
   const result = [...crowdOptions.value]
   const known = new Set(result.map((item) => crowdKey(item)))
@@ -1197,13 +1284,13 @@ const crowdDisplayOptions = computed(() => {
 })
 const defaultCrowdOptions = computed(() => crowdDisplayOptions.value.filter((item) => ['100', '101'].includes(crowdKey(item))))
 const crowdCategoryOptions = computed(() => [...new Set(crowdDisplayOptions.value
-  .map((item) => crowdCategoryLabel(item))
+  .map((item) => crowdSceneLabel(item))
   .filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-CN')))
 const filteredCrowdOptions = computed(() => {
   const keyword = crowdKeyword.value.trim().toLowerCase()
   return crowdDisplayOptions.value.filter((item) => {
     const matchesKeyword = !keyword || String(item.crowdName || '').toLowerCase().includes(keyword)
-    const matchesCategory = !crowdCategory.value || crowdCategoryLabel(item) === crowdCategory.value
+    const matchesCategory = !crowdCategory.value || crowdSceneLabel(item) === crowdCategory.value
     return matchesKeyword && matchesCategory
   })
 })
@@ -1276,7 +1363,8 @@ const creationProgressTitle = computed(() => {
   if (phase === 'submission_preflight_start' || phase === 'prepare_start') return '正在校验真实创建环境'
   if (phase === 'submission_preflight_complete') return '创建环境校验通过'
   if (phase === 'unit_allocation_complete') return '推广单元分配完成'
-  if (phase === 'product_keyword_rate_limit_wait' || phase === 'keyword_bid_retry_wait') return '京东接口繁忙，正在自动等待'
+  if (phase === 'product_keyword_rate_limit_wait' || phase === 'keyword_bid_retry_wait' || phase === 'create_keyword_bid_retry_wait') return '京东接口繁忙，正在自动等待'
+  if (phase.startsWith('create_keyword_bid_')) return '正在检查关键词底价与出价上限'
   if (phase === 'keyword_unit_start' || phase === 'keyword_unit_complete' || phase.startsWith('product_keyword_')) {
     return '正在获取单元关键词'
   }
@@ -1288,6 +1376,13 @@ const creationProgressTitle = computed(() => {
   if (phase === 'creation_complete') return '批量创建完成'
   return '正在准备创建任务'
 })
+const creationFailureRows = computed(() => (createdFullResult.value?.failures || []).map(failure => ({
+  ...failure,
+  stageLabel: ({ date_validation: '日期校验', preparation_validation: '准备结果校验', suggestion: '获取建议出价', version: '获取提交版本', build_body: '生成请求',
+    keyword_floor: '查询关键词底价', sign: '请求签名', submit: '提交京东', validate_response: '核对返回结果' })[failure.stage] || '创建前校验',
+  returnCode: [failure.jdCode, failure.jdSubCode].filter(value => value != null && value !== '').join(' / ') || failure.code || '--',
+  message: `${failure.blockedByCampaign ? '计划首单元创建失败，此单元未提交：' : ''}${failure.message || '创建失败'}`
+})))
 const creationProgressDetail = computed(() => {
   const progress = keywordPrepareProgress
   const phase = progress.phase || ''
@@ -1297,6 +1392,10 @@ const creationProgressDetail = computed(() => {
   if (phase === 'submission_preflight_complete') return '真实创建依赖已就绪，即将开始准备关键词'
   if (phase === 'unit_allocation_complete') {
     return `已为 ${progress.productCount || preview.value.productCount} 个商品分配 ${totalUnits || preview.value.unitCount} 个推广单元`
+  }
+  if (phase.startsWith('create_keyword_bid_')) {
+    const current = Math.min(Number(progress.completedUnits || 0) + 1, totalUnits || preview.value.unitCount)
+    return `正在核对第 ${current}/${totalUnits || preview.value.unitCount} 个单元的关键词底价与上限${phase === 'create_keyword_bid_retry_wait' ? `，${progress.secondsRemaining || 0} 秒后重试底价查询` : ''}`
   }
   if (phase === 'product_keyword_rate_limit_wait') {
     return `第 ${currentUnit || 1}/${totalUnits || preview.value.unitCount} 个单元推词受限，${progress.secondsRemaining || 0} 秒后重试`
@@ -1328,7 +1427,7 @@ const creationProgressDetail = computed(() => {
   return '正在启动创建流程'
 })
 const creationEtaText = computed(() => {
-  if (['product_keyword_rate_limit_wait', 'keyword_bid_retry_wait'].includes(keywordPrepareProgress.phase)) {
+  if (['product_keyword_rate_limit_wait', 'keyword_bid_retry_wait', 'create_keyword_bid_retry_wait'].includes(keywordPrepareProgress.phase)) {
     return `${keywordPrepareProgress.secondsRemaining || 0} 秒后自动重试`
   }
   const percent = creationProgressPercent.value
@@ -1455,6 +1554,13 @@ onBeforeUnmount(() => {
   removeVerificationListener?.()
 })
 
+onActivated(() => {
+  if (!fullCreateLoading.value && refreshExpiredStartDate()) {
+    showCenteredMessage('info', '开始日期已更新为今天，已准备的关键词不会因日期修改而清空')
+  }
+  readPreparationToken()
+})
+
 watch(activeStep, (step) => {
   if (step === 0) updateProductTableHeight()
   if (step === 2) updatePreviewTableHeight()
@@ -1465,10 +1571,14 @@ watch(activeStep, (step) => {
 
 watch(config, () => {
   if (storeId.value) localStorage.setItem(configStorageKey(storeId.value), JSON.stringify(config))
+}, { deep: true })
+
+// 开始/截止日期只影响提交，不影响已查询的关键词；商品、出价等变化才失效。
+watch(creationInputSignature, () => {
   if (preparedKeywordResult.value) preparedKeywordResult.value = null
   if (preparedFullResult.value) preparedFullResult.value = null
   resumePreparationToken.value = ''
-}, { deep: true })
+})
 
 function createDefaultConfig(mode = 'roi') {
   const createMode = mode === 'custom' ? 'custom' : 'roi'
@@ -1481,6 +1591,7 @@ function createDefaultConfig(mode = 'roi') {
     useMinKeywordBid: true,
     keywordBidIncrement: 0,
     customKeywordBid: 0.1,
+    maxCustomKeywordBid: null,
     keywordMatchType: 8,
     keywordSources: [],
     keywordSortType: 4,
@@ -1585,10 +1696,15 @@ function crowdKey(crowd) {
 }
 
 function crowdCategoryLabel(crowd) {
-  const first = String(crowd?.senceFirstCategory || '').trim()
+  const first = crowdSceneLabel(crowd)
   const second = String(crowd?.senceSecondCategory || '').trim()
   if (first && second && first !== second) return `${first} / ${second}`
-  return second || first || (crowd?.source === 'recommended' ? '默认推荐人群' : '自定义人群')
+  return second || first
+}
+
+function crowdSceneLabel(crowd) {
+  return String(crowd?.sceneCategoryName || crowd?.senceFirstCategory ||
+    (crowd?.source === 'default' ? '默认推荐人群' : '已有选择')).trim()
 }
 
 function formatCrowdReach(crowd) {
@@ -1603,12 +1719,21 @@ function findSelectedCrowd(crowd) {
   return (config.dmpCrowdSettings || []).find((item) => crowdKey(item) === key)
 }
 
+function requiresCrowdSeed(crowd = {}) {
+  return Number(crowd?.crowdType) === 4 || Number(crowd?.recommendCrowdType) === 2 || crowd?.requiresSeed === true
+}
+
+function removeUnsupportedCrowds() {
+  config.dmpCrowdSettings = (config.dmpCrowdSettings || []).filter(item => !requiresCrowdSeed(item))
+  configFormRef.value?.validateField('dmpCrowdSettings').catch(() => {})
+}
+
 function isCrowdSelected(crowd) {
   return Boolean(findSelectedCrowd(crowd))
 }
 
 function getCrowdPremium(crowd) {
-  return Number(findSelectedCrowd(crowd)?.adGroupPrice ?? crowd?.adGroupPrice ?? 10)
+  return Number(findSelectedCrowd(crowd)?.adGroupPrice ?? crowd?.adGroupPrice ?? 30)
 }
 
 function toggleCrowd(crowd, checked) {
@@ -1623,13 +1748,17 @@ function toggleCrowd(crowd, checked) {
     return
   }
   if (index >= 0) return
+  if (requiresCrowdSeed(crowd)) {
+    showCenteredMessage('warning', '该人群需要配置种子，请按场景类型选择其他人群')
+    return
+  }
   if (selected.length >= 30) {
     showCenteredMessage('warning', '一个推广单元最多选择 30 个人群')
     return
   }
   selected.push({
     ...crowd,
-    adGroupPrice: Math.min(Math.max(Math.round(Number(crowd?.adGroupPrice) || 10), 10), 300),
+    adGroupPrice: Math.min(Math.max(Math.round(Number(crowd?.adGroupPrice) || 30), 10), 300),
     isUsed: 1
   })
   config.dmpCrowdSettings = selected
@@ -1676,6 +1805,9 @@ async function loadCrowds(silent = false) {
       crowdError.value = '当前店铺未返回可用人群'
     } else if (!silent) {
       showCenteredMessage('success', `已加载 ${crowdOptions.value.length} 个人群`)
+    }
+    if (result.excludedCount) {
+      crowdError.value = [crowdError.value, `已排除 ${result.excludedCount} 个需要种子的人群，请选择场景人群`].filter(Boolean).join('；')
     }
   } catch (error) {
     if (requestSeq !== crowdRequestSeq || requestedStoreId !== String(storeId.value)) return
@@ -1824,6 +1956,7 @@ async function checkSigningEnvironment() {
 
 async function prepareSingleProductKeywords() {
   if (!ensureStoreSelected() || keywordPrepareLoading.value) return
+  refreshExpiredStartDate()
   if (!selectedProducts.size) {
     ElMessage.warning('请先查询待推广商品')
     return
@@ -1854,11 +1987,16 @@ async function prepareSingleProductKeywords() {
 
 async function createSingleProductPlan() {
   if (!preparedKeywordResult.value || !signingReady.value || singleCreateLoading.value) return
+  refreshExpiredStartDate()
+  if (startDateError(config.startDate)) {
+    showCenteredMessage('warning', startDateError(config.startDate))
+    return
+  }
   const firstProduct = Array.from(selectedProducts.values())[0]
   const budgetText = config.unlimitedBudget ? '每日预算不限' : `每日预算 ¥${config.dailyBudget}`
   try {
     await ElMessageBox.confirm(
-      `将真实创建 1 个京东快车测试计划，只包含 SKU ${firstProduct?.skuId || '-'}；${budgetText}，目标投产比 ${bidModeLabel.value}。创建后需到京准通查看，是否继续？`,
+      `将真实创建 1 个京东快车测试计划，只包含 SKU ${firstProduct?.skuId || '-'}；开始日期 ${config.startDate}，${budgetText}，目标投产比 ${bidModeLabel.value}。创建后需到京准通查看，是否继续？`,
       '确认创建单商品测试计划',
       {
         confirmButtonText: '确认创建 1 个计划',
@@ -1876,6 +2014,7 @@ async function createSingleProductPlan() {
     const result = await window.electronAPI.invoke('jd-express-create-single-test', {
       storeId: storeId.value,
       preparationToken: preparedKeywordResult.value.preparationToken,
+      creationDates: { startDate: config.startDate, endDate: config.endDate, unlimitedEndDate: config.unlimitedEndDate },
       confirmation: 'CREATE_SINGLE_PRODUCT_TEST'
     })
     if (!result?.success) throw new Error(result?.message || '创建测试计划失败')
@@ -1893,6 +2032,7 @@ async function createSingleProductPlan() {
 
 async function prepareFullKeywords() {
   if (!ensureStoreSelected() || keywordPrepareLoading.value || fullPrepareLoading.value) return
+  refreshExpiredStartDate()
   if (!selectedProducts.size) {
     ElMessage.warning('请先查询待推广商品')
     return
@@ -1911,6 +2051,7 @@ async function prepareFullKeywords() {
     })
     if (!result?.success) throw new Error(result?.message || '全部关键词准备失败')
     preparedFullResult.value = result
+    rememberPreparationToken(result.preparationToken, result.expiresAt)
     if (result.keywordSummary?.errorUnitCount) {
       ElMessage.warning('全部关键词已准备，部分来源暂无数据，请核对提示后再创建')
     } else {
@@ -1926,6 +2067,16 @@ async function prepareFullKeywords() {
 
 async function createAllPlans() {
   if (!ensureStoreSelected() || fullCreateLoading.value) return
+  if (createdFullResult.value) {
+    showCenteredMessage('warning', '本轮任务已结束。请先核对创建结果，需要下一轮时重新选品，勿整批重复创建')
+    return
+  }
+  refreshExpiredStartDate()
+  const dateError = startDateError(config.startDate)
+  if (dateError) {
+    showCenteredMessage('warning', dateError)
+    return
+  }
   if (!selectedProducts.size) {
     showCenteredMessage('warning', '请先查询待推广商品')
     return
@@ -1935,17 +2086,19 @@ async function createAllPlans() {
     return
   }
   const summary = preview.value
+  const requestedStoreId = storeId.value
+  const requestedTool = activeTool.value
   const savedPreparationToken = readPreparationToken()
   const budgetText = config.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${config.dailyBudget}`
   const keywordBidText = config.useMinKeywordBid
     ? `关键词按京东最低出价＋¥${Number(config.keywordBidIncrement || 0).toFixed(1)}`
-    : `关键词固定出价 ¥${Number(config.customKeywordBid || 0.1).toFixed(1)}`
+    : `关键词起始出价 ¥${Number(config.customKeywordBid).toFixed(1)}，允许自动抬至京东底价，最高 ¥${Number(config.maxCustomKeywordBid).toFixed(1)}，超价词跳过`
   const createModeText = activeTool.value === 'custom'
     ? `自定义投放（${keywordBidText}，${deliveryModeLabel.value}，智能匹配出价 ¥${Number(config.inSearchFee || 0).toFixed(1)}）`
     : `目标投产比 ${bidModeLabel.value}`
   try {
     await ElMessageBox.confirm(
-      `将自动准备关键词并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；${budgetText}，${createModeText}。${savedPreparationToken ? '检测到可恢复的关键词结果，本次将直接继续创建。' : ''}是否继续？`,
+      `将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${config.startDate}，${budgetText}，${createModeText}。是否继续？`,
       '确认批量创建京东快车计划',
       {
         confirmButtonText: '确认创建全部计划',
@@ -1957,47 +2110,63 @@ async function createAllPlans() {
   } catch {
     return
   }
+  if (String(requestedStoreId) !== String(storeId.value) || requestedTool !== activeTool.value) {
+    showCenteredMessage('warning', '店铺或投放模式已变化，请重新确认创建预览')
+    return
+  }
 
   fullCreateLoading.value = true
   creationStartedAt.value = Date.now()
   creationSubmissionStarted.value = false
   createdFullResult.value = null
+  creationDetailPanels.value = []
+  creationQuotaRefreshFailed.value = false
   Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
   Object.assign(keywordPrepareProgress, { phase: 'prepare_start', unitIndex: 0, totalUnits: summary.unitCount, secondsRemaining: 0 })
   try {
     const result = await window.electronAPI.invoke('jd-express-create-full', {
-      storeId: storeId.value,
-      createMode: activeTool.value,
+      storeId: requestedStoreId,
+      createMode: requestedTool,
       products: toIpcPlainData(Array.from(selectedProducts.values())),
       config: toIpcPlainData(config),
       ...(savedPreparationToken ? { preparationToken: savedPreparationToken } : {}),
-      confirmation: activeTool.value === 'custom' ? 'CREATE_ALL_CUSTOM_CAMPAIGNS' : 'CREATE_ALL_ROI_CAMPAIGNS'
+      confirmation: requestedTool === 'custom' ? 'CREATE_ALL_CUSTOM_CAMPAIGNS' : 'CREATE_ALL_ROI_CAMPAIGNS'
     })
+    if (String(requestedStoreId) !== String(storeId.value) || requestedTool !== activeTool.value) return
     if (!result?.success) {
       if (result?.preparationToken) {
         rememberPreparationToken(result.preparationToken, result.preparationExpiresAt)
       }
-      if (result?.code === 'JD_EXPRESS_PREPARATION_EXPIRED') clearPreparationToken()
+      if (['JD_EXPRESS_PREPARATION_EXPIRED', 'JD_EXPRESS_PREPARATION_MISMATCH'].includes(result?.code)) clearPreparationToken()
       const requestError = new Error(result?.message || '批量创建计划失败')
       requestError.code = result?.code
       requestError.retryWithoutPreparation = result?.retryWithoutPreparation === true
       throw requestError
     }
     createdFullResult.value = result
+    activeStep.value = 2
+    await nextTick()
+    creationResultRef.value?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     clearPreparationToken()
     preparedFullResult.value = null
     preparedKeywordResult.value = null
-    if (result.failureCount) {
-      ElMessage.warning(`批量创建完成：成功 ${result.successCampaignCount}/${result.campaignCount} 个计划、${result.successUnitCount}/${result.unitCount} 个单元，失败 ${result.failureCount} 个单元`)
+    if (result.successUnitCount === 0 && !result.failureCount && result.skippedUnitCount) {
+      ElMessage.warning(`全部跳过：${result.skippedUnitCount} 个单元没有上限内可用的关键词，未创建计划；请检查最高出价和跳过明细`)
+    } else if (result.successUnitCount === 0) {
+      ElMessage.error(`全部创建失败：${result.failureCount} 个单元；${String(result.failures?.[0]?.message || '请展开失败明细查看原因').slice(0, 180)}`)
+    } else if (result.failureCount || result.skippedKeywordCount) {
+      ElMessage.warning(`批量创建完成：成功 ${result.successCampaignCount}/${result.campaignCount} 个计划、${result.successUnitCount}/${result.unitCount} 个单元，失败 ${result.failureCount} 个单元，跳过 ${result.skippedKeywordCount || 0} 个关键词、${result.skippedUnitCount || 0} 个单元`)
     } else {
       ElMessage.success(`批量创建成功：${result.successCampaignCount} 个计划、${result.successUnitCount} 个单元`)
     }
-    await runPreflight({ silent: true })
+    const quotaRefreshed = await runPreflight({ silent: true, preserveKeywordUsage: true })
+    creationQuotaRefreshFailed.value = !quotaRefreshed || !preflight.limitsAvailable
   } catch (error) {
+    const dateUpdated = error?.code === 'JD_EXPRESS_DATE_INVALID' && refreshExpiredStartDate()
     const canResume = Boolean(readPreparationToken()) || error?.retryWithoutPreparation
     const message = error?.message || '批量创建计划失败'
     if (canResume && !creationSubmissionStarted.value) {
-      showCenteredMessage('error', `${message}；关键词结果已保留，再次点击可直接重试`)
+      showCenteredMessage('error', `${dateUpdated ? '跨天后开始日期已更新为今天' : message}；关键词结果已保留，准备完成后 24 小时内可继续，请确认日期后再次创建`)
     } else if (creationSubmissionStarted.value) {
       showCenteredMessage('error', `${message}；提交状态可能不确定，请先前往京准通核对后再重试`)
     } else {
@@ -2006,6 +2175,28 @@ async function createAllPlans() {
   } finally {
     fullCreateLoading.value = false
   }
+}
+
+async function showCreationDetails(panel) {
+  creationDetailPanels.value = [...new Set([...creationDetailPanels.value, panel])]
+  await nextTick()
+  const details = panel === 'failures' ? creationFailureDetailsRef.value : creationSkipDetailsRef.value
+  const element = details?.$el || details
+  element?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
+
+function startNewCreationDraft() {
+  if (fullCreateLoading.value) return
+  createdFullResult.value = null
+  creationDetailPanels.value = []
+  creationQuotaRefreshFailed.value = false
+  Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
+  selectedProducts.clear()
+  excludedProducts.clear()
+  products.value = []
+  productTotal.value = 0
+  activeStep.value = 0
+  showCenteredMessage('info', '请重新查询待推广商品。建议保留“过滤已有推广 SKU/SPU”，避免重复推广')
 }
 
 async function runPreflight(options = {}) {
@@ -2017,7 +2208,7 @@ async function runPreflight(options = {}) {
     preflight.pin = result.pin || ''
     preflight.limitsAvailable = result.limitsAvailable !== false
     Object.assign(preflight.limits, result.limits || {})
-    if (preflight.limitsAvailable && Number(preflight.limits.keyword.surplus) > 0) {
+    if (!options.preserveKeywordUsage && preflight.limitsAvailable && Number(preflight.limits.keyword.surplus) > 0) {
       config.keywordTotalUsage = Number(preflight.limits.keyword.surplus)
     }
     if (!options.silent && !preflight.limitsAvailable) {
@@ -2027,7 +2218,7 @@ async function runPreflight(options = {}) {
     }
     return true
   } catch (error) {
-    ElMessage.error(error.message || '检测失败')
+    if (!options.silent) ElMessage.error(error.message || '检测失败')
     return false
   } finally {
     preflightLoading.value = false
@@ -2369,6 +2560,11 @@ function buildPreview() {
   if (!config.keywordSources.length) warnings.push('尚未选择关键词类型')
   if (keywordPercentageTotal.value > 100) warnings.push('关键词来源占比合计不能超过 100%')
   if (config.areaType === 2 && !config.areaIds.length) warnings.push('尚未选择投放区域')
+  if (activeTool.value === 'custom' && config.useMinKeywordBid === false &&
+    (!Number.isFinite(config.maxCustomKeywordBid) || config.maxCustomKeywordBid < 0.1 ||
+      config.maxCustomKeywordBid > 9999 || config.maxCustomKeywordBid < Number(config.customKeywordBid))) {
+    warnings.push('请设置关键词最高出价，且不能低于起始出价')
+  }
 
   return {
     campaigns,
@@ -2400,6 +2596,8 @@ function restoreConfig(value, mode = activeTool.value) {
       if (Object.prototype.hasOwnProperty.call(saved, key)) knownValues[key] = saved[key]
     }
     Object.assign(config, knownValues)
+    // A saved historical date must not override today's default. Keep valid future dates.
+    if (startDateError(config.startDate)) config.startDate = defaults.startDate
     config.schemaVersion = CONFIG_SCHEMA_VERSION
     config.createMode = mode === 'custom' ? 'custom' : 'roi'
     config.biddingTarget = config.createMode === 'custom' ? 1 : 16
@@ -2444,13 +2642,21 @@ function preparationStorageKey(value = storeId.value, mode = activeTool.value) {
     : `dxe_jd_express_preparation_${value || 'none'}`
 }
 
+function keywordPreparationConfig() {
+  const preparedConfig = toIpcPlainData(config)
+  delete preparedConfig.startDate
+  delete preparedConfig.endDate
+  delete preparedConfig.unlimitedEndDate
+  return preparedConfig
+}
+
 function creationInputSignature() {
   const skuIds = Array.from(selectedProducts.keys()).map(String).sort()
   const text = JSON.stringify({
     storeId: String(storeId.value || ''),
     createMode: activeTool.value,
     skuIds,
-    config: toIpcPlainData(config)
+    config: keywordPreparationConfig()
   })
   let hash = 2166136261
   for (let index = 0; index < text.length; index += 1) {
@@ -2556,6 +2762,33 @@ function formatLocalDate(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function startDateError(value) {
+  if (!value) return '请选择开始日期'
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+    formatLocalDate(new Date(`${value}T00:00:00`)) !== value) return '请选择有效的开始日期'
+  return value < formatLocalDate(new Date()) ? '开始日期不能早于今天，请选择今天或未来日期' : ''
+}
+
+function disabledStartDate(date) {
+  return formatLocalDate(date) < formatLocalDate(new Date())
+}
+
+function disabledEndDate(date) {
+  const today = formatLocalDate(new Date())
+  const earliest = !startDateError(config.startDate) && config.startDate > today ? config.startDate : today
+  return formatLocalDate(date) < earliest
+}
+
+function refreshExpiredStartDate() {
+  const value = config.startDate
+  const today = formatLocalDate(new Date())
+  // 已选未来日期保持不变；损坏/空值交给正常表单校验，不能静默替用户选日期。
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+    formatLocalDate(new Date(`${value}T00:00:00`)) !== value || value >= today) return false
+  config.startDate = today
+  return true
 }
 
 function formatMonthDay(date) {
@@ -3331,9 +3564,20 @@ function formatDuration(milliseconds) {
   margin-bottom: 0 !important;
 }
 
+.custom-keyword-bid-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0 16px;
+}
+
+.custom-keyword-bid-row .field-help {
+  flex-basis: 100%;
+}
+
 .fixed-keyword-bid-item :deep(.el-form-item__content) {
   display: grid;
-  grid-template-columns: minmax(130px, 190px) auto;
+  grid-template-columns: 130px auto;
   gap: 8px;
 }
 
@@ -3599,6 +3843,53 @@ function formatDuration(milliseconds) {
   word-break: break-all;
 }
 
+.creation-result-panel {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid #e7ecf5;
+  border-radius: 8px;
+  background: #fafcff;
+  scroll-margin-top: 16px;
+}
+
+.creation-result-panel :deep(.el-alert__title) {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.creation-result-panel :deep(.el-alert__description) {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.creation-result-hint,
+.creation-result-verification {
+  margin: 10px 0 0;
+  color: #5f6f86;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.creation-result-verification {
+  color: #b87416;
+}
+
+.creation-result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.creation-result-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.creation-result-actions .creation-run-id {
+  overflow-wrap: anywhere;
+}
+
 .preview-metrics {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -3643,6 +3934,17 @@ function formatDuration(milliseconds) {
   justify-content: flex-end;
   gap: 10px;
   padding-top: 16px;
+}
+
+.creation-failures {
+  margin-top: 12px;
+}
+
+.creation-run-id {
+  margin: 8px 0;
+  color: #909399;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .creation-progress-mask {
