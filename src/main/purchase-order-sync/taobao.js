@@ -30,6 +30,35 @@ const PLATFORM_CONFIG = {
   orderPageKeyword: 'list_bought_items'
 }
 
+async function prepareTaobaoSession(accountId, ses, logPrefix) {
+  let cookies = await ses.cookies.get({})
+  let validation = null
+
+  if (hasValidPlatformCookies(cookies, 'taobao')) {
+    validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+    if (validation.status !== 'invalid' && validation.status !== 'mismatch') {
+      console.log(`[${logPrefix}] 本地淘宝会话可继续使用: status=${validation.status}`)
+      return { cookies, validation }
+    }
+    console.warn(`[${logPrefix}] 本地淘宝会话校验失败，强制从云端恢复一次: status=${validation.status}`)
+  } else {
+    console.log(`[${logPrefix}] 本地缺少淘宝登录 Cookie，从云端恢复...`)
+  }
+
+  const restoreResult = await restoreCookiesFromServer(accountId, 'taobao', { force: true })
+  cookies = await ses.cookies.get({})
+  console.log(
+    `[${logPrefix}] 云端恢复完成: restored=${restoreResult.restored === true}, ` +
+    `count=${restoreResult.count || 0}, cookies=${cookies.length}`
+  )
+  if (!hasValidPlatformCookies(cookies, 'taobao')) {
+    return { cookies, validation: null, restoreResult }
+  }
+
+  validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
+  return { cookies, validation, restoreResult }
+}
+
 // ============ JSONP 剥离 ============
 
 /**
@@ -337,24 +366,14 @@ function syncSingle(accountId, platformOrderNo) {
     console.log(`[PurchaseSync-Taobao] accountId:${accountId} orderNo:${platformOrderNo}`)
     console.log(`[PurchaseSync-Taobao] Cookies: ${cookies.length} 条`)
 
-    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
-    if (hasValidPlatformCookies(cookies, 'taobao')) {
-      console.log(`[PurchaseSync-Taobao] partition 已有有效平台 cookies，跳过服务器恢复`)
-    } else {
-      // partition 缺少有效 cookies，尝试从服务器恢复（合并模式：只补充缺失的，不覆盖已有的）
-      console.log(`[PurchaseSync-Taobao] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
-      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
-      if (restoreResult.restored) {
-        cookies = await ses.cookies.get({})
-        console.log(`[PurchaseSync-Taobao] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
-      }
-    }
+    const preparedSession = await prepareTaobaoSession(accountId, ses, 'PurchaseSync-Taobao')
+    cookies = preparedSession.cookies
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 
-    const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+    const validation = preparedSession.validation || await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
     if (validation.status === 'invalid') {
       return resolve({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
     }
@@ -1515,23 +1534,14 @@ function syncAll(accountId) {
     console.log(`[PurchaseSync-Taobao-All] accountId:${accountId}`)
     console.log(`[PurchaseSync-Taobao-All] Cookies: ${cookies.length} 条`)
 
-    // 优化：先检查 partition 是否已有有效平台 cookies，有则跳过服务器恢复
-    if (hasValidPlatformCookies(cookies, 'taobao')) {
-      console.log(`[PurchaseSync-Taobao-All] partition 已有有效平台 cookies，跳过服务器恢复`)
-    } else {
-      console.log(`[PurchaseSync-Taobao-All] partition 缺少有效平台 cookies，从服务器恢复（合并模式）...`)
-      const restoreResult = await restoreCookiesFromServer(accountId, 'taobao')
-      if (restoreResult.restored) {
-        cookies = await ses.cookies.get({})
-        console.log(`[PurchaseSync-Taobao-All] cookie 恢复完成：${restoreResult.count} 条补充，${restoreResult.skipped} 条保留，当前 Cookies: ${cookies.length} 条`)
-      }
-    }
+    const preparedSession = await prepareTaobaoSession(accountId, ses, 'PurchaseSync-Taobao-All')
+    cookies = preparedSession.cookies
 
     if (!hasValidPlatformCookies(cookies, 'taobao')) {
       return resolve({ success: false, message: '该采购账号未登录，请先点击"登录"按钮登录账号' })
     }
 
-    const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+    const validation = preparedSession.validation || await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
     if (validation.status === 'invalid') {
       return resolve({ success: false, message: '采购账号登录已过期，请重新登录该账号', needsRelogin: true })
     }
@@ -1704,6 +1714,7 @@ function syncAll(accountId) {
 module.exports = {
   PLATFORM_CONFIG,
   parseResponse,
+  prepareTaobaoSession,
   syncSingle,
   syncAll
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import statusService from '../server/services/purchase-order-status-service.js'
 
 const {
+  PENDING_PRINT_SOURCE_STATUSES,
   markForwardedAfterCloudOutbound,
   markPendingPrintAfterExceptionResolution,
   mergePurchaseOrderStatus,
@@ -43,7 +44,10 @@ describe('purchase order workflow status', () => {
     expect(refinePurchaseOrderStatusByTracking('cancelled', signed, '')).toBe('cancelled')
   })
 
-  it('moves a received order to pending print inside the same tenant only', async () => {
+  it('allows confirmed cloud orders with stale unsynced states to move to pending print', async () => {
+    expect(PENDING_PRINT_SOURCE_STATUSES).toEqual([
+      'ordered', 'pending', 'shipped', 'in_transit', 'received'
+    ])
     const execute = vi.fn().mockResolvedValue([{ affectedRows: 1 }])
     await expect(markPendingPrintAfterExceptionResolution({ execute }, {
       ownerId: 7,
@@ -51,7 +55,7 @@ describe('purchase order workflow status', () => {
     })).resolves.toBe(true)
     expect(execute).toHaveBeenCalledWith(
       expect.stringContaining("SET status = 'pending_print'"),
-      [23, 7, 'shipped', 'in_transit', 'received']
+      [23, 7, 'ordered', 'pending', 'shipped', 'in_transit', 'received']
     )
   })
 

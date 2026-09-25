@@ -8,6 +8,7 @@ const {
   normalizeTaobaoSearchItems,
   summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
+  isTaobaoItemDetailPageUrl,
   detectTaobaoMarketplace,
   prepareTaobaoSameProductUrl,
   buildTaobaoSameSelection,
@@ -649,6 +650,16 @@ describe('淘宝按图搜同款', () => {
     })
     expect(fallback.product.shop).toBe('商品页兜底店铺')
     expect(fallback.product.shopSource).toBe('product-page-fallback')
+  })
+
+  it('把天猫超市重定向页识别为商品详情页并允许浮窗注入', () => {
+    expect(isTaobaoItemDetailPageUrl('https://chaoshi.detail.tmall.com/item.htm?id=760750746501')).toBe(true)
+    expect(isTaobaoItemDetailPageUrl('https://detail.tmall.com/item.htm?id=1')).toBe(true)
+    expect(isTaobaoItemDetailPageUrl('https://chaoshi.detail.tmall.com/item.htm')).toBe(false)
+    expect(isTaobaoItemDetailPageUrl('https://evil.detail.tmall.com.example.com/item.htm?id=1')).toBe(false)
+
+    const script = buildTaobaoSameProductInjection({ goodsName: '销售商品' })
+    expect(script).toContain("host.endsWith('.detail.tmall.com')")
   })
 
   it('商品页没有读到SKU价时必须标记失败，禁止静默使用搜索列表价', () => {

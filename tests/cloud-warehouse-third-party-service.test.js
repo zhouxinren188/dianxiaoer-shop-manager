@@ -1147,7 +1147,7 @@ describe('异常处理后的复查结果', () => {
     expect(config.exceptionResolution.resultRecordedAt).toBe('2026-08-15 16:19:01')
     expect(pool.execute).toHaveBeenLastCalledWith(
       expect.stringContaining("SET status = 'pending_print'"),
-      [99, 18, 'shipped', 'in_transit', 'received']
+      [99, 18, 'ordered', 'pending', 'shipped', 'in_transit', 'received']
     )
   })
 

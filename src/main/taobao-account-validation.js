@@ -197,6 +197,10 @@ function statusCacheTtl(status) {
   return status === 'valid' ? TAOBAO_VALIDATION_SUCCESS_TTL : TAOBAO_VALIDATION_FAILURE_TTL
 }
 
+function shouldPersistValidatedTaobaoCookies(result) {
+  return result?.cookieChanged === true && result?.status === 'valid'
+}
+
 function invalidateTaobaoAccountValidation(accountId) {
   validationCache.delete(String(accountId || ''))
 }
@@ -383,14 +387,16 @@ async function validateTaobaoPurchaseAccount({ accountId, ses, force = false, re
     const startedAt = Date.now()
     let result = await runTaobaoAccountValidation({ accountId: key, ses })
     let cookiePersistResult = null
-    if (result.cookieChanged) {
-      cookiePersistResult = await persistTaobaoSessionCookies(key, ses)
-    }
     if (report) {
       const reportResult = await reportTaobaoAccountValidation(key, result)
       if (reportResult.success && reportResult.result?.status === 'mismatch') {
         result = { ...result, status: 'mismatch', reason: 'account_identity_mismatch' }
       }
+    }
+    // 必须在服务端完成账号归属核对后再决定是否上传 Cookie。
+    // invalid/risk/unknown/mismatch 会话即使被淘宝轮换了 Token，也不能覆盖云端的可恢复快照。
+    if (shouldPersistValidatedTaobaoCookies(result)) {
+      cookiePersistResult = await persistTaobaoSessionCookies(key, ses)
     }
     result = {
       ...result,
@@ -431,6 +437,7 @@ module.exports = {
   parseMtopJson,
   extractTaobaoSimpleUser,
   classifyTaobaoUserSimpleResponse,
+  shouldPersistValidatedTaobaoCookies,
   invalidateTaobaoAccountValidation,
   validateTaobaoPurchaseAccount
 }

@@ -282,6 +282,20 @@
                       <el-input-number v-model="config.unitsPerCampaign" :min="1" :max="100" :precision="0" class="compact-number-control" />
                     </el-form-item>
                   </div>
+                  <el-form-item prop="timeRangeSchedule" class="time-range-form-item">
+                    <div class="time-range-setting-row">
+                      <div class="time-range-setting-copy">
+                        <strong>投放时段与实时折扣</strong>
+                        <small>100% 为原价，0 为停投；自定义支持 30%～500%</small>
+                      </div>
+                      <el-radio-group v-model="config.timeRangeMode" @change="handleTimeRangeModeChange">
+                        <el-radio value="all">全天投放</el-radio>
+                        <el-radio value="custom">自定义时段</el-radio>
+                      </el-radio-group>
+                      <el-button v-if="config.timeRangeMode === 'custom'" plain @click="openTimeRangeDialog">设置时段与折扣</el-button>
+                      <span class="time-range-summary">{{ timeRangeSummary }}</span>
+                    </div>
+                  </el-form-item>
                 </section>
 
                 <section class="config-section">
@@ -755,6 +769,7 @@
                 <div class="summary-list">
                   <div><span>计划前缀</span><strong>{{ config.namePrefix || '未设置' }}</strong></div>
                   <div><span>每日预算</span><strong>{{ config.unlimitedBudget ? '不限' : `¥${config.dailyBudget}` }}</strong></div>
+                  <div><span>投放时段</span><strong>{{ timeRangeSummary }}</strong></div>
                   <div><span>{{ activeTool === 'custom' ? '出价控制' : '投产模式' }}</span><strong>{{ deliveryModeLabel }}</strong></div>
                   <div><span>关键词来源</span><strong>{{ keywordSourceSummary }}</strong></div>
                   <div><span>匹配方式</span><strong>{{ keywordMatchTypeLabel }}</strong></div>
@@ -806,6 +821,7 @@
             <el-descriptions-item v-if="activeTool === 'custom'" label="搜索人群">{{ selectedCrowdSummary }}</el-descriptions-item>
             <el-descriptions-item label="匹配方式">{{ keywordMatchTypeLabel }}</el-descriptions-item>
             <el-descriptions-item label="地域">{{ areaSummary }}</el-descriptions-item>
+            <el-descriptions-item label="投放时段">{{ timeRangeSummary }}</el-descriptions-item>
             <el-descriptions-item label="计划分配">{{ config.planGroupMode === 'category' ? '按二级类目' : '按数量' }}</el-descriptions-item>
           </el-descriptions>
 
@@ -897,6 +913,107 @@
     </div>
 
     <el-dialog
+      v-model="timeRangeDialogVisible"
+      title="投放时段与实时折扣系数"
+      width="1180px"
+      align-center
+      append-to-body
+      class="time-range-dialog"
+      @closed="closeTimeRangeEditor"
+    >
+      <div class="time-range-toolbar">
+        <div class="time-range-instruction">
+          <strong>拖动框选投放时段</strong>
+          <span>松开鼠标后再设置所选区域的折扣系数</span>
+        </div>
+        <div class="time-range-presets">
+          <el-button size="small" @click="applyTimeRangePreset('all')">整周无折扣</el-button>
+          <el-button size="small" @click="applyTimeRangePreset('daytime')">每天 08:00–24:00</el-button>
+        </div>
+      </div>
+      <div class="time-range-tip">
+        每格代表 1 小时；按住起点格拖到终点格进行矩形框选，松开后选择“自定义、无折扣或不投放”。
+      </div>
+      <div class="time-range-matrix-wrap" @mouseleave="stopTimeRangePaint">
+        <table class="time-range-matrix">
+          <thead>
+            <tr>
+              <th class="time-range-day-column">星期</th>
+              <th colspan="6">凌晨&nbsp; 00:00–06:00</th>
+              <th colspan="6">早间&nbsp; 06:00–12:00</th>
+              <th colspan="6">午后&nbsp; 12:00–18:00</th>
+              <th colspan="6">晚间&nbsp; 18:00–24:00</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(day, rowIndex) in JD_TIME_RANGE_DAYS" :key="day.apiIndex">
+              <th class="time-range-day-column">
+                <el-checkbox
+                  :model-value="isTimeRangeDayEnabled(day.apiIndex)"
+                  :indeterminate="isTimeRangeDayPartial(day.apiIndex)"
+                  @change="toggleTimeRangeDay(day.apiIndex, $event)"
+                >{{ day.label }}</el-checkbox>
+              </th>
+              <td v-for="hour in 24" :key="hour - 1">
+                <button
+                  type="button"
+                  class="time-range-cell"
+                  :class="[
+                    timeRangeCellClass(timeRangeDraft[day.apiIndex][hour - 1]),
+                    timeRangeSelectionCellClass(rowIndex, hour - 1)
+                  ]"
+                  :style="timeRangeCellStyle(timeRangeDraft[day.apiIndex][hour - 1])"
+                  :title="`${day.label} ${String(hour - 1).padStart(2, '0')}:00–${String(hour % 24).padStart(2, '0')}:00，${timeRangeDraft[day.apiIndex][hour - 1] === 0 ? '停投' : `${timeRangeDraft[day.apiIndex][hour - 1]}%`}`"
+                  :aria-label="`${day.label} ${hour - 1} 时，${timeRangeDraft[day.apiIndex][hour - 1] === 0 ? '不投放' : `${timeRangeDraft[day.apiIndex][hour - 1]}%`}`"
+                  @mousedown.left.prevent="beginTimeRangePaint(rowIndex, hour - 1)"
+                  @mouseenter="continueTimeRangePaint(rowIndex, hour - 1)"
+                ></button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="time-range-legend">
+        <span><i class="is-level-1" />30%–100%</span>
+        <span><i class="is-level-2" />101%–200%</span>
+        <span><i class="is-level-3" />201%–300%</span>
+        <span><i class="is-level-4" />301%–400%</span>
+        <span><i class="is-level-5" />401%–500%</span>
+        <span><i class="is-off" />不投放</span>
+      </div>
+      <div v-if="timeRangeSelectionPopupVisible" class="time-range-selection-popover" @mousedown.stop>
+        <strong>{{ timeRangeSelectionSummary }}</strong>
+        <div class="time-range-apply-option">
+          <el-radio v-model="timeRangeApplyMode" value="custom">自定义</el-radio>
+          <div class="time-range-coefficient-input">
+            <el-input-number
+              v-model="timeRangeApplyCoefficient"
+              :disabled="timeRangeApplyMode !== 'custom'"
+              :min="30"
+              :max="500"
+              :step="10"
+              :precision="0"
+              size="small"
+              @focus="timeRangeApplyMode = 'custom'"
+            />
+            <span>%</span>
+          </div>
+        </div>
+        <el-radio v-model="timeRangeApplyMode" value="no_discount">无折扣（100%）</el-radio>
+        <el-radio v-model="timeRangeApplyMode" value="off">不投放</el-radio>
+        <div class="time-range-popover-actions">
+          <el-button size="small" @click="cancelTimeRangeSelection">取消</el-button>
+          <el-button size="small" type="primary" @click="confirmTimeRangeSelection">确认</el-button>
+        </div>
+      </div>
+      <template #footer>
+        <span class="time-range-dialog-summary">{{ timeRangeDraftSummary }}</span>
+        <el-button @click="timeRangeDialogVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="timeRangeSelectionPopupVisible" @click="saveTimeRangeSchedule">保存时段设置</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="crowdDialogVisible"
       title="选择搜索人群"
       width="820px"
@@ -980,9 +1097,17 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, EditPen, MagicStick, QuestionFilled, TrendCharts } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
 import { summarizeCreationResult, creationVerificationHint } from '@/utils/jdExpressCreationResult'
+import {
+  JD_TIME_RANGE_DAYS,
+  createFullTimeRangeSchedule,
+  normalizeTimeRangeSchedule,
+  summarizeTimeRangeSchedule,
+  timeRangeCoefficientColor,
+  timeRangeScheduleError
+} from '@/utils/jdExpressTimeRange'
 
 const JZT_URL = 'https://jzt.jd.com/msa/#/list/shopSmart?objective=item&scenario=normal&targetingType=shopSmart'
-const CONFIG_SCHEMA_VERSION = 6
+const CONFIG_SCHEMA_VERSION = 7
 const keywordSourceOptions = [
   { value: 1, label: '商智关键词', ratioKey: 'businessWisdomPercent', recommended: 20 },
   { value: 2, label: '商品推词', ratioKey: 'productPercent', recommended: 50 },
@@ -1063,6 +1188,13 @@ const crowdDialogVisible = ref(false)
 const crowdKeyword = ref('')
 const crowdCategory = ref('')
 const crowdLoadedStoreId = ref('')
+const timeRangeDialogVisible = ref(false)
+const timeRangeDraft = ref(createFullTimeRangeSchedule())
+const timeRangePainting = ref(false)
+const timeRangeSelectionPopupVisible = ref(false)
+const timeRangeApplyMode = ref('custom')
+const timeRangeApplyCoefficient = ref(100)
+const timeRangeSelection = reactive({ startRow: -1, startHour: -1, endRow: -1, endHour: -1 })
 let crowdRequestSeq = 0
 const products = ref([])
 const productTotal = ref(0)
@@ -1223,6 +1355,13 @@ const configRules = {
     },
     trigger: 'change'
   }],
+  timeRangeSchedule: [{
+    validator: (_rule, value, callback) => {
+      const error = config.timeRangeMode === 'custom' ? timeRangeScheduleError(value) : ''
+      callback(error ? new Error(error) : undefined)
+    },
+    trigger: 'change'
+  }],
   skuPerUnit: [{ required: true, message: '请设置每单元商品数', trigger: 'change' }],
   unitsPerCampaign: [{ required: true, message: '请设置每计划单元数', trigger: 'change' }],
   planGroupMode: [{ required: true, message: '请选择计划分配模式', trigger: 'change' }]
@@ -1254,6 +1393,19 @@ const keywordSourceSummary = computed(() => {
     .join('、')
 })
 const areaSummary = computed(() => config.areaType === 1 ? '不限' : `特定区域（${config.areaIds.length} 个）`)
+const timeRangeSummary = computed(() => summarizeTimeRangeSchedule(config.timeRangeMode, config.timeRangeSchedule))
+const timeRangeDraftSummary = computed(() => summarizeTimeRangeSchedule('custom', timeRangeDraft.value))
+const timeRangeSelectionSummary = computed(() => {
+  if (timeRangeSelection.startRow < 0) return ''
+  const firstRow = Math.min(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const lastRow = Math.max(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const firstHour = Math.min(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const lastHour = Math.max(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const firstDay = JD_TIME_RANGE_DAYS[firstRow]?.label || ''
+  const lastDay = JD_TIME_RANGE_DAYS[lastRow]?.label || ''
+  const dayText = firstRow === lastRow ? firstDay : `${firstDay}–${lastDay}`
+  return `${dayText}：${String(firstHour).padStart(2, '0')}:00–${String(lastHour + 1).padStart(2, '0')}:00`
+})
 const displayedProducts = computed(() => {
   const start = (filters.pageNo - 1) * filters.pageSize
   return products.value.slice(start, start + filters.pageSize)
@@ -1478,6 +1630,7 @@ function updateResponsiveTableHeights() {
 onMounted(() => {
   loadStores()
   window.addEventListener('resize', updateResponsiveTableHeights)
+  window.addEventListener('mouseup', stopTimeRangePaint)
   updateResponsiveTableHeights()
   removeProgressListener = window.electronAPI.onUpdate('jd-express-products-progress', (progress) => {
     if (progress?.storeId && String(progress.storeId) !== String(storeId.value)) return
@@ -1549,6 +1702,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', updateResponsiveTableHeights)
+  window.removeEventListener('mouseup', stopTimeRangePaint)
   removeProgressListener?.()
   removeCreationProgressListener?.()
   removeVerificationListener?.()
@@ -1622,9 +1776,176 @@ function createDefaultConfig(mode = 'roi') {
     endDate: formatLocalDate(addDays(new Date(), 30)),
     unlimitedBudget: true,
     dailyBudget: 50,
+    timeRangeMode: 'all',
+    timeRangeSchedule: createFullTimeRangeSchedule(),
     planGroupMode: 'category',
     unitsPerCampaign: 100
   }
+}
+
+function handleTimeRangeModeChange(mode) {
+  if (mode === 'custom') {
+    config.timeRangeSchedule = normalizeTimeRangeSchedule(config.timeRangeSchedule)
+    openTimeRangeDialog()
+  } else {
+    nextTick(() => configFormRef.value?.validateField('timeRangeSchedule').catch(() => {}))
+  }
+}
+
+function openTimeRangeDialog() {
+  timeRangeDraft.value = normalizeTimeRangeSchedule(config.timeRangeSchedule)
+  timeRangePainting.value = false
+  timeRangeSelectionPopupVisible.value = false
+  timeRangeApplyMode.value = 'custom'
+  timeRangeApplyCoefficient.value = 100
+  clearTimeRangeSelection()
+  timeRangeDialogVisible.value = true
+}
+
+function clearTimeRangeSelection() {
+  Object.assign(timeRangeSelection, { startRow: -1, startHour: -1, endRow: -1, endHour: -1 })
+}
+
+function beginTimeRangePaint(row, hour) {
+  timeRangeSelectionPopupVisible.value = false
+  timeRangePainting.value = true
+  Object.assign(timeRangeSelection, { startRow: row, startHour: hour, endRow: row, endHour: hour })
+}
+
+function continueTimeRangePaint(row, hour) {
+  if (!timeRangePainting.value) return
+  timeRangeSelection.endRow = row
+  timeRangeSelection.endHour = hour
+}
+
+function isTimeRangeCellSelected(row, hour) {
+  if ((!timeRangePainting.value && !timeRangeSelectionPopupVisible.value) || timeRangeSelection.startRow < 0) return false
+  const firstRow = Math.min(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const lastRow = Math.max(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const firstHour = Math.min(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const lastHour = Math.max(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  return row >= firstRow && row <= lastRow && hour >= firstHour && hour <= lastHour
+}
+
+function timeRangeSelectionCellClass(row, hour) {
+  if (!isTimeRangeCellSelected(row, hour)) return ''
+  const firstRow = Math.min(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const lastRow = Math.max(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const firstHour = Math.min(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const lastHour = Math.max(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  return [
+    'is-range-selecting',
+    ...(row === firstRow ? ['is-range-top'] : []),
+    ...(row === lastRow ? ['is-range-bottom'] : []),
+    ...(hour === firstHour ? ['is-range-left'] : []),
+    ...(hour === lastHour ? ['is-range-right'] : [])
+  ]
+}
+
+function stopTimeRangePaint() {
+  if (!timeRangePainting.value || timeRangeSelection.startRow < 0) return
+  timeRangePainting.value = false
+  const values = []
+  const firstRow = Math.min(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const lastRow = Math.max(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const firstHour = Math.min(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const lastHour = Math.max(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    const day = JD_TIME_RANGE_DAYS[row]?.apiIndex
+    if (day == null) continue
+    values.push(...timeRangeDraft.value[day].slice(firstHour, lastHour + 1))
+  }
+  const uniformValue = values.length && values.every((value) => value === values[0]) ? values[0] : null
+  timeRangeApplyMode.value = 'custom'
+  timeRangeApplyCoefficient.value = uniformValue >= 30 && uniformValue <= 500 ? uniformValue : 100
+  timeRangeSelectionPopupVisible.value = true
+}
+
+function cancelTimeRangeSelection() {
+  timeRangePainting.value = false
+  timeRangeSelectionPopupVisible.value = false
+  clearTimeRangeSelection()
+}
+
+function confirmTimeRangeSelection() {
+  let value = 0
+  if (timeRangeApplyMode.value === 'no_discount') value = 100
+  else if (timeRangeApplyMode.value === 'custom') {
+    value = Number(timeRangeApplyCoefficient.value)
+    if (!Number.isInteger(value) || value < 30 || value > 500) {
+      ElMessage.warning('请输入 30%～500% 的整数折扣系数')
+      return
+    }
+  }
+  const firstRow = Math.min(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const lastRow = Math.max(timeRangeSelection.startRow, timeRangeSelection.endRow)
+  const firstHour = Math.min(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  const lastHour = Math.max(timeRangeSelection.startHour, timeRangeSelection.endHour)
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    const day = JD_TIME_RANGE_DAYS[row]?.apiIndex
+    if (day == null) continue
+    for (let hour = firstHour; hour <= lastHour; hour += 1) timeRangeDraft.value[day][hour] = value
+  }
+  cancelTimeRangeSelection()
+}
+
+function toggleTimeRangeDay(day, enabled) {
+  cancelTimeRangeSelection()
+  timeRangeDraft.value[day] = Array(24).fill(enabled ? 100 : 0)
+}
+
+function isTimeRangeDayEnabled(day) {
+  return timeRangeDraft.value[day].some((value) => Number(value) > 0)
+}
+
+function isTimeRangeDayPartial(day) {
+  const activeHours = timeRangeDraft.value[day].filter((value) => Number(value) > 0).length
+  return activeHours > 0 && activeHours < 24
+}
+
+function applyTimeRangePreset(preset) {
+  cancelTimeRangeSelection()
+  if (preset === 'all') {
+    timeRangeDraft.value = createFullTimeRangeSchedule(100)
+    return
+  }
+  if (preset === 'daytime') {
+    const schedule = createFullTimeRangeSchedule(0)
+    for (const day of schedule) {
+      for (let hour = 8; hour < 24; hour += 1) day[hour] = 100
+    }
+    timeRangeDraft.value = schedule
+  }
+}
+
+function timeRangeCellClass(value) {
+  if (value === 0) return 'is-off'
+  if (value <= 100) return 'is-level-1'
+  if (value <= 200) return 'is-level-2'
+  if (value <= 300) return 'is-level-3'
+  if (value <= 400) return 'is-level-4'
+  return 'is-level-5'
+}
+
+function timeRangeCellStyle(value) {
+  return { '--time-range-cell-color': timeRangeCoefficientColor(value) }
+}
+
+function closeTimeRangeEditor() {
+  cancelTimeRangeSelection()
+}
+
+function saveTimeRangeSchedule() {
+  const error = timeRangeScheduleError(timeRangeDraft.value)
+  if (error) {
+    ElMessage.warning(error)
+    return
+  }
+  config.timeRangeSchedule = timeRangeDraft.value.map((day) => [...day])
+  config.timeRangeMode = 'custom'
+  cancelTimeRangeSelection()
+  timeRangeDialogVisible.value = false
+  nextTick(() => configFormRef.value?.validateField('timeRangeSchedule').catch(() => {}))
 }
 
 function selectTool(tool) {
@@ -1914,6 +2235,10 @@ async function handleStoreChange(value) {
   crowdError.value = ''
   crowdPartial.value = false
   crowdDialogVisible.value = false
+  timeRangeDialogVisible.value = false
+  timeRangePainting.value = false
+  timeRangeSelectionPopupVisible.value = false
+  clearTimeRangeSelection()
   crowdKeyword.value = ''
   crowdCategory.value = ''
   crowdLoadedStoreId.value = ''
@@ -1992,11 +2317,16 @@ async function createSingleProductPlan() {
     showCenteredMessage('warning', startDateError(config.startDate))
     return
   }
+  const scheduleError = config.timeRangeMode === 'custom' ? timeRangeScheduleError(config.timeRangeSchedule) : ''
+  if (scheduleError) {
+    showCenteredMessage('warning', scheduleError)
+    return
+  }
   const firstProduct = Array.from(selectedProducts.values())[0]
   const budgetText = config.unlimitedBudget ? '每日预算不限' : `每日预算 ¥${config.dailyBudget}`
   try {
     await ElMessageBox.confirm(
-      `将真实创建 1 个京东快车测试计划，只包含 SKU ${firstProduct?.skuId || '-'}；开始日期 ${config.startDate}，${budgetText}，目标投产比 ${bidModeLabel.value}。创建后需到京准通查看，是否继续？`,
+      `将真实创建 1 个京东快车测试计划，只包含 SKU ${firstProduct?.skuId || '-'}；开始日期 ${config.startDate}，${budgetText}，${timeRangeSummary.value}，目标投产比 ${bidModeLabel.value}。创建后需到京准通查看，是否继续？`,
       '确认创建单商品测试计划',
       {
         confirmButtonText: '确认创建 1 个计划',
@@ -2014,7 +2344,13 @@ async function createSingleProductPlan() {
     const result = await window.electronAPI.invoke('jd-express-create-single-test', {
       storeId: storeId.value,
       preparationToken: preparedKeywordResult.value.preparationToken,
-      creationDates: { startDate: config.startDate, endDate: config.endDate, unlimitedEndDate: config.unlimitedEndDate },
+      creationDates: toIpcPlainData({
+        startDate: config.startDate,
+        endDate: config.endDate,
+        unlimitedEndDate: config.unlimitedEndDate,
+        timeRangeMode: config.timeRangeMode,
+        timeRangeSchedule: config.timeRangeSchedule
+      }),
       confirmation: 'CREATE_SINGLE_PRODUCT_TEST'
     })
     if (!result?.success) throw new Error(result?.message || '创建测试计划失败')
@@ -2077,6 +2413,11 @@ async function createAllPlans() {
     showCenteredMessage('warning', dateError)
     return
   }
+  const scheduleError = config.timeRangeMode === 'custom' ? timeRangeScheduleError(config.timeRangeSchedule) : ''
+  if (scheduleError) {
+    showCenteredMessage('warning', scheduleError)
+    return
+  }
   if (!selectedProducts.size) {
     showCenteredMessage('warning', '请先查询待推广商品')
     return
@@ -2098,7 +2439,7 @@ async function createAllPlans() {
     : `目标投产比 ${bidModeLabel.value}`
   try {
     await ElMessageBox.confirm(
-      `将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${config.startDate}，${budgetText}，${createModeText}。是否继续？`,
+      `将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${config.startDate}，${budgetText}，${timeRangeSummary.value}，${createModeText}。是否继续？`,
       '确认批量创建京东快车计划',
       {
         confirmButtonText: '确认创建全部计划',
@@ -2560,6 +2901,10 @@ function buildPreview() {
   if (!config.keywordSources.length) warnings.push('尚未选择关键词类型')
   if (keywordPercentageTotal.value > 100) warnings.push('关键词来源占比合计不能超过 100%')
   if (config.areaType === 2 && !config.areaIds.length) warnings.push('尚未选择投放区域')
+  if (config.timeRangeMode === 'custom') {
+    const scheduleError = timeRangeScheduleError(config.timeRangeSchedule)
+    if (scheduleError) warnings.push(scheduleError)
+  }
   if (activeTool.value === 'custom' && config.useMinKeywordBid === false &&
     (!Number.isFinite(config.maxCustomKeywordBid) || config.maxCustomKeywordBid < 0.1 ||
       config.maxCustomKeywordBid > 9999 || config.maxCustomKeywordBid < Number(config.customKeywordBid))) {
@@ -2625,6 +2970,8 @@ function restoreConfig(value, mode = activeTool.value) {
         }))
       : []
     config.areaIds = Array.isArray(config.areaIds) ? [...new Set(config.areaIds.map(String).filter(Boolean))] : []
+    config.timeRangeMode = config.timeRangeMode === 'custom' ? 'custom' : 'all'
+    config.timeRangeSchedule = normalizeTimeRangeSchedule(config.timeRangeSchedule)
     return Number(saved.schemaVersion) >= CONFIG_SCHEMA_VERSION
   } catch {
     localStorage.removeItem(configStorageKey(value, mode))
@@ -2647,6 +2994,8 @@ function keywordPreparationConfig() {
   delete preparedConfig.startDate
   delete preparedConfig.endDate
   delete preparedConfig.unlimitedEndDate
+  delete preparedConfig.timeRangeMode
+  delete preparedConfig.timeRangeSchedule
   return preparedConfig
 }
 
@@ -3334,6 +3683,341 @@ function formatDuration(milliseconds) {
 
 .planning-rule-grid {
   grid-template-columns: minmax(300px, 420px) minmax(180px, 220px);
+}
+
+.time-range-form-item {
+  margin-top: -2px;
+}
+
+.time-range-form-item :deep(.el-form-item__content) {
+  display: block;
+}
+
+.time-range-setting-row {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  gap: 18px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #e6eaf1;
+  border-radius: 7px;
+}
+
+.time-range-setting-copy {
+  display: flex;
+  min-width: 250px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.time-range-setting-copy strong {
+  color: #3f4b60;
+  font-size: 13px;
+}
+
+.time-range-setting-copy small,
+.time-range-summary {
+  color: #8a94a5;
+  font-size: 12px;
+}
+
+.time-range-summary {
+  margin-left: auto;
+  color: #52617a;
+  white-space: nowrap;
+}
+
+:global(.time-range-dialog) {
+  max-width: calc(100vw - 36px);
+}
+
+:global(.time-range-dialog .el-dialog__body) {
+  position: relative;
+  padding-top: 10px;
+}
+
+:global(.time-range-dialog .el-dialog__footer) {
+  display: flex;
+  align-items: center;
+}
+
+:global(.time-range-toolbar) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 12px;
+  background: #f7f9fc;
+  border-radius: 7px;
+}
+
+:global(.time-range-instruction),
+:global(.time-range-presets) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+:global(.time-range-instruction) {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+
+:global(.time-range-instruction strong) {
+  color: #3e4b61;
+  font-size: 13px;
+}
+
+:global(.time-range-instruction span) {
+  color: #667085;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+:global(.time-range-presets .el-button + .el-button) {
+  margin-left: 0;
+}
+
+:global(.time-range-tip) {
+  padding: 9px 2px;
+  color: #7b8494;
+  font-size: 12px;
+}
+
+:global(.time-range-matrix-wrap) {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #dfe4ec;
+  border-radius: 7px;
+  user-select: none;
+}
+
+:global(.time-range-matrix) {
+  width: 100%;
+  min-width: 900px;
+  border-spacing: 0;
+  border-collapse: separate;
+  table-layout: fixed;
+}
+
+:global(.time-range-matrix th),
+:global(.time-range-matrix td) {
+  padding: 0;
+  border-right: 1px solid #edf0f5;
+  border-bottom: 1px solid #edf0f5;
+  text-align: center;
+}
+
+:global(.time-range-matrix tr:last-child th),
+:global(.time-range-matrix tr:last-child td) {
+  border-bottom: 0;
+}
+
+:global(.time-range-matrix th:last-child),
+:global(.time-range-matrix td:last-child) {
+  border-right: 0;
+}
+
+:global(.time-range-matrix thead th) {
+  height: 42px;
+  color: #30394a;
+  background: #f5f7fb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+:global(.time-range-matrix .time-range-day-column) {
+  width: 92px;
+  color: #465268;
+  background: #fafbfe;
+  font-size: 12px;
+}
+
+:global(.time-range-day-column .el-checkbox) {
+  height: 38px;
+  margin-right: 0;
+}
+
+:global(.time-range-day-column .el-checkbox__label) {
+  padding-left: 5px;
+  color: #3f4b60;
+  font-size: 12px;
+}
+
+:global(.time-range-cell) {
+  width: 100%;
+  min-width: 30px;
+  height: 39px;
+  padding: 0;
+  background: #fff;
+  border: 1px solid transparent;
+  border-radius: 0;
+  cursor: crosshair;
+}
+
+:global(.time-range-cell.is-level-1) {
+  background: var(--time-range-cell-color, #ffd3ad);
+}
+
+:global(.time-range-cell.is-level-2) {
+  background: var(--time-range-cell-color, #ff7f84);
+}
+
+:global(.time-range-cell.is-level-3) {
+  background: var(--time-range-cell-color, #be54bb);
+}
+
+:global(.time-range-cell.is-level-4) {
+  background: var(--time-range-cell-color, #844acd);
+}
+
+:global(.time-range-cell.is-level-5) {
+  background: var(--time-range-cell-color, #4c65d3);
+}
+
+:global(.time-range-cell.is-off),
+:global(.time-range-legend i.is-off) {
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #e7ebf2;
+}
+
+:global(.time-range-legend i.is-level-1) {
+  background: linear-gradient(90deg, #fff4e7, #ffd3ad);
+}
+
+:global(.time-range-legend i.is-level-2) {
+  background: linear-gradient(90deg, #ffcfad, #ff7f84);
+}
+
+:global(.time-range-legend i.is-level-3) {
+  background: linear-gradient(90deg, #ff7f84, #be54bb);
+}
+
+:global(.time-range-legend i.is-level-4) {
+  background: linear-gradient(90deg, #be54bb, #844acd);
+}
+
+:global(.time-range-legend i.is-level-5) {
+  background: linear-gradient(90deg, #844acd, #4c65d3);
+}
+
+:global(.time-range-cell:hover) {
+  border-color: #2b5aed;
+}
+
+:global(.time-range-cell.is-range-selecting) {
+  position: relative;
+  z-index: 1;
+  background: #ff989c;
+  border-color: transparent;
+  box-shadow: none;
+  filter: none;
+}
+
+:global(.time-range-cell.is-range-top) {
+  border-top-color: #fa4f58;
+}
+
+:global(.time-range-cell.is-range-bottom) {
+  border-bottom-color: #fa4f58;
+}
+
+:global(.time-range-cell.is-range-left) {
+  border-left-color: #fa4f58;
+}
+
+:global(.time-range-cell.is-range-right) {
+  border-right-color: #fa4f58;
+}
+
+:global(.time-range-legend) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 18px;
+  padding: 14px 0 2px;
+}
+
+:global(.time-range-legend span) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #52617a;
+  font-size: 12px;
+}
+
+:global(.time-range-legend i) {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(73, 84, 104, 0.08);
+}
+
+:global(.time-range-selection-popover) {
+  position: absolute;
+  z-index: 20;
+  top: 155px;
+  left: 50%;
+  display: flex;
+  width: 270px;
+  padding: 16px 18px;
+  flex-direction: column;
+  gap: 10px;
+  background: #fff;
+  border: 1px solid #e1e5ec;
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(31, 42, 68, 0.2);
+  transform: translateX(-50%);
+}
+
+:global(.time-range-selection-popover > strong) {
+  padding-bottom: 10px;
+  color: #30394a;
+  border-bottom: 1px solid #edf0f5;
+  font-size: 13px;
+}
+
+:global(.time-range-selection-popover .el-radio) {
+  height: 26px;
+  margin-right: 0;
+}
+
+:global(.time-range-apply-option) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:global(.time-range-coefficient-input) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 26px;
+  color: #667085;
+  font-size: 12px;
+}
+
+:global(.time-range-coefficient-input .el-input-number) {
+  width: 138px;
+}
+
+:global(.time-range-popover-actions) {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+:global(.time-range-popover-actions .el-button + .el-button) {
+  margin-left: 0;
+}
+
+:global(.time-range-dialog-summary) {
+  margin-right: auto;
+  color: #52617a;
+  font-size: 12px;
 }
 
 .compact-number-grid {
@@ -4134,6 +4818,31 @@ function formatDuration(milliseconds) {
 
   .fixed-setting-row .el-tag {
     margin-left: 0;
+  }
+
+  .time-range-setting-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+  }
+
+  .time-range-setting-copy {
+    width: 100%;
+  }
+
+  .time-range-summary {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  :global(.time-range-toolbar) {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  :global(.time-range-instruction),
+  :global(.time-range-presets) {
+    flex-wrap: wrap;
   }
 
   .crowd-setting-header {

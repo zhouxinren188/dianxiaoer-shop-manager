@@ -1,6 +1,7 @@
 'use strict'
 
 const { normalizeCrowdSettings, assertCrowdSettings } = require('./jd-express-crowds')
+const { normalizeTimeRangeConfig } = require('./jd-express-time-range')
 
 const JD_EXPRESS_READ_POLICY = Object.freeze({
   pageSize: 100,
@@ -306,22 +307,25 @@ function assertCreationDates(config = {}, now = new Date()) {
   return startDate
 }
 
-const CREATION_DATE_FIELDS = Object.freeze(['startDate', 'endDate', 'unlimitedEndDate'])
+const CREATION_ONLY_FIELDS = Object.freeze([
+  'startDate', 'endDate', 'unlimitedEndDate', 'timeRangeMode', 'timeRangeSchedule'
+])
 
 function withPreparedCreationDates(prepared, dates = {}) {
   const config = { ...prepared.config }
-  // 日期不参与关键词准备；只能覆盖日期，不能借恢复令牌更改出价或商品。
-  for (const field of CREATION_DATE_FIELDS) {
+  // 日期和分时折扣只影响计划提交，不参与关键词准备；不能借恢复令牌更改出价或商品。
+  for (const field of CREATION_ONLY_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(dates, field)) config[field] = dates[field]
   }
   config.startDate = assertCreationDates(config)
+  Object.assign(config, normalizeTimeRangeConfig(config))
   return { ...prepared, config }
 }
 
 function assertPreparedInputsMatch(prepared, payload = {}) {
   const configSignature = (input) => {
     const normalized = normalizeRoiConfig(input)
-    for (const field of CREATION_DATE_FIELDS) delete normalized[field]
+    for (const field of CREATION_ONLY_FIELDS) delete normalized[field]
     return JSON.stringify(normalized)
   }
   const skuSignature = (products) => JSON.stringify([...new Set(products
@@ -363,6 +367,7 @@ function normalizeRoiConfig(input = {}) {
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(String(input.startDate || ''))
     ? String(input.startDate)
     : formatPlanDate()
+  const timeRangeConfig = normalizeTimeRangeConfig(input)
 
   return {
     namePrefix: String(input.namePrefix || '店小二_ROI').trim().slice(0, 20),
@@ -412,7 +417,8 @@ function normalizeRoiConfig(input = {}) {
     dailyBudget: unlimitedBudget ? null : clampInteger(input.dailyBudget, 50, 999999, 50),
     startDate,
     unlimitedEndDate,
-    endDate: unlimitedEndDate ? null : String(input.endDate || '')
+    endDate: unlimitedEndDate ? null : String(input.endDate || ''),
+    ...timeRangeConfig
   }
 }
 

@@ -96,6 +96,35 @@ describe('京东快车单商品创建组包', () => {
     })
   })
 
+  it('ROI 与自定义计划都提交同一份分时折扣数据', () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(100))
+    schedule[0][0] = 0
+    schedule[1][8] = 80
+    const timeConfig = { timeRangeMode: 'custom', timeRangeSchedule: schedule }
+    const roiBody = buildCampaignCreateBody({ planName: 'ROI计划', units: [unit] }, {
+      ...config,
+      ...timeConfig
+    }, { recommendFloorBid: 4, top_price_troi: 10 }, 'version', 123)
+    const customBody = buildCustomCampaignCreateBody({ planName: '自定义计划', units: [unit] }, {
+      ...config,
+      createMode: 'custom',
+      biddingTarget: 1,
+      automatedBiddingType: 32768,
+      premiumType: 2,
+      premiumCoef: 30,
+      inSearchFee: 0.1,
+      orientationRangeOption: [1],
+      dmpCrowdSettings: [],
+      ...timeConfig
+    }, 'version')
+
+    const roiTimeRange = JSON.parse(roiBody.campaignCreateCommand.timeRangePriceCoef)
+    expect(roiTimeRange.detail['0'].price_coef[0]).toBe(0)
+    expect(roiTimeRange.detail['1'].price_coef[8]).toBe(80)
+    expect(customBody.campaignCreateCommand.timeRangePriceCoef)
+      .toBe(roiBody.campaignCreateCommand.timeRangePriceCoef)
+  })
+
   it('拒绝把多商品准备结果提交到单商品测试接口', async () => {
     await expect(createSingleProductTest({
       prepared: {

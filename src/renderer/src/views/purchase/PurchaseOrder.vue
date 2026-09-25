@@ -23,7 +23,7 @@
                 <span>{{ acc.username || '未命名' }}</span>
                 <div style="display:flex;gap:6px;align-items:center">
                   <el-tag :type="platformTagType(acc.platform)" size="small">{{ platformLabel(acc.platform) }}</el-tag>
-                  <el-tag :type="acc.cookie_valid ? 'success' : 'danger'" size="small">{{ acc.cookie_valid ? '有效' : '失效' }}</el-tag>
+                  <el-tag :type="purchaseAccountCookieStatusType(acc)" size="small">{{ purchaseAccountCookieStatusLabel(acc) }}</el-tag>
                 </div>
               </div>
             </el-option>
@@ -98,7 +98,7 @@
                 <span>{{ acc.username || '未命名' }}</span>
                 <div style="display:flex;gap:6px;align-items:center">
                   <el-tag :type="platformTagType(acc.platform)" size="small">{{ platformLabel(acc.platform) }}</el-tag>
-                  <el-tag :type="acc.cookie_valid ? 'success' : 'danger'" size="small">{{ acc.cookie_valid ? '有效' : '失效' }}</el-tag>
+                  <el-tag :type="purchaseAccountCookieStatusType(acc)" size="small">{{ purchaseAccountCookieStatusLabel(acc) }}</el-tag>
                 </div>
               </div>
             </el-option>
@@ -3571,7 +3571,7 @@ async function confirmCreateAndBind() {
 const syncDialogVisible = ref(false)
 const syncForm = reactive({
   platform: 'taobao',
-  accountId: 'default'
+  accountId: ''
 })
 
 // ==================== 手动添加采购单 ====================
@@ -3758,6 +3758,10 @@ function handleSync() {
 }
 
 async function handleSyncSubmit() {
+  if (!syncForm.accountId) {
+    ElMessage.warning('请先选择采购账号')
+    return
+  }
   syncing.value = true
   // 重置进度
   batchSyncProgress.active = false

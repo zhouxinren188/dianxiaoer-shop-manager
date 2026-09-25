@@ -4,6 +4,7 @@ const { adjustRoiBid, assertCreationDates, assertCustomKeywordBidConfig } = requ
 const { applyCustomKeywordBidLimit, KEYWORD_MIN_BID_URL } = require('./jd-express-keywords')
 const { isJdSessionExpiredPayload, isJdSessionFailure } = require('./jd-session-recovery')
 const { assertCrowdSettings, normalizeCrowdSettings } = require('./jd-express-crowds')
+const { normalizeTimeRangeConfig, serializeTimeRangePriceCoef } = require('./jd-express-time-range')
 const {
   creationErrorDetails, creationResponseError, creationUnitContext, creationBodySummary,
   emitCreationDiagnostic, runCreationStage
@@ -126,7 +127,7 @@ function buildCampaignCreateBody(campaign, config, suggestion, recommendVersionI
       endTime: config.unlimitedEndDate ? null : config.endDate,
       dateRange: '',
       dayBudget: config.unlimitedBudget ? null : config.dailyBudget,
-      timeRangePriceCoef: '',
+      timeRangePriceCoef: serializeTimeRangePriceCoef(config),
       subExpType: '',
       expTarget: '',
       requestFrom: 0,
@@ -232,7 +233,7 @@ function buildCustomCampaignCreateBody(campaign, config, recommendVersionId) {
       endTime: config.unlimitedEndDate ? null : config.endDate,
       dateRange: '',
       dayBudget: config.unlimitedBudget ? null : config.dailyBudget,
-      timeRangePriceCoef: '',
+      timeRangePriceCoef: serializeTimeRangePriceCoef(config),
       subExpType: '',
       expTarget: '',
       requestFrom: 0,
@@ -348,6 +349,7 @@ async function createSingleProductTest(options = {}) {
   }
   if (!eid) throw new Error('京东 eid Cookie 缺失，请重新登录京准通')
   assertCreationDates(prepared.config || {})
+  normalizeTimeRangeConfig(prepared.config || {})
   const campaign = prepared.campaigns[0]
   const unit = campaign.units[0]
   const context = creationUnitContext(campaign, unit, 0, 0)
@@ -410,6 +412,7 @@ async function createRoiCampaigns(options = {}) {
   if (!prepared?.campaigns?.length) throw new Error('没有可提交的广告计划')
   if (!eid) throw new Error('京东 eid Cookie 缺失，请重新登录京准通')
   assertCreationDates(prepared.config || {})
+  normalizeTimeRangeConfig(prepared.config || {})
 
   const createdCampaigns = []
   const createdUnits = []
@@ -578,6 +581,7 @@ async function createCustomCampaigns(options = {}) {
   if (!prepared?.campaigns?.length) throw new Error('没有可提交的广告计划')
   if (!eid) throw new Error('京东 eid Cookie 缺失，请重新登录京准通')
   assertCreationDates(prepared.config || {})
+  normalizeTimeRangeConfig(prepared.config || {})
   assertCustomKeywordBidConfig({ ...prepared.config, createMode: 'custom' })
   assertCrowdSettings(prepared.config.dmpCrowdSettings)
 

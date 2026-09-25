@@ -7,7 +7,8 @@ const {
   createTaobaoCookieFingerprint,
   extractTaobaoSimpleUser,
   hasTaobaoLoginCookie,
-  selectTaobaoMtopToken
+  selectTaobaoMtopToken,
+  shouldPersistValidatedTaobaoCookies
 } = validation
 
 describe('淘宝采购账号轻量校验', () => {
@@ -82,5 +83,14 @@ describe('淘宝采购账号轻量校验', () => {
     expect(classifyTaobaoUserSimpleResponse({ ret: ['FAIL_SYS_TOKEN_EXPIRED::令牌过期'] }).status).toBe('token')
     expect(classifyTaobaoUserSimpleResponse({ ret: ['FAIL_SYS_TRAFFIC_LIMIT::被挤爆'] }).status).toBe('unknown')
     expect(classifyTaobaoUserSimpleResponse({ ret: ['SUCCESS::调用成功'], data: {} }).status).toBe('unknown')
+  })
+
+  it('只有确认有效且 Cookie 确实变化时才覆盖云端快照', () => {
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'valid', cookieChanged: true })).toBe(true)
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'valid', cookieChanged: false })).toBe(false)
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'invalid', cookieChanged: true })).toBe(false)
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'risk', cookieChanged: true })).toBe(false)
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'unknown', cookieChanged: true })).toBe(false)
+    expect(shouldPersistValidatedTaobaoCookies({ status: 'mismatch', cookieChanged: true })).toBe(false)
   })
 })

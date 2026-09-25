@@ -525,9 +525,21 @@ function refineStatusByTracking(status, tracking, logisticsStatus) {
 const PLATFORM_DOMAINS = {
   jd: ['jd.com', 'jd.hk'],
   pinduoduo: ['pinduoduo.com', 'yangkeduo.com'],
-  taobao: ['taobao.com', 'tmall.com'],
+  taobao: ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com'],
+  tmall: ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com'],
   '1688': ['1688.com', 'alibaba.com'],
   douyin: ['douyin.com', 'jinritemai.com']
+}
+
+function isCookieForPlatform(cookie, platform) {
+  const domains = PLATFORM_DOMAINS[String(platform || '').toLowerCase()] || []
+  if (!domains.length) return false
+  const cookieDomain = String(cookie?.domain || '').replace(/^\./, '').toLowerCase()
+  return domains.some(domain => cookieDomain === domain || cookieDomain.endsWith(`.${domain}`))
+}
+
+function filterCookiesForPlatform(cookies, platform) {
+  return Array.isArray(cookies) ? cookies.filter(cookie => isCookieForPlatform(cookie, platform)) : []
 }
 
 /**
@@ -551,13 +563,28 @@ function hasValidPlatformCookies(cookies, platform) {
   const now = Date.now() / 1000
   const validPlatformCookies = cookies.filter(ck => {
     // 必须属于该平台域名
-    if (!ck.domain || !domains.some(d => ck.domain.includes(d))) return false
+    if (!isCookieForPlatform(ck, platform)) return false
     // 必须未过期（session cookie 无 expirationDate 或为 0，视为有效）
     if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate <= now) return false
     return true
   })
 
   if (validPlatformCookies.length === 0) return false
+
+  // 淘宝域内的 cna、t、_m_h5_tk 等追踪/接口 Cookie 并不能代表买家已登录。
+  // 至少要有一个稳定的账号登录 Cookie，才允许跳过云端恢复。
+  if (platform === 'taobao' || platform === 'tmall') {
+    const loginCookieNames = new Set(['unb', 'cookie17', 'cookie2'])
+    const loginDomains = ['taobao.com', 'tmall.com', 'tmall.hk']
+    if (!validPlatformCookies.some(cookie => {
+      if (!loginCookieNames.has(String(cookie.name || '')) || !cookie.value) return false
+      const cookieDomain = String(cookie.domain || '').replace(/^\./, '').toLowerCase()
+      return loginDomains.some(domain => cookieDomain === domain || cookieDomain.endsWith(`.${domain}`))
+    })) {
+      console.warn('[CookieCheck] 淘宝缺少账号登录 Cookie，视为无效')
+      return false
+    }
+  }
 
   // PDD 平台额外检查：PDDAccessToken 是必要条件
   // 只有 api_uid 等非认证 cookie 而无 PDDAccessToken，PDD 服务器会拒绝请求
@@ -586,7 +613,8 @@ const COOKIE_RESTORE_CACHE_TTL = 600000 // 10 分钟缓存有效期（批量同�
  * - 如果 partition 已有同名/同域/同路径的 cookie，跳过（保留 partition 的新鲜版本）
  * - 如果 partition 缺少该 cookie，从服务器补充（确保多用户共享同一份 cookie）
  *
- * 缓存策略：同一 accountId+platform 在 60 秒内不重复请求服务器（批量同步场景优化）
+ * 缓存策略：同一 accountId+platform 在 10 分钟内不重复请求服务器（批量同步场景优化）；
+ * 明确判定本地会话失效时通过 force 绕过缓存，立即获取云端最新快照。
  *
  * 解决场景：
  * - 子账号新增采购账号后，其他用户在本机 partition 无 cookie 导致"未登录"
@@ -600,13 +628,13 @@ const COOKIE_RESTORE_CACHE_TTL = 600000 // 10 分钟缓存有效期（批量同�
  * @param {string} platform - 平台 (pinduoduo/taobao/1688/douyin)
  * @returns {Promise<{restored: boolean, count: number, skipped: number}>} 恢复结果
  */
-async function restoreCookiesFromServer(accountId, platform) {
+async function restoreCookiesFromServer(accountId, platform, { force = false } = {}) {
   const RESTORE_TIMEOUT = 5000 // 5 秒总超时，防止 HTTP 请求挂起阻塞同步
 
   // 检查缓存：同一 accountId+platform 在 CACHE_TTL 内不重复请求
   const cacheKey = `${accountId}|${platform}`
   const cached = _cookieRestoreCache.get(cacheKey)
-  if (cached && Date.now() - cached.timestamp < COOKIE_RESTORE_CACHE_TTL) {
+  if (!force && cached && Date.now() - cached.timestamp < COOKIE_RESTORE_CACHE_TTL) {
     console.log(`[CookieRestore] 命中缓存，跳过服务器请求 (accountId=${accountId}, 缓存剩余${Math.round((COOKIE_RESTORE_CACHE_TTL - (Date.now() - cached.timestamp)) / 1000)}秒)`)
     return cached.result
   }
@@ -663,6 +691,7 @@ async function restoreCookiesFromServer(accountId, platform) {
     // 3. 过滤过期 cookie
     const now = Date.now() / 1000
     const validCookies = raw.filter(ck => {
+      if (!isCookieForPlatform(ck, platform)) return false
       if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
       return true
     })
@@ -698,7 +727,7 @@ async function restoreCookiesFromServer(accountId, platform) {
     // 淘宝平台：恢复前先清除 partition 中该平台域名的旧 cookie
     // 原因：旧 cookie 可能是 hostOnly（domain 无前导点如 taobao.com），与服务器新格式（有前导点如 .taobao.com）不同
     // Chromium 视为不同 cookie，新旧并存时淘宝优先使用旧的失效 cookie，导致滑块验证或登录重定向
-    if (platform === 'taobao') {
+    if (platform === 'taobao' || platform === 'tmall') {
       try {
         const tbDomains = ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com']
         const existingTbCookies = await ses.cookies.get({})
@@ -721,7 +750,7 @@ async function restoreCookiesFromServer(accountId, platform) {
     // 5. 写入服务器 cookie
     // PDD/淘宝已清除旧 cookie，全量写入；其他平台仍为合并模式（只补充缺失的，不覆盖已有的）
     const existingKeysAfter = new Set()
-    if (platform !== 'pinduoduo' && platform !== 'taobao') {
+    if (platform !== 'pinduoduo' && platform !== 'taobao' && platform !== 'tmall') {
       const currentCookies = await ses.cookies.get({})
       for (const ck of currentCookies) {
         existingKeysAfter.add(`${ck.name}|${ck.domain}|${ck.path}`)
@@ -756,10 +785,7 @@ async function restoreCookiesFromServer(accountId, platform) {
     }
 
     // 6. 刷盘持久化（5秒超时防止卡死）
-    await Promise.race([
-      new Promise(resolve => ses.flushStorageData(resolve)),
-      new Promise(resolve => setTimeout(resolve, 5000))
-    ])
+    ses.flushStorageData()
 
     console.log(`[CookieRestore] 合并完成: accountId=${accountId}, ${setOk} 条补充/${skipped} 条保留/${validCookies.length} 条服务器总有效 (平台: ${platform})`)
     return { restored: setOk > 0, count: setOk, skipped }
@@ -771,18 +797,32 @@ async function restoreCookiesFromServer(accountId, platform) {
   }
 
   // 用 Promise.race 防止整个恢复流程挂起（如 DNS 解析卡住、服务器无响应等）
+  let restoreTimeoutId = null
   const timeoutPromise = new Promise(resolve => {
-    setTimeout(() => {
+    restoreTimeoutId = setTimeout(() => {
       console.warn(`[CookieRestore] 恢复超时(${RESTORE_TIMEOUT}ms)，跳过，使用 partition 已有 cookie (accountId=${accountId})`)
       resolve({ restored: false, count: 0, skipped: 0, timedOut: true })
     }, RESTORE_TIMEOUT)
   })
   const finalResult = await Promise.race([doRestore(), timeoutPromise])
+  if (restoreTimeoutId) clearTimeout(restoreTimeoutId)
   // 缓存结果（超时的结果不缓存，下次重试时重新请求）
   if (!finalResult.timedOut) {
     _cookieRestoreCache.set(cacheKey, { result: finalResult, timestamp: Date.now() })
   }
   return finalResult
+}
+
+function invalidateCookieRestoreCache(accountId, platform) {
+  const normalizedAccountId = String(accountId || '')
+  if (!normalizedAccountId) return
+  if (platform) {
+    _cookieRestoreCache.delete(`${normalizedAccountId}|${platform}`)
+    return
+  }
+  for (const key of _cookieRestoreCache.keys()) {
+    if (key.startsWith(`${normalizedAccountId}|`)) _cookieRestoreCache.delete(key)
+  }
 }
 
 // ============ 页面可见性覆盖 ============
@@ -815,7 +855,9 @@ module.exports = {
   httpPostJson,
   // Cookie Restore
   restoreCookiesFromServer,
+  invalidateCookieRestoreCache,
   hasValidPlatformCookies,
+  filterCookiesForPlatform,
   // Path Resolution
   resolveAppPath,
   // Visibility

@@ -15,6 +15,13 @@ const {
   reportStoreDeviceStatus,
   uploadCookiesToServer
 } = require('./cookie-heartbeat')
+const { isExpectedNavigationAbort, createStandardChromeIdentity } = require('./platform-window-navigation')
+const {
+  filterCookiesForPlatform,
+  hasValidPlatformCookies,
+  invalidateCookieRestoreCache,
+  restoreCookiesFromServer
+} = require('./purchase-order-sync/common')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -627,6 +634,28 @@ function registerPlatformWindowIpc(mainWindow) {
       }
     })
 
+    // 京东登录页的初始化配置接口会校验浏览器身份。平台窗口此前保留了
+    // Electron 默认 UA，页面虽然能打开，但接口会直接报“网络错误”。保持
+    // Chromium 版本一致，只移除 Electron 标识，并补齐标准 Client Hints。
+    if (platform === 'jd') {
+      const browserIdentity = createStandardChromeIdentity(process.versions.chrome)
+      win.webContents.setUserAgent(browserIdentity.userAgent)
+      platformSession.webRequest.onBeforeSendHeaders({ urls: ['*://*.jd.com/*'] }, (details, callback) => {
+        const requestHeaders = details.requestHeaders || {}
+        requestHeaders['User-Agent'] = browserIdentity.userAgent
+        requestHeaders['Sec-CH-UA'] = browserIdentity.secChUa
+        requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        callback({ requestHeaders })
+      })
+      platformSession.webRequest.onErrorOccurred({ urls: ['*://*.jd.com/*'] }, (details) => {
+        if (details.error === 'net::ERR_ABORTED') return
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=jd_request_failed code=${details.error} url=${details.url}`
+        )
+      })
+    }
+
     const loadPromise = win.loadURL(targetUrl)
 
     // 确保平台窗口在最前面，防止被主窗口遮挡
@@ -730,6 +759,18 @@ function registerPlatformWindowIpc(mainWindow) {
       await loadPromise
       return { success: true }
     } catch (error) {
+      // 京东会从 shop.jd.com 自动跳转 passport.shop.jd.com。Electron 将初始
+      // 导航标为 ERR_ABORTED（-3），但登录页仍在当前窗口继续加载；不能把
+      // 这种正常重定向误判为失败并销毁窗口。
+      if (!win.isDestroyed() && isExpectedNavigationAbort(error)) {
+        const currentUrl = win.webContents.getURL()
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=initial_redirect result=continue url=${currentUrl || targetUrl}`
+        )
+        console.log('[PlatformWindow] 初始导航被正常重定向，继续等待登录页:', currentUrl || targetUrl)
+        return { success: true, redirected: true }
+      }
       if (keepCookie) {
         await restoreOriginalCookies(storeId)
       } else {
@@ -970,7 +1011,7 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
           ? JSON.parse(json.data.cookie_data)
           : json.data.cookie_data
         if (Array.isArray(raw) && raw.length > 0) {
-          const serverCookies = raw.filter(ck => {
+          const serverCookies = filterCookiesForPlatform(raw, platform).filter(ck => {
             if (ck.expirationDate && ck.expirationDate > 0 && ck.expirationDate < now) return false
             return true
           })
@@ -1281,6 +1322,7 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
           })
           requireBusinessResponse(saveResponse, '保存采购账号 Cookie 失败')
+          invalidateCookieRestoreCache(accountId, platform)
           console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
 
           if (platform === 'taobao') {
@@ -1455,6 +1497,7 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: cookieData, platform })
           })
           requireBusinessResponse(saveResponse, '保存采购账号 Cookie 失败')
+          invalidateCookieRestoreCache(accountId, platform)
           console.log('[PurchaseWindow] Cookie 已保存，共', cookies.length, '条')
 
           if (platform === 'taobao') {
@@ -1536,6 +1579,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       const ses = session.fromPartition(partitionName)
       await ses.clearStorageData({ storages: ['cookies'] })
       invalidateTaobaoAccountValidation(accountId)
+      invalidateCookieRestoreCache(accountId)
       console.log(`[PurchaseWindow] 已清除账号 ${accountId} 的 cookies`)
       return { success: true }
     } catch (err) {
@@ -1556,6 +1600,7 @@ function registerPurchaseAccountIpc(mainWindow) {
     await ses.clearStorageData()
     ses.flushStorageData()
     invalidateTaobaoAccountValidation(normalizedAccountId)
+    invalidateCookieRestoreCache(normalizedAccountId)
     console.log(`[PurchaseWindow] 已清除账号 ${normalizedAccountId} 的完整本地会话`)
     return { success: true }
   }
@@ -1591,6 +1636,7 @@ function registerPurchaseAccountIpc(mainWindow) {
           body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
         })
         requireBusinessResponse(saveResponse, '刷新采购账号 Cookie 失败')
+        invalidateCookieRestoreCache(accountId, platform)
         // 检查是否有 _m_h5_tk（淘宝 H5 API 签名所需）
         let hasH5Tk = cookies.some(c => c.name === '_m_h5_tk')
         console.log(`[PurchaseWindow] 刷新 cookies 到服务器: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
@@ -1615,7 +1661,28 @@ function registerPurchaseAccountIpc(mainWindow) {
     try {
       const partitionName = `persist:purchase-${accountId}`
       const ses = session.fromPartition(partitionName)
-      return await validateTaobaoPurchaseAccount({ accountId, ses, force })
+      let cookies = await ses.cookies.get({})
+      let restoreAttempted = false
+
+      // “检测”可能发生在另一台设备，本地 partition 为空不等于云端账号已失效。
+      // 先恢复该采购账号的云端快照，再进行真实接口校验。
+      if (!hasValidPlatformCookies(cookies, 'taobao')) {
+        restoreAttempted = true
+        await restoreCookiesFromServer(accountId, 'taobao', { force: true })
+      }
+
+      let validation = await validateTaobaoPurchaseAccount({ accountId, ses, force })
+      if (!restoreAttempted && (validation.status === 'invalid' || validation.status === 'mismatch')) {
+        // 当前设备的 Cookie 实际不可用或串号时，只从云端抢救一次；仍失败才保留
+        // 最终失效/账号不符结果，避免重复使用无效 Cookie。
+        restoreAttempted = true
+        await restoreCookiesFromServer(accountId, 'taobao', { force: true })
+        cookies = await ses.cookies.get({})
+        if (hasValidPlatformCookies(cookies, 'taobao')) {
+          validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
+        }
+      }
+      return validation
     } catch (error) {
       runtimeLog.writeLog('TaobaoAccountCheck', `accountId=${accountId}, status=unknown, reason=ipc_error, error=${String(error.message || error).slice(0, 160)}`)
       return { status: 'unknown', reason: 'ipc_error', message: error.message }
@@ -1627,27 +1694,19 @@ function registerPurchaseAccountIpc(mainWindow) {
     try {
       const partitionName = `persist:purchase-${accountId}`
       const ses = session.fromPartition(partitionName)
-      const allCookies = await ses.cookies.get({})
+      let allCookies = await ses.cookies.get({})
+      let filteredCookies = filterCookiesForPlatform(allCookies, platform)
 
-      if (!allCookies || allCookies.length === 0) {
-        return { success: false, error: '该账号没有Cookie，请先登录' }
+      // 当前设备可能还没有该账号的本地分区，但云端已有登录快照。导出前
+      // 强制恢复一次，避免错误提示“没有 Cookie”。
+      if (!hasValidPlatformCookies(filteredCookies, platform)) {
+        await restoreCookiesFromServer(accountId, platform, { force: true })
+        allCookies = await ses.cookies.get({})
+        filteredCookies = filterCookiesForPlatform(allCookies, platform)
       }
 
-      // 按平台过滤Cookie
-      const PLATFORM_DOMAINS = {
-        pinduoduo: ['pinduoduo.com', 'yangkeduo.com', 'pdd.net'],
-        taobao: ['taobao.com', 'tmall.com', 'alibaba.com'],
-        '1688': ['1688.com', 'alibaba.com'],
-        jd: ['jd.com', 'jd.hk'],
-        douyin: ['jinritemai.com', 'douyin.com']
-      }
-      const domains = PLATFORM_DOMAINS[platform] || []
-      const filteredCookies = domains.length > 0
-        ? allCookies.filter(c => c.domain && domains.some(d => c.domain.includes(d)))
-        : allCookies
-
-      if (filteredCookies.length === 0) {
-        return { success: false, error: `未找到${platform || '该平台'}的Cookie，请先登录` }
+      if (!hasValidPlatformCookies(filteredCookies, platform)) {
+        return { success: false, error: `本机和云端均未找到${platform || '该平台'}的有效登录 Cookie，请先登录` }
       }
 
       // 生成导出内容：注释头 + JSON行格式（每行一个cookie，保留完整属性用于精确恢复）
@@ -1772,6 +1831,11 @@ function registerPurchaseAccountIpc(mainWindow) {
         return { success: false, error: '文件中未找到有效的Cookie数据' }
       }
 
+      cookies = filterCookiesForPlatform(cookies, platform)
+      if (cookies.length === 0) {
+        return { success: false, error: `文件中没有${platform || '该平台'}域名的 Cookie` }
+      }
+
       // 写入到partition session
       const partitionName = `persist:purchase-${accountId}`
       const ses = session.fromPartition(partitionName)
@@ -1816,6 +1880,7 @@ function registerPurchaseAccountIpc(mainWindow) {
             body: JSON.stringify({ cookie_data: JSON.stringify(allCookies), platform })
           })
           requireBusinessResponse(saveResponse, '导入 Cookie 后同步服务器失败')
+          invalidateCookieRestoreCache(accountId, platform)
           console.log(`[PurchaseWindow] Cookie已同步到服务器: ${allCookies.length}条`)
           if (platform === 'taobao') {
             const validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })

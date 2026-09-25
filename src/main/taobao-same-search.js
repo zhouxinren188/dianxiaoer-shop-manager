@@ -8,6 +8,8 @@ const path = require('path')
 const { getAuthToken } = require('./auth-store')
 const runtimeLog = require('./runtime-logger')
 const { SALES_PRODUCT_CARD_RENDERER_SOURCE } = require('./sales-product-card-script')
+const { createStandardChromeIdentity } = require('./platform-window-navigation')
+const { inspectTaobaoRiskPage } = require('./taobao-risk-page')
 const {
   normalizeTaobaoSkuSelection,
   decodeTaobaoSkuSourceUrl,
@@ -589,10 +591,8 @@ function closeDedicatedLoginWindow(state) {
 }
 
 function setTaobaoWindowUserAgent(win) {
-  const chromeVersion = process.versions.chrome || '134.0.6998.205'
-  const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
-  win.webContents.setUserAgent(userAgent)
+  const browserIdentity = createStandardChromeIdentity(process.versions.chrome)
+  win.webContents.setUserAgent(browserIdentity.userAgent)
 }
 
 function createTaobaoSearchBrowserWindow(state) {
@@ -1907,16 +1907,18 @@ function isTaobaoProductPageUrl(value) {
   }
 }
 
+function isTaobaoItemDetailHost(value) {
+  const host = String(value || '').toLowerCase()
+  return host === 'item.taobao.com' ||
+    host === 'detail.tmall.com' || host.endsWith('.detail.tmall.com') ||
+    host === 'detail.tmall.hk' || host.endsWith('.detail.tmall.hk')
+}
+
 function isTaobaoItemDetailPageUrl(value) {
   if (!isTaobaoProductPageUrl(value) || isTaobaoLoginPageUrl(value) || isTaobaoVerificationUrl(value)) return false
   try {
     const url = new URL(String(value || ''))
-    const host = url.hostname.toLowerCase()
-    return !!url.searchParams.get('id') && (
-      host === 'item.taobao.com' ||
-      host === 'detail.tmall.com' ||
-      host === 'detail.tmall.hk'
-    )
+    return !!url.searchParams.get('id') && isTaobaoItemDetailHost(url.hostname)
   } catch (_) {
     return false
   }
@@ -2161,8 +2163,8 @@ function buildTaobaoSameProductInjection(sourceProduct = {}, logoDataUrl = '', d
       var host = currentUrl.hostname.toLowerCase();
       return !!currentUrl.searchParams.get('id') && (
         host === 'item.taobao.com' ||
-        host === 'detail.tmall.com' ||
-        host === 'detail.tmall.hk'
+        host === 'detail.tmall.com' || host.endsWith('.detail.tmall.com') ||
+        host === 'detail.tmall.hk' || host.endsWith('.detail.tmall.hk')
       );
     } catch (_) {
       return false;
@@ -2725,10 +2727,7 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   )
   productWindows.add(productWindow)
   attachTaobaoProductPriceDiagnostics(productWindow, diagnosticId)
-  const chromeVersion = process.versions.chrome || '134.0.6998.205'
-  productWindow.webContents.setUserAgent(
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/' + chromeVersion + ' Safari/537.36'
-  )
+  setTaobaoWindowUserAgent(productWindow)
 
   const injectionTimers = new Set()
   const skuAutoSelectScript = savedTaobaoSku
@@ -2942,6 +2941,22 @@ async function openTaobaoSameProductPage(params, ownerWebContents) {
   // 页面内MutationObserver只能守护当前document。手动刷新会销毁整个document，
   // 因此主进程还要在新DOM、完整加载和主框架导航三个阶段核验并按需重注入。
   productWindow.webContents.on('dom-ready', () => {
+    setTimeout(() => {
+      if (productWindow.isDestroyed()) return
+      inspectTaobaoRiskPage(productWindow.webContents)
+        .then(result => {
+          if (!result?.detected) return
+          runtimeLog.writeLog(
+            'TaobaoRiskPage',
+            'context=same_product, accountId=' + accountId +
+              ', window=' + diagnosticId +
+              ', marker=' + (result.marker || '') +
+              ', title=' + String(result.title || '').slice(0, 120) +
+              ', url=' + productWindow.webContents.getURL().slice(0, 180)
+          )
+        })
+        .catch(error => runtimeLog.writeLog('TaobaoRiskPage', 'context=same_product, probeError=' + error.message))
+    }, 500)
     scheduleInject('dom-ready', true)
     scheduleSkuAutoSelect('dom-ready', 350)
   })
@@ -3773,6 +3788,7 @@ module.exports = {
   normalizeTaobaoSearchItems,
   summarizeTaobaoSearchResponse,
   isTaobaoProductPageUrl,
+  isTaobaoItemDetailPageUrl,
   detectTaobaoMarketplace,
   prepareTaobaoSameProductUrl,
   buildTaobaoSameSelection,

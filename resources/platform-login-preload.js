@@ -8,6 +8,11 @@ const { ipcRenderer } = require('electron')
 let lastAccount = ''
 let lastPassword = ''
 
+function isCredentialCapturePage() {
+  const url = String(window.location.href || '').toLowerCase()
+  return url.includes('login') || url.includes('passport') || url.includes('signin') || url.includes('sign-in')
+}
+
 function sendCredentials() {
   if (!lastAccount) return
   ipcRenderer.send('platform-login-credentials', {
@@ -167,6 +172,7 @@ function extractAndSendStoreInfo() {
 function init() {
   // 实时监听输入事件
   document.addEventListener('input', (e) => {
+    if (!isCredentialCapturePage()) return
     const target = e.target
     if (isAccountInput(target)) {
       lastAccount = target.value || ''
@@ -180,6 +186,7 @@ function init() {
 
   // 监听表单提交时也发送一次
   document.addEventListener('submit', () => {
+    if (!isCredentialCapturePage()) return
     if (lastAccount) sendCredentials()
   }, true)
 

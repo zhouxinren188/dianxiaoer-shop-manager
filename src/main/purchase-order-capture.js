@@ -6,7 +6,10 @@ const vm = require('vm')
 const { getAuthToken } = require('./auth-store')
 const ProvinceData = require('./province-data')
 const runtimeLog = require('./runtime-logger')
-const { validateTaobaoPurchaseAccount } = require('./taobao-account-validation')
+const { validateTaobaoPurchaseAccount, hasTaobaoLoginCookie } = require('./taobao-account-validation')
+const { decideTaobaoCookieSource } = require('./taobao-cookie-source-policy')
+const { createStandardChromeIdentity } = require('./platform-window-navigation')
+const { inspectTaobaoRiskPage } = require('./taobao-risk-page')
 const {
   buildTaobaoAddressManagerScript,
   TAOBAO_TERMINAL_FAILURE_RESULTS,
@@ -5135,8 +5138,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       ? decodeTaobaoSkuSourceUrl(purchaseUrl)
       : { url: purchaseUrl, selection: null }
     const savedTaobaoSku = decodedTaobaoSource.selection
-    // 淘宝/PDD 必须以服务端 Cookie 为准。请求与返利转链并行进行，避免两段网络等待串行累加。
-    const prefetchedServerCookies = (platform === 'taobao' || platform === 'tmall' || platform === 'pinduoduo')
+    // PDD 仍以服务端 Cookie 为准，可与返利转链并行预取。
+    // 淘宝/天猫必须先验证本机持久会话；只有明确失效、账号不符或缺少登录 Cookie 时才恢复云端，
+    // 否则跨设备快照会破坏当前设备的连续登录环境并触发“访问异常”。
+    const prefetchedServerCookies = platform === 'pinduoduo'
       ? loadServerPurchaseCookies(accountId)
       : null
     const rebatePreparation = (platform === 'taobao' || platform === 'tmall')
@@ -5185,12 +5190,13 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
     // ========== Cookie 恢复策略 ==========
     // PDD 平台：始终从服务器恢复（PDDAccessToken 可能在本地未过期但服务端已失效）
-    // 淘宝平台：始终从服务器恢复（SUB/cookie2 可能在本地未过期但服务端已撤销/轮换，
-    //   导致滑块验证或重定向到登录页；多台电脑共享时需获取最新 cookie）
+    // 淘宝平台：本机有效会话优先；仅明确失效/账号不符/缺少登录 Cookie 时恢复云端一次
     // 其他平台：partition 有有效 cookie 时信任 partition（更新鲜），否则从服务器恢复
     const ses = session.fromPartition(partitionName)
     let needServerRestore = true
     let validPlatformCookieCount = 0
+    let taobaoValidation = null
+    let taobaoCookieDecision = null
     try {
       const partitionCookies = await ses.cookies.get({})
       // 按平台检测 cookie：必须属于该平台域名且未过期
@@ -5215,9 +5221,43 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       // PDD 平台：即使 partition 有 PDDAccessToken 也必须从服务器恢复
       if (platform === 'pinduoduo') {
         console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条PDD cookie，但仍需服务器恢复（PDDAccessToken可能服务端已失效）`)
-      // 淘宝平台：即使 partition 有有效 cookie 也必须从服务器恢复
+      // 淘宝平台：先验证当前设备会话。unknown/risk 只能说明暂时无法确认，不能据此清空 Cookie。
       } else if (platform === 'taobao' || platform === 'tmall') {
-        console.log(`[PurchaseCapture] Partition有 ${validPlatformCookies.length} 条淘宝 cookie，但仍需服务器恢复（SUB/cookie2可能服务端已失效）`)
+        const hasLocalLogin = hasTaobaoLoginCookie(partitionCookies)
+        if (hasLocalLogin) {
+          try {
+            taobaoValidation = await validateTaobaoPurchaseAccount({ accountId, ses })
+          } catch (validationError) {
+            taobaoValidation = {
+              status: 'unknown',
+              reason: 'validation_exception',
+              message: validationError.message
+            }
+          }
+        } else {
+          taobaoValidation = { status: 'invalid', reason: 'missing_login_cookie' }
+        }
+        taobaoCookieDecision = decideTaobaoCookieSource({
+          hasLocalLogin,
+          validationStatus: taobaoValidation.status
+        })
+        needServerRestore = taobaoCookieDecision.restoreFromServer
+        const strategyAction = needServerRestore ? 'restore_cloud' : 'keep_local'
+        console.log(
+          `[PurchaseCapture] 淘宝Cookie策略: action=${strategyAction}, ` +
+          `status=${taobaoValidation.status}, reason=${taobaoValidation.reason || taobaoCookieDecision.reason}`
+        )
+        runtimeLog.writeLog(
+          'PurchaseCookieStrategy',
+          `platform=${platform}, accountId=${accountId}, action=${strategyAction}, ` +
+          `status=${taobaoValidation.status}, reason=${taobaoValidation.reason || taobaoCookieDecision.reason}, ` +
+          `validCookies=${validPlatformCookieCount}`
+        )
+        logOpenTiming(
+          'taobao_local_session_checked',
+          `action=${strategyAction}, status=${taobaoValidation.status}, reason=${taobaoValidation.reason || taobaoCookieDecision.reason}`
+        )
+        if (!needServerRestore) flushStorageDataAsync(ses)
       // 其他平台：partition 有有效 cookie 时信任 partition，跳过服务器恢复
       } else if (validPlatformCookies.length > 0) {
         needServerRestore = false
@@ -5296,7 +5336,10 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     }
 
     if (platform === 'taobao' || platform === 'tmall') {
-      const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+      // 云端恢复后必须绕过旧缓存复核；保留本地时复用上面的结果，避免重复请求淘宝接口。
+      const validation = needServerRestore
+        ? await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
+        : (taobaoValidation || await validateTaobaoPurchaseAccount({ accountId, ses }))
       logOpenTiming(
         'taobao_account_validated',
         `status=${validation.status}, reason=${validation.reason || ''}, cached=${validation.cached === true}`
@@ -5403,20 +5446,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       }, delay)
     }
 
-    // ========== 反爬指纹伪装（复用上方已获取的 ses 对象） ==========
-    const chromeVersion = process.versions.chrome || '134.0.0.0'
-    const cleanUA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
-    win.webContents.setUserAgent(cleanUA)
-    const secChUa = `"Chromium";v="${chromeVersion.split('.')[0]}", "Google Chrome";v="${chromeVersion.split('.')[0]}", "Not-A.Brand";v="99"`
-
-    ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
-      if (details.requestHeaders) {
-        details.requestHeaders['Sec-CH-UA'] = secChUa
-        details.requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
-        details.requestHeaders['User-Agent'] = cleanUA
-      }
-      callback({ requestHeaders: details.requestHeaders })
-    })
+    // 使用与同款商品窗口一致的 Chromium 版本身份，只移除 Electron 标识。
+    // 淘宝/天猫保留 Chromium 自己生成的 Client Hints；伪造 Google Chrome 品牌会造成
+    // User-Agent、TLS 与 sec-ch-ua 不一致，反而更容易触发“访问异常”。
+    const browserIdentity = createStandardChromeIdentity(process.versions.chrome)
+    win.webContents.setUserAgent(browserIdentity.userAgent)
+    let purchaseHeaderOverrideInstalled = false
+    if (platform !== 'taobao' && platform !== 'tmall') {
+      ses.webRequest.onBeforeSendHeaders({ urls: ['*://*/*'] }, (details, callback) => {
+        const requestHeaders = details.requestHeaders || {}
+        requestHeaders['Sec-CH-UA'] = browserIdentity.secChUa
+        requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
+        requestHeaders['User-Agent'] = browserIdentity.userAgent
+        callback({ requestHeaders })
+      })
+      purchaseHeaderOverrideInstalled = true
+    }
 
     let resolved = false
     let pollTimer = null
@@ -5465,11 +5510,14 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         }
         backgroundAddrWin = null
       }
-      // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏到其他窗口）
-      try {
-        const ses = session.fromPartition(partitionName)
-        ses.webRequest.onBeforeSendHeaders(null)
-      } catch (e) {}
+      // 淘宝/天猫没有安装全局 Header 监听器，不能在关闭采购窗口时误删共享分区中
+      // 其他窗口的监听器。只有本窗口确实安装过时才清理。
+      if (purchaseHeaderOverrideInstalled) {
+        try {
+          const ses = session.fromPartition(partitionName)
+          ses.webRequest.onBeforeSendHeaders(null)
+        } catch (e) {}
+      }
       windowState.pollTimer = null
       activePurchaseWindows.delete(purchaseNo)
     }
@@ -5573,25 +5621,43 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
         const ses = session.fromPartition(partitionName)
         cookies = await ses.cookies.get({})
         if (cookies && cookies.length > 0) {
-          // PDD domain 规范化：hostOnly 的 mobile.yangkeduo.com 必须加前导点
-          if (platform === 'pinduoduo') cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
-          await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
-          })
-          console.log(`[PurchaseCapture] Cookie saved on window close: ${cookies.length} cookies`)
-
-          // 同步更新采购账号在线状态
-          try {
-            await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
-              method: 'PUT',
+          let allowCloudSave = true
+          if (platform === 'taobao' || platform === 'tmall') {
+            const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+            if (validation.status !== 'valid') {
+              allowCloudSave = false
+              runtimeLog.writeLog(
+                'PurchaseCookieStrategy',
+                `platform=${platform}, accountId=${accountId}, action=skip_cloud_save, ` +
+                `status=${validation.status}, reason=${validation.reason || ''}, cookies=${cookies.length}`
+              )
+              console.warn(
+                `[PurchaseCapture] 淘宝Cookie未通过有效性校验，跳过云端保存: ` +
+                `status=${validation.status}, reason=${validation.reason || ''}`
+              )
+            }
+          }
+          if (allowCloudSave) {
+            // PDD domain 规范化：hostOnly 的 mobile.yangkeduo.com 必须加前导点
+            if (platform === 'pinduoduo') cookies = cookies.map(c => c.domain === 'mobile.yangkeduo.com' && c.hostOnly ? { ...c, domain: '.mobile.yangkeduo.com', hostOnly: false } : c)
+            await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/cookies`, {
+              method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ online: true })
+              body: JSON.stringify({ cookie_data: JSON.stringify(cookies), platform })
             })
-            console.log(`[PurchaseCapture] 采购账号 ${accountId} 状态已更新为在线`)
-          } catch (statusErr) {
-            console.warn('[PurchaseCapture] 更新采购账号在线状态失败:', statusErr.message)
+            console.log(`[PurchaseCapture] Cookie saved on window close: ${cookies.length} cookies`)
+
+            // 同步更新采购账号在线状态
+            try {
+              await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ online: true })
+              })
+              console.log(`[PurchaseCapture] 采购账号 ${accountId} 状态已更新为在线`)
+            } catch (statusErr) {
+              console.warn('[PurchaseCapture] 更新采购账号在线状态失败:', statusErr.message)
+            }
           }
         }
       } catch (e) {
@@ -6425,6 +6491,22 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
 
       const currentUrl = win.webContents.getURL()
       console.log(`[PurchaseCapture] dom-ready: ${currentUrl.substring(0, 120)}`)
+      if (platform === 'taobao' || platform === 'tmall') {
+        setTimeout(() => {
+          if (win.isDestroyed() || resolved) return
+          inspectTaobaoRiskPage(win.webContents)
+            .then(result => {
+              if (!result?.detected) return
+              runtimeLog.writeLog(
+                'TaobaoRiskPage',
+                `context=purchase, accountId=${accountId}, purchaseNo=${purchaseNo || ''}, ` +
+                `marker=${result.marker || ''}, title=${String(result.title || '').slice(0, 120)}, ` +
+                `url=${win.webContents.getURL().slice(0, 180)}`
+              )
+            })
+            .catch(error => runtimeLog.writeLog('TaobaoRiskPage', `context=purchase, probeError=${error.message}`))
+        }, 500)
+      }
       scheduleTaobaoSkuAutoSelect('dom-ready', 450)
       scheduleTaobaoAddressCodeGuard('dom-ready', 250)
 

@@ -61,6 +61,7 @@ const {
 } = require('./services/purchase-order-sales-status-filter')
 const {
   hasValidPlatformCookies,
+  normalizePurchaseCookieSnapshot,
   sanitizePurchaseAccountRow,
   purchaseAccountMetadataChanged
 } = require('./services/purchase-account-policy')
@@ -6098,67 +6099,33 @@ app.post('/api/purchase-accounts/:id/cookies', async (req, res) => {
       return res.status(400).json(fail('Cookie 平台与采购账号平台不一致'))
     }
 
-    let newCookies = typeof req.body?.cookie_data === 'string'
-      ? JSON.parse(req.body.cookie_data || '[]')
-      : (req.body?.cookie_data || [])
-    if (!Array.isArray(newCookies)) return res.status(400).json(fail('cookie_data 格式错误'))
-
-    if (normalizedPlatform === 'pinduoduo') {
-      let normalizedCount = 0
-      newCookies = newCookies.map(cookie => {
-        if (cookie.domain === 'mobile.yangkeduo.com' && cookie.hostOnly) {
-          normalizedCount++
-          return { ...cookie, domain: '.mobile.yangkeduo.com', hostOnly: false }
-        }
-        return cookie
-      })
-      if (normalizedCount > 0) {
-        console.log(`[CookieSave] PDD domain 规范化: account=${accountId}, ${normalizedCount} 条 cookie 加前导点`)
-      }
+    let submittedCookies
+    try {
+      submittedCookies = typeof req.body?.cookie_data === 'string'
+        ? JSON.parse(req.body.cookie_data || '[]')
+        : (req.body?.cookie_data || [])
+    } catch (_) {
+      return res.status(400).json(fail('cookie_data 格式错误'))
     }
-
-    const [existingRows] = await pool.execute(
-      'SELECT cookie_data FROM purchase_cookies WHERE account_id = ?',
-      [accountId]
-    )
-    let existingCookies = []
-    if (existingRows[0]?.cookie_data) {
-      try {
-        existingCookies = typeof existingRows[0].cookie_data === 'string'
-          ? JSON.parse(existingRows[0].cookie_data)
-          : existingRows[0].cookie_data
-      } catch (_) {
-        existingCookies = []
-      }
+    if (!Array.isArray(submittedCookies)) return res.status(400).json(fail('cookie_data 格式错误'))
+    const cookieSnapshot = normalizePurchaseCookieSnapshot(submittedCookies, normalizedPlatform)
+    if (!cookieSnapshot.length) {
+      return res.status(400).json(fail('未找到该采购平台的 Cookie，已保留原登录数据'))
     }
-    if (!Array.isArray(existingCookies)) existingCookies = []
-    if (normalizedPlatform === 'pinduoduo') {
-      existingCookies = existingCookies.map(cookie => {
-        if (cookie.domain === 'mobile.yangkeduo.com' && cookie.hostOnly) {
-          return { ...cookie, domain: '.mobile.yangkeduo.com', hostOnly: false }
-        }
-        return cookie
-      })
+    if ((normalizedPlatform === 'taobao' || normalizedPlatform === 'tmall') &&
+        !hasValidPlatformCookies(cookieSnapshot, normalizedPlatform)) {
+      return res.status(400).json(fail('缺少淘宝账号登录 Cookie，已保留原登录数据'))
     }
-
-    const cookieMap = new Map()
-    for (const cookie of existingCookies) {
-      cookieMap.set(`${cookie.name}|${cookie.domain || ''}|${cookie.path || '/'}`, cookie)
-    }
-    for (const cookie of newCookies) {
-      cookieMap.set(`${cookie.name}|${cookie.domain || ''}|${cookie.path || '/'}`, cookie)
-    }
-    const mergedCookies = [...cookieMap.values()]
 
     await pool.execute(
       `INSERT INTO purchase_cookies (account_id, cookie_data, platform, saved_at)
        VALUES (?,?,?,NOW())
        ON DUPLICATE KEY UPDATE cookie_data = VALUES(cookie_data), platform = VALUES(platform), saved_at = NOW()`,
-      [accountId, JSON.stringify(mergedCookies), normalizedPlatform]
+      [accountId, JSON.stringify(cookieSnapshot), normalizedPlatform]
     )
 
     if (normalizedPlatform !== 'taobao' && normalizedPlatform !== 'tmall') {
-      const cookieValid = hasValidPlatformCookies(mergedCookies, normalizedPlatform)
+      const cookieValid = hasValidPlatformCookies(cookieSnapshot, normalizedPlatform)
       await pool.execute('UPDATE purchase_accounts SET online = ? WHERE id = ?', [cookieValid ? 1 : 0, accountId])
     }
     res.json(ok(true))

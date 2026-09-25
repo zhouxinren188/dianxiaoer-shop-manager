@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url)
 const {
   hasValidPlatformCookies,
   evaluatePurchaseCookieState,
+  normalizePurchaseCookieSnapshot,
   sanitizePurchaseAccountRow,
   purchaseAccountMetadataChanged
 } = require('../server/services/purchase-account-policy')
@@ -16,17 +17,44 @@ describe('采购账号安全与 Cookie 状态策略', () => {
 
   it('只把平台域名内且未过期的 Cookie 判定为有效', () => {
     expect(hasValidPlatformCookies([
-      { name: 'sid', value: 'ok', domain: '.taobao.com', expirationDate: now + 60 }
+      { name: 'cookie2', value: 'ok', domain: '.taobao.com', expirationDate: now + 60 }
     ], 'taobao', now)).toBe(true)
 
     expect(hasValidPlatformCookies([
-      { name: 'sid', value: 'expired', domain: '.taobao.com', expirationDate: now - 1 },
+      { name: 'cookie2', value: 'expired', domain: '.taobao.com', expirationDate: now - 1 },
       { name: 'sid', value: 'wrong-domain', domain: '.example.com', expirationDate: now + 60 }
     ], 'taobao', now)).toBe(false)
 
     expect(hasValidPlatformCookies([
       { name: 'api_uid', value: 'session-cookie', domain: '.yangkeduo.com', session: true }
     ], 'pinduoduo', now)).toBe(true)
+  })
+
+  it('淘宝追踪 Cookie 不能冒充登录凭证', () => {
+    expect(hasValidPlatformCookies([
+      { name: 'cna', value: 'tracking-only', domain: '.taobao.com', expirationDate: now + 60 },
+      { name: '_m_h5_tk', value: 'token-only', domain: '.taobao.com', expirationDate: now + 60 }
+    ], 'taobao', now)).toBe(false)
+    expect(evaluatePurchaseCookieState({
+      platform: 'taobao',
+      cookie_status: 'valid',
+      cookie_data: JSON.stringify([
+        { name: 'cna', value: 'tracking-only', domain: '.taobao.com', expirationDate: now + 60 }
+      ])
+    }, now)).toEqual({ cookieValid: false, status: 'invalid' })
+  })
+
+  it('Cookie 保存使用当前平台完整快照，过滤其他平台且不保留旧快照', () => {
+    const snapshot = normalizePurchaseCookieSnapshot([
+      { name: 'cookie2', value: 'old', domain: '.taobao.com', path: '/' },
+      { name: 'cookie2', value: 'new', domain: '.taobao.com', path: '/' },
+      { name: 'ali-token', value: 'wrong-platform', domain: '.1688.com', path: '/' },
+      { name: 'alipay-session', value: 'related', domain: '.alipay.com', path: '/' }
+    ], 'taobao')
+    expect(snapshot).toEqual([
+      { name: 'cookie2', value: 'new', domain: '.taobao.com', path: '/' },
+      { name: 'alipay-session', value: 'related', domain: '.alipay.com', path: '/' }
+    ])
   })
 
   it('淘宝服务端曾校验成功也不能掩盖本地 Cookie 已过期', () => {
@@ -66,6 +94,7 @@ describe('采购账号安全与 Cookie 状态策略', () => {
 
   it('主进程和界面接入业务响应校验、完整分区清理和密码脱敏', () => {
     const mainSource = fs.readFileSync(path.resolve('src/main/platform-window.js'), 'utf8')
+    const commonSource = fs.readFileSync(path.resolve('src/main/purchase-order-sync/common.js'), 'utf8')
     const preloadSource = fs.readFileSync(path.resolve('src/preload/index.js'), 'utf8')
     const rendererSource = fs.readFileSync(path.resolve('src/renderer/src/views/purchase/PurchaseOrder.vue'), 'utf8')
     const serverSource = fs.readFileSync(path.resolve('server/index.js'), 'utf8')
@@ -76,6 +105,7 @@ describe('采购账号安全与 Cookie 状态策略', () => {
     expect(mainSource).toContain('await ses.clearStorageData()')
     expect(mainSource).toContain('ses.flushStorageData()')
     expect(mainSource).not.toContain('new Promise(resolve => ses.flushStorageData(resolve))')
+    expect(commonSource).not.toContain('new Promise(resolve => ses.flushStorageData(resolve))')
     expect(mainSource).toContain('session_replaced: sessionReplaced')
     expect(mainSource).toContain('if (loginDetected && cookies && cookies.length > 0)')
     expect(mainSource).toContain('const sessionReplaced = loginDetected && !persistenceFailed && cookies.length > 0')
@@ -91,5 +121,7 @@ describe('采购账号安全与 Cookie 状态策略', () => {
     expect(serverSource).toContain('session_reset_required: metadataChanged && !sessionReplaced')
     expect(serverSource).toContain("SET online = 0, cookie_status = 'unknown'")
     expect(serverSource).toContain("SET cookie_status = 'unknown', cookie_status_reason = 'login_session_replaced'")
+    expect(serverSource).toContain('normalizePurchaseCookieSnapshot(submittedCookies, normalizedPlatform)')
+    expect(serverSource).not.toContain('const mergedCookies = [...cookieMap.values()]')
   })
 })

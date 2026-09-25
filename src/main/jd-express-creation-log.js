@@ -93,12 +93,24 @@ function creationBodySummary(body = {}) {
     const group = body.adGroupCreateCommand || body
     const keywords = Array.isArray(group.keywordList) ? group.keywordList : []
     const bids = keywords.map(keyword => Number(keyword.keywordMobilePrice)).filter(Number.isFinite)
+    const timeRange = campaign.timeRangePriceCoef
+      ? JSON.parse(campaign.timeRangePriceCoef)
+      : null
+    const timeRangeCoefficients = timeRange
+      ? Object.values(timeRange.detail || {}).flatMap(day => Array.isArray(day?.price_coef) ? day.price_coef : [])
+        .map(Number).filter(Number.isFinite)
+      : Array(168).fill(100)
+    const activeTimeRangeCoefficients = timeRangeCoefficients.filter(coefficient => coefficient > 0)
     return {
       submittedPlanName: campaign.name,
       submittedUnitName: group.name,
       startDate: campaign.startTime,
       endDate: campaign.endTime,
       dailyBudget: campaign.dayBudget,
+      timeRangeMode: timeRange ? 'custom' : 'all',
+      timeRangeActiveHours: activeTimeRangeCoefficients.length,
+      timeRangeMinimumCoef: activeTimeRangeCoefficients.length ? Math.min(...activeTimeRangeCoefficients) : 0,
+      timeRangeMaximumCoef: activeTimeRangeCoefficients.length ? Math.max(...activeTimeRangeCoefficients) : 0,
       automatedBiddingType: group.automatedBiddingType,
       inSearchFee: group.inSearchFee,
       premiumCoef: group.premiumCoef,
@@ -131,6 +143,7 @@ function createCreationLogger({ storeId, runId, createMode, writeLog }) {
       'httpStatus', 'jdCode', 'jdSubCode', 'jdMessage', 'traceId', 'networkCode', 'networkMessage',
       'campaignId', 'campaignIndex', 'unitIndex', 'skuCount', 'keywordCount', 'elapsedMs', 'blockedByCampaign',
       'submittedPlanName', 'submittedUnitName', 'startDate', 'endDate', 'dailyBudget',
+      'timeRangeMode', 'timeRangeActiveHours', 'timeRangeMinimumCoef', 'timeRangeMaximumCoef',
       'automatedBiddingType', 'inSearchFee', 'premiumCoef', 'tcpaBid', 'crowdCount', 'seedCount', 'keywordMinBid', 'keywordMaxBid']) {
       if (event[key] != null) detail[key] = typeof event[key] === 'number' || typeof event[key] === 'boolean'
         ? event[key] : creationLogText(event[key])

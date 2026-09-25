@@ -12,6 +12,11 @@ const PLATFORM_TERMINAL_STATUSES = new Set([
 ])
 
 const PENDING_PRINT_SOURCE_STATUSES = Object.freeze([
+  // 员工端未及时同步采购平台时，仓库采购单可能仍停留在已下单/采购中。
+  // 本转换只会在云仓异常处理明确成功且写后复验通过后调用，因此云仓回执
+  // 比本地滞后的平台状态更权威，可以安全推进到待打印。
+  'ordered',
+  'pending',
   'shipped',
   'in_transit',
   'received'

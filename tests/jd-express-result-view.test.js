@@ -8,6 +8,7 @@ import { renderToString } from '@vue/server-renderer'
 import ElementPlus, { ID_INJECTION_KEY, ZINDEX_INJECTION_KEY } from 'element-plus'
 import { describe, expect, it } from 'vitest'
 import * as summaries from '../src/renderer/src/utils/jdExpressCreationResult'
+import * as timeRanges from '../src/renderer/src/utils/jdExpressTimeRange'
 
 const require = createRequire(import.meta.url)
 const source = readFileSync(new URL('../src/renderer/src/views/operations/JdExpress.vue', import.meta.url), 'utf8')
@@ -33,6 +34,7 @@ async function renderFixture(result) {
   const resolve = name => {
     if (name === 'vue') return Vue
     if (name === '@/utils/jdExpressCreationResult') return summaries
+    if (name === '@/utils/jdExpressTimeRange') return timeRanges
     if (name === '@/api/store') return { fetchStores: () => { throw new Error('QA must not query live stores') } }
     return require(name)
   }

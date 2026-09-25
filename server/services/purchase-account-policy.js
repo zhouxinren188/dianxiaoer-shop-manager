@@ -1,11 +1,14 @@
 const PLATFORM_COOKIE_DOMAINS = Object.freeze({
   pinduoduo: ['pinduoduo.com', 'yangkeduo.com', 'pdd.net'],
-  taobao: ['taobao.com', 'tmall.com'],
-  tmall: ['taobao.com', 'tmall.com'],
+  taobao: ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com'],
+  tmall: ['taobao.com', 'tmall.com', 'tmall.hk', 'alipay.com'],
   '1688': ['1688.com', 'alibaba.com'],
   jd: ['jd.com', 'jd.hk'],
   douyin: ['douyin.com', 'jinritemai.com']
 })
+
+const TAOBAO_LOGIN_COOKIE_NAMES = new Set(['unb', 'cookie17', 'cookie2'])
+const TAOBAO_LOGIN_COOKIE_DOMAINS = Object.freeze(['taobao.com', 'tmall.com', 'tmall.hk'])
 
 function parsePurchaseCookies(cookieData) {
   if (Array.isArray(cookieData)) return cookieData
@@ -33,9 +36,35 @@ function isCookieForPlatform(cookie, platform) {
 }
 
 function hasValidPlatformCookies(cookieData, platform, nowSeconds = Date.now() / 1000) {
-  return parsePurchaseCookies(cookieData).some(cookie =>
-    isCookieForPlatform(cookie, platform) && isCookieUnexpired(cookie, nowSeconds)
+  const normalizedPlatform = String(platform || '').toLowerCase()
+  const validCookies = parsePurchaseCookies(cookieData).filter(cookie =>
+    isCookieForPlatform(cookie, normalizedPlatform) && isCookieUnexpired(cookie, nowSeconds)
   )
+  if (normalizedPlatform === 'taobao' || normalizedPlatform === 'tmall') {
+    return validCookies.some(cookie => {
+      if (!TAOBAO_LOGIN_COOKIE_NAMES.has(String(cookie.name || ''))) return false
+      const cookieDomain = String(cookie.domain || '').replace(/^\./, '').toLowerCase()
+      return TAOBAO_LOGIN_COOKIE_DOMAINS.some(domain =>
+        cookieDomain === domain || cookieDomain.endsWith(`.${domain}`)
+      )
+    })
+  }
+  return validCookies.length > 0
+}
+
+function normalizePurchaseCookieSnapshot(cookieData, platform) {
+  const normalizedPlatform = String(platform || '').toLowerCase()
+  const cookieMap = new Map()
+  for (const rawCookie of parsePurchaseCookies(cookieData)) {
+    if (!isCookieForPlatform(rawCookie, normalizedPlatform)) continue
+    let cookie = { ...rawCookie }
+    if (normalizedPlatform === 'pinduoduo' && cookie.domain === 'mobile.yangkeduo.com' && cookie.hostOnly) {
+      cookie = { ...cookie, domain: '.mobile.yangkeduo.com', hostOnly: false }
+    }
+    const key = `${cookie.name}|${cookie.domain || ''}|${cookie.path || '/'}`
+    cookieMap.set(key, cookie)
+  }
+  return [...cookieMap.values()]
 }
 
 function evaluatePurchaseCookieState(row, nowSeconds = Date.now() / 1000) {
@@ -84,6 +113,7 @@ module.exports = {
   isCookieUnexpired,
   isCookieForPlatform,
   hasValidPlatformCookies,
+  normalizePurchaseCookieSnapshot,
   evaluatePurchaseCookieState,
   sanitizePurchaseAccountRow,
   purchaseAccountMetadataChanged

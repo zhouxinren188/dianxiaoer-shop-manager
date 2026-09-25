@@ -121,13 +121,15 @@ describe('未提交的关键词跨夜恢复', () => {
     expect(cache.getPreparedJob(token)).toBeNull()
   })
 
-  it('仅日期变化不改变前端恢复签名，不清空关键词/令牌，其他字段照常保存', async () => {
+  it('仅日期或分时折扣变化不改变前端恢复签名，不清空关键词/令牌', async () => {
     const h = viewHarness()
     h.rememberPreparationToken(token, Date.now() + ttl)
     const signature = h.creationInputSignature()
     vi.setSystemTime(new Date(2026, 8, 16, 8))
     expect(h.refreshExpiredStartDate()).toBe(true)
     h.config.endDate = '2026-09-20'; h.config.unlimitedEndDate = false
+    h.config.timeRangeMode = 'custom'
+    h.config.timeRangeSchedule[0][0] = 0
     await nextTick()
     expect(h.config.startDate).toBe('2026-09-16')
     expect(h.creationInputSignature()).toBe(signature)
@@ -161,14 +163,26 @@ describe('未提交的关键词跨夜恢复', () => {
     expect(h.readPreparationToken()).toBe('')
   })
 
-  it('只覆盖日期，保持原关键词和出价，不修改持久化准备数据', () => {
+  it('只覆盖日期和分时折扣，保持原关键词和出价，不修改持久化准备数据', () => {
     const prepared = preparedFixture()
     vi.setSystemTime(new Date(2026, 8, 16, 8))
-    const result = withPreparedCreationDates(prepared, { startDate: '2026-09-16', customKeywordBid: 99, namePrefix: 'bad' })
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(100))
+    schedule[0][0] = 0
+    const result = withPreparedCreationDates(prepared, {
+      startDate: '2026-09-16',
+      timeRangeMode: 'custom',
+      timeRangeSchedule: schedule,
+      customKeywordBid: 99,
+      namePrefix: 'bad'
+    })
     expect(result.config.startDate).toBe('2026-09-16')
+    expect(result.config.timeRangeMode).toBe('custom')
+    expect(result.config.timeRangeSchedule[0][0]).toBe(0)
     expect(result.config.customKeywordBid).toBe(0.1)
     expect(result.units[0].keywordList).toBe(prepared.units[0].keywordList)
     expect(prepared.config.startDate).toBe('2026-09-15')
+    expect(prepared.config.timeRangeMode).toBe('all')
+    expect(prepared.config.timeRangeSchedule[0][0]).toBe(100)
     expect(() => assertPreparedInputsMatch(prepared, { config: { customKeywordBid: 99 } })).toThrow('不匹配')
     expect(() => assertPreparedInputsMatch(prepared, { products: [{ skuId: '2' }] })).toThrow('不匹配')
   })

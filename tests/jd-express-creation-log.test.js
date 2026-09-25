@@ -104,7 +104,8 @@ describe('快车逐计划/单元创建诊断', () => {
     await createCustomCampaigns(opts)
     const summary = opts.onDiagnostic.mock.calls.map(([event]) => event).find(event => event.stage === 'request_summary')
     expect(summary).toMatchObject({ submittedPlanName: '计划1', submittedUnitName: '计划1',
-      inSearchFee: 0.1, automatedBiddingType: 0, crowdCount: 0, keywordMinBid: 0.1, keywordMaxBid: 0.1 })
+      inSearchFee: 0.1, automatedBiddingType: 0, crowdCount: 0, keywordMinBid: 0.1, keywordMaxBid: 0.1,
+      timeRangeMode: 'all', timeRangeActiveHours: 168, timeRangeMinimumCoef: 100, timeRangeMaximumCoef: 100 })
     expect(summary).not.toHaveProperty('body')
     expect(summary).not.toHaveProperty('keywordList')
   })
