@@ -311,6 +311,17 @@
               <div class="chart-header-left">
                 <span class="chart-title">待开发票（{{ pendingInvoiceTotal }}）</span>
               </div>
+              <el-button
+                class="invoice-refresh"
+                circle
+                plain
+                size="small"
+                :icon="Refresh"
+                :loading="invoiceLoading"
+                aria-label="刷新待开发票"
+                title="刷新服务器数据"
+                @click="refreshPendingInvoices"
+              />
             </div>
             <div class="chart-body invoice-summary" v-loading="invoiceLoading">
               <div v-if="pendingInvoices.length" class="invoice-list">
@@ -718,11 +729,20 @@ async function loadPendingInvoiceTotal() {
     const summaryTotal = Number(data?.summary?.totalPendingConsumerInvoices || 0)
     pendingInvoiceTotal.value = Math.max(summaryTotal, storeTotal, invoiceList.length)
     pendingInvoices.value = invoiceList
+    return true
   } catch (err) {
     console.error('[HomePage] 加载待开发票总数失败:', err.message)
+    return false
   } finally {
     invoiceLoading.value = false
   }
+}
+
+async function refreshPendingInvoices() {
+  if (invoiceLoading.value) return
+  const success = await loadPendingInvoiceTotal()
+  if (success) ElMessage.success('待开发票已刷新')
+  else ElMessage.error('待开发票刷新失败，请稍后重试')
 }
 
 // ===== 销售趋势图表 =====
@@ -1232,6 +1252,17 @@ onUnmounted(() => {
 .settlement-refresh {
   color: #0f9f7a;
   border-color: #b9eadc;
+}
+
+.invoice-refresh {
+  color: #2b5aed;
+  border-color: #c9d6ff;
+}
+
+.invoice-refresh:hover {
+  color: #1f46c7;
+  border-color: #91a9f8;
+  background: #f1f5ff;
 }
 
 .settlement-refresh:hover {
