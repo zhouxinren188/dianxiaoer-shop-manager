@@ -1203,6 +1203,8 @@ app.get('/api/stores', async (req, res) => {
     }
     const list = rows.map(row => ({
       ...row,
+      // 京东登录已改为官方页面手动验证，服务端不再向客户端返回历史密码。
+      password: String(row.platform || '').toLowerCase() === 'jd' ? '' : row.password,
       cloud_warehouse_id: cloudWarehouseByStore.get(Number(row.id))?.cloud_warehouse_id || null,
       cloud_warehouse_name: cloudWarehouseByStore.get(Number(row.id))?.cloud_warehouse_name || '',
       cloud_machine_bound: !!cloudWarehouseByStore.get(Number(row.id))?.cloud_machine_code
@@ -1306,10 +1308,11 @@ app.post('/api/stores', async (req, res) => {
       name, platform, store_type, account, password, merchant_id, shop_id,
       tags, status, setup_pending, cloud_warehouse_id
     } = req.body
+    const normalizedPlatform = String(platform || '').trim().toLowerCase()
 
     const supportedPlatforms = new Set(['jd', 'taobao', 'tmall', 'pdd', 'douyin'])
     const supportedStoreTypes = new Set(['pop', 'supplier', 'consignment'])
-    if (!supportedPlatforms.has(String(platform || ''))) {
+    if (!supportedPlatforms.has(normalizedPlatform)) {
       return res.status(400).json(fail('不支持的店铺平台'))
     }
     if (store_type && !supportedStoreTypes.has(String(store_type))) {
@@ -1343,9 +1346,10 @@ app.post('/api/stores', async (req, res) => {
         // ★ 只更新有值的字段，避免 store_type/tags 被空值覆盖（历史bug修复）
         const updateFields = ['merchant_id = ?']
         const updateValues = [merchant_id]
+        if (normalizedPlatform === 'jd') updateFields.push("password = ''")
         for (const [column, value] of [
-          ['name', name], ['platform', platform], ['account', account],
-          ['password', password], ['shop_id', shop_id]
+          ['name', name], ['platform', normalizedPlatform], ['account', account],
+          ['password', normalizedPlatform === 'jd' ? '' : password], ['shop_id', shop_id]
         ]) {
           if (value !== undefined && value !== null && String(value).trim() !== '') {
             updateFields.push(`${column} = ?`)
@@ -1374,7 +1378,7 @@ app.post('/api/stores', async (req, res) => {
           updateValues
         )
         
-        res.json(ok({ id: existingId, updated: true, ...req.body }))
+        res.json(ok({ id: existingId, updated: true, ...req.body, platform: normalizedPlatform, password: normalizedPlatform === 'jd' ? '' : password }))
         return
       }
     }
@@ -1385,7 +1389,7 @@ app.post('/api/stores', async (req, res) => {
          (name, platform, store_type, account, password, merchant_id, shop_id, tags,
           status, setup_status, owner_id, cloud_warehouse_id, subscription_end)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(CURDATE(), INTERVAL 7 DAY))`,
-      [name || '', platform || '', store_type || '', account || '', password || '',
+      [name || '', normalizedPlatform, store_type || '', account || '', normalizedPlatform === 'jd' ? '' : (password || ''),
         merchant_id || '', shop_id || '', JSON.stringify(tags || []), status || 'enabled',
         setup_pending === true ? 'pending' : 'active', ownerId, cloudWarehouseId]
     )
@@ -1399,7 +1403,7 @@ app.post('/api/stores', async (req, res) => {
       console.log(`[Store] 子账号 ${req.user.username} 创建店铺 ${result.insertId}，已自动关联`)
     }
 
-    res.json(ok({ id: result.insertId, ...req.body }))
+    res.json(ok({ id: result.insertId, ...req.body, platform: normalizedPlatform, password: normalizedPlatform === 'jd' ? '' : password }))
   } catch (err) {
     res.status(500).json(fail(err.message))
   }
@@ -1415,6 +1419,12 @@ app.put('/api/stores/:id', async (req, res) => {
     }
 
     const ownerId = getOwnerId(req.user)
+    const [currentStoreRows] = await pool.execute(
+      'SELECT platform FROM stores WHERE id = ? AND owner_id = ? LIMIT 1',
+      [id, ownerId]
+    )
+    if (!currentStoreRows.length) return res.status(404).json(fail('店铺不存在'))
+    const effectivePlatform = String(req.body.platform || currentStoreRows[0].platform || '').trim().toLowerCase()
     let cloudWarehouseId = null
     if (req.body.cloud_warehouse_id !== undefined &&
         req.body.cloud_warehouse_id !== null && req.body.cloud_warehouse_id !== '') {
@@ -1434,10 +1444,13 @@ app.put('/api/stores/:id', async (req, res) => {
     const values = []
     for (const [key, val] of Object.entries(req.body)) {
       if (allowed.includes(key) && val !== undefined) {
+        if (key === 'password' && effectivePlatform === 'jd') continue
         fields.push(`${key} = ?`)
         values.push(key === 'tags'
           ? JSON.stringify(val || [])
-          : (key === 'cloud_warehouse_id' ? cloudWarehouseId : val))
+          : (key === 'cloud_warehouse_id'
+              ? cloudWarehouseId
+              : (key === 'platform' ? effectivePlatform : val)))
       }
     }
     if (!fields.length) return res.json(fail('没有要修改的字段'))
@@ -1539,6 +1552,8 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
     const ownerId = getOwnerId(req.user)
     const merchantId = String(req.body?.merchant_id || '').trim().slice(0, 50)
     const shopId = String(req.body?.shop_id || '').trim().slice(0, 50)
+    const expectedMerchantId = String(req.body?.expected_merchant_id || '').trim().slice(0, 50)
+    const expectedShopId = String(req.body?.expected_shop_id || '').trim().slice(0, 50)
     const cookieDomain = String(req.body?.domain || '').trim().slice(0, 50)
     const sourceDeviceId = normalizeCookieDeviceId(req.body?.device_id)
     const parsedCookies = parseCookieData(req.body?.cookie_data)
@@ -1574,7 +1589,7 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
     }
 
     const [sourceRows] = await connection.execute(
-      'SELECT id, owner_id, setup_status FROM stores WHERE id = ? AND owner_id = ? FOR UPDATE',
+      'SELECT id, owner_id, setup_status, merchant_id, shop_id FROM stores WHERE id = ? AND owner_id = ? FOR UPDATE',
       [sourceStoreId, ownerId]
     )
     if (!sourceRows.length) {
@@ -1582,6 +1597,26 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
       return res.status(404).json(fail('待登录店铺不存在'))
     }
     const sourceStore = sourceRows[0]
+    const storedMerchantId = String(sourceStore.merchant_id || '').trim()
+    const storedShopId = String(sourceStore.shop_id || '').trim()
+    if (sourceStore.setup_status !== 'pending') {
+      if (expectedMerchantId && storedMerchantId && expectedMerchantId !== storedMerchantId) {
+        await connection.rollback()
+        return res.status(409).json(fail('店铺资料已变化，请刷新店铺列表后重新登录'))
+      }
+      if (expectedShopId && storedShopId && expectedShopId !== storedShopId) {
+        await connection.rollback()
+        return res.status(409).json(fail('店铺资料已变化，请刷新店铺列表后重新登录'))
+      }
+      if (storedMerchantId && merchantId && storedMerchantId !== merchantId) {
+        await connection.rollback()
+        return res.status(409).json(fail('当前登录商家与原店铺不一致，已停止覆盖 Cookie'))
+      }
+      if (storedShopId && shopId && storedShopId !== shopId) {
+        await connection.rollback()
+        return res.status(409).json(fail('当前登录店铺与原店铺不一致，已停止覆盖 Cookie'))
+      }
+    }
     if (sourceStore.setup_status === 'pending' && !merchantId && !shopId) {
       await connection.rollback()
       return res.status(422).json(fail('尚未提取到商家ID或店铺ID，请确认已进入店铺后台'))
@@ -1608,6 +1643,8 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
 
     const updateFields = ["setup_status = 'active'"]
     const updateValues = []
+    // 京东登录不再保存密码；成功建立新会话时顺带清理历史明文密码。
+    if (cookieDomain === 'jd') updateFields.push("password = ''")
     for (const [column, rawValue, maxLength] of [
       ['name', req.body?.name, 100],
       ['account', req.body?.account, 100],
@@ -1615,6 +1652,7 @@ app.post('/api/stores/:id/finalize-login', async (req, res) => {
       ['merchant_id', merchantId, 50],
       ['shop_id', shopId, 50]
     ]) {
+      if (column === 'password' && cookieDomain === 'jd') continue
       const rawText = String(rawValue || '')
       const value = (column === 'password' ? rawText : rawText.trim()).slice(0, maxLength)
       if (value) {
@@ -4548,7 +4586,8 @@ app.get('/api/sales-trend', async (req, res) => {
 // 写入店铺售后纠纷指标（由 Electron 客户端调用）
 const AFTERSALE_SINGLE_METRIC_COLUMNS = Object.freeze({
   pending_violations: 'pending_violations',
-  pending_follow_ups: 'pending_follow_ups'
+  pending_follow_ups: 'pending_follow_ups',
+  pending_consumer_invoices: 'pending_consumer_invoices'
 })
 
 const PENDING_INVOICE_DEADLINE_MS = 10 * 24 * 60 * 60 * 1000
@@ -4605,17 +4644,36 @@ app.post('/api/store-aftersale-metrics/:storeId/metric', async (req, res) => {
       return res.status(400).json(fail('invalid metric value'))
     }
 
+    const isPendingInvoiceMetric = metric === 'pending_consumer_invoices'
+    const normalizedPendingInvoices = isPendingInvoiceMetric
+      ? normalizePendingInvoicesPayload(req.body?.pending_invoices)
+      : null
+    if (isPendingInvoiceMetric && (!normalizedPendingInvoices || normalizedPendingInvoices.length > value)) {
+      return res.status(400).json(fail('invalid pending invoice snapshot'))
+    }
+
     const accessibleStoreIds = await getAccessibleStoreIds(req.user)
     if (!accessibleStoreIds.includes(storeId)) {
       return res.status(403).json(fail('store access denied'))
     }
 
-    await pool.execute(
-      `INSERT INTO store_aftersale_metrics (store_id, platform, ${column})
-       VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE ${column}=VALUES(${column})`,
-      [storeId, platform, value]
-    )
+    if (isPendingInvoiceMetric) {
+      await pool.execute(
+        `INSERT INTO store_aftersale_metrics
+         (store_id, platform, ${column}, pending_invoices_json)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+         ${column}=VALUES(${column}), pending_invoices_json=VALUES(pending_invoices_json)`,
+        [storeId, platform, value, JSON.stringify(normalizedPendingInvoices)]
+      )
+    } else {
+      await pool.execute(
+        `INSERT INTO store_aftersale_metrics (store_id, platform, ${column})
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE ${column}=VALUES(${column})`,
+        [storeId, platform, value]
+      )
+    }
 
     console.log(`[售后指标-单项] storeId=${storeId} metric=${metric} value=${value} 写入成功`)
     res.json(ok({ storeId, platform, metric, value }))

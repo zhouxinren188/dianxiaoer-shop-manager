@@ -3777,6 +3777,7 @@ function setupPurchaseListeners() {
           need_verify: '淘宝要求安全验证',
           script_error: '页面脚本执行异常',
           load_failed: '地址页面加载失败',
+          load_stalled: '淘宝地址页面连续加载无响应',
           timeout: '操作超时'
         }[data.reason] || '未知原因'
         ElMessage({

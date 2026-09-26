@@ -33,6 +33,22 @@ describe('采购地址诊断日志', () => {
     expect(source).not.toContain("selectedText=' + result.selectedText")
   })
 
+  it('淘宝无导航重绘为确认订单时重新安装地址保护', () => {
+    expect(source).toContain("isTaobaoHost && /确认订单|提交订单|确认购买/.test(document.title || '')")
+    expect(source).toContain("scheduleTaobaoAddressCodeGuard(`${reason}-address-guard`, 50)")
+    expect(source).toContain('检测到淘宝无导航结算页，准备重挂核对地址浮窗')
+  })
+
+  it('淘宝地址页加载卡死时自动停止并重试，结算页还能主动唤醒恢复', () => {
+    expect(source).toContain('const addressLoadWatchdogMs = 8000')
+    expect(source).toContain('const maxAddressLoadAttempts = 3')
+    expect(source).toContain("beginAddressPageLoad('initial')")
+    expect(source).toContain("scheduleAddressPageRetry('load-watchdog', 200)")
+    expect(source).toContain("failAddressPageLoad('load_stalled')")
+    expect(source).toContain("backgroundAddrWin.__dxeEnsureAddressSetupProgress('checkout-title')")
+    expect(source).toContain('地址页加载无响应: platform=${platform}, purchaseNo=${purchaseNo}')
+  })
+
   it('结算页地址浮层可复制完整收货信息并兼容剪贴板降级', () => {
     expect(source).toContain("copyBtn.textContent = '\\u590d\\u5236'")
     expect(source).toContain("[info.shippingName, info.shippingPhone, info.shippingAddress]")

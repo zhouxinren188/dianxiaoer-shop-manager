@@ -85,6 +85,16 @@ let isQuitting = false
 let quitRequestInFlight = false
 let quitPromptInFlight = false
 let forcedExitTimer = null
+let rendererQuitPromptPending = false
+let rendererQuitPromptTimer = null
+
+function clearRendererQuitPromptPending() {
+  rendererQuitPromptPending = false
+  if (rendererQuitPromptTimer) {
+    clearTimeout(rendererQuitPromptTimer)
+    rendererQuitPromptTimer = null
+  }
+}
 
 function collectOpenWindowSessions() {
   const sessions = new Set([session.defaultSession])
@@ -169,6 +179,25 @@ async function confirmApplicationQuit(mainWindow) {
   } finally {
     quitPromptInFlight = false
   }
+}
+
+function requestRendererQuitConfirmation(mainWindow) {
+  if (rendererQuitPromptPending || isQuitting || mainWindow.isDestroyed()) return
+  rendererQuitPromptPending = true
+  try {
+    mainWindow.webContents.send('app-close-requested')
+  } catch {
+    clearRendererQuitPromptPending()
+    void confirmApplicationQuit(mainWindow)
+    return
+  }
+
+  // 正常页面会立即回执并展示原来的应用内弹窗；只有 renderer 真正卡死或
+  // preload 不兼容时才使用系统原生确认，保证仍然能够退出。
+  rendererQuitPromptTimer = setTimeout(() => {
+    clearRendererQuitPromptPending()
+    void confirmApplicationQuit(mainWindow)
+  }, 1500)
 }
 
 // 允许自签名证书（仅用于连接内部服务器API）
@@ -258,11 +287,11 @@ function createWindow() {
     })
   }
 
-  // 拦截窗口关闭 — 通知渲染进程弹出确认对话框（Element Plus 风格）
+  // 拦截 Alt+F4/任务栏关闭：优先使用 renderer 内的 Element Plus 弹窗。
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
-      void confirmApplicationQuit(mainWindow)
+      requestRendererQuitConfirmation(mainWindow)
     }
   })
 
@@ -277,7 +306,19 @@ ipcMain.handle('window-maximize', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win) win.isMaximized() ? win.unmaximize() : win.maximize()
 })
+// 兼容旧 renderer：请求显示应用内退出确认。
+ipcMain.handle('window-request-close', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed()) return { success: false, message: '窗口不存在' }
+  requestRendererQuitConfirmation(win)
+  return { success: true }
+})
+ipcMain.handle('window-close-prompt-shown', () => {
+  clearRendererQuitPromptPending()
+  return { success: true }
+})
 ipcMain.handle('window-close', (event) => {
+  clearRendererQuitPromptPending()
   requestApplicationQuit('renderer_confirmed')
   return { success: true }
 })
@@ -356,6 +397,8 @@ async function updateStoreOnlineStatus(storeId, online, reason, verified = false
       win.webContents.send('store-status-changed', {
         storeId,
         online: overallOnline,
+        localOnline: !!online,
+        overallOnline,
         wasOnline: true
       })
     }
@@ -1062,6 +1105,15 @@ ipcMain.handle('open-jd-outbound', (event, { storeId, orderId, title }) => {
 })
 
 // 窗口尺寸切换：登录页 <-> 主页
+// 登录态恢复、renderer 热重载等路径不一定会重新经过登录页，因此把主页窗口
+// 归一化集中在主进程执行，避免已经进入主页却仍保持 620x400 登录窗口尺寸。
+function normalizeMainWindowSize(win) {
+  if (!win || win.isDestroyed()) return
+  win.setResizable(true)
+  win.setMinimumSize(1024, 680)
+  win.maximize()
+}
+
 ipcMain.handle('window-set-login-size', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (!win) return
@@ -1075,10 +1127,7 @@ ipcMain.handle('window-set-login-size', (event) => {
 })
 ipcMain.handle('window-set-main-size', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
-  if (!win) return
-  win.setResizable(true)
-  win.setMinimumSize(1024, 680)
-  win.maximize()
+  normalizeMainWindowSize(win)
 })
 
 // 更新 IPC 通道由 update-manager 统一注册
@@ -1090,6 +1139,11 @@ ipcMain.handle('set-auth-token', (event, token) => {
   if (!token) {
     // 退出、会话失效或渲染进程重新登录时，立即停止销售订单后台同步。
     stopAutoSync()
+  }
+  if (token) {
+    // 有效登录态一同步就恢复主页尺寸。即使页面 mounted 钩子被可选功能异常
+    // 打断，也不会再出现主页被压在登录窗口大小里的情况。
+    normalizeMainWindowSize(BrowserWindow.fromWebContents(event.sender))
   }
   desktopCommandChannel?.notifyAuthChanged()
   console.log('[Main] Auth token 已同步', token ? '(有效)' : '(清除)')

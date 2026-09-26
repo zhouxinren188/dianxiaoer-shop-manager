@@ -891,8 +891,9 @@ async function checkAllStores(mainWindow) {
         lastRestoreTime[storeId] = Date.now()
       }
 
-      // 先记录旧的总体状态，用于前端判断在线→离线转场。
+      // 先记录旧的本机状态，用于前端判断当前电脑的在线→离线转场。
       const wasOnline = storeStatusMap[storeId]
+      const localOnline = !!online
       const statusResult = await reportStoreDeviceStatus(storeId, {
         online,
         verified,
@@ -900,7 +901,9 @@ async function checkAllStores(mainWindow) {
         context: 'heartbeat_status'
       })
       online = statusResult.overallOnline
-      storeStatusMap[storeId] = online
+      // 当前客户端的灯和转场必须跟随本机验证结果；服务端仍保存跨设备
+      // overallOnline，供其他设备恢复 Cookie 和同步锁判断使用。
+      storeStatusMap[storeId] = localOnline
 
       console.log(`[Heartbeat] store_id=${storeId} platform=${store.platform} overallOnline=${online} localVerified=${verified} reason=${statusReason} httpFailCount=${httpFailCount[storeId] || 0}`)
 
@@ -910,6 +913,8 @@ async function checkAllStores(mainWindow) {
           storeId: storeId,
           storeName: storeName,
           online,
+          localOnline,
+          overallOnline: online,
           wasOnline  // undefined=首次检测, true=之前在线, false=之前离线
         })
       }

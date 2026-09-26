@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import validation from '../src/main/taobao-account-validation.js'
+import { readFileSync } from 'node:fs'
+
+const validationSource = readFileSync(new URL('../src/main/taobao-account-validation.js', import.meta.url), 'utf8')
 
 const {
   buildTaobaoUserSimpleRequest,
@@ -92,5 +95,12 @@ describe('淘宝采购账号轻量校验', () => {
     expect(shouldPersistValidatedTaobaoCookies({ status: 'risk', cookieChanged: true })).toBe(false)
     expect(shouldPersistValidatedTaobaoCookies({ status: 'unknown', cookieChanged: true })).toBe(false)
     expect(shouldPersistValidatedTaobaoCookies({ status: 'mismatch', cookieChanged: true })).toBe(false)
+  })
+
+  it('Chromium 误拦 MTOP 请求时使用携带隔离会话 Cookie 的主进程请求兜底', () => {
+    expect(validationSource).toContain("includes('ERR_BLOCKED_BY_CLIENT')")
+    expect(validationSource).toContain('fetchTaobaoUserSimpleNatively(ses, request')
+    expect(validationSource).toContain("ses.cookies.get({ url: request.url })")
+    expect(validationSource).toContain("...(cookieHeader ? { Cookie: cookieHeader } : {})")
   })
 })

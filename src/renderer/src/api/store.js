@@ -1,7 +1,9 @@
-import { get, post, put, del } from './request'
+import { get, getThroughMain, post, put, del } from './request'
 
 export function fetchStores(params) {
-  return get('/api/stores', params)
+  // 店铺管理是登录后的基础页面，固定走主进程代理，避免 renderer 网络状态、
+  // CORS 或热更新切换造成“接口有店铺但页面显示 0 家”。
+  return getThroughMain('/api/stores', params)
 }
 
 export function fetchStore(id) {

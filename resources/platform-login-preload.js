@@ -8,6 +8,13 @@ const { ipcRenderer } = require('electron')
 let lastAccount = ''
 let lastPassword = ''
 
+const ACCOUNT_INPUT_TYPES = new Set(['', 'text', 'tel', 'email'])
+const APP_TITLEBAR_ID = 'dxe-platform-titlebar'
+const APP_TITLEBAR_SPACER_ID = 'dxe-platform-titlebar-spacer'
+const CUSTOM_TITLEBAR_ENABLED = process.argv.includes('--dxe-custom-platform-titlebar=1')
+let credentialFillObserver = null
+let credentialFillTimers = []
+
 function isCredentialCapturePage() {
   const url = String(window.location.href || '').toLowerCase()
   return url.includes('login') || url.includes('passport') || url.includes('signin') || url.includes('sign-in')
@@ -23,14 +30,19 @@ function sendCredentials() {
 
 function isAccountInput(el) {
   if (!el || el.tagName !== 'INPUT') return false
-  const type = (el.type || '').toLowerCase()
-  if (type === 'password' || type === 'hidden' || type === 'submit') return false
+  const type = String(el.getAttribute('type') || el.type || '').toLowerCase()
+  // 京东旧版登录按钮也是 input（type=button），且 class 中带 login。
+  // 账号只能写入真正可编辑的文本框，不能仅凭 class 模糊匹配。
+  if (!ACCOUNT_INPUT_TYPES.has(type) || el.disabled || el.readOnly) return false
 
-  const name = (el.name || '').toLowerCase()
-  const id = (el.id || '').toLowerCase()
-  const placeholder = (el.placeholder || '').toLowerCase()
-  const cls = (el.className || '').toLowerCase()
+  const name = String(el.name || '').toLowerCase()
+  const id = String(el.id || '').toLowerCase()
+  const placeholder = String(el.placeholder || '').toLowerCase()
+  const cls = String(el.className || '').toLowerCase()
   const autocomplete = (el.getAttribute('autocomplete') || '').toLowerCase()
+
+  const verificationMarker = `${name} ${id} ${placeholder} ${cls}`
+  if (/(captcha|verify|verification|sms|code|otp|验证码|短信)/.test(verificationMarker)) return false
 
   return name.includes('login') || name.includes('user') || name.includes('account') ||
     name.includes('phone') || name.includes('mobile') || name.includes('uname') ||
@@ -45,32 +57,209 @@ function isAccountInput(el) {
 
 function isPasswordInput(el) {
   if (!el || el.tagName !== 'INPUT') return false
-  if (el.type !== 'password') return false
-  const name = (el.name || '').toLowerCase()
-  return !name.includes('verify') && !name.includes('captcha') && !name.includes('code')
+  if (String(el.type || '').toLowerCase() !== 'password' || el.disabled || el.readOnly) return false
+  const marker = `${el.name || ''} ${el.id || ''} ${el.placeholder || ''}`.toLowerCase()
+  return !/(verify|captcha|code|otp|验证码|短信)/.test(marker)
 }
 
-// 自动填充登录表单
+function isVisibleInput(el) {
+  if (!el || !el.isConnected) return false
+  const style = window.getComputedStyle(el)
+  if (style.display === 'none' || style.visibility === 'hidden') return false
+  const rect = el.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
+}
+
+function inputMarker(el) {
+  return `${el.name || ''} ${el.id || ''} ${el.placeholder || ''} ${el.className || ''} ${el.getAttribute('autocomplete') || ''}`.toLowerCase()
+}
+
+function accountInputScore(el) {
+  const marker = inputMarker(el)
+  let score = 0
+  if (/(username|loginname|login_name|user-name|account)/.test(marker)) score += 60
+  if (/(phone|mobile|email|uname)/.test(marker)) score += 35
+  if (/(账号|用户名|手机号|邮箱|会员名|登录名)/.test(marker)) score += 50
+  if ((el.getAttribute('autocomplete') || '').toLowerCase() === 'username') score += 80
+  if (isVisibleInput(el)) score += 20
+  return score
+}
+
+function findBestInput(predicate, score) {
+  const candidates = Array.from(document.querySelectorAll('input')).filter(predicate)
+  if (!candidates.length) return null
+  const visibleCandidates = candidates.filter(isVisibleInput)
+  const pool = visibleCandidates.length ? visibleCandidates : candidates
+  pool.sort((a, b) => score(b) - score(a))
+  return pool[0]
+}
+
+function findBestAccountInput() {
+  return findBestInput(isAccountInput, accountInputScore)
+}
+
+function findBestPasswordInput() {
+  return findBestInput(isPasswordInput, el => isVisibleInput(el) ? 20 : 0)
+}
+
+function fillPasswordField(password) {
+  if (!password) return false
+  const passwordInput = findBestPasswordInput()
+  if (!passwordInput) return false
+  return setInputValue(passwordInput, password)
+}
+
+// 自动填充登录表单。账号触发 input 后，京东登录页可能重新渲染密码框，
+// 因此密码必须重新查询 DOM 并进行短间隔补填。
 function fillLoginForm(account, password) {
-  const inputs = document.querySelectorAll('input')
-  inputs.forEach(el => {
-    if (account && isAccountInput(el)) {
-      setInputValue(el, account)
+  const result = {
+    accountProvided: !!account,
+    passwordProvided: !!password,
+    accountFound: false,
+    passwordFound: false,
+    accountFilled: !account,
+    passwordFilled: !password
+  }
+  if (!isCredentialCapturePage()) return result
+
+  if (account) {
+    const accountInput = findBestAccountInput()
+    result.accountFound = !!accountInput
+    if (accountInput) result.accountFilled = setInputValue(accountInput, account)
+  }
+
+  const passwordInput = password ? findBestPasswordInput() : null
+  result.passwordFound = !!passwordInput
+  if (passwordInput) result.passwordFilled = setInputValue(passwordInput, password)
+  return result
+}
+
+function scheduleCredentialFill(account, password) {
+  credentialFillTimers.forEach(timer => clearTimeout(timer))
+  credentialFillTimers = []
+  if (credentialFillObserver) credentialFillObserver.disconnect()
+  credentialFillObserver = null
+
+  let latestResult = null
+  const attemptFill = () => {
+    latestResult = fillLoginForm(account, password)
+    if (latestResult?.accountFilled && latestResult?.passwordFilled && credentialFillObserver) {
+      credentialFillObserver.disconnect()
+      credentialFillObserver = null
     }
-    if (password && isPasswordInput(el)) {
-      setInputValue(el, password)
-    }
+    return latestResult
+  }
+
+  // 京东登录页会在账号写入后重建密码框，并且网络慢时表单可能晚于
+  // DOMContentLoaded 数秒才出现，因此既做定时补填，也监听表单节点变化。
+  ;[0, 150, 500, 1200, 2500, 4500].forEach(delay => {
+    credentialFillTimers.push(setTimeout(attemptFill, delay))
   })
+
+  if (document.body && window.MutationObserver) {
+    credentialFillObserver = new MutationObserver(() => attemptFill())
+    credentialFillObserver.observe(document.body, { childList: true, subtree: true })
+  }
+
+  credentialFillTimers.push(setTimeout(() => {
+    if (credentialFillObserver) credentialFillObserver.disconnect()
+    credentialFillObserver = null
+    const result = latestResult || attemptFill()
+    ipcRenderer.send('platform-login-fill-result', result)
+  }, 6000))
 }
 
 // 模拟用户输入（触发 React/Vue 的事件绑定）
 function setInputValue(el, value) {
-  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-    window.HTMLInputElement.prototype, 'value'
-  ).set
+  if (!el || el.tagName !== 'INPUT') return false
+  if (el.value === value) return true
+  const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')
+  const nativeInputValueSetter = descriptor && descriptor.set
+  if (!nativeInputValueSetter) return false
   nativeInputValueSetter.call(el, value)
   el.dispatchEvent(new Event('input', { bubbles: true }))
   el.dispatchEvent(new Event('change', { bubbles: true }))
+  return true
+}
+
+function installAppTitlebar() {
+  // resources 文件可能先于主进程更新。只有创建窗口的主进程明确声明使用
+  // 隐藏式标题栏时才注入，避免旧主进程的系统标题栏与自定义栏叠成两层。
+  if (!CUSTOM_TITLEBAR_ENABLED || !document.body || document.getElementById(APP_TITLEBAR_ID)) return
+
+  const hostname = String(window.location.hostname || '').toLowerCase()
+  let platformTitle = '平台安全登录'
+  if (hostname.includes('jd.com')) platformTitle = '京东官方安全登录'
+  else if (hostname.includes('taobao.com') || hostname.includes('tmall.com')) platformTitle = '淘宝/天猫安全登录'
+  else if (hostname.includes('pinduoduo.com') || hostname.includes('yangkeduo.com')) platformTitle = '拼多多安全登录'
+
+  const style = document.createElement('style')
+  style.textContent = `
+    #${APP_TITLEBAR_ID} {
+      position: fixed;
+      z-index: 2147483647;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 43px;
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 150px 0 14px;
+      color: #fff;
+      background: linear-gradient(90deg, #062f52 0%, #0b4776 100%);
+      box-shadow: 0 1px 6px rgba(0, 24, 48, .22);
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 43px;
+      user-select: none;
+      -webkit-app-region: drag;
+    }
+    #${APP_TITLEBAR_ID} .dxe-titlebar-logo {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 7px;
+      color: #0b4776;
+      background: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 24px;
+    }
+    #${APP_TITLEBAR_ID} .dxe-titlebar-name { font-weight: 600; }
+    #${APP_TITLEBAR_ID} .dxe-titlebar-subtitle { color: rgba(255, 255, 255, .72); }
+    #${APP_TITLEBAR_SPACER_ID} {
+      display: block !important;
+      position: relative !important;
+      width: 100% !important;
+      height: 43px !important;
+      min-height: 43px !important;
+      flex: 0 0 43px !important;
+      visibility: hidden !important;
+      pointer-events: none !important;
+    }
+  `
+  document.head.appendChild(style)
+
+  // 固定标题栏不能直接压在京东网页上方。插入一个参与正常布局的占位块，
+  // 让账号框和页面工具条从标题栏下方开始显示。
+  const spacer = document.createElement('div')
+  spacer.id = APP_TITLEBAR_SPACER_ID
+  spacer.setAttribute('aria-hidden', 'true')
+  document.body.prepend(spacer)
+
+  const titlebar = document.createElement('div')
+  titlebar.id = APP_TITLEBAR_ID
+  titlebar.setAttribute('role', 'banner')
+  titlebar.innerHTML = `
+    <span class="dxe-titlebar-logo">店</span>
+    <span class="dxe-titlebar-name">店小二网店管家</span>
+    <span class="dxe-titlebar-subtitle">${platformTitle}</span>
+  `
+  document.body.appendChild(titlebar)
 }
 
 // 检测是否在后台页面（非登录页）
@@ -170,6 +359,8 @@ function extractAndSendStoreInfo() {
 }
 
 function init() {
+  installAppTitlebar()
+
   // 实时监听输入事件
   document.addEventListener('input', (e) => {
     if (!isCredentialCapturePage()) return
@@ -192,10 +383,11 @@ function init() {
 
   // 监听主进程发来的自动填充指令
   ipcRenderer.on('fill-credentials', (event, { account, password }) => {
-    // 延迟执行，等页面 DOM 加载完成
-    setTimeout(() => fillLoginForm(account, password), 1000)
-    setTimeout(() => fillLoginForm(account, password), 2500)
+    scheduleCredentialFill(account || '', password || '')
   })
+  // 主进程 did-finish-load 可能早于页面脚本注册监听器。由 preload 在自身
+  // 就绪后主动请求一次，避免凭据消息在首次打开窗口时丢失。
+  ipcRenderer.send('platform-login-ready')
 
   // 延迟提取商家信息（等页面渲染完成）
   setTimeout(extractAndSendStoreInfo, 3000)

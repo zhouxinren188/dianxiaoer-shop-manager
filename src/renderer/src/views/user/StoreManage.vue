@@ -244,7 +244,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
+import { reactive, ref, computed, onMounted, onUnmounted, onActivated } from 'vue'
 import { Search, Plus, Connection, Edit, Delete, Monitor, Wallet, ArrowRight, Shop, Goods, Van } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchStores, createStore, deleteStore, deletePendingStore, toggleStoreStatus, fetchStoreTags } from '@/api/store'
@@ -308,6 +308,18 @@ const warehouseOptions = ref([])
 const loading = ref(false)
 let keywordSearchTimer = null
 let storeRequestId = 0
+let storeRefreshTimer = null
+// stores.online 是多设备汇总状态；店铺管理需要展示当前电脑能否直接使用
+// 该店铺 Cookie，因此本机明确检测结果优先，且列表刷新后仍保留覆盖。
+const localOnlineOverrides = new Map()
+
+function setLocalOnline(storeId, online) {
+  const key = String(storeId ?? '')
+  if (!key) return
+  localOnlineOverrides.set(key, !!online)
+  const row = tableData.value.find(item => String(item.id) === key)
+  if (row) row.online = online ? 1 : 0
+}
 
 // 编辑弹窗
 const editDialogVisible = ref(false)
@@ -351,7 +363,10 @@ async function loadStores() {
     }
     const data = await fetchStores(params)
     if (requestId !== storeRequestId) return
-    tableData.value = data.list || []
+    tableData.value = (data.list || []).map(row => {
+      const localOnline = localOnlineOverrides.get(String(row.id))
+      return localOnline === undefined ? row : { ...row, online: localOnline ? 1 : 0 }
+    })
     pageInfo.total = data.total || 0
   } catch (err) {
     if (requestId !== storeRequestId) return
@@ -359,6 +374,17 @@ async function loadStores() {
   } finally {
     if (requestId === storeRequestId) loading.value = false
   }
+}
+
+// 店铺管理位于 keep-alive 中。首次挂载和从其他页面返回时可能连续触发
+// mounted/activated，用同一个零延时任务合并刷新，同时确保重新登录后的
+// 新令牌已经写入 localStorage 后再发起店铺列表请求。
+function scheduleStoreRefresh() {
+  if (storeRefreshTimer !== null) return
+  storeRefreshTimer = setTimeout(() => {
+    storeRefreshTimer = null
+    loadStores()
+  }, 0)
 }
 
 async function loadAllTagOptions() {
@@ -574,15 +600,20 @@ async function handleLogin(row) {
   loginPending.storeId = row.id
   loginPending.storeName = row.name
   loginPending.platform = row.platform
-  // 登录按钮保留已有 cookie，并传递账号密码供自动填充
+  // 京东密码不从服务端读取；账号传给主进程后会与本机 Windows 加密凭据合并。
   try {
-    const result = await window.electronAPI.invoke('open-platform-window', {
+    const loginPayload = {
       storeId: row.id,
       platform: row.platform,
       keepCookie: true,
       account: row.account || '',
-      password: row.password || ''
-    })
+      expectedMerchantId: row.merchant_id || '',
+      expectedShopId: row.shop_id || ''
+    }
+    if (row.platform !== 'jd') {
+      loginPayload.password = row.password || ''
+    }
+    const result = await window.electronAPI.invoke('open-platform-window', loginPayload)
     if (!result?.success) throw new Error(result?.message || '打开平台窗口失败')
   } catch (err) {
     ElMessage.error('打开平台窗口失败: ' + err.message)
@@ -626,55 +657,81 @@ function handlePageChange() {
   loadStores()
 }
 
+// renderer 热更新可能短时间运行在较旧的 preload 上。可选事件通道即使尚未
+// 进入白名单，也只能影响该条提示，绝不能中断整个页面 mounted 流程。
+function listenForUpdate(channel, handler) {
+  try {
+    const remove = window.electronAPI?.onUpdate?.(channel, handler)
+    if (typeof remove === 'function') removeListeners.push(remove)
+  } catch (error) {
+    console.warn(`[StoreManage] IPC 监听不可用: ${channel}`, error?.message || error)
+  }
+}
+
 onMounted(() => {
-  loadStores()
+  scheduleStoreRefresh()
   loadWarehouseOptions()
   // 单独加载全量标签选项（不受分页限制）
   loadAllTagOptions()
 
   // 监听平台登录成功事件
   if (window.electronAPI?.onUpdate) {
-    removeListeners.push(
-      window.electronAPI.onUpdate('platform-login-success', ({ storeId, requestedStoreId }) => {
-        clearLoginPending(requestedStoreId || storeId)
-        loadStores()
+    listenForUpdate('platform-login-success', ({ storeId, requestedStoreId }) => {
+      if (requestedStoreId) localOnlineOverrides.delete(String(requestedStoreId))
+      if (storeId) setLocalOnline(storeId, true)
+      clearLoginPending(requestedStoreId || storeId)
+      loadStores()
+    })
+    listenForUpdate('platform-login-failed', ({ requestedStoreId, message }) => {
+      clearLoginPending(requestedStoreId)
+      ElMessage.error(message || '店铺登录信息保存失败，请重试')
+      loadStores()
+    })
+    listenForUpdate('platform-login-risk', ({ requestedStoreId, message }) => {
+      if (requestedStoreId && loginPending.storeId && requestedStoreId !== loginPending.storeId) return
+      ElMessage.warning({
+        message: message || '京东触发安全验证，请在登录窗口完成验证',
+        duration: 10000
       })
-    )
-    removeListeners.push(
-      window.electronAPI.onUpdate('platform-login-failed', ({ requestedStoreId, message }) => {
-        clearLoginPending(requestedStoreId)
-        ElMessage.error(message || '店铺登录信息保存失败，请重试')
-        loadStores()
-      })
-    )
-    removeListeners.push(
-      window.electronAPI.onUpdate('platform-login-closed', ({ requestedStoreId }) => {
-        clearLoginPending(requestedStoreId)
-        loadStores()
-      })
-    )
+    })
+    listenForUpdate('auto-sync-result', ({ storeId, success, cookieFailed }) => {
+      if (storeId === undefined || storeId === null) return
+      if (cookieFailed) setLocalOnline(storeId, false)
+      else if (success === true) setLocalOnline(storeId, true)
+    })
+    listenForUpdate('platform-login-closed', ({ requestedStoreId }) => {
+      clearLoginPending(requestedStoreId)
+      loadStores()
+    })
     // 监听心跳状态变化
-    removeListeners.push(
-      window.electronAPI.onUpdate('store-status-changed', ({ storeId, storeName, online, wasOnline }) => {
-        const row = tableData.value.find(item => item.id === storeId)
-        if (row) row.online = online ? 1 : 0
-        if (online === false && wasOnline === true) {
-          const msg = `${storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`
-          ElMessage.warning({ message: msg, duration: 8000 })
-          try {
-            const utterance = new SpeechSynthesisUtterance(msg)
-            utterance.lang = 'zh-CN'
-            utterance.rate = 1
-            speechSynthesis.speak(utterance)
-          } catch (e) { /* 语音不可用时静默 */ }
-        }
-      })
-    )
+    listenForUpdate('store-status-changed', ({ storeId, storeName, online, localOnline, wasOnline }) => {
+      const effectiveOnline = typeof localOnline === 'boolean' ? localOnline : !!online
+      setLocalOnline(storeId, effectiveOnline)
+      if (effectiveOnline === false && wasOnline === true) {
+        const msg = `${storeName || '店铺'}cookie已失效，请到店铺管理界面重新登录！`
+        ElMessage.warning({ message: msg, duration: 8000 })
+        try {
+          const utterance = new SpeechSynthesisUtterance(msg)
+          utterance.lang = 'zh-CN'
+          utterance.rate = 1
+          speechSynthesis.speak(utterance)
+        } catch (e) { /* 语音不可用时静默 */ }
+      }
+    })
   }
+})
+
+// keep-alive 页面再次显示时必须重新查询，不能继续展示旧登录会话留下的空列表。
+onActivated(() => {
+  scheduleStoreRefresh()
 })
 
 onUnmounted(() => {
   cancelKeywordSearch()
+  if (storeRefreshTimer !== null) {
+    clearTimeout(storeRefreshTimer)
+    storeRefreshTimer = null
+  }
   removeListeners.forEach(fn => fn && fn())
 })
 </script>

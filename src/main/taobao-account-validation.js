@@ -296,12 +296,89 @@ async function persistTaobaoSessionCookies(accountId, ses) {
   }
 }
 
+async function applyNativeResponseCookies(ses, requestUrl, response) {
+  const setCookieHeaders = typeof response?.headers?.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : []
+  if (!setCookieHeaders.length) return 0
+  const request = new URL(requestUrl)
+  let applied = 0
+  for (const header of setCookieHeaders) {
+    try {
+      const parts = String(header || '').split(';').map(part => part.trim()).filter(Boolean)
+      const separator = parts[0]?.indexOf('=') ?? -1
+      if (separator <= 0) continue
+      const attributes = {}
+      for (const part of parts.slice(1)) {
+        const index = part.indexOf('=')
+        const key = (index >= 0 ? part.slice(0, index) : part).trim().toLowerCase()
+        attributes[key] = index >= 0 ? part.slice(index + 1).trim() : true
+      }
+      const domain = String(attributes.domain || '').trim()
+      const path = String(attributes.path || '/').trim() || '/'
+      const secure = attributes.secure === true || request.protocol === 'https:'
+      const details = {
+        url: `${secure ? 'https:' : request.protocol}//${domain.replace(/^\./, '') || request.hostname}${path}`,
+        name: parts[0].slice(0, separator),
+        value: parts[0].slice(separator + 1),
+        path,
+        secure,
+        httpOnly: attributes.httponly === true
+      }
+      if (domain) details.domain = domain
+      if (attributes.expires) {
+        const expiresAt = Date.parse(attributes.expires)
+        if (Number.isFinite(expiresAt)) details.expirationDate = expiresAt / 1000
+      } else if (attributes['max-age'] && Number.isFinite(Number(attributes['max-age']))) {
+        details.expirationDate = Date.now() / 1000 + Number(attributes['max-age'])
+      }
+      const sameSite = String(attributes.samesite || '').toLowerCase()
+      if (sameSite === 'none') details.sameSite = 'no_restriction'
+      else if (sameSite === 'lax') details.sameSite = 'lax'
+      else if (sameSite === 'strict') details.sameSite = 'strict'
+      await ses.cookies.set(details)
+      applied++
+    } catch {
+      // 单个辅助 Cookie 解析失败不应影响登录状态校验。
+    }
+  }
+  return applied
+}
+
+async function fetchTaobaoUserSimpleNatively(ses, request, signal, chromeVersion) {
+  const cookies = await ses.cookies.get({ url: request.url })
+  const cookieHeader = cookies
+    .filter(cookie => cookie?.name && cookie.value !== undefined && !isCookieExpired(cookie))
+    .map(cookie => `${cookie.name}=${cookie.value}`)
+    .join('; ')
+  const response = await globalThis.fetch(request.url, {
+    method: 'GET',
+    cache: 'no-store',
+    redirect: 'follow',
+    signal,
+    headers: {
+      Accept: 'application/json',
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      Origin: 'https://i.taobao.com',
+      Referer: 'https://i.taobao.com/my_itaobao',
+      'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`,
+      ...(cookieHeader ? { Cookie: cookieHeader } : {})
+    }
+  })
+  const text = await response.text()
+  await applyNativeResponseCookies(ses, request.url, response)
+  if (!response.ok && !text) {
+    return { status: 'unknown', reason: `http_${response.status}`, userId: '', nick: '', retText: '' }
+  }
+  return classifyTaobaoUserSimpleResponse(parseMtopJson(text))
+}
+
 async function fetchTaobaoUserSimple(ses, token) {
   const request = buildTaobaoUserSimpleRequest(token)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TAOBAO_VALIDATION_TIMEOUT)
+  const chromeVersion = process.versions.chrome || '134.0.0.0'
   try {
-    const chromeVersion = process.versions.chrome || '134.0.0.0'
     const response = await ses.fetch(request.url, {
       method: 'GET',
       credentials: 'include',
@@ -322,9 +399,19 @@ async function fetchTaobaoUserSimple(ses, token) {
     }
     return classifyTaobaoUserSimpleResponse(parseMtopJson(text))
   } catch (error) {
+    // Chromium 会把部分 MTOP 宿主请求误拦为 ERR_BLOCKED_BY_CLIENT；与京东
+    // 数据接口相同，改由主进程原生 fetch 携带当前隔离会话 Cookie 兜底。
+    if (String(error?.message || error).includes('ERR_BLOCKED_BY_CLIENT')) {
+      try {
+        return await fetchTaobaoUserSimpleNatively(ses, request, controller.signal, chromeVersion)
+      } catch (nativeError) {
+        error = nativeError
+      }
+    }
     return {
       status: 'unknown',
       reason: error?.name === 'AbortError' ? 'timeout' : 'network_error',
+      message: sanitizeReason(`${error?.name || 'Error'}: ${error?.message || error}${error?.cause?.message ? ` (${error.cause.message})` : ''}`),
       userId: '',
       nick: '',
       retText: ''
@@ -415,7 +502,7 @@ async function validateTaobaoPurchaseAccount({ accountId, ses, force = false, re
       `identity=${result.userId ? 'YES' : 'NO'}, nick=${result.nick ? 'YES' : 'NO'}, ` +
       `cookieFp=${result.cookieFingerprint || cookieFingerprint || 'none'}, ` +
       `cookieChanged=${result.cookieChanged === true}, cookiePersisted=${result.cookiePersisted === true}, ` +
-      `elapsedMs=${result.elapsedMs}`
+      `elapsedMs=${result.elapsedMs}${result.message ? `, detail=${sanitizeReason(result.message)}` : ''}`
     )
     return result
   })().finally(() => {

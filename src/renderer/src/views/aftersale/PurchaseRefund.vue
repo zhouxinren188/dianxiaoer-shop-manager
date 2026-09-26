@@ -493,6 +493,7 @@ async function submitLog() {
     logInput.value = ''
     logPendingStatus.value = ''
     selectedPhrase.value = ''
+    logDialogVisible.value = false
     ElMessage.success('日志已添加')
     loadData()
   } catch (err) {

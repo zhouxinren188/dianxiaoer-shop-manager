@@ -75,6 +75,13 @@ async function initDB() {
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN password VARCHAR(200) DEFAULT '' AFTER account`)
     } catch (e) { /* 字段已存在 */ }
+    // 京东店铺改用官方页面手动登录，不再保存或回填账号密码；清除历史明文密码。
+    const [jdPasswordCleanup] = await connection.execute(
+      `UPDATE stores SET password = '' WHERE LOWER(platform) = 'jd' AND password <> ''`
+    )
+    if (jdPasswordCleanup.affectedRows > 0) {
+      console.log(`[DB] 已清理 ${jdPasswordCleanup.affectedRows} 家京东店铺的历史登录密码`)
+    }
     // 兼容已存在的 stores 表：添加 store_type 字段
     try {
       await connection.execute(`ALTER TABLE stores ADD COLUMN store_type VARCHAR(20) DEFAULT '' AFTER platform`)

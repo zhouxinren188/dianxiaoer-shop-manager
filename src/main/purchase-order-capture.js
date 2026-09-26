@@ -571,7 +571,13 @@ const PRODUCT_INFO_OVERLAY = `
   }
 
   // === 判断是否是结算页 ===
-  var isCheckout = url.indexOf('buy.taobao.com') >= 0 ||
+  // 淘宝新版会在商品页原 URL 内直接重绘成“确认订单”，此时 Electron 不会收到
+  // did-navigate / did-navigate-in-page / dom-ready，必须同时根据页面标题识别结算态。
+  var isTaobaoHost = host === 'taobao.com' || /\\.taobao\\.com$/.test(host) ||
+                     host === 'tmall.com' || /\\.tmall\\.(com|hk)$/.test(host);
+  var isTaobaoCheckoutTitle = isTaobaoHost && /确认订单|提交订单|确认购买/.test(document.title || '');
+  var isCheckout = isTaobaoCheckoutTitle ||
+                   url.indexOf('buy.taobao.com') >= 0 ||
                    url.indexOf('buyertrade.taobao.com') >= 0 ||
                    url.indexOf('buy.tmall.com') >= 0 ||
                    url.indexOf('yangkeduo.com/order') >= 0 ||
@@ -2856,7 +2862,11 @@ function buildTaobaoAddressCodeGuardScript(purchaseNo, purchaseInfo = {}) {
   var expectedToken = config.expectedToken || '';
   var guardKey = [config.mode, expectedToken, config.contactDigits, config.expectedName, config.shippingPhoneDigits].join('|');
   var url = (location.href || '').toLowerCase();
-  var isTaobaoCheckout = url.indexOf('buy.taobao.com') >= 0 ||
+  var host = (location.hostname || '').toLowerCase();
+  var isTaobaoHost = host === 'taobao.com' || /\\.taobao\\.com$/.test(host) ||
+                     host === 'tmall.com' || /\\.tmall\\.(com|hk)$/.test(host);
+  var isTaobaoCheckout = (isTaobaoHost && /确认订单|提交订单|确认购买/.test(document.title || '')) ||
+                          url.indexOf('buy.taobao.com') >= 0 ||
                           url.indexOf('buy.tmall.com') >= 0 ||
                           url.indexOf('buyertrade.taobao.com') >= 0;
   var hasDropshipIdentity = config.mode === 'dropship' &&
@@ -4106,7 +4116,8 @@ function buildLoginAutoFillScript(accountName, password) {
   function isAccountInput(el) {
     if (!el || el.tagName !== 'INPUT') return false;
     var type = (el.type || '').toLowerCase();
-    if (type === 'password' || type === 'hidden' || type === 'submit' || type === 'checkbox' || type === 'radio') return false;
+    if (type !== '' && type !== 'text' && type !== 'tel' && type !== 'email') return false;
+    if (el.disabled || el.readOnly) return false;
     var name = (el.name || '').toLowerCase();
     var id = (el.id || '').toLowerCase();
     var placeholder = (el.placeholder || '').toLowerCase();
@@ -4544,6 +4555,13 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   let addressOutcome = 'pending'
   let addressCloseReason = 'unexpected'
   let addressCloseRequest = 'none'
+  let addressLoadAttempt = 0
+  let addressLoadStartedAt = 0
+  let addressPageReached = false
+  let addressLoadWatchdog = null
+  let addressLoadRetryTimer = null
+  const addressLoadWatchdogMs = 8000
+  const maxAddressLoadAttempts = 3
 
   // 绝对生存期比阶段超时多留10秒，仅用于防止异常窗口泄漏。
   const maxLifetime = setTimeout(() => {
@@ -4572,6 +4590,8 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   addrWin.on('closed', () => {
     clearTimeout(maxLifetime)
     if (taobaoAddressInjectTimer) clearTimeout(taobaoAddressInjectTimer)
+    if (addressLoadWatchdog) clearTimeout(addressLoadWatchdog)
+    if (addressLoadRetryTimer) clearTimeout(addressLoadRetryTimer)
     runtimeLog.writeLog(
       'AddrSetupWin',
       `地址窗口关闭: platform=${platform}, purchaseNo=${purchaseNo}, done=${addrDone}, outcome=${addressOutcome}, closeReason=${addressCloseReason}, closeRequest=${addressCloseRequest}, stage=${addressLastStage}, elapsedMs=${Date.now() - addressStartedAt}`
@@ -4590,6 +4610,111 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
     addressCloseRequest = `failure:${reason}`
     if (addrWin.isDestroyed()) return
     addrWin.destroy()
+  }
+
+  function failAddressPageLoad(reason = 'load_stalled') {
+    if (addrDone || addrWin.isDestroyed()) return
+    lastAddressIssue = reason
+    addressOutcome = `failed:${reason}`
+    addressLastStage = 'PAGE_LOAD_FAILED'
+    addrDone = true
+    clearTimeout(maxLifetime)
+    if (addressLoadWatchdog) clearTimeout(addressLoadWatchdog)
+    if (addressLoadRetryTimer) clearTimeout(addressLoadRetryTimer)
+    runtimeLog.writeLog(
+      'AddrSetupWin',
+      `地址页连续加载失败: platform=${platform}, purchaseNo=${purchaseNo}, attempts=${addressLoadAttempt}, reason=${reason}`
+    )
+    sendAddressSetupDone({ failed: true, reason })
+    closeAddressWindowAfterFailure(reason)
+  }
+
+  function markAddressPageReached(source, url) {
+    const currentUrl = String(url || '')
+    if (!/^https?:/i.test(currentUrl) || addrDone) return false
+    addressPageReached = true
+    if (addressLoadWatchdog) {
+      clearTimeout(addressLoadWatchdog)
+      addressLoadWatchdog = null
+    }
+    if (addressLastStage === 'PAGE_LOADING') addressLastStage = 'PAGE_READY'
+    let currentHost = 'unknown'
+    try { currentHost = new URL(currentUrl).host } catch (_) {}
+    runtimeLog.writeLog(
+      'AddrSetupWin',
+      `地址页已响应: platform=${platform}, purchaseNo=${purchaseNo}, attempt=${addressLoadAttempt}, source=${source}, host=${currentHost}`
+    )
+    return true
+  }
+
+  function scheduleAddressPageRetry(reason, delay = 500) {
+    if (addrDone || addrWin.isDestroyed() || addressPageReached || addressLoadRetryTimer) return
+    if (addressLoadAttempt >= maxAddressLoadAttempts) {
+      failAddressPageLoad('load_stalled')
+      return
+    }
+    addressLoadRetryTimer = setTimeout(() => {
+      addressLoadRetryTimer = null
+      beginAddressPageLoad(reason)
+    }, delay)
+  }
+
+  function beginAddressPageLoad(reason = 'initial') {
+    if (addrDone || addrWin.isDestroyed()) return false
+    if (addressLoadAttempt >= maxAddressLoadAttempts) {
+      failAddressPageLoad('load_stalled')
+      return false
+    }
+
+    addressLoadAttempt += 1
+    const attempt = addressLoadAttempt
+    addressLoadStartedAt = Date.now()
+    addressPageReached = false
+    addressLastStage = 'PAGE_LOADING'
+    if (addressLoadWatchdog) clearTimeout(addressLoadWatchdog)
+    if (attempt > 1) {
+      try { addrWin.webContents.stop() } catch (_) {}
+    }
+    runtimeLog.writeLog(
+      'AddrSetupWin',
+      `加载地址页: platform=${platform}, purchaseNo=${purchaseNo}, attempt=${attempt}/${maxAddressLoadAttempts}, reason=${reason}`
+    )
+
+    addrWin.loadURL(addrUrl).catch(error => {
+      if (addrDone || addrWin.isDestroyed() || attempt !== addressLoadAttempt || addressPageReached) return
+      const errorText = String(error?.message || error || 'unknown').replace(/\s+/g, ' ').substring(0, 300)
+      runtimeLog.writeLog(
+        'AddrSetupWin',
+        `地址页加载报错: platform=${platform}, purchaseNo=${purchaseNo}, attempt=${attempt}, error=${errorText}`
+      )
+      scheduleAddressPageRetry('load-error')
+    })
+
+    addressLoadWatchdog = setTimeout(() => {
+      addressLoadWatchdog = null
+      if (addrDone || addrWin.isDestroyed() || attempt !== addressLoadAttempt || addressPageReached) return
+      runtimeLog.writeLog(
+        'AddrSetupWin',
+        `地址页加载无响应: platform=${platform}, purchaseNo=${purchaseNo}, attempt=${attempt}, elapsedMs=${Date.now() - addressLoadStartedAt}`
+      )
+      scheduleAddressPageRetry('load-watchdog', 200)
+    }, addressLoadWatchdogMs)
+    return true
+  }
+
+  addrWin.__dxeEnsureAddressSetupProgress = (reason = 'external-check') => {
+    if (addrDone || addrWin.isDestroyed() || addressPageReached) return false
+    if (Date.now() - addressLoadStartedAt < 4000) return false
+    if (addressLoadWatchdog) {
+      clearTimeout(addressLoadWatchdog)
+      addressLoadWatchdog = null
+    }
+    runtimeLog.writeLog(
+      'AddrSetupWin',
+      `外部检测到地址页未响应: platform=${platform}, purchaseNo=${purchaseNo}, attempt=${addressLoadAttempt}, reason=${reason}`
+    )
+    scheduleAddressPageRetry(reason, 0)
+    return true
   }
 
   function classifyPurchaseAddressPage(url) {
@@ -4915,6 +5040,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   addrWin.webContents.on('dom-ready', () => {
     if (addrWin.isDestroyed() || addrDone) return
     const currentUrl = addrWin.webContents.getURL()
+    markAddressPageReached('dom-ready', currentUrl)
     console.log(`[AddrSetupWin] dom-ready: ${currentUrl.substring(0, 120)}`)
     injectAddressScripts(currentUrl)
 
@@ -4942,6 +5068,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
 
   addrWin.webContents.on('did-navigate', (event, url) => {
     if (addrWin.isDestroyed() || addrDone) return
+    markAddressPageReached('did-navigate', url)
     console.log(`[AddrSetupWin] did-navigate: ${url.substring(0, 120)}`)
     injectAddressScripts(url)
 
@@ -4970,6 +5097,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   // 新版 i.taobao.com 地址页使用 SPA 路由，hash/pushState 变化不会触发 did-navigate。
   addrWin.webContents.on('did-navigate-in-page', (event, url) => {
     if (addrWin.isDestroyed() || addrDone) return
+    markAddressPageReached('did-navigate-in-page', url)
     console.log(`[AddrSetupWin] did-navigate-in-page: ${url.substring(0, 120)}`)
     injectAddressScripts(url)
   })
@@ -5076,11 +5204,7 @@ function startBackgroundAddressSetup({ purchaseInfo, platform, parsedAddr, mainW
   // 加载地址管理页
   console.log(`[AddrSetupWin] Loading address management: ${addrUrl}`)
   runtimeLog.writeLog('AddrSetupWin', `开始地址设置: platform=${platform}, purchaseNo=${purchaseNo}, url=${addrUrl}`)
-  addrWin.loadURL(addrUrl).catch((err) => {
-    lastAddressIssue = 'load_failed'
-    addressOutcome = 'failed:load_failed'
-    runtimeLog.writeLog('AddrSetupWin', `地址页加载失败: ${err.message}`)
-  })
+  beginAddressPageLoad('initial')
 
   return addrWin
 }
@@ -5443,6 +5567,42 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
             }
           })
           .catch(error => runtimeLog.writeLog('PurchaseAddressGuard', `${reason}注入失败: ${error.message}`))
+      }, delay)
+    }
+
+    // 淘宝新版从商品页进入确认订单时可能只替换页面 DOM 和标题，不触发导航事件。
+    // 标题变化后强制重建核对地址浮窗，并重新安装地址防错保护；短延迟和稳定态各做一次，
+    // 防止第一次注入恰好落在淘宝移除旧 DOM 的过程中。
+    function scheduleTaobaoCheckoutUiRepair(reason, delay = 200) {
+      if (platform !== 'taobao' && platform !== 'tmall') return
+      setTimeout(() => {
+        if (win.isDestroyed() || resolved) return
+        const repairScript = `
+(function() {
+  var title = document.title || '';
+  var host = (location.hostname || '').toLowerCase();
+  var isTaobaoHost = host === 'taobao.com' || /\\.taobao\\.com$/.test(host) ||
+                     host === 'tmall.com' || /\\.tmall\\.(com|hk)$/.test(host);
+  if (!isTaobaoHost || !/确认订单|提交订单|确认购买/.test(title)) {
+    return { repaired: false, reason: 'not-checkout-title' };
+  }
+  window.__jdProductInfo = ${jdInfo};
+  ${PRODUCT_INFO_OVERLAY};
+  return {
+    repaired: !!document.getElementById('jd-product-overlay'),
+    titleMatched: true
+  };
+})()
+`
+        win.webContents.executeJavaScript(repairScript, true)
+          .then(result => {
+            runtimeLog.writeLog(
+              'PurchaseCheckoutUi',
+              `${reason}: repaired=${!!result?.repaired}, titleMatched=${!!result?.titleMatched}, resultReason=${result?.reason || 'none'}`
+            )
+          })
+          .catch(error => runtimeLog.writeLog('PurchaseCheckoutUi', `${reason}重挂失败: ${error.message}`))
+        scheduleTaobaoAddressCodeGuard(`${reason}-address-guard`, 50)
       }, delay)
     }
 
@@ -6527,7 +6687,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
           .then(result => {
             if (result) console.log(`[PurchaseCapture] Overlay result: ${result}`)
           })
-          .catch(() => {})
+          .catch(error => runtimeLog.writeLog('PurchaseOverlay', `dom-ready注入失败: ${error.message}`))
       }
 
       // === 登录页自动填充 ===
@@ -7360,7 +7520,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (!isThirdPartyPage(url)) {
         win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
           .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(nav) result: ${result}`) })
-          .catch(() => {})
+          .catch(error => runtimeLog.writeLog('PurchaseOverlay', `did-navigate注入失败: ${error.message}`))
       }
       scheduleTaobaoSkuAutoSelect('did-navigate', 650)
     })
@@ -7463,7 +7623,7 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
       if (!isThirdPartyPage(url)) {
         win.webContents.executeJavaScript(`window.__jdProductInfo = ${jdInfo}; ${PRODUCT_INFO_OVERLAY}`)
           .then(result => { if (result) console.log(`[PurchaseCapture] Overlay(spa) result: ${result}`) })
-          .catch(() => {})
+          .catch(error => runtimeLog.writeLog('PurchaseOverlay', `did-navigate-in-page注入失败: ${error.message}`))
       }
     })
 
@@ -7617,6 +7777,15 @@ function registerPurchaseOrderCaptureIpc(mainWindow) {
     win.on('page-title-updated', (event, title) => {
       runtimeLog.writeLog('PurchaseTitle', `页面标题: ${title}`)
       logOpenTiming('page_title_updated', `titleLength=${String(title || '').length}`)
+      if ((platform === 'taobao' || platform === 'tmall') && /确认订单|提交订单|确认购买/.test(String(title || ''))) {
+        runtimeLog.writeLog('PurchaseCheckoutUi', '检测到淘宝无导航结算页，准备重挂核对地址浮窗')
+        if (backgroundAddrWin && !backgroundAddrWin.isDestroyed() &&
+            typeof backgroundAddrWin.__dxeEnsureAddressSetupProgress === 'function') {
+          backgroundAddrWin.__dxeEnsureAddressSetupProgress('checkout-title')
+        }
+        scheduleTaobaoCheckoutUiRepair('checkout-title-fast', 180)
+        scheduleTaobaoCheckoutUiRepair('checkout-title-stable', 1100)
+      }
       if (title.includes('网络异常') || title.includes('网络错误') || title.includes('风险')) {
         runtimeLog.writeLog('PurchaseError', `★ 支付页面标题含错误关键词: "${title}"`)
         console.log(`[PurchaseCapture] ★ 支付页面标题含错误关键词: "${title}"`)

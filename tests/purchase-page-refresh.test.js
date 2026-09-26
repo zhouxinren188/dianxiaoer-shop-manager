@@ -34,6 +34,18 @@ describe('采购淘宝商品页手动刷新浮窗', () => {
     expect(overlaySource).toContain('window.innerWidth - rowWidth - 530')
   })
 
+  it('淘宝在原商品 URL 内重绘为确认订单时仍识别为结算页', () => {
+    expect(overlaySource).toContain('var isTaobaoCheckoutTitle = isTaobaoHost')
+    expect(overlaySource).toContain('/确认订单|提交订单|确认购买/.test(document.title')
+    expect(overlaySource).toContain('var isCheckout = isTaobaoCheckoutTitle ||')
+    expect(runtimeOverlaySource).toContain('/\\.taobao\\.com$/')
+    expect(mainSource).toContain('function scheduleTaobaoCheckoutUiRepair(reason, delay = 200)')
+    expect(mainSource).toContain("scheduleTaobaoCheckoutUiRepair('checkout-title-fast', 180)")
+    expect(mainSource).toContain("scheduleTaobaoCheckoutUiRepair('checkout-title-stable', 1100)")
+    expect(mainSource).toContain("'PurchaseCheckoutUi'")
+    expect(mainSource).toContain("runtimeLog.writeLog('PurchaseOverlay', `dom-ready注入失败:")
+  })
+
   it('刷新只绑定用户点击事件，并在触发前阻止重复点击', () => {
     const clickHandler = overlaySource.slice(
       overlaySource.indexOf("refreshBtn.addEventListener('click'"),

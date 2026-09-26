@@ -22,6 +22,21 @@ const {
   invalidateCookieRestoreCache,
   restoreCookiesFromServer
 } = require('./purchase-order-sync/common')
+const { parseJdVendorSessionResponse } = require('./jd-vendor-session')
+const {
+  JD_STORE_LOGIN_FALLBACK_URL,
+  JD_STORE_LOGIN_URL,
+  JD_STORE_PROFILE_URL,
+  findJdLoginRiskMarker,
+  getJdLoginCookieState,
+  parseJdStoreProfileText,
+  validateJdStoreIdentity
+} = require('./jd-store-login')
+const {
+  getJdStoreCredential,
+  saveJdStoreCredential,
+  moveJdStoreCredential
+} = require('./jd-store-credential-vault')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -34,10 +49,11 @@ const BUSINESS_SERVER = 'http://150.158.54.108:3002'
 const PLATFORM_URLS = {
   taobao: 'https://myseller.taobao.com/',
   tmall: 'https://myseller.taobao.com/',
-  jd: 'https://shop.jd.com/',
+  jd: JD_STORE_LOGIN_URL,
   pdd: 'https://mms.pinduoduo.com/',
   douyin: 'https://fxg.jinritemai.com/'
 }
+const JD_VENDOR_LIST_URL = 'https://i.shop.jd.com/switch/vendor/list?appName=shop&callback=&v=5111'
 
 // Cookie 提取域名映射
 const PLATFORM_COOKIE_URLS = {
@@ -61,8 +77,20 @@ const storeKeepCookie = new Map()
 // 同一店铺一次只允许一个保存任务，避免页面重复加载/手动确认造成并发写入。
 const storeSaveTasks = new Map()
 const storeOriginalCookies = new Map()
+// 京东登录使用一次性内存分区，登录成功后才复制到正式店铺分区。
+const storeLoginPartitions = new Map()
+const storeExpectedIdentities = new Map()
 
 function cleanupPlatformWindowState(storeId) {
+  const loginPartition = storeLoginPartitions.get(storeId)
+  if (loginPartition && !loginPartition.startsWith('persist:')) {
+    session.fromPartition(loginPartition).clearStorageData().catch(error => {
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} phase=temp_session_cleanup result=failed reason=${String(error.message || error).slice(0, 160)}`
+      )
+    })
+  }
   platformWindows.delete(storeId)
   storePlatforms.delete(storeId)
   storeKeepCookie.delete(storeId)
@@ -70,6 +98,8 @@ function cleanupPlatformWindowState(storeId) {
   storeExtractedInfo.delete(storeId)
   storeSaveTasks.delete(storeId)
   storeOriginalCookies.delete(storeId)
+  storeLoginPartitions.delete(storeId)
+  storeExpectedIdentities.delete(storeId)
 }
 
 function cookieUrl(cookie) {
@@ -166,9 +196,9 @@ function httpRequest(url, options = {}) {
     // 自动附带 auth token
     const headers = { ...options.headers }
     const token = getAuthToken()
-    if (token) {
+    if (token && options.includeAuth !== false) {
       headers['Authorization'] = `Bearer ${token}`
-    } else {
+    } else if (options.includeAuth !== false) {
       console.warn('[PlatformWindow] httpRequest: 主进程没有 auth token! 请求可能被 401 拒绝. URL:', url)
     }
 
@@ -179,19 +209,95 @@ function httpRequest(url, options = {}) {
       method: options.method || 'GET',
       headers,
       timeout: 10000,
-      rejectUnauthorized: false
+      rejectUnauthorized: options.rejectUnauthorized !== false
     }
 
     const req = mod.request(reqOptions, (res) => {
       let data = ''
       res.on('data', chunk => { data += chunk })
-      res.on('end', () => resolve({ statusCode: res.statusCode, data }))
+      res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, data }))
     })
     req.on('error', reject)
     req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')) })
     if (options.body) req.write(options.body)
     req.end()
   })
+}
+
+function cookiesToRequestHeader(cookies, requestUrl) {
+  const target = new URL(requestUrl)
+  const hostname = target.hostname.toLowerCase()
+  const pathname = target.pathname || '/'
+  return (Array.isArray(cookies) ? cookies : [])
+    .filter(cookie => {
+      if (!cookie?.name || cookie?.value === undefined) return false
+      if (cookie.secure && target.protocol !== 'https:') return false
+      const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase()
+      if (!domain) return false
+      const domainMatches = cookie.hostOnly
+        ? hostname === domain
+        : hostname === domain || hostname.endsWith(`.${domain}`)
+      if (!domainMatches) return false
+      const cookiePath = String(cookie.path || '/')
+      return pathname === cookiePath || pathname.startsWith(cookiePath.endsWith('/') ? cookiePath : `${cookiePath}/`)
+    })
+    .map(cookie => `${cookie.name}=${cookie.value}`)
+    .join('; ')
+}
+
+function decodeCookieIdentity(cookie) {
+  const value = String(cookie?.value || '')
+  if (!value) return ''
+  try { return decodeURIComponent(value) } catch { return value }
+}
+
+async function fetchJdVendorIdentity(cookies, browserIdentity, expectedMerchantId = '') {
+  const cookieHeader = cookiesToRequestHeader(cookies, JD_VENDOR_LIST_URL)
+  if (!cookieHeader) return { valid: false, reason: 'cookie_header_empty' }
+  try {
+    const response = await httpRequest(JD_VENDOR_LIST_URL, {
+      includeAuth: false,
+      headers: {
+        Cookie: cookieHeader,
+        'User-Agent': browserIdentity.userAgent,
+        Accept: 'application/json, text/plain, */*',
+        Referer: 'https://shop.jd.com/'
+      }
+    })
+    return parseJdVendorSessionResponse({
+      statusCode: response.statusCode,
+      headers: response.headers,
+      body: response.data,
+      expectedMerchantId
+    })
+  } catch (error) {
+    return { valid: null, reason: 'request_failed', message: error.message }
+  }
+}
+
+async function fetchJdStoreProfile(ses, browserIdentity) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await ses.fetch(JD_STORE_PROFILE_URL, {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json, text/plain, */*',
+        Referer: 'https://shop.jd.com/',
+        'User-Agent': browserIdentity.userAgent
+      }
+    })
+    const text = await response.text()
+    if (!response.ok) return null
+    return parseJdStoreProfileText(text)
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function cleanupPendingStoreOnServer(storeId, context = 'cancel') {
@@ -280,7 +386,8 @@ function buildLoginAutoFillScript(accountName, password) {
   function isAccountInput(el) {
     if (!el || el.tagName !== 'INPUT') return false;
     var type = (el.type || '').toLowerCase();
-    if (type === 'password' || type === 'hidden' || type === 'submit' || type === 'checkbox' || type === 'radio') return false;
+    if (type !== '' && type !== 'text' && type !== 'tel' && type !== 'email') return false;
+    if (el.disabled || el.readOnly) return false;
     var name = (el.name || '').toLowerCase();
     var id = (el.id || '').toLowerCase();
     var placeholder = (el.placeholder || '').toLowerCase();
@@ -375,6 +482,30 @@ function buildLoginAutoFillScript(accountName, password) {
 
 function registerPlatformWindowIpc(mainWindow) {
   const preloadPath = resolveAppPath('resources/platform-login-preload.js')
+
+  function findPlatformWindowBySender(sender) {
+    for (const [storeId, win] of platformWindows.entries()) {
+      if (!win.isDestroyed() && win.webContents === sender) return { storeId, win }
+    }
+    return null
+  }
+
+  function sendPlatformLoginCredentials(storeId, win, source) {
+    if (!win || win.isDestroyed()) return false
+    const credential = storeCredentials.get(storeId) || {}
+    const hasAccount = !!credential.account
+    const hasPassword = !!credential.password
+    runtimeLog.writeLog(
+      'STORE_LOGIN',
+      `store_id=${storeId} phase=credential_fill_send source=${source} account=${hasAccount ? 'yes' : 'no'} password=${hasPassword ? 'yes' : 'no'}`
+    )
+    if (!hasAccount && !hasPassword) return false
+    win.webContents.send('fill-credentials', {
+      account: credential.account || '',
+      password: credential.password || ''
+    })
+    return true
+  }
 
   // 判断是否为后台 URL（排除登录页）
   function isBackendUrl(url, platform = 'jd') {
@@ -594,8 +725,204 @@ function registerPlatformWindowIpc(mainWindow) {
     tryExtract()
   }
 
+  async function completeJdStoreLoginOnce(win, storeId, { manual = false } = {}) {
+    if (!win || win.isDestroyed()) return { success: false, message: '京东登录窗口已关闭' }
+    if (win._loginCancelled) return { success: false, cancelled: true, message: '京东登录已取消' }
+    if (win._saveDone) return { success: true }
+    if (win._saveStarted) return { success: false, pending: true, message: '正在核验店铺身份，请稍候' }
+
+    let pageSnapshot = { url: win.webContents.getURL(), title: '', text: '' }
+    try {
+      pageSnapshot = await win.webContents.executeJavaScript(`(() => ({
+        url: String(location.href || ''),
+        title: String(document.title || ''),
+        text: String(document.body && document.body.innerText || '').slice(0, 200000)
+      }))()`, true)
+    } catch { /* 页面跳转过程中读取失败，等待下一次加载 */ }
+
+    const riskMarker = findJdLoginRiskMarker(`${pageSnapshot.title}\n${pageSnapshot.text}`)
+    if (riskMarker) {
+      if (win._lastJdRiskMarker !== riskMarker) {
+        win._lastJdRiskMarker = riskMarker
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=jd_risk result=manual_verification_required marker=${riskMarker}`
+        )
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('platform-login-risk', {
+            requestedStoreId: storeId,
+            message: '京东触发安全验证，请使用主账号或短信验证码完成验证；系统不会自动重试或恢复旧 Cookie。'
+          })
+        }
+      }
+      return {
+        success: false,
+        pending: true,
+        risk: true,
+        message: '京东正在进行安全验证，请完成主账号或短信验证'
+      }
+    }
+
+    const sessionPartition = storeLoginPartitions.get(storeId)
+    const ses = session.fromPartition(sessionPartition)
+    const allCookies = await ses.cookies.get({})
+    const cookieState = getJdLoginCookieState(allCookies)
+    if (!cookieState.valid) {
+      return {
+        success: false,
+        pending: true,
+        message: manual ? '尚未取得完整京东登录凭证，请先完成登录或安全验证' : '等待京东登录完成'
+      }
+    }
+
+    let profile = parseJdStoreProfileText(pageSnapshot.text) || {}
+    if (isBackendUrl(pageSnapshot.url, 'jd') && (!profile.venderId || !profile.shopId || !profile.storeName)) {
+      try {
+        const extracted = await win.webContents.executeJavaScript(extractionScript, true)
+        if (extracted && typeof extracted === 'object') {
+          delete extracted._debug
+          profile = { ...extracted, ...profile }
+        }
+      } catch { /* JSON 响应页不一定具备普通后台 DOM，继续走商家身份接口 */ }
+    }
+
+    const expected = storeExpectedIdentities.get(storeId) || {}
+    const browserIdentity = win._browserIdentity || createStandardChromeIdentity(process.versions.chrome)
+    if (!profile.venderId || !profile.shopId || !profile.storeName) {
+      const fetchedProfile = await fetchJdStoreProfile(ses, browserIdentity)
+      if (fetchedProfile) {
+        for (const [key, value] of Object.entries(fetchedProfile)) {
+          if (String(value || '').trim()) profile[key] = value
+        }
+      }
+    }
+    const vendorIdentity = await fetchJdVendorIdentity(
+      cookieState.cookies,
+      browserIdentity,
+      expected.merchantId || ''
+    )
+    if (vendorIdentity.valid === true) {
+      profile.venderId = profile.venderId || vendorIdentity.vendorId || ''
+      profile.storeName = profile.storeName || vendorIdentity.vendorName || ''
+    } else if (vendorIdentity.reason === 'vendor_identity_mismatch') {
+      profile.venderId = vendorIdentity.vendorId || profile.venderId || ''
+    }
+    profile.account = profile.account || decodeCookieIdentity(cookieState.identityCookie)
+
+    // 核验接口返回前用户可能已经关窗。取消发生后禁止继续写入服务器或正式分区。
+    if (win.isDestroyed() || win._loginCancelled) {
+      return { success: false, cancelled: true, message: '京东登录已取消' }
+    }
+
+    const identityCheck = validateJdStoreIdentity(profile, expected)
+    if (!identityCheck.valid) {
+      if (identityCheck.reason.endsWith('_missing')) {
+        return {
+          success: false,
+          pending: true,
+          message: '登录已完成，但尚未取得完整店铺身份，请稍候或重新打开登录窗口'
+        }
+      }
+      const label = identityCheck.reason === 'merchant_id_mismatch' ? '商家ID' : '店铺ID'
+      const message = `${label}与原店铺不一致（原 ${identityCheck.expected}，当前 ${identityCheck.actual}），已停止覆盖 Cookie`
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} phase=identity_check result=mismatch type=${identityCheck.reason} expected=${identityCheck.expected} actual=${identityCheck.actual}`
+      )
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('platform-login-failed', { requestedStoreId: storeId, message })
+      }
+      setTimeout(() => {
+        if (!win.isDestroyed()) win.close()
+      }, 0)
+      return { success: false, message }
+    }
+
+    if (!profile.venderId && !profile.shopId) {
+      return {
+        success: false,
+        pending: true,
+        message: '登录已完成，但京东尚未返回商家ID或店铺ID，请稍候'
+      }
+    }
+
+    storeExtractedInfo.set(storeId, {
+      venderId: String(profile.venderId || '').trim(),
+      shopId: String(profile.shopId || '').trim(),
+      storeName: String(profile.storeName || '').trim()
+    })
+    win._saveStarted = true
+    const result = await saveStoreInfo(mainWindow, storeId, 'jd', profile.account || '', '', {
+      verifiedLogin: true,
+      sessionPartition,
+      expectedMerchantId: expected.merchantId || '',
+      expectedShopId: expected.shopId || ''
+    })
+    if (!result.success) {
+      win._saveStarted = false
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('platform-login-failed', {
+          requestedStoreId: storeId,
+          message: result.message || '京东店铺登录信息保存失败，请重试'
+        })
+      }
+      return result
+    }
+
+    // 只有店铺身份和 Cookie 都核验成功后，才把本次输入的账号密码保存到
+    // 当前 Windows 用户的加密安全存储。京东密码不会上传服务端。
+    const capturedCredential = storeCredentials.get(storeId) || {}
+    try {
+      const targetStoreId = Number(result.storeId || storeId)
+      if (targetStoreId !== Number(storeId)) {
+        moveJdStoreCredential(storeId, targetStoreId)
+      }
+      const credentialSaveResult = saveJdStoreCredential(targetStoreId, {
+        account: capturedCredential.account || profile.account || '',
+        password: capturedCredential.password || ''
+      })
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${targetStoreId} phase=credential_vault result=${credentialSaveResult.success ? 'success' : 'failed'} account=${capturedCredential.account || profile.account ? 'yes' : 'no'} password=${capturedCredential.password ? 'yes' : 'no'}${credentialSaveResult.reason ? ` reason=${String(credentialSaveResult.reason).slice(0, 120)}` : ''}`
+      )
+    } catch (error) {
+      runtimeLog.writeLog(
+        'STORE_LOGIN',
+        `store_id=${storeId} phase=credential_vault result=failed reason=${String(error.message || error).slice(0, 160)}`
+      )
+    }
+
+    win._saveDone = true
+    setTimeout(() => {
+      if (!win.isDestroyed()) win.close()
+    }, 1000)
+    return result
+  }
+
+  function completeJdStoreLogin(win, storeId, options = {}) {
+    if (!win || win.isDestroyed()) {
+      return Promise.resolve({ success: false, message: '京东登录窗口已关闭' })
+    }
+    // 登录成功会连续触发多次页面加载事件，手动确认也可能与自动检测同时发生。
+    // 复用同一个核验 Promise，防止重复请求京东身份接口或重复提交 Cookie。
+    if (win._jdLoginProbe) return win._jdLoginProbe
+    const probe = completeJdStoreLoginOnce(win, storeId, options)
+    win._jdLoginProbe = probe
+    return probe.finally(() => {
+      if (win._jdLoginProbe === probe) win._jdLoginProbe = null
+    })
+  }
+
   // 打开平台登录窗口
-  ipcMain.handle('open-platform-window', async (event, { storeId, platform, keepCookie, account, password }) => {
+  ipcMain.handle('open-platform-window', async (event, {
+    storeId,
+    platform,
+    keepCookie,
+    account,
+    password,
+    expectedMerchantId,
+    expectedShopId
+  }) => {
     if (platformWindows.has(storeId)) {
       const existWin = platformWindows.get(storeId)
       if (!existWin.isDestroyed()) {
@@ -610,43 +937,67 @@ function registerPlatformWindowIpc(mainWindow) {
       return { success: false, message: `不支持的平台: ${platform}` }
     }
 
-    const partitionName = `persist:platform-${storeId}`
+    const permanentPartitionName = `persist:platform-${storeId}`
+    const isIsolatedJdLogin = platform === 'jd'
+    const partitionName = isIsolatedJdLogin
+      ? `jd-store-login-${storeId}-${Date.now()}`
+      : permanentPartitionName
     const platformSession = session.fromPartition(partitionName)
+    storeLoginPartitions.set(storeId, partitionName)
+    storeExpectedIdentities.set(storeId, {
+      merchantId: String(expectedMerchantId || '').trim(),
+      shopId: String(expectedShopId || '').trim()
+    })
 
-    // keepCookie=true（登录按钮）保留已有 cookie；否则（新增店铺）清除
-    if (keepCookie) {
+    // 京东始终在一次性内存分区中登录，不把已失效 Cookie 带进登录页；正式分区
+    // 只有在身份校验和服务端保存都成功后才会被替换。其他平台保持原有逻辑。
+    if (isIsolatedJdLogin) {
+      storeOriginalCookies.delete(storeId)
+      await platformSession.clearStorageData()
+    } else if (keepCookie) {
       storeOriginalCookies.set(storeId, await platformSession.cookies.get({}))
     } else {
       storeOriginalCookies.delete(storeId)
       await platformSession.clearStorageData({ storages: ['cookies'] })
     }
 
-    const win = new BrowserWindow({
-      width: 1200,
-      height: 800,
-      title: `店铺登录 - ${platform}`,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        partition: partitionName,
-        preload: preloadPath
-      }
-    })
+    const webPreferences = {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: partitionName,
+      additionalArguments: ['--dxe-custom-platform-titlebar=1']
+    }
+    // 登录凭据只通过隔离 preload 在内存中捕获；京东登录成功后写入本机
+    // Windows 加密存储，不再上传服务端或写入普通配置文件。
+    webPreferences.preload = preloadPath
 
-    // 京东登录页的初始化配置接口会校验浏览器身份。平台窗口此前保留了
-    // Electron 默认 UA，页面虽然能打开，但接口会直接报“网络错误”。保持
-    // Chromium 版本一致，只移除 Electron 标识，并补齐标准 Client Hints。
+    const win = new BrowserWindow({
+      width: 960,
+      height: 680,
+      minWidth: 820,
+      minHeight: 560,
+      show: false,
+      title: platform === 'jd' ? '京东店铺安全登录' : `店铺登录 - ${platform}`,
+      autoHideMenuBar: true,
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#0b4776',
+        symbolColor: '#ffffff',
+        height: 43
+      },
+      backgroundColor: '#ffffff',
+      icon: resolveAppPath('resources/icon.ico'),
+      webPreferences
+    })
+    win.setMenuBarVisibility(false)
+
+    // 使用与当前 Chromium 运行时一致的标准 Chrome UA。Client Hints 由 Chromium
+    // 自己生成，避免请求头与页面中的 navigator.userAgentData 互相矛盾。
     if (platform === 'jd') {
       const browserIdentity = createStandardChromeIdentity(process.versions.chrome)
+      win._browserIdentity = browserIdentity
       win.webContents.setUserAgent(browserIdentity.userAgent)
-      platformSession.webRequest.onBeforeSendHeaders({ urls: ['*://*.jd.com/*'] }, (details, callback) => {
-        const requestHeaders = details.requestHeaders || {}
-        requestHeaders['User-Agent'] = browserIdentity.userAgent
-        requestHeaders['Sec-CH-UA'] = browserIdentity.secChUa
-        requestHeaders['Sec-CH-UA-Platform'] = '"Windows"'
-        callback({ requestHeaders })
-      })
       platformSession.webRequest.onErrorOccurred({ urls: ['*://*.jd.com/*'] }, (details) => {
         if (details.error === 'net::ERR_ABORTED') return
         runtimeLog.writeLog(
@@ -657,9 +1008,13 @@ function registerPlatformWindowIpc(mainWindow) {
     }
 
     const loadPromise = win.loadURL(targetUrl)
+    let jdFallbackAttempted = false
 
-    // 确保平台窗口在最前面，防止被主窗口遮挡
+    // 首屏绘制完成前保持隐藏，避免 Chromium 新窗口初始表面短暂透出
+    // 主窗口/白屏。ready-to-show 后再一次性展示完整登录页。
     win.once('ready-to-show', () => {
+      if (win.isDestroyed()) return
+      win.show()
       win.focus()
     })
     // 延迟再聚焦一次，防止主窗口的 ElMessage/router 操作抢焦点
@@ -673,9 +1028,26 @@ function registerPlatformWindowIpc(mainWindow) {
     storeCredentials.delete(storeId)
     storeExtractedInfo.delete(storeId)
 
-    // 暂存登录凭证
-    if (account || password) {
-      storeCredentials.set(storeId, { account: account || '', password: password || '' })
+    let initialAccount = account || ''
+    let initialPassword = password || ''
+    if (platform === 'jd') {
+      try {
+        const savedCredential = getJdStoreCredential(storeId)
+        initialAccount = savedCredential?.account || initialAccount
+        initialPassword = savedCredential?.password || initialPassword
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=credential_vault_read result=success account=${initialAccount ? 'yes' : 'no'} password=${initialPassword ? 'yes' : 'no'}`
+        )
+      } catch (error) {
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=credential_vault_read result=failed reason=${String(error.message || error).slice(0, 160)}`
+        )
+      }
+    }
+    if (initialAccount || initialPassword) {
+      storeCredentials.set(storeId, { account: initialAccount, password: initialPassword })
     }
 
     // 页面加载完成后：自动填充凭证 + 提取商家信息
@@ -683,11 +1055,19 @@ function registerPlatformWindowIpc(mainWindow) {
       if (win.isDestroyed()) return
       const currentUrl = win.webContents.getURL()
 
-      // 1. 自动填充登录凭证（如果有）
-      const cred = storeCredentials.get(storeId)
-      if (cred && (cred.account || cred.password)) {
-        win.webContents.send('fill-credentials', { account: cred.account || '', password: cred.password || '' })
+      if (platform === 'jd') {
+        sendPlatformLoginCredentials(storeId, win, 'did-finish-load')
+        completeJdStoreLogin(win, storeId).catch(error => {
+          runtimeLog.writeLog(
+            'STORE_LOGIN',
+            `store_id=${storeId} phase=jd_login_probe result=failed reason=${String(error.message || error).slice(0, 180)}`
+          )
+        })
+        return
       }
+
+      // 1. 自动填充登录凭证（如果有）
+      sendPlatformLoginCredentials(storeId, win, 'did-finish-load')
 
       // 2. 在后台页面提取商家信息（排除登录页）
       const isBackend = isBackendUrl(currentUrl, platform)
@@ -705,6 +1085,7 @@ function registerPlatformWindowIpc(mainWindow) {
       e.preventDefault()
       if (win._closing) return
       win._closing = true
+      win._loginCancelled = true
 
       const closeWithoutSaving = async () => {
         let saveSucceeded = false
@@ -714,27 +1095,34 @@ function registerPlatformWindowIpc(mainWindow) {
           saveSucceeded = result.success === true
         }
 
+        const usesTemporaryLoginSession = !String(storeLoginPartitions.get(storeId) || '').startsWith('persist:')
         if (!saveSucceeded) {
-          if (storeKeepCookie.get(storeId)) {
+          if (storeKeepCookie.get(storeId) && !usesTemporaryLoginSession) {
             await restoreOriginalCookies(storeId)
           } else {
-            const cleanupResult = await cleanupPendingStoreOnServer(
-              storeId,
-              activeSave ? 'close_after_save_failure' : 'window_cancel'
-            )
-            if (!cleanupResult.success && mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('platform-login-failed', {
-                requestedStoreId: storeId,
-                message: cleanupResult.message || '取消登录后清理临时店铺失败'
-              })
+            // 已有京东店铺使用临时登录分区，取消时正式 Cookie 完全未动；只有新增
+            // 店铺（keepCookie=false）才需要删除服务端 pending 记录。
+            if (!storeKeepCookie.get(storeId)) {
+              const cleanupResult = await cleanupPendingStoreOnServer(
+                storeId,
+                activeSave ? 'close_after_save_failure' : 'window_cancel'
+              )
+              if (!cleanupResult.success && mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('platform-login-failed', {
+                  requestedStoreId: storeId,
+                  message: cleanupResult.message || '取消登录后清理临时店铺失败'
+                })
+              }
+              if (!usesTemporaryLoginSession) {
+                const pendingSession = session.fromPartition(permanentPartitionName)
+                await pendingSession.clearStorageData()
+              }
             }
-            const pendingSession = session.fromPartition(`persist:platform-${storeId}`)
-            await pendingSession.clearStorageData()
           }
         }
 
         try {
-          const ses = session.fromPartition(`persist:platform-${storeId}`)
+          const ses = session.fromPartition(partitionName)
           ses.flushStorageData()
         } catch (error) {
           console.error('[PlatformWindow] Session刷盘失败:', error.message)
@@ -757,11 +1145,26 @@ function registerPlatformWindowIpc(mainWindow) {
 
     try {
       await loadPromise
+      if (platform === 'jd' && !win.isDestroyed()) {
+        // 该 JZT 地址在部分网络环境会返回 200 + 空响应体，loadURL 可能仍然
+        // resolve。主动识别空文档，否则用户只会看到一个无法操作的白窗。
+        const hasUsableDocument = await win.webContents.executeJavaScript(`
+          Boolean(document.body && (document.body.children.length || document.body.innerText.trim()))
+        `).catch(() => false)
+        if (!hasUsableDocument) {
+          jdFallbackAttempted = true
+          runtimeLog.writeLog(
+            'STORE_LOGIN',
+            `store_id=${storeId} phase=primary_entry_blank action=fallback url=${targetUrl}`
+          )
+          await win.loadURL(JD_STORE_LOGIN_FALLBACK_URL)
+          return { success: true, fallback: true }
+        }
+      }
       return { success: true }
     } catch (error) {
-      // 京东会从 shop.jd.com 自动跳转 passport.shop.jd.com。Electron 将初始
-      // 导航标为 ERR_ABORTED（-3），但登录页仍在当前窗口继续加载；不能把
-      // 这种正常重定向误判为失败并销毁窗口。
+      // 登录页可能通过服务端或页面脚本继续导航。Electron 会将初始 loadURL
+      // 标为 ERR_ABORTED（-3），但目标页仍在窗口中加载，不能误判为失败。
       if (!win.isDestroyed() && isExpectedNavigationAbort(error)) {
         const currentUrl = win.webContents.getURL()
         runtimeLog.writeLog(
@@ -771,10 +1174,38 @@ function registerPlatformWindowIpc(mainWindow) {
         console.log('[PlatformWindow] 初始导航被正常重定向，继续等待登录页:', currentUrl || targetUrl)
         return { success: true, redirected: true }
       }
-      if (keepCookie) {
+
+      // 京东 JZT 登录入口有时会直接让 Electron 返回 ERR_FAILED(-2)，这并不
+      // 代表 passport 整体不可用。自动切换到京东通用账号登录页，登录完成后
+      // 仍由同一套 Cookie + 店铺身份校验接管，安全边界不变。
+      if (platform === 'jd' && !jdFallbackAttempted && !win.isDestroyed()) {
+        runtimeLog.writeLog(
+          'STORE_LOGIN',
+          `store_id=${storeId} phase=primary_entry_failed action=fallback code=${error.code || ''} reason=${String(error.message || error).slice(0, 180)}`
+        )
+        try {
+          await win.loadURL(JD_STORE_LOGIN_FALLBACK_URL)
+          runtimeLog.writeLog(
+            'STORE_LOGIN',
+            `store_id=${storeId} phase=fallback_entry result=loaded url=${JD_STORE_LOGIN_FALLBACK_URL}`
+          )
+          return { success: true, fallback: true }
+        } catch (fallbackError) {
+          if (!win.isDestroyed() && isExpectedNavigationAbort(fallbackError)) {
+            const currentUrl = win.webContents.getURL()
+            runtimeLog.writeLog(
+              'STORE_LOGIN',
+              `store_id=${storeId} phase=fallback_redirect result=continue url=${currentUrl || JD_STORE_LOGIN_FALLBACK_URL}`
+            )
+            return { success: true, redirected: true, fallback: true }
+          }
+          error = fallbackError
+        }
+      }
+      if (keepCookie && !isIsolatedJdLogin) {
         await restoreOriginalCookies(storeId)
       } else {
-        await cleanupPendingStoreOnServer(storeId, 'load_failed')
+        if (!keepCookie) await cleanupPendingStoreOnServer(storeId, 'load_failed')
         await platformSession.clearStorageData()
       }
       win._saveDone = true
@@ -799,6 +1230,21 @@ function registerPlatformWindowIpc(mainWindow) {
     }
   })
 
+  ipcMain.on('platform-login-ready', event => {
+    const matched = findPlatformWindowBySender(event.sender)
+    if (!matched) return
+    sendPlatformLoginCredentials(matched.storeId, matched.win, 'preload-ready')
+  })
+
+  ipcMain.on('platform-login-fill-result', (event, result = {}) => {
+    const matched = findPlatformWindowBySender(event.sender)
+    if (!matched) return
+    runtimeLog.writeLog(
+      'STORE_LOGIN',
+      `store_id=${matched.storeId} phase=credential_fill_result account_provided=${result.accountProvided ? 'yes' : 'no'} password_provided=${result.passwordProvided ? 'yes' : 'no'} account_found=${result.accountFound ? 'yes' : 'no'} password_found=${result.passwordFound ? 'yes' : 'no'} account_filled=${result.accountFilled ? 'yes' : 'no'} password_filled=${result.passwordFilled ? 'yes' : 'no'}`
+    )
+  })
+
   // 监听商家信息提取（平台窗口 preload 发送）
   ipcMain.on('platform-store-info', (event, info) => {
     for (const [sid, win] of platformWindows.entries()) {
@@ -819,6 +1265,9 @@ function registerPlatformWindowIpc(mainWindow) {
     }
 
     const actualPlatform = storePlatforms.get(storeId) || platform
+    if (actualPlatform === 'jd') {
+      return completeJdStoreLogin(win, storeId, { manual: true })
+    }
     if (!isBackendUrl(win.webContents.getURL(), actualPlatform)) {
       return { success: false, message: '尚未进入店铺后台，请先完成登录' }
     }
@@ -845,7 +1294,12 @@ function registerPlatformWindowIpc(mainWindow) {
 }
 
 // 保存店铺信息：只有确认进入后台后，才事务化提交店铺资料和 Cookie。
-async function saveStoreInfo(mainWindow, storeId, platform, account, password, { verifiedLogin = false } = {}) {
+async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
+  verifiedLogin = false,
+  sessionPartition = '',
+  expectedMerchantId = '',
+  expectedShopId = ''
+} = {}) {
   if (storeSaveTasks.has(storeId)) return storeSaveTasks.get(storeId)
 
   const saveTask = (async () => {
@@ -860,7 +1314,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
       return failSave('verify_backend', '尚未进入店铺后台，请先完成登录')
     }
 
-    const partitionName = `persist:platform-${storeId}`
+    const partitionName = sessionPartition || `persist:platform-${storeId}`
     const ses = session.fromPartition(partitionName)
     const cookies = await ses.cookies.get({})
     if (!Array.isArray(cookies) || cookies.length === 0) {
@@ -881,7 +1335,7 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
       if (!cookieShopId && (name === 'shopId' || nameLow === 'shopid' || nameLow === 'shop_id')) {
         cookieShopId = value
       }
-      if (!pinName && nameLow === 'pin') {
+      if (!pinName && ['pin', 'pt_pin', 'pinid'].includes(nameLow)) {
         try { pinName = decodeURIComponent(value) } catch { pinName = value }
       }
     }
@@ -889,17 +1343,32 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
     const extracted = storeExtractedInfo.get(storeId) || {}
     const merchantId = String(extracted.venderId || cookieMerchantId || '').trim()
     const shopId = String(extracted.shopId || cookieShopId || '').trim()
+    if (platform === 'jd') {
+      const cookieState = getJdLoginCookieState(cookies)
+      if (!cookieState.valid) {
+        return failSave('verify_cookie', '未取得完整京东登录凭证，请重新登录后再试')
+      }
+      const identityCheck = validateJdStoreIdentity(
+        { venderId: merchantId, shopId },
+        { merchantId: expectedMerchantId, shopId: expectedShopId }
+      )
+      if (!identityCheck.valid) {
+        return failSave('verify_identity', '当前登录店铺与原店铺不一致，已停止覆盖 Cookie')
+      }
+    }
     const updateBody = {
       cookie_data: cookies,
       domain: platform,
       device_id: getDeviceId()
     }
     if (account) updateBody.account = account
-    if (password) updateBody.password = password
+    if (platform !== 'jd' && password) updateBody.password = password
     if (merchantId) updateBody.merchant_id = merchantId
     if (shopId) updateBody.shop_id = shopId
     if (extracted.storeName) updateBody.name = extracted.storeName
     if (!account && pinName) updateBody.account = pinName
+    if (expectedMerchantId) updateBody.expected_merchant_id = String(expectedMerchantId).trim()
+    if (expectedShopId) updateBody.expected_shop_id = String(expectedShopId).trim()
 
     const finalized = await finalizeStoreLoginOnServer(storeId, updateBody)
     if (!finalized.success) {
@@ -908,12 +1377,19 @@ async function saveStoreInfo(mainWindow, storeId, platform, account, password, {
 
     const targetStoreId = Number(finalized.data?.store_id || storeId)
     let cookieRevision = Number(finalized.data?.cookie_revision || 0)
-    if (targetStoreId !== Number(storeId)) {
+    const targetPartitionName = `persist:platform-${targetStoreId}`
+    if (targetStoreId !== Number(storeId) || partitionName !== targetPartitionName) {
       const restored = await replaceLocalStoreCookies(targetStoreId, cookies)
       runtimeLog.writeLog(
         'STORE_LOGIN',
-        `store_id=${storeId} target_store_id=${targetStoreId} phase=merge_local_cookie restored=${restored}/${cookies.length}`
+        `store_id=${storeId} target_store_id=${targetStoreId} phase=replace_local_cookie source_partition=${partitionName.startsWith('persist:') ? 'persistent' : 'temporary'} restored=${restored}/${cookies.length}`
       )
+      if (platform === 'jd') {
+        const targetCookies = await session.fromPartition(targetPartitionName).cookies.get({})
+        if (!getJdLoginCookieState(targetCookies).valid) {
+          return failSave('replace_local_cookie', '京东登录已保存到云端，但本机登录状态写入失败，请重新打开登录窗口重试')
+        }
+      }
     }
     if (cookieRevision > 0) setCookieRevision(targetStoreId, cookieRevision)
 
@@ -1172,14 +1648,25 @@ function registerPurchaseAccountIpc(mainWindow) {
       width: 1100,
       height: 750,
       title: `采购账号登录 - ${platform}`,
+      autoHideMenuBar: true,
+      titleBarStyle: 'hidden',
+      titleBarOverlay: {
+        color: '#0b4776',
+        symbolColor: '#ffffff',
+        height: 43
+      },
+      backgroundColor: '#ffffff',
+      icon: resolveAppPath('resources/icon.ico'),
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
         partition: partitionName,
-        preload: preloadPath
+        preload: preloadPath,
+        additionalArguments: ['--dxe-custom-platform-titlebar=1']
       }
     })
+    win.setMenuBarVisibility(false)
 
     // 反检测：伪装 Electron 指纹为标准 Chrome（和采购窗口一致）
     const chromeVersion = process.versions.chrome || '134.0.0.0'

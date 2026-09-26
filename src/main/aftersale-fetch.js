@@ -225,6 +225,9 @@ async function saveObservedPendingMetric(storeId, observation) {
         platform: 'jd',
         metric: observation.metric,
         value: observation.value,
+        ...(observation.metric === 'pending_consumer_invoices'
+          ? { pending_invoices: observation.invoices }
+          : {}),
         source: 'jd_list_response',
         observedAt: observation.observedAt
       })
@@ -246,12 +249,18 @@ function registerPendingMetricCaptureIpc(mainWindow) {
     if (!storeId || !observation || !isPendingMetricPageUrl(observation.metric, event.sender.getURL())) return
 
     const reportKey = `${storeId}:${observation.metric}`
+    const reportSignature = observation.metric === 'pending_consumer_invoices'
+      ? JSON.stringify({
+          value: observation.value,
+          invoices: observation.invoices.map(item => [item.orderId, item.applyTime])
+        })
+      : String(observation.value)
     const recent = recentPendingMetricReports.get(reportKey)
-    if (recent && recent.value === observation.value && Date.now() - recent.savedAt < 5000) return
+    if (recent && recent.signature === reportSignature && Date.now() - recent.savedAt < 5000) return
 
     try {
       await saveObservedPendingMetric(storeId, observation)
-      recentPendingMetricReports.set(reportKey, {value: observation.value, savedAt: Date.now()})
+      recentPendingMetricReports.set(reportKey, {signature: reportSignature, savedAt: Date.now()})
       runtimeLog.writeLog(
         'AFTERSALE_LIVE_METRIC',
         `store_id=${storeId} metric=${observation.metric} value=${observation.value} evidence=${observation.evidence} result=success`

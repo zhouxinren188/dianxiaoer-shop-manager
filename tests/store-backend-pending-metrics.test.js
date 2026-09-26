@@ -6,8 +6,10 @@ import pendingMetrics from '../src/main/store-backend-pending-metrics'
 const {
   PENDING_VIOLATION_API,
   PENDING_FOLLOW_UP_API,
+  PENDING_INVOICE_API,
   isPendingViolationPageUrl,
   isPendingFollowUpPageUrl,
+  isPendingInvoicePageUrl,
   isPendingMetricPageUrl,
   normalizePendingMetricObservation
 } = pendingMetrics
@@ -99,6 +101,52 @@ describe('store backend pending metric validation', () => {
     expect(isPendingMetricPageUrl('pending_violations', warningUrl)).toBe(false)
   })
 
+  it('accepts a sanitized pending-invoice snapshot, including an empty result', () => {
+    const observation = normalizePendingMetricObservation({
+      metric: 'pending_consumer_invoices',
+      value: 1,
+      api: PENDING_INVOICE_API,
+      evidence: 'response_capture',
+      observedAt: 789,
+      invoices: [{
+        orderId: '3511443006337080',
+        invoiceTitle: '测试抬头',
+        invoiceAmount: 138,
+        companyName: '测试店铺',
+        applyTime: 1770000000000
+      }]
+    })
+    expect(observation).toMatchObject({
+      metric: 'pending_consumer_invoices',
+      value: 1,
+      api: PENDING_INVOICE_API,
+      evidence: 'response_capture',
+      observedAt: 789
+    })
+    expect(observation.invoices).toHaveLength(1)
+    expect(normalizePendingMetricObservation({
+      metric: 'pending_consumer_invoices',
+      value: 0,
+      api: PENDING_INVOICE_API,
+      evidence: 'response_capture',
+      invoices: []
+    })?.invoices).toEqual([])
+  })
+
+  it('rejects forged invoice snapshots and restricts them to the invoice page', () => {
+    const invoiceUrl = 'https://shop.jd.com/jdm/finance/consumerInvoice/cinvoiceOrder'
+    expect(isPendingInvoicePageUrl(invoiceUrl)).toBe(true)
+    expect(isPendingMetricPageUrl('pending_consumer_invoices', invoiceUrl)).toBe(true)
+    expect(isPendingInvoicePageUrl('https://shop.jd.com/jdm/home')).toBe(false)
+    expect(normalizePendingMetricObservation({
+      metric: 'pending_consumer_invoices',
+      value: 0,
+      api: PENDING_INVOICE_API,
+      evidence: 'response_capture',
+      invoices: [{orderId: '3511443006337080'}]
+    })).toBeNull()
+  })
+
   it('keeps the live update event in the renderer preload allowlist', () => {
     const source = fs.readFileSync(path.resolve('src/preload/index.js'), 'utf8')
     expect(source).toContain("'aftersale-metric-updated'")
@@ -122,5 +170,13 @@ describe('store backend pending metric validation', () => {
     expect(source).toContain("api === replyApi")
     expect(source).toContain('scheduleAfterReply()')
     expect(source).not.toContain('pendingFollowUpMutationObserver')
+  })
+
+  it('captures the latest invoice query response after an upload', () => {
+    const source = fs.readFileSync(path.resolve('resources/store-backend-page-preload.js'), 'utf8')
+    expect(source).toContain('queryPendingReviewApplyOrderList')
+    expect(source).toContain("metric: 'pending_consumer_invoices'")
+    expect(source).toContain("evidence: 'response_capture'")
+    expect(source).toContain('__DXE_PENDING_INVOICE_CAPTURE_INSTALLED__')
   })
 })

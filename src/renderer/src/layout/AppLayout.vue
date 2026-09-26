@@ -106,21 +106,42 @@ const userInfo = computed(() => {
   }
 })
 
-// 退出确认弹窗
+// 退出确认弹窗（同一时间只允许一个，避免重复点击叠加透明遮罩层）。
+let quitConfirmTask = null
 function showQuitConfirm() {
-  ElMessageBox.confirm('确定要退出店小二网店管家吗？', '退出确认', {
-    confirmButtonText: '退出',
-    cancelButtonText: '取消',
-    type: 'warning'
-  }).then(() => {
+  if (quitConfirmTask) return
+  let confirmTask
+  try {
+    confirmTask = ElMessageBox.confirm('确定要退出店小二网店管家吗？', '退出确认', {
+      confirmButtonText: '退出',
+      cancelButtonText: '取消',
+      type: 'warning'
+    })
+    quitConfirmTask = confirmTask
+    // Alt+F4 由主进程转发到这里。应用内弹窗成功创建后再回执，取消原生
+    // 兜底计时；若创建失败，主进程仍会在超时后提供可退出的系统确认框。
+    window.electronAPI?.invoke('window-close-prompt-shown')?.catch(() => {})
+  } catch {
+    // 兼容尚未重启、preload 仍是旧白名单的当前开发进程。
+  }
+  if (!confirmTask) return
+  confirmTask.then(() => {
     window.electronAPI?.invoke('window-close')
-  }).catch(() => {})
+  }).catch(() => {}).finally(() => {
+    if (quitConfirmTask === confirmTask) quitConfirmTask = null
+  })
 }
 
 // 进入主界面时切换到大窗口尺寸
 let unsubCloseRequested = null
 let stopJdExpressSpendScheduler = null
 onMounted(() => {
+  // 页面热更新、renderer 重载或主进程重启后重新同步当前有效令牌，避免界面
+  // 显示已登录，但主进程代理与后台任务仍处于“认证未就绪”。
+  const activeToken = localStorage.getItem('accessToken')
+  if (activeToken) {
+    window.electronAPI?.invoke('set-auth-token', activeToken).catch(() => {})
+  }
   window.electronAPI?.invoke('window-set-main-size')
   // 登录后在整个主界面后台同步快车消耗，不依赖用户是否停留在首页。
   stopJdExpressSpendScheduler = startJdExpressSpendScheduler()

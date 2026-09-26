@@ -658,6 +658,162 @@ try {
   console.error('[DXE_PENDING_METRIC_PRELOAD] ' + String(error?.message || error))
 }
 
+// The consumer-invoice page refreshes its pending list when the operator clicks
+// 查询 after uploading. Capture that exact response so the dashboard replaces
+// its cached invoice details immediately instead of waiting for the hourly run.
+try {
+  contextBridge.executeInMainWorld({
+    func: messageSource => {
+      if (location.hostname.toLowerCase() !== 'shop.jd.com'
+        || !/^\/jdm\/finance\/consumerInvoice\/cinvoiceOrder(?:\/|$)/i.test(location.pathname)
+        || window.__DXE_PENDING_INVOICE_CAPTURE_INSTALLED__) {
+        return false
+      }
+      window.__DXE_PENDING_INVOICE_CAPTURE_INSTALLED__ = true
+
+      const targetApi = 'dsm.pop.finance.vendor.spi.cinvoice.ApplyOrderDsmProvider.queryPendingReviewApplyOrderList'
+
+      function readApi(urlValue) {
+        try {
+          return new URL(String(urlValue || ''), location.href).searchParams.get('api') || ''
+        } catch (_error) {
+          return ''
+        }
+      }
+
+      function safeText(value, maxLength = 200) {
+        return String(value == null ? '' : value).trim().slice(0, maxLength)
+      }
+
+      function normalizeInvoice(item) {
+        const orderId = safeText(item?.orderId, 30)
+        if (!/^\d{10,30}$/.test(orderId)) return null
+        const invoiceAmount = Number(item?.invoiceAmount)
+        const applyTime = Number(item?.applyTime)
+        return {
+          orderId,
+          invoiceTitle: safeText(item?.invoiceTitle),
+          invoiceAmount: Number.isFinite(invoiceAmount) && invoiceAmount >= 0 ? invoiceAmount : 0,
+          companyName: safeText(item?.companyName),
+          applyTime: Number.isFinite(applyTime) && applyTime > 0 ? Math.trunc(applyTime) : null
+        }
+      }
+
+      function isUnfilteredPendingQuery(bodyValue) {
+        let body = bodyValue
+        try {
+          if (typeof body === 'string') body = JSON.parse(body)
+        } catch (_error) {
+          return false
+        }
+        const request = body?.request
+        if (!request || typeof request !== 'object' || Number(request.pageIndex) !== 1) return false
+        const restrictiveFields = [
+          'orderId', 'invoiceTitle', 'invoiceTitleType', 'countdownDays',
+          'auditInvoiceStatus', 'allInvoiceStatus', 'invoiceType', 'applyTime',
+          'orderCompleteTime', 'sourceId', 'userType', 'companyId',
+          'orderCompleteTimeStart', 'orderCompleteTimeEnd'
+        ]
+        if (restrictiveFields.some(key => request[key] != null && String(request[key]).trim() !== '')) {
+          return false
+        }
+        const startTime = Date.parse(String(request.applyTimeStart || ''))
+        const endTime = Date.parse(String(request.applyTimeEnd || ''))
+        const dayMs = 24 * 60 * 60 * 1000
+        return Number.isFinite(startTime)
+          && Number.isFinite(endTime)
+          && endTime >= Date.now() - (2 * dayMs)
+          && endTime - startTime >= 85 * dayMs
+      }
+
+      function readSnapshot(value) {
+        let response = value
+        try {
+          if (typeof response === 'string') response = JSON.parse(response)
+        } catch (_error) {
+          return null
+        }
+        const total = Number(response?.data?.totalCount)
+        if (String(response?.code) !== '200'
+          || !Number.isSafeInteger(total)
+          || total < 0
+          || total > 1000000) {
+          return null
+        }
+        const invoices = []
+        const seen = new Set()
+        const rows = Array.isArray(response?.data?.data) ? response.data.data : []
+        for (const row of rows) {
+          const invoice = normalizeInvoice(row)
+          if (!invoice || seen.has(invoice.orderId)) continue
+          seen.add(invoice.orderId)
+          invoices.push(invoice)
+          if (invoices.length >= 100) break
+        }
+        if (invoices.length > total) return null
+        return {total, invoices}
+      }
+
+      function publishSnapshot(value) {
+        const snapshot = readSnapshot(value)
+        if (!snapshot) return
+        window.postMessage({
+          source: messageSource,
+          observation: {
+            metric: 'pending_consumer_invoices',
+            value: snapshot.total,
+            api: targetApi,
+            invoices: snapshot.invoices,
+            evidence: 'response_capture',
+            observedAt: Date.now()
+          }
+        }, location.origin)
+      }
+
+      const originalFetch = window.fetch
+      window.fetch = function(input, init) {
+        const urlValue = typeof input === 'string' ? input : input?.url || ''
+        const requestBody = init?.body
+        return originalFetch.apply(this, arguments).then(response => {
+          if (readApi(urlValue || response.url) === targetApi && isUnfilteredPendingQuery(requestBody)) {
+            response.clone().json().then(publishSnapshot).catch(() => {})
+          }
+          return response
+        })
+      }
+
+      const originalOpen = XMLHttpRequest.prototype.open
+      const originalSend = XMLHttpRequest.prototype.send
+      XMLHttpRequest.prototype.open = function(method, url) {
+        this.__dxePendingInvoiceUrl = String(url || '')
+        return originalOpen.apply(this, arguments)
+      }
+      XMLHttpRequest.prototype.send = function() {
+        const xhr = this
+        const requestBody = arguments[0]
+        if (readApi(xhr.__dxePendingInvoiceUrl || '') === targetApi && isUnfilteredPendingQuery(requestBody)) {
+          xhr.addEventListener('load', () => {
+            try {
+              const result = xhr.responseType === 'json'
+                ? xhr.response
+                : (!xhr.responseType || xhr.responseType === 'text' ? xhr.responseText || '' : null)
+              if (result != null) publishSnapshot(result)
+            } catch (_error) {
+              // Ignore unsupported XHR response types.
+            }
+          })
+        }
+        return originalSend.apply(this, arguments)
+      }
+
+      return true
+    },
+    args: [PENDING_METRIC_MESSAGE_SOURCE]
+  })
+} catch (error) {
+  console.error('[DXE_PENDING_INVOICE_PRELOAD] ' + String(error?.message || error))
+}
+
 // The warning center's default list uses handlingState=-1 (all reminders).
 // Query handlingState=0 directly so the dashboard stores only reminders that
 // still require a reply. Only the resulting count is sent to the main process.
