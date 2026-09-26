@@ -209,4 +209,35 @@ describe('desktop command channel client', () => {
       error_code: 'execution_interrupted'
     })
   })
+
+  it('releases the single-flight channel when a handler exceeds the task deadline', async () => {
+    vi.useFakeTimers()
+    try {
+      let terminalBody
+      const requestJson = vi.fn(async request => {
+        if (request.endpoint.endsWith('/status')) return { accepted: true }
+        if (request.endpoint.endsWith('/result')) {
+          terminalBody = request.body
+          return { accepted: true }
+        }
+        throw new Error('unexpected request')
+      })
+      const hangingHandler = vi.fn(() => new Promise(() => {}))
+      const { client } = makeClient({ requestJson, pingHandler: hangingHandler })
+      const claim = makeClaim()
+      claim.task.expires_at = '2026-08-31T01:00:06.000Z'
+
+      const handling = client.handleClaim(claim)
+      await vi.advanceTimersByTimeAsync(1000)
+      await expect(handling).resolves.toBeUndefined()
+
+      expect(terminalBody).toMatchObject({
+        status: 'failed',
+        error_code: 'task_deadline_exceeded'
+      })
+      expect(client.active).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -201,6 +201,7 @@ async function listDevices(pool, auth, now = new Date()) {
 
 async function recordHeartbeat(pool, auth, body, now = new Date()) {
   const input = normalizeHeartbeatRequest(body)
+  await expireOverdueTasks(pool, auth.userId, now)
   await pool.execute(
     `INSERT INTO desktop_command_devices
        (user_id, device_id, instance_id, protocol_version, app_version, status, capabilities_json,
@@ -232,14 +233,22 @@ async function recordHeartbeat(pool, auth, body, now = new Date()) {
   }
 }
 
-async function maintainExpiredTasks(connection, userId, now) {
+async function expireOverdueTasks(executor, userId, now) {
   const mysqlNow = toMysqlDate(now)
-  await connection.execute(
+  await executor.execute(
     `UPDATE desktop_command_tasks
-        SET status = 'expired', completed_at = COALESCE(completed_at, ?), updated_at = ?
-      WHERE user_id = ? AND status = 'queued' AND expires_at <= ?`,
+        SET status = 'expired',
+            error_code = COALESCE(NULLIF(error_code, ''), 'task_expired'),
+            error_message = COALESCE(NULLIF(error_message, ''), 'Desktop task exceeded its absolute deadline'),
+            completed_at = COALESCE(completed_at, ?), lease_expires_at = NULL, updated_at = ?
+      WHERE user_id = ? AND status IN ('queued', 'leased', 'executing') AND expires_at <= ?`,
     [mysqlNow, mysqlNow, userId, mysqlNow]
   )
+}
+
+async function maintainExpiredTasks(connection, userId, now) {
+  const mysqlNow = toMysqlDate(now)
+  await expireOverdueTasks(connection, userId, now)
   await connection.execute(
     `UPDATE desktop_command_tasks
         SET status = 'queued', claimed_device_id = '', claimed_instance_id = '',
@@ -338,7 +347,7 @@ async function updateTaskStatus(pool, auth, taskId, body, now = new Date()) {
         SET status = 'executing', progress_json = ?, started_at = COALESCE(started_at, ?), updated_at = ?
       WHERE task_id = ? AND user_id = ? AND status IN ('leased', 'executing')
         AND claimed_device_id = ? AND claimed_instance_id = ?
-        AND lease_id = ? AND fencing_token = ? AND lease_expires_at > ?`,
+        AND lease_id = ? AND fencing_token = ? AND lease_expires_at > ? AND expires_at > ?`,
     [
       JSON.stringify(input.progress),
       toMysqlDate(now),
@@ -349,6 +358,7 @@ async function updateTaskStatus(pool, auth, taskId, body, now = new Date()) {
       input.instanceId,
       input.leaseId,
       input.fencingToken,
+      toMysqlDate(now),
       toMysqlDate(now)
     ]
   )
@@ -361,12 +371,13 @@ async function updateTaskStatus(pool, auth, taskId, body, now = new Date()) {
 async function renewLease(pool, auth, taskId, body, now = new Date()) {
   const input = normalizeLeaseRequest(body, { allowProgress: true })
   const leaseExpiresAt = new Date(now.getTime() + LEASE_SECONDS * 1000)
+  await expireOverdueTasks(pool, auth.userId, now)
   const [result] = await pool.execute(
     `UPDATE desktop_command_tasks
-        SET lease_expires_at = ?, progress_json = ?, updated_at = ?
+        SET lease_expires_at = LEAST(?, expires_at), progress_json = ?, updated_at = ?
       WHERE task_id = ? AND user_id = ? AND status IN ('leased', 'executing')
         AND claimed_device_id = ? AND claimed_instance_id = ?
-        AND lease_id = ? AND fencing_token = ? AND lease_expires_at > ?`,
+        AND lease_id = ? AND fencing_token = ? AND lease_expires_at > ? AND expires_at > ?`,
     [
       toMysqlDate(leaseExpiresAt),
       JSON.stringify(input.progress),
@@ -377,6 +388,7 @@ async function renewLease(pool, auth, taskId, body, now = new Date()) {
       input.instanceId,
       input.leaseId,
       input.fencingToken,
+      toMysqlDate(now),
       toMysqlDate(now)
     ]
   )
@@ -421,7 +433,8 @@ async function recordTaskResult(pool, auth, taskId, body, now = new Date()) {
     }
     if (
       !sameClaim ||
-      new Date(task.lease_expires_at).getTime() <= now.getTime()
+      new Date(task.lease_expires_at).getTime() <= now.getTime() ||
+      new Date(task.expires_at).getTime() <= now.getTime()
     ) {
       throw protocolError('lease_invalid', 'The desktop task lease is invalid or expired')
     }

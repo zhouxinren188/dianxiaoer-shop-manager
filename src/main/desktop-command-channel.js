@@ -9,6 +9,8 @@ const MAX_REQUEST_BYTES = 64 * 1024
 const MAX_RESPONSE_BYTES = 256 * 1024
 const JOURNAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const JOURNAL_MAX_ENTRIES = 200
+const TASK_HANDLER_MAX_MS = 4 * 60 * 1000
+const TASK_RESULT_GRACE_MS = 5 * 1000
 
 function createChannelError(code, message, extras = {}) {
   return Object.assign(new Error(message), { code, ...extras })
@@ -502,6 +504,33 @@ class DesktopCommandChannelClient {
     }
   }
 
+  async executeHandler(active, handler, context) {
+    const expiresAt = Date.parse(active.task.expires_at)
+    const remainingMs = Number.isFinite(expiresAt)
+      ? expiresAt - this.now() - TASK_RESULT_GRACE_MS
+      : TASK_HANDLER_MAX_MS
+    const timeoutMs = Math.max(1, Math.min(TASK_HANDLER_MAX_MS, remainingMs))
+    let timeout = null
+    const timeoutPromise = new Promise((resolve, reject) => {
+      timeout = this.setTimeoutFn(() => {
+        active.cancelled = true
+        reject(createChannelError(
+          'task_deadline_exceeded',
+          'Desktop command exceeded its execution deadline'
+        ))
+      }, timeoutMs)
+      timeout?.unref?.()
+    })
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => handler(active.task.payload, context)),
+        timeoutPromise
+      ])
+    } finally {
+      if (timeout) this.clearTimeoutFn(timeout)
+    }
+  }
+
   async handleClaim(claim) {
     const { task, lease } = this.validateClaim(claim)
     const active = {
@@ -545,7 +574,7 @@ class DesktopCommandChannelClient {
           ))
         } else if (!outcome) {
           try {
-            const result = await handler(task.payload, {
+            const result = await this.executeHandler(active, handler, {
               taskId: task.task_id,
               deviceId: this.deviceId,
               instanceId: this.instanceId,

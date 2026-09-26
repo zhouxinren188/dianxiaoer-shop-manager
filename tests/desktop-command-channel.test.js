@@ -18,7 +18,8 @@ const {
   claimTask,
   createTask,
   recordHeartbeat,
-  recordTaskResult
+  recordTaskResult,
+  renewLease
 } = require('../server/services/desktop-command-channel-service')
 const {
   requireDesktopDevice
@@ -33,6 +34,7 @@ const {
 const DEVICE_ID = 'device_12345678'
 const INSTANCE_ID = 'instance_12345678'
 const dbSource = readFileSync(new URL('../server/db.js', import.meta.url), 'utf8')
+const salesOrderFetchSource = readFileSync(new URL('../src/main/sales-order-fetch.js', import.meta.url), 'utf8')
 
 function heartbeatBody(overrides = {}) {
   return {
@@ -196,10 +198,38 @@ describe('desktop command channel service', () => {
     const result = await recordHeartbeat({ execute }, { userId: 7 }, heartbeatBody(), now)
     expect(result.accepted).toBe(true)
     expect(result.server_time).toBe(now.toISOString())
-    expect(execute).toHaveBeenCalledTimes(1)
-    expect(execute.mock.calls[0][1][0]).toBe(7)
-    expect(execute.mock.calls[0][1][1]).toBe(DEVICE_ID)
-    expect(execute.mock.calls[0][1][3]).toBe(PROTOCOL_VERSION)
+    expect(execute).toHaveBeenCalledTimes(2)
+    expect(execute.mock.calls[0][0]).toContain("status IN ('queued', 'leased', 'executing')")
+    expect(execute.mock.calls[1][1][0]).toBe(7)
+    expect(execute.mock.calls[1][1][1]).toBe(DEVICE_ID)
+    expect(execute.mock.calls[1][1][3]).toBe(PROTOCOL_VERSION)
+  })
+
+  it('expires an executing task at its absolute deadline instead of renewing forever', async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+    const now = new Date('2026-09-26T06:05:01.000Z')
+
+    await expect(renewLease({ execute }, { userId: 13 }, 'desktop_task_12345678', {
+      device_id: DEVICE_ID,
+      instance_id: INSTANCE_ID,
+      lease_id: 'lease_12345678',
+      fencing_token: 1,
+      progress: { phase: 'executing' }
+    }, now)).rejects.toMatchObject({ code: 'lease_invalid' })
+
+    expect(execute.mock.calls[0][0]).toContain("status = 'expired'")
+    expect(execute.mock.calls[0][0]).toContain("status IN ('queued', 'leased', 'executing')")
+    expect(execute.mock.calls[1][0]).toContain('LEAST(?, expires_at)')
+    expect(execute.mock.calls[1][0]).toContain('expires_at > ?')
+  })
+
+  it('bounds JD remark signing, network and page execution time', () => {
+    expect(salesOrderFetchSource).toContain('VENDOR_REMARK_EXECUTION_TIMEOUT_MS = 30000')
+    expect(salesOrderFetchSource).toContain('VENDOR_REMARK_SIGN_TIMEOUT_MS = 8000')
+    expect(salesOrderFetchSource).toContain('VENDOR_REMARK_FETCH_TIMEOUT_MS = 12000')
+    expect(salesOrderFetchSource).toContain('signal: controller.signal')
   })
 
   it('returns the idempotent task row selected after an upsert', async () => {

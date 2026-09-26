@@ -19,6 +19,19 @@ let submitVendorRemarkImplementation = null
 let stockRemarkQueue = Promise.resolve()
 const queuedStockRemarkTasks = new Set()
 
+const VENDOR_REMARK_EXECUTION_TIMEOUT_MS = 30000
+const VENDOR_REMARK_SIGN_TIMEOUT_MS = 8000
+const VENDOR_REMARK_FETCH_TIMEOUT_MS = 12000
+
+function withTimeout(promise, timeoutMs, message) {
+  let timer = null
+  const timeoutPromise = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([Promise.resolve(promise), timeoutPromise])
+    .finally(() => clearTimeout(timer))
+}
+
 async function submitVendorRemark(input) {
   if (typeof submitVendorRemarkImplementation !== 'function') {
     return { success: false, message: '京东备注能力尚未初始化' }
@@ -3153,7 +3166,7 @@ function registerSalesOrderIpc(mainWindow) {
   // 在指定京东页面中使用官方 ParamsSign 环境执行 batchSubmitVenderRemark。
   async function _executeVendorRemarkApi(webContents, orderId, remark) {
     const encodedInput = Buffer.from(JSON.stringify({ orderId: String(orderId), remark: String(remark) }), 'utf8').toString('base64')
-    const apiResult = await webContents.executeJavaScript(`
+    const apiResult = await withTimeout(webContents.executeJavaScript(`
       (async function() {
         try {
           var bytes = Uint8Array.from(atob('${encodedInput}'), function(char) { return char.charCodeAt(0); });
@@ -3188,6 +3201,12 @@ function registerSalesOrderIpc(mainWindow) {
           var businessId = (config.securityWhiteList && config.securityWhiteList[api]) || config.defaultBusinessId || '0248a';
           var signer = new window.ParamsSign({ appId: businessId, preRequest: false, debug: false, onSign: function() {} });
 
+          function rejectAfter(milliseconds, message) {
+            return new Promise(function(resolve, reject) {
+              setTimeout(function() { reject(new Error(message)); }, milliseconds);
+            });
+          }
+
           function getJsToken() {
             if (typeof window.getJsToken !== 'function') return Promise.resolve('');
             return new Promise(function(resolve) {
@@ -3212,7 +3231,10 @@ function registerSalesOrderIpc(mainWindow) {
           }
 
           var signedAndEid = await Promise.all([
-            signer.sign({ body: bodyHash, appId: appId, api: api, v: '1.0' }),
+            Promise.race([
+              signer.sign({ body: bodyHash, appId: appId, api: api, v: '1.0' }),
+              rejectAfter(${VENDOR_REMARK_SIGN_TIMEOUT_MS}, '京东备注签名超时')
+            ]),
             getJsToken()
           ]);
           var signed = signedAndEid[0];
@@ -3235,19 +3257,31 @@ function registerSalesOrderIpc(mainWindow) {
           };
           if (eid) headers['dsm-eid'] = eid;
 
-          var response = await fetch('https://sff.jd.com/api?v=1.0&appId=' + appId + '&api=' + encodeURIComponent(api), {
-            method: 'POST',
-            credentials: 'include',
-            headers: headers,
-            body: bodyText
-          });
-          var data = await response.json();
+          var controller = new AbortController();
+          var fetchTimer = setTimeout(function() { controller.abort(); }, ${VENDOR_REMARK_FETCH_TIMEOUT_MS});
+          var response;
+          var data;
+          try {
+            response = await fetch('https://sff.jd.com/api?v=1.0&appId=' + appId + '&api=' + encodeURIComponent(api), {
+              method: 'POST',
+              credentials: 'include',
+              headers: headers,
+              body: bodyText,
+              signal: controller.signal
+            });
+            data = await response.json();
+          } catch (fetchError) {
+            if (fetchError && fetchError.name === 'AbortError') throw new Error('京东备注请求超时');
+            throw fetchError;
+          } finally {
+            clearTimeout(fetchTimer);
+          }
           return { success: true, data: data };
         } catch (error) {
           return { success: false, error: error && error.message ? error.message : String(error) };
         }
       })()
-    `)
+    `), VENDOR_REMARK_EXECUTION_TIMEOUT_MS, '京东备注页面执行超时')
 
     console.log('[VendorRemark] API返回:', JSON.stringify(apiResult).substring(0, 500))
 
