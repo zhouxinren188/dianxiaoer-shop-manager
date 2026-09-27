@@ -6013,6 +6013,22 @@ app.get('/api/purchase-accounts', async (req, res) => {
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
 
+// 仅供桌面主进程在本机加密凭据库缺失时迁移已保存的登录凭据。
+// 路由沿用采购账号权限校验，并禁止代理/浏览器缓存包含密码的响应。
+app.get('/api/purchase-accounts/:id/login-credential', async (req, res) => {
+  try {
+    const account = await requireAccessiblePurchaseAccount(req, res)
+    if (!account) return
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+    res.set('Pragma', 'no-cache')
+    res.json(ok({
+      account: String(account.account || ''),
+      password: String(account.password || ''),
+      platform: String(account.platform || '').toLowerCase()
+    }))
+  } catch (err) { res.status(500).json(fail(err.message)) }
+})
+
 app.post('/api/purchase-accounts', async (req, res) => {
   try {
     const ownerId = getOwnerId(req.user)

@@ -37,6 +37,10 @@ const {
   saveJdStoreCredential,
   moveJdStoreCredential
 } = require('./jd-store-credential-vault')
+const {
+  getPurchaseAccountCredential,
+  savePurchaseAccountCredential
+} = require('./purchase-account-credential-vault')
 
 // 解析应用资源路径（直接从 app 根目录查找）
 function resolveAppPath(relativePath) {
@@ -1620,8 +1624,73 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
 function registerPurchaseAccountIpc(mainWindow) {
   const preloadPath = resolveAppPath('resources/platform-login-preload.js')
 
+  async function resolvePurchaseLoginCredential(accountId, platform, requestedAccount, requestedPassword) {
+    const normalizedPlatform = String(platform || '').toLowerCase()
+    let account = String(requestedAccount || '')
+    let password = String(requestedPassword || '')
+    let source = password ? 'request' : 'none'
+
+    try {
+      const local = getPurchaseAccountCredential(accountId)
+      if (local && (!local.platform || local.platform === normalizedPlatform)) {
+        const usedLocal = (!account && !!local.account) || (!password && !!local.password)
+        account = account || local.account
+        password = password || local.password
+        if (usedLocal) source = 'local-vault'
+      }
+    } catch (error) {
+      runtimeLog.writeLog(
+        'PURCHASE_LOGIN',
+        `account_id=${accountId} phase=credential_vault_read result=failed reason=${String(error.message || error).slice(0, 160)}`
+      )
+    }
+
+    // 老版本只把密码保存在服务器。首次打开时迁移到本机 safeStorage，
+    // 后续登录优先读取本机加密凭据，避免把密码交给 renderer。
+    if (!account || !password) {
+      try {
+        const response = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/login-credential`)
+        const remote = requireBusinessResponse(response, '读取采购账号登录凭据失败') || {}
+        const remotePlatform = String(remote.platform || '').toLowerCase()
+        if (!remotePlatform || remotePlatform === normalizedPlatform) {
+          account = account || String(remote.account || '')
+          password = password || String(remote.password || '')
+          if (remote.account || remote.password) source = 'server-migration'
+        }
+      } catch (error) {
+        runtimeLog.writeLog(
+          'PURCHASE_LOGIN',
+          `account_id=${accountId} phase=credential_migration result=failed reason=${String(error.message || error).slice(0, 160)}`
+        )
+      }
+    }
+
+    if (account || password) {
+      try {
+        const saved = savePurchaseAccountCredential(accountId, { account, password, platform: normalizedPlatform })
+        runtimeLog.writeLog(
+          'PURCHASE_LOGIN',
+          `account_id=${accountId} phase=credential_vault_write result=${saved.success ? 'success' : 'failed'} source=${source} account=${account ? 'yes' : 'no'} password=${password ? 'yes' : 'no'}${saved.reason ? ` reason=${String(saved.reason).slice(0, 120)}` : ''}`
+        )
+      } catch (error) {
+        runtimeLog.writeLog(
+          'PURCHASE_LOGIN',
+          `account_id=${accountId} phase=credential_vault_write result=failed source=${source} reason=${String(error.message || error).slice(0, 160)}`
+        )
+      }
+    }
+
+    return { account, password }
+  }
+
   // 打开采购账号登录窗口
-  ipcMain.handle('open-purchase-login-window', async (event, { accountId, platform, account, password }) => {
+  ipcMain.handle('open-purchase-login-window', async (event, {
+    accountId,
+    platform,
+    account: requestedAccount,
+    password: requestedPassword,
+    clearSession = false
+  }) => {
     if (purchaseWindows.has(accountId)) {
       const existWin = purchaseWindows.get(accountId)
       if (!existWin.isDestroyed()) {
@@ -1637,11 +1706,21 @@ function registerPurchaseAccountIpc(mainWindow) {
     }
 
     const partitionName = `persist:purchase-${accountId}`
+    const resolvedCredential = await resolvePurchaseLoginCredential(
+      accountId,
+      platform,
+      requestedAccount,
+      requestedPassword
+    )
+    const account = resolvedCredential.account
+    const password = resolvedCredential.password
 
-    // 新账号清除旧 cookie
-    if (!account) {
+    // “重登”明确清除旧会话；不再用“是否传账号”推断，以免清 Cookie 后丢失代填凭据。
+    if (clearSession === true) {
       const ses = session.fromPartition(partitionName)
       await ses.clearStorageData({ storages: ['cookies'] })
+      invalidateTaobaoAccountValidation(accountId)
+      invalidateCookieRestoreCache(accountId, platform)
     }
 
     const win = new BrowserWindow({
@@ -1748,6 +1827,37 @@ function registerPurchaseAccountIpc(mainWindow) {
         needServerRestore = true
       }
     }
+
+    function sendPurchaseLoginCredentials(source) {
+      if (win.isDestroyed() || platform === 'pinduoduo' || (!account && !password)) return false
+      runtimeLog.writeLog(
+        'PURCHASE_LOGIN',
+        `account_id=${accountId} phase=credential_fill_send source=${source} account=${account ? 'yes' : 'no'} password=${password ? 'yes' : 'no'}`
+      )
+      win.webContents.send('fill-credentials', { account, password })
+      return true
+    }
+
+    // preload 在每次导航后都会重新发送 ready。必须在 loadURL 前注册，
+    // 避免淘宝页面较快时错过首次握手。
+    const fillReadyHandler = event => {
+      if (win.isDestroyed() || win.webContents !== event.sender) return
+      sendPurchaseLoginCredentials('preload-ready')
+    }
+    const fillResultHandler = (event, result = {}) => {
+      if (win.isDestroyed() || win.webContents !== event.sender) return
+      runtimeLog.writeLog(
+        'PURCHASE_LOGIN',
+        `account_id=${accountId} phase=credential_fill_result account_provided=${result.accountProvided ? 'yes' : 'no'} password_provided=${result.passwordProvided ? 'yes' : 'no'} account_found=${result.accountFound ? 'yes' : 'no'} password_found=${result.passwordFound ? 'yes' : 'no'} account_filled=${result.accountFilled ? 'yes' : 'no'} password_filled=${result.passwordFilled ? 'yes' : 'no'}`
+      )
+    }
+    ipcMain.on('platform-login-ready', fillReadyHandler)
+    ipcMain.on('platform-login-fill-result', fillResultHandler)
+    const removePurchaseFillListeners = () => {
+      ipcMain.removeListener('platform-login-ready', fillReadyHandler)
+      ipcMain.removeListener('platform-login-fill-result', fillResultHandler)
+    }
+    win.once('closed', removePurchaseFillListeners)
 
     // ★ 立即加载 URL（页面开始渲染，不再白屏等待）
     win.loadURL(targetUrl)
@@ -1934,6 +2044,7 @@ function registerPurchaseAccountIpc(mainWindow) {
       win.hide()
 
       ipcMain.removeListener('platform-login-credentials', credHandler)
+      removePurchaseFillListeners()
 
       // 清理 session 上的 onBeforeSendHeaders 监听器（防止泄漏）
       try {
@@ -2014,6 +2125,24 @@ function registerPurchaseAccountIpc(mainWindow) {
         })
         requireBusinessResponse(updateResponse, '更新采购账号失败')
         console.log('[PurchaseWindow] 已更新采购账号:', updateBody)
+        if (sessionReplaced && (capturedAccount || capturedPassword)) {
+          try {
+            const credentialSaveResult = savePurchaseAccountCredential(accountId, {
+              account: capturedAccount,
+              password: capturedPassword,
+              platform
+            })
+            runtimeLog.writeLog(
+              'PURCHASE_LOGIN',
+              `account_id=${accountId} phase=credential_vault_write result=${credentialSaveResult.success ? 'success' : 'failed'} source=successful-login account=${capturedAccount ? 'yes' : 'no'} password=${capturedPassword ? 'yes' : 'no'}${credentialSaveResult.reason ? ` reason=${String(credentialSaveResult.reason).slice(0, 120)}` : ''}`
+            )
+          } catch (error) {
+            runtimeLog.writeLog(
+              'PURCHASE_LOGIN',
+              `account_id=${accountId} phase=credential_vault_write result=failed source=successful-login reason=${String(error.message || error).slice(0, 160)}`
+            )
+          }
+        }
         // 账号身份变化会清空旧淘宝身份；更新后重新校验一次，确保最终在线状态
         // 来自当前 Cookie，而不是“保存成功”这一中间步骤。
         if (sessionReplaced && platform === 'taobao') {
