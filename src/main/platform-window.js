@@ -1714,6 +1714,13 @@ function registerPurchaseAccountIpc(mainWindow) {
     )
     const account = resolvedCredential.account
     const password = resolvedCredential.password
+    const platformTitle = {
+      taobao: '淘宝/天猫',
+      tmall: '淘宝/天猫',
+      pinduoduo: '拼多多',
+      '1688': '阿里巴巴',
+      douyin: '抖音'
+    }[platform] || platform
 
     // “重登”明确清除旧会话；不再用“是否传账号”推断，以免清 Cookie 后丢失代填凭据。
     if (clearSession === true) {
@@ -1726,14 +1733,8 @@ function registerPurchaseAccountIpc(mainWindow) {
     const win = new BrowserWindow({
       width: 1100,
       height: 750,
-      title: `采购账号登录 - ${platform}`,
+      title: `店小二网店管家 - ${platformTitle}安全登录`,
       autoHideMenuBar: true,
-      titleBarStyle: 'hidden',
-      titleBarOverlay: {
-        color: '#0b4776',
-        symbolColor: '#ffffff',
-        height: 43
-      },
       backgroundColor: '#ffffff',
       icon: resolveAppPath('resources/icon.ico'),
       webPreferences: {
@@ -1741,8 +1742,7 @@ function registerPurchaseAccountIpc(mainWindow) {
         nodeIntegration: false,
         sandbox: true,
         partition: partitionName,
-        preload: preloadPath,
-        additionalArguments: ['--dxe-custom-platform-titlebar=1']
+        preload: preloadPath
       }
     })
     win.setMenuBarVisibility(false)

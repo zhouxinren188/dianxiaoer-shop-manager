@@ -145,4 +145,17 @@ describe('采购账号安全与 Cookie 状态策略', () => {
     expect(serverSource).toContain("app.get('/api/purchase-accounts/:id/login-credential'")
     expect(serverSource).toContain("res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private')")
   })
+
+  it('采购账号登录窗口使用带店小二图标的原生标题栏', () => {
+    const mainSource = fs.readFileSync(path.resolve('src/main/platform-window.js'), 'utf8')
+    const handlerStart = mainSource.indexOf("ipcMain.handle('open-purchase-login-window'")
+    const handlerEnd = mainSource.indexOf('// 关闭采购账号窗口', handlerStart)
+    const purchaseLoginHandler = mainSource.slice(handlerStart, handlerEnd)
+
+    expect(purchaseLoginHandler).toContain("title: `店小二网店管家 - ${platformTitle}安全登录`")
+    expect(purchaseLoginHandler).toContain("icon: resolveAppPath('resources/icon.ico')")
+    expect(purchaseLoginHandler).not.toContain("titleBarStyle: 'hidden'")
+    expect(purchaseLoginHandler).not.toContain('titleBarOverlay:')
+    expect(purchaseLoginHandler).not.toContain('--dxe-custom-platform-titlebar=1')
+  })
 })
