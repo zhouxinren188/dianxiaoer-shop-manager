@@ -143,6 +143,8 @@ describe('采购账号安全与 Cookie 状态策略', () => {
     expect(mainSource).toContain('closeAfterSuccessfulCookieSave(result')
     expect(mainSource).toContain('phase=auto_close scheduled=yes')
     expect(mainSource).toContain('if (autoCloseOnSuccess !== true) return false')
+    expect(mainSource).toContain("result.validationStatus !== 'valid'")
+    expect(mainSource).toContain('validationStatus = String(validation.status ||')
     expect(mainSource).toContain('h5WarmupDone || !loginDetected')
     expect(mainSource).toContain('if (isLoginPage)')
     expect(mainSource).toContain('loginDetected = false')

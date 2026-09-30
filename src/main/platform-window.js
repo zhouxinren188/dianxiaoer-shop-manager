@@ -1949,8 +1949,10 @@ function registerPurchaseAccountIpc(mainWindow) {
           invalidateCookieRestoreCache(accountId, platform)
           console.log(`[PurchaseWindow] Cookies 已保存: ${cookies.length} 条, _m_h5_tk=${hasH5Tk ? '有' : '无'}`)
 
+          let validationStatus = ''
           if (platform === 'taobao') {
             const validation = await validateTaobaoPurchaseAccount({ accountId, ses })
+            validationStatus = String(validation.status || '')
             console.log(`[PurchaseWindow] 淘宝账号轻量校验: status=${validation.status}, reason=${validation.reason}`)
             if (validation.cookieChanged) {
               cookies = await ses.cookies.get({})
@@ -1964,10 +1966,10 @@ function registerPurchaseAccountIpc(mainWindow) {
           const missing = criticalNames.filter(n => !cookieNames.has(n))
           if (missing.length > 0) {
             console.warn(`[PurchaseWindow] 关键 cookie 缺失: ${missing.join(', ')}，将在 8 秒后重试保存`)
-            return { count: cookies.length, hasH5Tk, missingCritical: missing }
+            return { count: cookies.length, hasH5Tk, validationStatus, missingCritical: missing }
           }
 
-          return { count: cookies.length, hasH5Tk }
+          return { count: cookies.length, hasH5Tk, validationStatus }
         }
         return { count: 0, hasH5Tk: false }
       } catch (err) {
@@ -1984,7 +1986,9 @@ function registerPurchaseAccountIpc(mainWindow) {
       // 只有新增账号和“重登”这种明确的登录流程才在保存成功后自动关闭。
       if (autoCloseOnSuccess !== true) return false
       if (loginAutoCloseScheduled || !result || result.count <= 0 || result.missingCritical?.length) return false
-      if (platform === 'taobao' && !result.hasH5Tk) return false
+      // 淘宝关键 Cookie 即使齐全也可能已经被服务端判定失效。只有轻量接口
+      // 明确验证为 valid 才能关闭登录窗口，避免用户还未真正登录成功就被关掉。
+      if (platform === 'taobao' && (!result.hasH5Tk || result.validationStatus !== 'valid')) return false
       loginAutoCloseScheduled = true
       runtimeLog.writeLog(
         'PURCHASE_LOGIN',
