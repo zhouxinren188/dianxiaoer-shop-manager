@@ -66,11 +66,17 @@ function getPurchaseAccountCredential(accountId) {
   return {
     account: String(credential.account || ''),
     password: String(credential.password || ''),
-    platform: String(credential.platform || '').toLowerCase()
+    platform: String(credential.platform || '').toLowerCase(),
+    serverUpdatedAt: String(credential.serverUpdatedAt || '')
   }
 }
 
-function savePurchaseAccountCredential(accountId, { account = '', password = '', platform = '' } = {}) {
+function savePurchaseAccountCredential(accountId, {
+  account = '',
+  password = '',
+  platform = '',
+  serverUpdatedAt = ''
+} = {}) {
   const key = normalizeAccountId(accountId)
   const vault = readVault()
   const previous = vault[key] && typeof vault[key] === 'object' ? vault[key] : {}
@@ -78,6 +84,7 @@ function savePurchaseAccountCredential(accountId, { account = '', password = '',
     account: String(account || previous.account || ''),
     password: String(password || previous.password || ''),
     platform: String(platform || previous.platform || '').toLowerCase(),
+    serverUpdatedAt: String(serverUpdatedAt || previous.serverUpdatedAt || ''),
     updatedAt: new Date().toISOString()
   }
   if (!next.account && !next.password) return { success: false, reason: '没有可保存的登录凭据' }
@@ -85,7 +92,17 @@ function savePurchaseAccountCredential(accountId, { account = '', password = '',
   return writeVault(vault)
 }
 
+function deletePurchaseAccountCredential(accountId) {
+  const key = normalizeAccountId(accountId)
+  const vault = readVault()
+  if (!vault[key]) return { success: true, removed: false }
+  delete vault[key]
+  const result = writeVault(vault)
+  return { ...result, removed: result.success === true }
+}
+
 module.exports = {
   getPurchaseAccountCredential,
-  savePurchaseAccountCredential
+  savePurchaseAccountCredential,
+  deletePurchaseAccountCredential
 }

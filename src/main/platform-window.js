@@ -39,7 +39,8 @@ const {
 } = require('./jd-store-credential-vault')
 const {
   getPurchaseAccountCredential,
-  savePurchaseAccountCredential
+  savePurchaseAccountCredential,
+  deletePurchaseAccountCredential
 } = require('./purchase-account-credential-vault')
 
 // 解析应用资源路径（直接从 app 根目录查找）
@@ -1624,11 +1625,18 @@ async function restorePurchaseCookiesInBackground(accountId, platform, partition
 function registerPurchaseAccountIpc(mainWindow) {
   const preloadPath = resolveAppPath('resources/platform-login-preload.js')
 
-  async function resolvePurchaseLoginCredential(accountId, platform, requestedAccount, requestedPassword) {
+  async function resolvePurchaseLoginCredential(
+    accountId,
+    platform,
+    requestedAccount,
+    requestedPassword,
+    requestedServerUpdatedAt
+  ) {
     const normalizedPlatform = String(platform || '').toLowerCase()
     let account = String(requestedAccount || '')
     let password = String(requestedPassword || '')
     let source = password ? 'request' : 'none'
+    let localServerUpdatedAt = ''
 
     try {
       const local = getPurchaseAccountCredential(accountId)
@@ -1636,6 +1644,7 @@ function registerPurchaseAccountIpc(mainWindow) {
         const usedLocal = (!account && !!local.account) || (!password && !!local.password)
         account = account || local.account
         password = password || local.password
+        localServerUpdatedAt = local.serverUpdatedAt || ''
         if (usedLocal) source = 'local-vault'
       }
     } catch (error) {
@@ -1647,14 +1656,24 @@ function registerPurchaseAccountIpc(mainWindow) {
 
     // 老版本只把密码保存在服务器。首次打开时迁移到本机 safeStorage，
     // 后续登录优先读取本机加密凭据，避免把密码交给 renderer。
-    if (!account || !password) {
+    const requestedUpdatedMs = Date.parse(String(requestedServerUpdatedAt || ''))
+    const localUpdatedMs = Date.parse(localServerUpdatedAt)
+    const serverCredentialMayBeNewer = Number.isFinite(requestedUpdatedMs) &&
+      (!Number.isFinite(localUpdatedMs) || requestedUpdatedMs > localUpdatedMs)
+    if (!account || !password || serverCredentialMayBeNewer) {
       try {
         const response = await httpRequest(`${BUSINESS_SERVER}/api/purchase-accounts/${accountId}/login-credential`)
         const remote = requireBusinessResponse(response, '读取采购账号登录凭据失败') || {}
         const remotePlatform = String(remote.platform || '').toLowerCase()
         if (!remotePlatform || remotePlatform === normalizedPlatform) {
-          account = account || String(remote.account || '')
-          password = password || String(remote.password || '')
+          if (serverCredentialMayBeNewer) {
+            account = String(remote.account || account)
+            password = String(remote.password || password)
+          } else {
+            account = account || String(remote.account || '')
+            password = password || String(remote.password || '')
+          }
+          localServerUpdatedAt = String(remote.updated_at || requestedServerUpdatedAt || localServerUpdatedAt)
           if (remote.account || remote.password) source = 'server-migration'
         }
       } catch (error) {
@@ -1667,7 +1686,12 @@ function registerPurchaseAccountIpc(mainWindow) {
 
     if (account || password) {
       try {
-        const saved = savePurchaseAccountCredential(accountId, { account, password, platform: normalizedPlatform })
+        const saved = savePurchaseAccountCredential(accountId, {
+          account,
+          password,
+          platform: normalizedPlatform,
+          serverUpdatedAt: localServerUpdatedAt
+        })
         runtimeLog.writeLog(
           'PURCHASE_LOGIN',
           `account_id=${accountId} phase=credential_vault_write result=${saved.success ? 'success' : 'failed'} source=${source} account=${account ? 'yes' : 'no'} password=${password ? 'yes' : 'no'}${saved.reason ? ` reason=${String(saved.reason).slice(0, 120)}` : ''}`
@@ -1689,7 +1713,9 @@ function registerPurchaseAccountIpc(mainWindow) {
     platform,
     account: requestedAccount,
     password: requestedPassword,
-    clearSession = false
+    credentialUpdatedAt,
+    clearSession = false,
+    autoCloseOnSuccess = false
   }) => {
     if (purchaseWindows.has(accountId)) {
       const existWin = purchaseWindows.get(accountId)
@@ -1710,7 +1736,8 @@ function registerPurchaseAccountIpc(mainWindow) {
       accountId,
       platform,
       requestedAccount,
-      requestedPassword
+      requestedPassword,
+      credentialUpdatedAt
     )
     const account = resolvedCredential.account
     const password = resolvedCredential.password
@@ -1951,8 +1978,29 @@ function registerPurchaseAccountIpc(mainWindow) {
 
     // 淘宝账号需要 _m_h5_tk：如果没有则导航到已买到的商品页面来获取
     // PDD 账号如果关键 cookie 缺失，延迟重试等待 JS 异步设置 cookie
+    let loginAutoCloseScheduled = false
+    function closeAfterSuccessfulCookieSave(result, source) {
+      // “进入后台”是浏览/操作入口，即使 Cookie 有效也必须保持窗口打开；
+      // 只有新增账号和“重登”这种明确的登录流程才在保存成功后自动关闭。
+      if (autoCloseOnSuccess !== true) return false
+      if (loginAutoCloseScheduled || !result || result.count <= 0 || result.missingCritical?.length) return false
+      if (platform === 'taobao' && !result.hasH5Tk) return false
+      loginAutoCloseScheduled = true
+      runtimeLog.writeLog(
+        'PURCHASE_LOGIN',
+        `account_id=${accountId} phase=auto_close scheduled=yes source=${source} cookies=${result.count}`
+      )
+      setTimeout(() => {
+        if (!win.isDestroyed()) win.close()
+      }, 500)
+      return true
+    }
+
     async function ensureH5TokenAndSave() {
-      if (win.isDestroyed() || h5WarmupDone) return
+      // 首次访问后台地址经常会先触发一次非登录导航，随后才被平台重定向到
+      // 登录页。只有窗口此刻仍处于已登录状态时才开始保存，避免提前消耗
+      // h5WarmupDone，导致用户真正登录后无法再次保存并自动关闭。
+      if (win.isDestroyed() || h5WarmupDone || !loginDetected) return
       h5WarmupDone = true
 
       // 第一次保存
@@ -1965,6 +2013,7 @@ function registerPurchaseAccountIpc(mainWindow) {
           const retry = await saveCookiesToServer()
           if (retry && !retry.missingCritical) {
             console.log('[PurchaseWindow] PDD 关键 cookie 重试保存成功')
+            closeAfterSuccessfulCookieSave(retry, 'pdd-retry')
           } else if (retry && retry.missingCritical) {
             console.warn(`[PurchaseWindow] PDD 关键 cookie 仍缺失: ${retry.missingCritical.join(', ')}`)
           }
@@ -1983,21 +2032,32 @@ function registerPurchaseAccountIpc(mainWindow) {
         // 等页面加载和 JS 执行完毕后再次保存
         setTimeout(async () => {
           const result2 = await saveCookiesToServer()
-          if (result2 && result2.hasH5Tk) {
+          if (result2 && result2.hasH5Tk && !result2.missingCritical?.length) {
             console.log('[PurchaseWindow] _m_h5_tk 已获取并保存')
+            closeAfterSuccessfulCookieSave(result2, 'taobao-h5-warmup')
           } else {
             console.warn('[PurchaseWindow] 导航后仍未获取到 _m_h5_tk')
           }
         }, 8000)
       }
+
+      const waitingForPddRetry = platform === 'pinduoduo' && !!result?.missingCritical?.length
+      const waitingForTaobaoWarmup = platform === 'taobao' && !!result && !result.hasH5Tk
+      if (!waitingForPddRetry && !waitingForTaobaoWarmup) {
+        closeAfterSuccessfulCookieSave(result, 'initial-save')
+      }
     }
 
     win.webContents.on('did-navigate', (e, url) => {
-      if (loginDetected) return
       const backendUrl = PURCHASE_BACKEND_URLS[platform] || ''
-      // 如果导航到了非登录页面（后台页面），视为登录成功
       const isLoginPage = url.includes('login') || url.includes('passport') || url.includes('sign')
-      if (!isLoginPage && backendUrl) {
+
+      // 后台入口可能先加载一次再跳转登录页。看到登录页时必须撤销此前的
+      // 临时判断，保证用户登录后离开登录页时能够重新触发 Cookie 保存。
+      if (isLoginPage) {
+        loginDetected = false
+        h5WarmupDone = false
+      } else if (!loginDetected && backendUrl) {
         loginDetected = true
         console.log('[PurchaseWindow] 检测到登录成功:', url)
         // 延迟5秒保存cookies（等页面JS执行完毕，H5 API请求完成）
@@ -2230,13 +2290,43 @@ function registerPurchaseAccountIpc(mainWindow) {
     }
   })
 
-  ipcMain.handle('remove-purchase-account-session', async (event, { accountId }) => {
+  ipcMain.handle('save-purchase-account-credential', async (event, payload = {}) => {
     try {
-      return await clearPurchaseAccountSession(accountId)
+      const result = savePurchaseAccountCredential(payload.accountId, {
+        account: payload.account,
+        password: payload.password,
+        platform: payload.platform,
+        serverUpdatedAt: payload.serverUpdatedAt
+      })
+      return result.success ? { success: true } : { success: false, error: result.reason }
     } catch (err) {
-      console.error('[PurchaseWindow] 删除本地会话失败:', err.message)
+      console.error('[PurchaseWindow] 保存本机采购账号凭据失败:', err.message)
       return { success: false, error: err.message }
     }
+  })
+
+  ipcMain.handle('remove-purchase-account-session', async (event, { accountId }) => {
+    let sessionError = ''
+    try {
+      await clearPurchaseAccountSession(accountId)
+    } catch (err) {
+      sessionError = err.message
+      console.error('[PurchaseWindow] 删除本地会话失败:', err.message)
+    }
+
+    // 即使 Chromium 分区清理失败，也必须继续删除本机加密凭据，避免账号
+    // 已从服务器删除后仍在凭据保险库中残留密码。
+    try {
+      const credentialResult = deletePurchaseAccountCredential(accountId)
+      if (!credentialResult.success) {
+        return { success: false, error: credentialResult.reason || sessionError || '删除本机登录凭据失败' }
+      }
+    } catch (err) {
+      console.error('[PurchaseWindow] 删除本机登录凭据失败:', err.message)
+      return { success: false, error: err.message }
+    }
+
+    return sessionError ? { success: false, error: sessionError } : { success: true }
   })
 
   ipcMain.handle('refresh-purchase-cookies', async (event, { accountId, platform }) => {

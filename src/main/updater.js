@@ -34,7 +34,9 @@ function configureUpdater() {
     const autoUpdater = getAutoUpdater()
     autoUpdater.logger = console
     autoUpdater.autoDownload = false
-    autoUpdater.autoInstallOnAppQuit = true
+    // 下载完成也不能在用户正常退出时静默安装；只允许显式的 um-install
+    // 调用进入 quitAndInstall 流程。
+    autoUpdater.autoInstallOnAppQuit = false
 
     // electron-updater defaults to LOCALAPPDATA on Windows. Override its app
     // adapter before the download helper is created so full installers are

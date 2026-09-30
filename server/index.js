@@ -6024,7 +6024,8 @@ app.get('/api/purchase-accounts/:id/login-credential', async (req, res) => {
     res.json(ok({
       account: String(account.account || ''),
       password: String(account.password || ''),
-      platform: String(account.platform || '').toLowerCase()
+      platform: String(account.platform || '').toLowerCase(),
+      updated_at: account.updated_at || null
     }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })
@@ -6134,9 +6135,14 @@ app.put('/api/purchase-accounts/:id', async (req, res) => {
     } finally {
       connection.release()
     }
+    const [updatedRows] = await pool.execute(
+      'SELECT updated_at FROM purchase_accounts WHERE id = ? LIMIT 1',
+      [current.id]
+    )
     res.json(ok({
       updated: true,
-      session_reset_required: metadataChanged && !sessionReplaced
+      session_reset_required: metadataChanged && !sessionReplaced,
+      updated_at: updatedRows[0]?.updated_at || null
     }))
   } catch (err) { res.status(500).json(fail(err.message)) }
 })

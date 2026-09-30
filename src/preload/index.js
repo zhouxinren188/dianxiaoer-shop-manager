@@ -38,6 +38,7 @@ const validInvokeChannels = [
   'fetch-buyer-sensitive-info',
   'save-buyer-info-to-server',
   'clear-purchase-cookies',
+  'save-purchase-account-credential',
   'reset-purchase-account-session',
   'remove-purchase-account-session',
   'toggle-jd-auto-sync',

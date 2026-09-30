@@ -923,23 +923,15 @@
           <template #default="{ row }">
             <el-tooltip :content="purchaseAccountCookieStatusReason(row)" placement="top">
               <el-tag :type="purchaseAccountCookieStatusType(row)" size="small" effect="light">
-                {{ purchaseAccountCookieStatusLabel(row) }}
+                {{ row.validatingCookie ? '检测中' : purchaseAccountCookieStatusLabel(row) }}
               </el-tag>
             </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="330" align="center">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="handleLoginAccount(row)">登录</el-button>
+            <el-button link type="primary" size="small" @click="handleLoginAccount(row)">进入后台</el-button>
             <el-button link type="success" size="small" @click="handleReloginAccount(row)">重登</el-button>
-            <el-button
-              v-if="row.platform === 'taobao' || row.platform === 'tmall'"
-              link
-              type="primary"
-              size="small"
-              :loading="row.validatingCookie"
-              @click="handleValidateTaobaoAccount(row)"
-            >检测</el-button>
             <el-button link type="info" size="small" @click="handleExportCookies(row)">导出Cookie</el-button>
             <el-button link type="info" size="small" @click="handleImportCookies(row)">导入Cookie</el-button>
             <el-button link type="warning" size="small" @click="handleEditAccount(row)">编辑</el-button>
@@ -1555,8 +1547,44 @@ async function loadAccounts() {
   }
 }
 
-function handleAccountManage() {
+let accountStatusRefreshTask = null
+
+async function refreshPurchaseAccountStatuses() {
+  if (!window.electronAPI || accountStatusRefreshTask) return accountStatusRefreshTask
+  const taobaoAccounts = accountList.value.filter(row => row.platform === 'taobao' || row.platform === 'tmall')
+  if (!taobaoAccounts.length) return null
+
+  accountStatusRefreshTask = Promise.allSettled(taobaoAccounts.map(async account => {
+    account.validatingCookie = true
+    try {
+      const result = await window.electronAPI.invoke('validate-taobao-purchase-account', {
+        accountId: String(account.id),
+        force: true
+      })
+      const current = accountList.value.find(row => String(row.id) === String(account.id))
+      if (current && result?.status) {
+        current.cookie_status = result.status
+        current.effective_cookie_status = result.status
+        current.cookie_status_reason = result.reason || ''
+      }
+    } catch (error) {
+      console.warn(`采购账号 ${account.id} 实时状态检测失败:`, error.message)
+    } finally {
+      const current = accountList.value.find(row => String(row.id) === String(account.id))
+      if (current) current.validatingCookie = false
+    }
+  })).finally(async () => {
+    accountStatusRefreshTask = null
+    if (accountManageVisible.value) await loadAccounts()
+  })
+
+  return accountStatusRefreshTask
+}
+
+async function handleAccountManage() {
   accountManageVisible.value = true
+  await loadAccounts()
+  void refreshPurchaseAccountStatuses()
 }
 
 function handleAddAccount() {
@@ -1591,7 +1619,8 @@ async function handleAddAccountSubmit() {
         accountId: String(accountId),
         platform: addAccountForm.platform,
         account: addAccountForm.account,
-        password: addAccountForm.password
+        password: addAccountForm.password,
+        autoCloseOnSuccess: true
       })
       ElMessage.success('已打开登录窗口，登录完成后关闭窗口即可自动保存')
     } else {
@@ -1611,7 +1640,8 @@ function handleLoginAccount(row) {
     window.electronAPI.invoke('open-purchase-login-window', {
       accountId: String(row.id),
       platform: row.platform,
-      account: row.username
+      account: row.username,
+      credentialUpdatedAt: row.updated_at
     })
     ElMessage.info('已打开登录窗口')
   } else {
@@ -1630,7 +1660,9 @@ function handleReloginAccount(row) {
         accountId: String(row.id),
         platform: row.platform,
         account: row.username,
-        clearSession: true
+        credentialUpdatedAt: row.updated_at,
+        clearSession: true,
+        autoCloseOnSuccess: true
       })
       ElMessage.info('已清除登录态并打开登录窗口')
     }).catch(() => {})
@@ -1640,12 +1672,9 @@ function handleReloginAccount(row) {
 }
 
 function purchaseAccountCookieStatusLabel(row) {
-  if (row.platform !== 'taobao' && row.platform !== 'tmall') {
-    return row.status === 'online' ? '在线' : '离线'
-  }
   const status = row.effective_cookie_status || row.cookie_status || (row.cookie_valid ? 'stored' : 'missing')
   return {
-    valid: '已验证',
+    valid: '有效',
     invalid: '已失效',
     mismatch: '账号不符',
     risk: '需安全验证',
@@ -1678,37 +1707,9 @@ function purchaseAccountCookieStatusReason(row) {
     timeout: '检测超时，暂不判定失效',
     success_without_identity: '接口成功但未返回可核验身份，暂不判定有效'
   }
-  return reasonMap[reason] || (reason ? `检测结果：${reason}` : '尚未执行淘宝轻量登录检测')
-}
-
-async function handleValidateTaobaoAccount(row) {
-  if (!window.electronAPI) {
-    ElMessage.warning('请在 Electron 环境中使用此功能')
-    return
-  }
-  row.validatingCookie = true
-  try {
-    const result = await window.electronAPI.invoke('validate-taobao-purchase-account', {
-      accountId: String(row.id),
-      force: true
-    })
-    if (result.status === 'valid') {
-      ElMessage.success(`淘宝账号验证成功${result.nick ? `：${result.nick}` : ''}`)
-    } else if (result.status === 'invalid') {
-      ElMessage.error('淘宝账号登录已失效，请重新登录')
-    } else if (result.status === 'mismatch') {
-      ElMessage.error('当前分区登录的淘宝账号与已绑定账号不一致，请重新登录正确账号')
-    } else if (result.status === 'risk') {
-      ElMessage.warning('淘宝要求完成安全验证，账号暂未判定失效')
-    } else {
-      ElMessage.warning('本次未能确认登录状态，未将账号判定为失效，请稍后重试')
-    }
-    await loadAccounts()
-  } catch (err) {
-    ElMessage.error('淘宝账号检测失败：' + err.message)
-  } finally {
-    row.validatingCookie = false
-  }
+  if (reason) return reasonMap[reason] || `检测结果：${reason}`
+  if (row.platform === 'taobao' || row.platform === 'tmall') return '尚未完成淘宝实时登录检测'
+  return row.cookie_valid ? '服务器保存的 Cookie 当前仍在有效期内' : '未找到当前有效的登录 Cookie'
 }
 
 async function handleExportCookies(row) {
@@ -1771,6 +1772,22 @@ async function handleEditAccountSubmit() {
     if (editAccountForm.password) submitData.password = editAccountForm.password
     const result = await updatePurchaseAccount(editAccountForm.id, submitData)
     let localSessionWarning = ''
+    if (window.electronAPI) {
+      try {
+        const credentialResult = await window.electronAPI.invoke('save-purchase-account-credential', {
+          accountId: String(editAccountForm.id),
+          platform: editAccountForm.platform,
+          account: editAccountForm.username,
+          password: editAccountForm.password,
+          serverUpdatedAt: result?.updated_at || ''
+        })
+        if (!credentialResult?.success) {
+          localSessionWarning = credentialResult?.error || '本机加密密码更新失败'
+        }
+      } catch (error) {
+        localSessionWarning = error?.message || '本机加密密码更新失败'
+      }
+    }
     if (result?.session_reset_required && window.electronAPI) {
       try {
         const resetResult = await window.electronAPI.invoke('reset-purchase-account-session', {
@@ -1784,7 +1801,7 @@ async function handleEditAccountSubmit() {
     editAccountVisible.value = false
     await loadAccounts()
     if (localSessionWarning) {
-      ElMessage.warning('账号信息已更新，但本地登录会话清理失败，请重启软件后重新登录：' + localSessionWarning)
+      ElMessage.warning('账号信息已更新，但本机凭据或登录会话处理不完整，请重启软件后重新登录：' + localSessionWarning)
     } else {
       ElMessage.success('账号信息已更新')
     }
