@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 // 允许的 IPC 通道白名单
 const validInvokeChannels = [
   'um-check',
+  'um-get-state',
   'um-download',
   'um-install',
   'window-minimize',

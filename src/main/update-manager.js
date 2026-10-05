@@ -14,6 +14,8 @@ let retryCount = 0
 const MAX_RETRY = 3
 let checkPromise = null
 let downloadPromise = null
+let downloadPercent = 0
+let lastError = ''
 
 // 发送事件到渲染进程
 function send(channel, data) {
@@ -60,6 +62,30 @@ function checkForUpdates(manual = false) {
   return checkPromise
 }
 
+function formatUpdateInfo(info = updateInfo, type = currentUpdateType) {
+  if (!info || !type) return null
+  return {
+    version: info.version || '',
+    type,
+    size: info.size || 0,
+    changelog: info.changelog || '',
+    sha256: info.sha256 || '',
+    force: info.force || false
+  }
+}
+
+// 更新检查可能比 renderer 挂载更早完成。IPC 事件不会重放，因此保留一份
+// 可查询的状态，让页面监听器注册后主动补取，避免“服务端已返回更新但不弹窗”。
+function getUpdateStateSnapshot() {
+  const info = formatUpdateInfo()
+  return {
+    state: state === 'idle' && info ? 'available' : state,
+    info,
+    percent: downloadPercent,
+    error: lastError
+  }
+}
+
 async function performUpdateCheck(manual = false) {
   if (state === 'downloading' || state === 'ready') return // 下载中或已就绪不重复检查
 
@@ -76,22 +102,21 @@ async function performUpdateCheck(manual = false) {
 
     if (!result.needUpdate || result.updateType === 'none') {
       state = 'idle'
+      updateInfo = null
+      currentUpdateType = null
+      downloadPercent = 0
+      lastError = ''
       if (manual) send('um-no-update', {})
       return
     }
 
     updateInfo = result
     currentUpdateType = result.updateType
+    downloadPercent = 0
+    lastError = ''
     state = 'idle'
 
-    send('um-update-available', {
-      version: result.version,
-      type: result.updateType,
-      size: result.size || 0,
-      changelog: result.changelog || '',
-      sha256: result.sha256 || '',
-      force: result.force || false
-    })
+    send('um-update-available', formatUpdateInfo(result, result.updateType))
 
     // 无论全量还是热更新，都必须等待用户明确点击“立即下载”。发现更新只提示，
     // 不得在“稍后提醒”或关闭提示框后继续后台下载。
@@ -101,6 +126,7 @@ async function performUpdateCheck(manual = false) {
     )
   } catch (e) {
     state = 'idle'
+    lastError = e.message
     console.log('[UpdateManager] 检查更新失败:', e.message)
     if (manual) {
       send('um-update-error', { message: '检查更新失败: ' + e.message })
@@ -117,6 +143,8 @@ async function startDownload() {
   if (state === 'downloading' || !updateInfo || !currentUpdateType) return
 
   state = 'downloading'
+  downloadPercent = 0
+  lastError = ''
   retryCount = 0
   const downloadType = currentUpdateType
   runtimeLog.writeLog(
@@ -129,7 +157,8 @@ async function startDownload() {
       console.error('[UpdateManager] download task failed:', err.message)
       if (state === 'downloading') {
         state = 'error'
-        send('um-update-error', { message: formatFullUpdateError(err) })
+        lastError = formatFullUpdateError(err)
+        send('um-update-error', { message: lastError })
       }
     })
     .finally(() => {
@@ -199,6 +228,7 @@ async function startHotDownload() {
 
   try {
     await downloadAndApplyUpdate(downloadUrl, expectedSha256, (percent) => {
+      downloadPercent = percent
       send('um-update-progress', { percent })
     })
     state = 'ready'
@@ -314,13 +344,15 @@ function initUpdateManager(win) {
 
   if (autoUpdater) {
     autoUpdater.on('download-progress', (progressObj) => {
-      send('um-update-progress', { percent: Math.round(progressObj.percent) })
+      downloadPercent = Math.round(progressObj.percent)
+      send('um-update-progress', { percent: downloadPercent })
     })
 
     autoUpdater.on('update-downloaded', (info) => {
       runtimeLog.writeLog('UPDATER', `download_ready pid=${process.pid} type=full version=${info.version}`)
       console.log('[UpdateManager] 全量更新下载完成:', info.version)
       state = 'ready'
+      downloadPercent = 100
       send('um-update-ready', { type: 'full' })
       // 下载完成后仍等待用户明确点击“安装并重启”，不得定时强制退出应用。
       runtimeLog.writeLog('UPDATER', `install_waiting pid=${process.pid} type=full explicit_consent_required=yes`)
@@ -334,7 +366,8 @@ function initUpdateManager(win) {
       console.error('[UpdateManager] electron-updater 错误:', err.message)
       if (state === 'downloading') {
         state = 'error'
-        send('um-update-error', { message: formatFullUpdateError(err) })
+        lastError = formatFullUpdateError(err)
+        send('um-update-error', { message: lastError })
       }
     })
   }
@@ -354,6 +387,8 @@ function initUpdateManager(win) {
 
 // 注册 IPC 通道
 function registerIpc() {
+  ipcMain.handle('um-get-state', () => getUpdateStateSnapshot())
+
   ipcMain.handle('um-check', async () => {
     await checkForUpdates(true)
     return { success: true }

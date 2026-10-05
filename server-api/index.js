@@ -809,6 +809,9 @@ app.get('/api/update/check', (req, res) => {
     const meta = readMeta()
     const currentVersion = req.query.version || '0.0.0'
     const appVersion = req.query.appVersion || ''
+    // v3 之前的主进程只上传 version。对这些客户端以当前版本作为基础版本
+    // 参与全量更新判断，否则 fullVersion 明明更高却会错误返回无需更新。
+    const effectiveAppVersion = appVersion || currentVersion
     const currentNum = parseVersion(currentVersion)
 
     // 支持两种字段名格式：fullUpdate 和 full
@@ -818,18 +821,25 @@ app.get('/api/update/check', (req, res) => {
 
     const fullNum = full ? parseVersion(full.version) : 0
     const hotNum = hot ? parseVersion(hot.version) : 0
-    const appNum = appVersion ? parseVersion(appVersion) : 0
+    const appNum = parseVersion(effectiveAppVersion)
 
     // 规则1：appVersion < fullVersion → 必须全量更新
-    if (appVersion && full && fullNum > appNum) {
-      console.log('[Update] base outdated: appVersion=' + appVersion + ', fullVersion=' + full.version + ', returning full update')
-      return res.json({
+    if (full && fullNum > appNum) {
+      console.log('[Update] base outdated: appVersion=' + effectiveAppVersion + ', fullVersion=' + full.version + ', returning full update')
+      const payload = {
         needUpdate: true,
         updateType: 'full',
         version: full.version,
         changelog: full.changelog || '',
         force: false
-      })
+      }
+
+      // 1.9.104 及更早客户端只监听一次即时事件，renderer 若尚未挂载会漏掉
+      // 更新提示。为这些已发布客户端留出挂载时间；新客户端通过状态快照兜底。
+      if (appNum <= parseVersion('1.9.104')) {
+        return setTimeout(() => res.json(payload), 3000)
+      }
+      return res.json(payload)
     }
 
     // 规则2：基础版本已达标，检查热更新（hotVersion > currentVersion）

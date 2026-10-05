@@ -167,16 +167,21 @@ function formatSize(bytes) {
 
 let removeListeners = []
 
+function showAvailableUpdate(info) {
+  if (!info) return
+  updateInfo.value = info
+  updateState.value = 'available'
+  errorMsg.value = ''
+  downloadPercent.value = 0
+  isMinimized.value = false
+  dialogVisible.value = true
+}
+
 function registerListeners() {
   if (!window.electronAPI?.onUpdate) return
 
   removeListeners.push(window.electronAPI.onUpdate('um-update-available', (info) => {
-    updateInfo.value = info
-    updateState.value = 'available'
-    errorMsg.value = ''
-    downloadPercent.value = 0
-    isMinimized.value = false
-    dialogVisible.value = true
+    showAvailableUpdate(info)
   }))
 
   removeListeners.push(window.electronAPI.onUpdate('um-no-update', () => {
@@ -210,6 +215,30 @@ function registerListeners() {
   }))
 }
 
+async function restoreUpdateState() {
+  try {
+    const snapshot = await window.electronAPI?.invoke('um-get-state')
+    if (!snapshot || snapshot.state === 'idle' || snapshot.state === 'checking') return
+
+    if (snapshot.info) updateInfo.value = snapshot.info
+    downloadPercent.value = Number(snapshot.percent || 0)
+    errorMsg.value = snapshot.error || ''
+
+    if (snapshot.state === 'available') {
+      showAvailableUpdate(snapshot.info)
+      return
+    }
+
+    if (snapshot.state === 'downloading' || snapshot.state === 'ready' || snapshot.state === 'error') {
+      updateState.value = snapshot.state
+      dialogVisible.value = true
+    }
+  } catch (error) {
+    // 兼容尚未提供状态快照 IPC 的旧主进程；后续实时事件仍可正常工作。
+    console.warn('[AppUpdater] 恢复更新状态失败:', error?.message || error)
+  }
+}
+
 async function handleDownload() {
   updateState.value = 'downloading'
   errorMsg.value = ''
@@ -239,8 +268,9 @@ async function handleRetry() {
   await handleDownload()
 }
 
-onMounted(() => {
+onMounted(async () => {
   registerListeners()
+  await restoreUpdateState()
 })
 
 onUnmounted(() => {
