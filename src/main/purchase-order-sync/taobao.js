@@ -16,6 +16,11 @@ const {
   shouldFetchTaobaoLogisticsDetails,
   isRelevantTaobaoLogisticsResult
 } = require('./taobao-logistics')
+const {
+  applyTaobaoOrderAmount,
+  extractTaobaoOrderAmount,
+  mergeTaobaoOrderInfo
+} = require('./taobao-amount')
 const { validateTaobaoPurchaseAccount } = require('../taobao-account-validation')
 
 // ============ 平台配置 ============
@@ -57,6 +62,79 @@ async function prepareTaobaoSession(accountId, ses, logPrefix) {
 
   validation = await validateTaobaoPurchaseAccount({ accountId, ses, force: true })
   return { cookies, validation, restoreResult }
+}
+
+async function fetchTaobaoOrderAmountFromSession(ses, platformOrderNo) {
+  const orderNo = String(platformOrderNo || '').trim()
+  if (!ses || !orderNo) return { success: false, error: 'missing_session_or_order_no' }
+
+  const form = new URLSearchParams({
+    buyerNick: '',
+    dateBegin: '0',
+    dateEnd: '0',
+    itemTitle: orderNo,
+    lastStartRow: '',
+    logisticsService: '',
+    options: '0',
+    orderStatus: '',
+    pageNum: '1',
+    pageSize: '15',
+    queryBizType: '',
+    queryOrder: 'desc',
+    rateStatus: '',
+    refund: '',
+    sellerNick: '',
+    auctionTitle: orderNo,
+    prePageNo: '1'
+  })
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 10000)
+  try {
+    const chromeVersion = process.versions.chrome || '134.0.0.0'
+    const response = await ses.fetch(
+      'https://buyertrade.taobao.com/trade/itemlist/asyncBought.htm?action=itemlist/BoughtQueryAction&event_submit_do_query=1&_input_charset=utf8',
+      {
+        method: 'POST',
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Origin: 'https://buyertrade.taobao.com',
+          Referer: PLATFORM_CONFIG.entryUrl,
+          'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+        },
+        body: form.toString()
+      }
+    )
+    const text = await response.text()
+    if (!response.ok) return { success: false, error: `http_${response.status}`, responseLength: text.length }
+
+    const data = tryParseJson(text)
+    const mainOrders = data?.mainOrders || data?.data?.mainOrders
+    if (!Array.isArray(mainOrders) || mainOrders.length === 0) {
+      return { success: false, error: 'no_orders', responseLength: text.length }
+    }
+
+    const order = mainOrders.find(item => String(item?.id || item?.orderId || '') === orderNo) ||
+      mainOrders.find(item => JSON.stringify(item).includes(orderNo))
+    if (!order) return { success: false, error: 'order_not_found', responseLength: text.length }
+
+    const amount = extractTaobaoOrderAmount(order)
+    if (!(amount.total_amount > 0)) {
+      return { success: false, error: 'no_fee', responseLength: text.length, ...amount }
+    }
+    return { success: true, responseLength: text.length, ...amount }
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.name === 'AbortError' ? 'timeout' : (error?.message || 'request_failed')
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 // ============ JSONP 剥离 ============
@@ -280,26 +358,9 @@ function parseSearchResponse(dataObj) {
       // 解析物流公司名称
       result.logistics_company = resolveLogisticsCompany(result.logistics_company, result.logistics_company_code)
 
-      // 提取商品单价（从 payInfo 和 subOrders 中提取）
-      const payInfo = order.payInfo || {}
-      if (payInfo.actualFee && parseFloat(payInfo.actualFee) > 0) {
-        result.purchase_price = String(parseFloat(payInfo.actualFee))
-      } else if (payInfo.shouldPay && parseFloat(payInfo.shouldPay) > 0) {
-        result.purchase_price = String(parseFloat(payInfo.shouldPay))
-      }
-      // 从 subOrders 提取单价（更精确）
-      const subs = order.subOrders || []
-      if (subs.length > 0) {
-        for (const sub of subs) {
-          if (!sub) continue
-          const itemInfo = sub.itemInfo || sub.payInfo || {}
-          const unitPrice = itemInfo.unitPrice || itemInfo.price || itemInfo.actualFee
-          if (unitPrice && parseFloat(unitPrice) > 0) {
-            result.purchase_price = String(parseFloat(unitPrice))
-            break
-          }
-        }
-      }
+      // payInfo.actualFee 是订单实付总额，不是商品单价。统一提取总额、
+      // 运费、数量，并按 (实付-运费)/数量 计算采购单价。
+      applyTaobaoOrderAmount(result, order)
 
       orders.push(result)
     }
@@ -320,23 +381,28 @@ function findAllOrders(allResponses) {
       allOrders.push(...orders)
     } catch (e) { /* skip */ }
     try {
-      // parseSearchResponse 期望解析后的 JSON 对象（含 mainOrders 字段）
+      // asyncBought.htm 把 mainOrders 放在响应根节点；MTOP 响应则通常
+      // 放在 data 或 data.data 中。三种结构都要解析。
       const parsed = tryParseJson(r.body)
-      if (parsed && parsed.data) {
-        const dataObj = typeof parsed.data === 'string' ? tryParseJson(parsed.data) : parsed.data
-        if (dataObj) {
-          const orders = parseSearchResponse(dataObj)
-          allOrders.push(...orders)
-        }
+      const candidates = []
+      if (parsed && typeof parsed === 'object') candidates.push(parsed)
+      const dataObj = typeof parsed?.data === 'string' ? tryParseJson(parsed.data) : parsed?.data
+      if (dataObj && typeof dataObj === 'object') candidates.push(dataObj)
+      if (dataObj?.data && typeof dataObj.data === 'object') candidates.push(dataObj.data)
+      for (const candidate of candidates) {
+        const orders = parseSearchResponse(candidate)
+        allOrders.push(...orders)
       }
     } catch (e) { /* skip */ }
   }
-  const seen = new Set()
-  return allOrders.filter(o => {
-    if (seen.has(o.order_no)) return false
-    seen.add(o.order_no)
-    return true
-  })
+  // 同一响应可能同时被组件解析器和 mainOrders 解析器命中。不能简单
+  // 保留第一条，否则第一条只有状态时会把后续实付金额丢掉。
+  const mergedOrders = new Map()
+  for (const order of allOrders) {
+    if (!order?.order_no) continue
+    mergedOrders.set(order.order_no, mergeTaobaoOrderInfo(mergedOrders.get(order.order_no), order))
+  }
+  return Array.from(mergedOrders.values())
 }
 
 // ============ 单个订单同步 ============
@@ -409,6 +475,52 @@ function syncSingle(accountId, platformOrderNo) {
     const overallTimer = setTimeout(() => {
       finish({ success: false, message: '同步超时，请稍后重试' })
     }, OVERALL_TIMEOUT)
+
+    let exactAmountLookup = null
+    let completingOrder = false
+
+    function completeWithOrderInfo(orderInfo, source) {
+      if (resolved || completingOrder) return true
+      completingOrder = true
+
+      ;(async () => {
+        const completed = { ...orderInfo }
+        if (!(Number(completed.total_amount || 0) > 0)) {
+          if (!exactAmountLookup) {
+            exactAmountLookup = fetchTaobaoOrderAmountFromSession(ses, platformOrderNo)
+          }
+          const amount = await exactAmountLookup
+          if (amount.success) {
+            if (amount.total_amount > 0) completed.total_amount = String(amount.total_amount)
+            if (amount.shipping_fee > 0) completed.shipping_fee = String(amount.shipping_fee)
+            if (amount.purchase_price > 0) completed.purchase_price = String(amount.purchase_price)
+            if (amount.quantity > 0) completed.quantity = amount.quantity
+            console.log(
+              `[PurchaseSync-Taobao] 精确查询补齐金额(${source}): ` +
+              `unit=${completed.purchase_price || 0}, total=${completed.total_amount}, shipping=${completed.shipping_fee || 0}`
+            )
+          } else {
+            console.warn(
+              `[PurchaseSync-Taobao] 精确查询未获取金额(${source}): ` +
+              `reason=${amount.error || 'unknown'}, responseLength=${amount.responseLength || 0}`
+            )
+          }
+        }
+
+        if (!resolved) {
+          clearTimeout(overallTimer)
+          finish({ success: true, orderInfo: completed })
+        }
+      })().catch(error => {
+        console.warn(`[PurchaseSync-Taobao] 金额补齐异常(${source}):`, error.message)
+        if (!resolved) {
+          clearTimeout(overallTimer)
+          finish({ success: true, orderInfo })
+        }
+      })
+
+      return true
+    }
 
     try {
       win = new BrowserWindow({
@@ -537,10 +649,8 @@ function syncSingle(accountId, platformOrderNo) {
             navigateToLogisticsPage()
             return true
           }
-          clearTimeout(overallTimer)
           console.log('[PurchaseSync-Taobao] 首页找到目标订单:', JSON.stringify(found))
-          finish({ success: true, orderInfo: found })
-          return true
+          return completeWithOrderInfo(found, 'first_page')
         }
 
         // 未找到，是否应继续轮询
@@ -573,10 +683,8 @@ function syncSingle(accountId, platformOrderNo) {
             return true
           }
           if (found.logistics_company || found.status) {
-            clearTimeout(overallTimer)
             console.log('[PurchaseSync-Taobao] 详情页找到完整订单:', JSON.stringify(found))
-            finish({ success: true, orderInfo: found })
-            return true
+            return completeWithOrderInfo(found, 'detail_page_parsed')
           }
         }
 
@@ -613,10 +721,8 @@ function syncSingle(accountId, platformOrderNo) {
         if (!orderInfo && found) {
           orderInfo = found
         } else if (orderInfo && found) {
-          // parseDetailData 有结果但可能缺少价格，用 found 补充
-          if (!orderInfo.purchase_price && found.purchase_price) {
-            orderInfo.purchase_price = found.purchase_price
-          }
+          // 详情解析和列表解析各自可能只包含部分字段，合并而不是只补单价。
+          orderInfo = mergeTaobaoOrderInfo(orderInfo, found)
         }
 
         if (orderInfo) {
@@ -631,10 +737,8 @@ function syncSingle(accountId, platformOrderNo) {
 
           if (isNoLogisticsStatus) {
             // 不需要物流信息的订单，直接完成，不访问物流页面
-            clearTimeout(overallTimer)
             console.log(`[PurchaseSync-Taobao] 订单状态为"${orderInfo.status}"，无需访问物流页面:`, JSON.stringify(orderInfo))
-            finish({ success: true, orderInfo })
-            return true
+            return completeWithOrderInfo(orderInfo, 'detail_page_no_logistics')
           }
 
           // 映射后的英文状态码
@@ -647,10 +751,8 @@ function syncSingle(accountId, platformOrderNo) {
           // 如果已有物流单号和快递公司，且不需要轨迹，则不去物流页面
           const hasLogisticsInfo = orderInfo.logistics_no && (orderInfo.logistics_company || orderInfo.logistics_company_code)
           if (hasLogisticsInfo && !needTracking) {
-            clearTimeout(overallTimer)
             console.log(`[PurchaseSync-Taobao] 详情页已获取完整物流信息:`, JSON.stringify(orderInfo))
-            finish({ success: true, orderInfo })
-            return true
+            return completeWithOrderInfo(orderInfo, 'detail_page_complete')
           }
 
           if (needLogisticsPage || needStatus || needTracking) {
@@ -661,10 +763,8 @@ function syncSingle(accountId, platformOrderNo) {
             return true
           }
 
-          clearTimeout(overallTimer)
           console.log('[PurchaseSync-Taobao] 详情页解析到完整订单:', JSON.stringify(orderInfo))
-          finish({ success: true, orderInfo })
-          return true
+          return completeWithOrderInfo(orderInfo, 'detail_page_fallback')
         }
 
         // 未找到，是否应继续轮询
@@ -742,14 +842,7 @@ function syncSingle(accountId, platformOrderNo) {
 
         // 合并所有解析结果：后面的结果补充前面缺失的字段
         for (const logisticsInfo of parsedResults) {
-          if (!merged.logistics_no && logisticsInfo.logistics_no) merged.logistics_no = logisticsInfo.logistics_no
-          if (!merged.logistics_company && logisticsInfo.logistics_company) merged.logistics_company = logisticsInfo.logistics_company
-          if (!merged.logistics_company_code && logisticsInfo.logistics_company_code) merged.logistics_company_code = logisticsInfo.logistics_company_code
-          if (!merged.status && logisticsInfo.status) merged.status = logisticsInfo.status
-          if (!merged.logistics_status && logisticsInfo.logistics_status) merged.logistics_status = logisticsInfo.logistics_status
-          if (!merged.pickup_code && logisticsInfo.pickup_code) merged.pickup_code = logisticsInfo.pickup_code
-          if (!merged.pickup_address && logisticsInfo.pickup_address) merged.pickup_address = logisticsInfo.pickup_address
-          if (!merged.purchase_price && logisticsInfo.purchase_price) merged.purchase_price = logisticsInfo.purchase_price
+          Object.assign(merged, mergeTaobaoOrderInfo(merged, logisticsInfo))
           // 物流页的轨迹数据优先（更详细）
           if (logisticsInfo.logistics_tracking && logisticsInfo.logistics_tracking.length > 0) {
             merged.logistics_tracking = logisticsInfo.logistics_tracking
@@ -759,11 +852,11 @@ function syncSingle(accountId, platformOrderNo) {
         // 重新解析快递公司名称
         merged.logistics_company = resolveLogisticsCompany(merged.logistics_company, merged.logistics_company_code)
 
-        clearTimeout(overallTimer)
         if (merged.logistics_no || merged.status || merged.logistics_company || merged.pickup_code || merged.pickup_address) {
           console.log('[PurchaseSync-Taobao] 最终合并结果:', JSON.stringify(merged))
-          finish({ success: true, orderInfo: merged })
+          return completeWithOrderInfo(merged, 'logistics_page')
         } else {
+          clearTimeout(overallTimer)
           console.log(`[PurchaseSync-Taobao] 物流页也未找到订单 ${platformOrderNo}`)
           finish({ success: false, message: `未找到订单 ${platformOrderNo}` })
         }
@@ -1375,13 +1468,7 @@ function syncSingle(accountId, platformOrderNo) {
           if (!result.logistics_status && lo.statusDesc) result.logistics_status = lo.statusDesc
         }
 
-        // 提取商品价格（从 payInfo）
-        const payInfo = order.payInfo || {}
-        if (payInfo.actualFee && parseFloat(payInfo.actualFee) > 0) {
-          result.purchase_price = String(parseFloat(payInfo.actualFee))
-        } else if (payInfo.shouldPay && parseFloat(payInfo.shouldPay) > 0) {
-          result.purchase_price = String(parseFloat(payInfo.shouldPay))
-        }
+        applyTaobaoOrderAmount(result, order)
 
         // 直接字段
         if (!result.logistics_no && order.mailNo) result.logistics_no = order.mailNo

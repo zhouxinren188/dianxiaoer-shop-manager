@@ -146,15 +146,27 @@ function resolveInstallDataRoot(execPath) {
   return path.join(parentDirectory, DATA_ROOT_NAME)
 }
 
+function readConfiguredDataRoot(userDataPath) {
+  const pointer = readJson(path.join(userDataPath, LOCATION_POINTER_FILE))
+  if (pointer?.schemaVersion !== STORAGE_SCHEMA_VERSION || !path.isAbsolute(pointer.dataRoot || '')) {
+    return null
+  }
+
+  const configuredRoot = path.resolve(pointer.dataRoot)
+  if (isSamePath(configuredRoot, path.parse(configuredRoot).root)) return null
+  return configuredRoot
+}
+
 function resolveDataRoot({ userDataPath, execPath, explicitDataRoot, env = process.env }) {
   const explicit = explicitDataRoot || env.DXE_DATA_ROOT
   if (explicit) return path.resolve(explicit)
 
-  const pointer = readJson(path.join(userDataPath, LOCATION_POINTER_FILE))
-  if (pointer?.schemaVersion === STORAGE_SCHEMA_VERSION && path.isAbsolute(pointer.dataRoot || '')) {
-    const pointedState = readJson(path.join(pointer.dataRoot, MIGRATION_STATE_FILE))
-    if (pointedState?.schemaVersion === STORAGE_SCHEMA_VERSION) return path.resolve(pointer.dataRoot)
-  }
+  // The pointer is also the user's requested migration destination. It must be
+  // honored before migration-state.json exists so a missing target directory can
+  // be created and populated. prepareMigration performs the state/manifest
+  // validation before the target is activated.
+  const configuredRoot = readConfiguredDataRoot(userDataPath)
+  if (configuredRoot) return configuredRoot
 
   return resolveInstallDataRoot(execPath)
 }
@@ -587,8 +599,18 @@ function initializeStorage(app, options = {}) {
   const oldSessionDataPath = app.getPath('sessionData')
   const localAppDataPath = options.localAppDataPath || process.env.LOCALAPPDATA || path.join(path.dirname(userDataPath), '..', 'Local')
   const packaged = options.isPackaged ?? app.isPackaged
+  const env = options.env || process.env
+  const hasConfiguredDataRoot = Boolean(
+    options.dataRoot ||
+    env.DXE_DATA_ROOT ||
+    readConfiguredDataRoot(userDataPath)
+  )
 
-  if (!packaged) {
+  // Unconfigured development profiles remain isolated and lightweight. When a
+  // data root is explicitly configured (or persisted in storage-location.json),
+  // development must use the same managed storage path; otherwise long-running
+  // debugging silently grows Chromium partition caches on C: again.
+  if (!packaged && !hasConfiguredDataRoot) {
     const paths = buildLegacyPaths(userDataPath, localAppDataPath)
     activeContext = {
       usingManagedStorage: false,
@@ -606,7 +628,7 @@ function initializeStorage(app, options = {}) {
       userDataPath,
       execPath: options.execPath || process.execPath,
       explicitDataRoot: options.dataRoot,
-      env: options.env || process.env
+      env
     })
     paths = buildManagedPaths(dataRoot)
     if (

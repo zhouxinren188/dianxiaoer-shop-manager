@@ -14,6 +14,7 @@ const {
 const { isSuccessfulEmptySalesOrderResponse } = require('./sales-order-response')
 const { runWithConcurrency } = require('./concurrency-pool')
 const { hasValidPlatformCookies } = require('./purchase-order-sync/common')
+const { loadURLAllowingExpectedAbort } = require('./platform-window-navigation')
 
 let submitVendorRemarkImplementation = null
 let stockRemarkQueue = Promise.resolve()
@@ -1123,6 +1124,12 @@ function registerSalesOrderIpc(mainWindow) {
     if (!storeId || !orderId) return { success: false, message: '缺少参数' }
 
     try {
+      const {
+        refreshCookiesFromServerIfNewer,
+        recoverStoreSessionFromServer,
+        reportStoreDeviceStatus
+      } = require('./cookie-heartbeat')
+
       // 轮询等待辅助函数
       async function pollUntil(checkFn, { timeout = 10000, interval = 500, label = '' } = {}) {
         const start = Date.now()
@@ -1139,8 +1146,21 @@ function registerSalesOrderIpc(mainWindow) {
 
       const partitionName = 'persist:platform-' + storeId
       const ses = session.fromPartition(partitionName)
+
+      // 与订单同步共用同一套 Cookie 恢复策略：本机没有有效京东 Cookie 时，
+      // 优先恢复服务器上当前设备或其他已验证设备的最新快照。
+      const precheck = await refreshCookiesFromServerIfNewer(storeId, {
+        skipFlush: true,
+        context: 'buyer_sensitive_precheck',
+        timeoutMs: 3000
+      })
+      runtimeLog.writeLog(
+        'JD_COOKIE_FLOW',
+        `store_id=${storeId} device=${getShortDeviceId()} phase=buyer_sensitive_precheck action=${precheck.action || 'unknown'}`
+      )
+
       const cookies = await ses.cookies.get({})
-      if (!cookies || cookies.length === 0) {
+      if (!hasValidPlatformCookies(cookies, 'jd')) {
         return { success: false, message: '店铺未登录，请先登录京东后台' }
       }
 
@@ -1385,14 +1405,56 @@ function registerSalesOrderIpc(mainWindow) {
 
         // 第一步：直接加载订单详情页（详情页有眼睛图标 I.jd-icon.shop-adv-icon）
         const detailUrl = 'https://shop.jd.com/jdm/trade/orders/order-details?orderId=' + orderId
-        console.log('[SalesFetch] [BuyerInfo] 加载订单详情页:', detailUrl)
-        await tempWin.loadURL(detailUrl)
-
-        const entryUrl = tempWin.webContents.getURL()
-        if (isLoginPage(entryUrl)) {
-          tempWin.destroy()
-          return { success: false, message: '店铺登录已过期，请重新登录京东后台' }
+        const loadDetailPage = async (phase) => {
+          console.log('[SalesFetch] [BuyerInfo] 加载订单详情页:', detailUrl, 'phase=' + phase)
+          const navigation = await loadURLAllowingExpectedAbort(tempWin, detailUrl)
+          if (navigation.redirected) {
+            runtimeLog.writeLog(
+              'JD_COOKIE_FLOW',
+              `store_id=${storeId} device=${getShortDeviceId()} phase=${phase}_redirect result=continue`
+            )
+            // ERR_ABORTED 返回时后续重定向仍可能在进行，等待目标详情页或登录页稳定。
+            await pollUntil(() => {
+              if (!tempWin || tempWin.isDestroyed()) return null
+              const currentUrl = tempWin.webContents.getURL()
+              const reachedDetail = currentUrl.includes('/jdm/trade/orders/order-details') &&
+                currentUrl.includes(String(orderId)) && !tempWin.webContents.isLoading()
+              const settledLogin = isLoginPage(currentUrl) && !tempWin.webContents.isLoading()
+              return reachedDetail || settledLogin ? currentUrl : null
+            }, { timeout: 12000, interval: 300, label: phase + '重定向完成' })
+          }
+          return tempWin && !tempWin.isDestroyed() ? tempWin.webContents.getURL() : ''
         }
+
+        let entryUrl = await loadDetailPage('buyer_sensitive_initial')
+        if (isLoginPage(entryUrl)) {
+          runtimeLog.writeLog(
+            'JD_COOKIE_FLOW',
+            `store_id=${storeId} device=${getShortDeviceId()} phase=buyer_sensitive_login_redirect action=restore_server_cookie`
+          )
+          const recovered = await recoverStoreSessionFromServer(storeId, 'jd')
+          if (recovered !== false && tempWin && !tempWin.isDestroyed()) {
+            entryUrl = await loadDetailPage('buyer_sensitive_retry')
+          }
+
+          if (isLoginPage(entryUrl)) {
+            await reportStoreDeviceStatus(storeId, {
+              online: false,
+              verified: false,
+              reason: 'buyer_sensitive_login_expired',
+              context: 'buyer_sensitive_status'
+            })
+            tempWin.destroy()
+            return { success: false, message: '店铺登录已过期，请在店铺管理中重新登录京东后台后再试' }
+          }
+        }
+
+        await reportStoreDeviceStatus(storeId, {
+          online: true,
+          verified: true,
+          reason: 'buyer_sensitive_detail_loaded',
+          context: 'buyer_sensitive_status'
+        })
 
         // 等待详情页微前端渲染（orders微前端异步加载，需要等待 consignee-info-content 出现）
         // 关键：只等 orders 微前端的内容，不等 header-menu 的内容

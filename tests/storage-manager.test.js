@@ -122,6 +122,67 @@ describe('安装盘会话数据迁移', () => {
     expect(fs.existsSync(path.join(userData, 'device-id.json'))).toBe(true)
   })
 
+  it('位置指针指向尚未创建的目录时从该目录启动迁移', () => {
+    const root = makeTemporaryRoot()
+    const { userData, localAppData } = seedLegacyData(root)
+    const dataRoot = path.join(root, 'configured-drive', 'dianxiaoer-data')
+    writeFile(path.join(userData, 'storage-location.json'), JSON.stringify({
+      schemaVersion: 1,
+      dataRoot
+    }))
+    const app = createFakeApp(userData)
+
+    const context = initializeStorage(app, {
+      isPackaged: true,
+      execPath: path.join(root, 'install', 'dianxiaoer.exe'),
+      localAppDataPath: localAppData,
+      skipMaintenance: true
+    })
+
+    expect(context.usingManagedStorage).toBe(true)
+    expect(context.paths.dataRoot).toBe(dataRoot)
+    expect(context.paths.sessionDataDir).toBe(path.join(dataRoot, 'storage-v1', 'session'))
+    expect(fs.readFileSync(path.join(context.paths.sessionDataDir, 'Partitions', 'platform-12', 'Network', 'Cookies'), 'utf8'))
+      .toBe('platform-cookie')
+  })
+
+  it('开发模式存在位置指针时也使用受管数据目录', () => {
+    const root = makeTemporaryRoot()
+    const { userData, localAppData } = seedLegacyData(root)
+    const dataRoot = path.join(root, 'configured-drive', 'dianxiaoer-data')
+    writeFile(path.join(userData, 'storage-location.json'), JSON.stringify({
+      schemaVersion: 1,
+      dataRoot
+    }))
+    const app = createFakeApp(userData)
+    app.isPackaged = false
+
+    const context = initializeStorage(app, {
+      isPackaged: false,
+      localAppDataPath: localAppData,
+      skipMaintenance: true
+    })
+
+    expect(context.usingManagedStorage).toBe(true)
+    expect(app.paths.sessionData).toBe(path.join(dataRoot, 'storage-v1', 'session'))
+  })
+
+  it('开发模式没有配置数据目录时保持旧的隔离行为', () => {
+    const root = makeTemporaryRoot()
+    const { userData, localAppData } = seedLegacyData(root)
+    const app = createFakeApp(userData)
+    app.isPackaged = false
+
+    const context = initializeStorage(app, {
+      isPackaged: false,
+      localAppDataPath: localAppData,
+      skipMaintenance: true
+    })
+
+    expect(context.usingManagedStorage).toBe(false)
+    expect(app.paths.sessionData).toBe(userData)
+  })
+
   it('确认 Electron 实际使用新 sessionData 后自动删除旧会话并保留必要配置', async () => {
     const root = makeTemporaryRoot()
     const { userData, localAppData } = seedLegacyData(root)

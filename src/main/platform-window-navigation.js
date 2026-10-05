@@ -8,6 +8,20 @@ function isExpectedNavigationAbort(error) {
   return code === 'ERR_ABORTED' || /ERR_ABORTED\s*\(-?3\)/.test(message) || message.includes('ERR_ABORTED')
 }
 
+/**
+ * Electron 的 loadURL 会在服务端重定向时拒绝 Promise，即使新页面仍在正常加载。
+ * 统一吞掉这种预期内的 ERR_ABORTED，其他网络错误继续向上抛出。
+ */
+async function loadURLAllowingExpectedAbort(win, url) {
+  try {
+    await win.loadURL(url)
+    return { redirected: false, url: win.webContents?.getURL?.() || url }
+  } catch (error) {
+    if (win?.isDestroyed?.() || !isExpectedNavigationAbort(error)) throw error
+    return { redirected: true, url: win.webContents?.getURL?.() || url }
+  }
+}
+
 function createStandardChromeIdentity(chromeVersion) {
   const version = String(chromeVersion || '134.0.0.0')
   const majorVersion = version.split('.')[0] || '134'
@@ -17,4 +31,8 @@ function createStandardChromeIdentity(chromeVersion) {
   }
 }
 
-module.exports = { isExpectedNavigationAbort, createStandardChromeIdentity }
+module.exports = {
+  createStandardChromeIdentity,
+  isExpectedNavigationAbort,
+  loadURLAllowingExpectedAbort
+}
