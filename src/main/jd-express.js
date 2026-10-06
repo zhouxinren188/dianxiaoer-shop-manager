@@ -8,9 +8,10 @@ const zlib = require('node:zlib')
 const { BrowserWindow, session } = require('electron')
 const runtimeLog = require('./runtime-logger')
 const {
-  safeEndpoint, creationErrorDetails, creationOutcome, createCreationLogger, emitCreationDiagnostic
+  safeEndpoint, creationErrorDetails, creationOutcome, createCreationLogger, emitCreationDiagnostic,
+  configurationSnapshotSignature, creationConfigAuditSnapshot
 } = require('./jd-express-creation-log')
-const { getManagedTempDirectory } = require('./storage-manager')
+const { getManagedTempDirectory, getStoragePaths } = require('./storage-manager')
 const {
   JD_EXPRESS_READ_POLICY,
   assertCreationDates,
@@ -101,8 +102,9 @@ const EXISTING_PROMOTION_PAGE_SIZE = 1000
 const EXISTING_PROMOTION_MAX_PAGES = 500
 const activeProbeWindows = new Set()
 const preparedRoiJobs = new Map()
-// 未真实提交的关键词允许跨夜恢复；最低出价等结果不无限期复用。
+// 关键词任务快照允许跨夜恢复；已提交快照保持锁定以防重放，最低出价等结果不无限期复用。
 const PREPARED_JOB_TTL_MS = 24 * 60 * 60 * 1000
+const UNCERTAIN_JOB_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const PREPARED_JOB_FILE_PATTERN = /^[0-9a-f-]{16,64}\.json$/i
 
 function createRequestError(message, code = 'JD_EXPRESS_REQUEST_FAILED') {
@@ -131,6 +133,35 @@ function getMessage(payload, fallback) {
 
 function logSafe(value) {
   return String(value || '').replace(/[\r\n]+/g, ' ').slice(0, 500)
+}
+
+function configAuditEventDetail(payload = {}) {
+  return {
+    sequence: Number.isFinite(Number(payload.sequence)) ? Number(payload.sequence) : null,
+    rendererTime: logSafe(payload.rendererTime).slice(0, 40),
+    source: logSafe(payload.source || 'unknown').slice(0, 80),
+    field: logSafe(payload.field || '').slice(0, 80),
+    before: creationConfigAuditSnapshot(payload.before || {}),
+    after: creationConfigAuditSnapshot(payload.after || {})
+  }
+}
+
+function appendConfigAuditRecord(record = {}) {
+  try {
+    const dataRoot = getStoragePaths()?.dataRoot
+    if (!dataRoot) return false
+    const directory = path.join(dataRoot, 'jd-express-audit')
+    fs.mkdirSync(directory, { recursive: true })
+    fs.appendFileSync(
+      path.join(directory, 'config-snapshots.jsonl'),
+      `${JSON.stringify({ timestamp: new Date().toISOString(), ...record })}\n`,
+      'utf8'
+    )
+    return true
+  } catch (error) {
+    runtimeLog.writeLog('JD_EXPRESS', `action=config_audit_persist result=failed message=${logSafe(error.message)}`)
+    return false
+  }
 }
 
 function assertSuccess(payload, expectedCode) {
@@ -1054,8 +1085,13 @@ function loadPreparedJob(token, now = Date.now()) {
   if (!filePath || !fs.existsSync(filePath)) return null
   try {
     const job = JSON.parse(fs.readFileSync(filePath, 'utf8'))
-    if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) {
+    if (!job?.expiresAt || job.expiresAt <= now) {
       fs.unlinkSync(filePath)
+      return null
+    }
+    // 服务器返回未知时保留关键词和已完成进度用于人工核对，但绝不自动重放。
+    if (job?.consumed) {
+      preparedRoiJobs.set(String(token), job)
       return null
     }
     preparedRoiJobs.set(String(token), job)
@@ -1075,6 +1111,9 @@ function getPreparedJob(token, now = Date.now()) {
   const normalizedToken = String(token || '')
   const memoryJob = preparedRoiJobs.get(normalizedToken)
   if (!memoryJob?.consumed && memoryJob?.expiresAt > now) return memoryJob
+  // consumed=true 也用于标记当前进程中正在提交的批次。此时直接拒绝并发复用，
+  // 但不能删除磁盘文件；原提交完成后还可能因京东明确拒绝且零创建而恢复它。
+  if (memoryJob?.consumed && memoryJob?.expiresAt > now) return null
   if (memoryJob) preparedRoiJobs.delete(normalizedToken)
   return loadPreparedJob(normalizedToken, now)
 }
@@ -1102,8 +1141,143 @@ function consumePreparedJob(token) {
   deletePreparedJob(token)
 }
 
+function beginPreparedJobSubmission(token) {
+  const normalizedToken = String(token || '')
+  const job = getPreparedJob(normalizedToken)
+  if (!job) throw createRequestError('关键词准备结果已过期、已提交或正在提交，请先核对京准通', 'JD_EXPRESS_PREPARATION_EXPIRED')
+  const submittingJob = { ...job, consumed: true, submissionStartedAt: Date.now() }
+  if (!persistPreparedJob(normalizedToken, submittingJob)) {
+    throw createRequestError('无法保存提交状态，请检查数据盘空间和权限；尚未提交计划', 'JD_EXPRESS_PREPARATION_CACHE_FAILED')
+  }
+  preparedRoiJobs.set(normalizedToken, submittingJob)
+  return submittingJob
+}
+
+function checkpointPreparedJobSubmission(token, job, resumeState) {
+  const normalizedToken = String(token || '')
+  const previousCampaigns = job?.resumeState?.campaigns || {}
+  const nextCampaigns = resumeState?.campaigns || {}
+  const shouldPersist = Object.entries(nextCampaigns).some(([key, next]) => {
+    const previous = previousCampaigns[key] || {}
+    const expectedUnitCount = job?.data?.campaigns?.[Number(key)]?.units?.length || 0
+    const previousCompleted = new Set(previous.completedUnitIndexes || []).size
+    const nextCompleted = new Set(next?.completedUnitIndexes || []).size
+    return (!previous.campaignId && next?.campaignId) ||
+      (expectedUnitCount > 0 && previousCompleted < expectedUnitCount && nextCompleted >= expectedUnitCount) ||
+      previous.timeRangeSignature !== next?.timeRangeSignature
+  })
+  const checkpointedJob = {
+    ...job,
+    consumed: true,
+    submissionStartedAt: job?.submissionStartedAt || Date.now(),
+    resumeState
+  }
+  // 几万关键词的完整快照可能很大。仅在计划建立、计划内单元全部完成或时段完成
+  // 这些安全边界落盘；普通单元进度保存在内存，任务返回时会由恢复/完成分支收口。
+  if (shouldPersist && !persistPreparedJob(normalizedToken, checkpointedJob)) {
+    throw createRequestError('无法保存已创建计划的续传进度；为避免重复创建，请先到京准通核对', 'JD_EXPRESS_CHECKPOINT_FAILED')
+  }
+  preparedRoiJobs.set(normalizedToken, checkpointedJob)
+  return checkpointedJob
+}
+
+function markPreparedJobUncertain(token, job, error) {
+  const normalizedToken = String(token || '')
+  const now = Date.now()
+  const uncertainJob = {
+    ...job,
+    consumed: true,
+    submissionUncertain: true,
+    submissionUncertainAt: now,
+    // 给人工核对留足时间；普通未提交关键词仍维持 24 小时有效期。
+    expiresAt: Math.max(Number(job?.expiresAt || 0), now + UNCERTAIN_JOB_TTL_MS),
+    submissionError: {
+      code: String(error?.code || 'JD_EXPRESS_SUBMISSION_UNCERTAIN').slice(0, 100),
+      message: String(error?.message || '提交结果不确定').replace(/[\r\n]+/g, ' ').slice(0, 300)
+    }
+  }
+  persistPreparedJob(normalizedToken, uncertainJob)
+  preparedRoiJobs.set(normalizedToken, uncertainJob)
+  return uncertainJob
+}
+
+function getUncertainPreparedJob(token, now = Date.now()) {
+  const normalizedToken = String(token || '')
+  let job = preparedRoiJobs.get(normalizedToken)
+  if (!job) {
+    const filePath = getPreparedJobFilePath(normalizedToken)
+    if (!filePath || !fs.existsSync(filePath)) return null
+    try {
+      job = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+      preparedRoiJobs.set(normalizedToken, job)
+    } catch {
+      return null
+    }
+  }
+  if (!job?.consumed || !job?.submissionUncertain || Number(job.expiresAt || 0) <= now) return null
+  return job
+}
+
+function recoverUncertainPreparedJob(token, storeId, confirmation) {
+  if (confirmation !== 'CONFIRM_NO_UNTRACKED_CREATION') {
+    throw createRequestError('请先核对京准通，并确认没有检查点之外的新增计划或单元', 'JD_EXPRESS_RECOVERY_CONFIRMATION_REQUIRED')
+  }
+  const job = getUncertainPreparedJob(token)
+  if (!job) throw createRequestError('待核对的关键词快照不存在或已过期', 'JD_EXPRESS_PREPARATION_EXPIRED')
+  if (job.storeId !== normalizeStoreId(storeId)) {
+    throw createRequestError('待核对快照与当前店铺不匹配', 'JD_EXPRESS_PREPARATION_MISMATCH')
+  }
+  return restorePreparedJobAfterDefinitiveRejection(token, job)
+}
+
+function restorePreparedJobAfterDefinitiveRejection(token, job) {
+  const normalizedToken = String(token || '')
+  const restoredJob = { ...job, consumed: false }
+  delete restoredJob.submissionStartedAt
+  delete restoredJob.submissionUncertain
+  delete restoredJob.submissionUncertainAt
+  delete restoredJob.submissionError
+  if (!persistPreparedJob(normalizedToken, restoredJob)) {
+    throw createRequestError('失败步骤可安全重试，但无法恢复关键词和续传进度，请检查数据盘空间和权限', 'JD_EXPRESS_PREPARATION_CACHE_FAILED')
+  }
+  preparedRoiJobs.set(normalizedToken, restoredJob)
+  return restoredJob
+}
+
+function isDefinitiveZeroCreationResult(result = {}) {
+  if (Number(result.successCampaignCount || 0) > 0 || Number(result.successUnitCount || 0) > 0) return false
+  const failures = Array.isArray(result.failures) ? result.failures : []
+  if (!failures.length) return Number(result.skippedUnitCount || 0) > 0
+  const rootFailures = failures.filter((failure) => !failure?.blockedByCampaign)
+  if (!rootFailures.length) return false
+  const noWriteStages = new Set(['suggestion', 'version', 'build_body', 'keyword_floor', 'sign', 'date_validation'])
+  return rootFailures.every((failure) => {
+    if (noWriteStages.has(failure?.stage)) return true
+    return failure?.stage === 'submit' &&
+      failure?.code === 'JD_EXPRESS_RESPONSE_FAILED' &&
+      failure?.jdCode != null
+  })
+}
+
+function isRetryablePreparedResult(result = {}) {
+  const failures = Array.isArray(result.failures) ? result.failures : []
+  const timeRangeFailures = Array.isArray(result.timeRangeFailures) ? result.timeRangeFailures : []
+  const hasRetryableWork = failures.length > 0 || timeRangeFailures.length > 0 || Number(result.skippedUnitCount || 0) > 0
+  if (!hasRetryableWork) return false
+  const rootFailures = failures.filter((failure) => !failure?.blockedByCampaign)
+  const noWriteStages = new Set(['suggestion', 'version', 'build_body', 'keyword_floor', 'sign', 'date_validation'])
+  const creationFailuresAreSafe = rootFailures.every((failure) =>
+    noWriteStages.has(failure?.stage) ||
+    (failure?.stage === 'submit' && failure?.code === 'JD_EXPRESS_RESPONSE_FAILED' && failure?.jdCode != null))
+  const timeRangeFailuresAreSafe = timeRangeFailures.every((failure) => failure?.retrySafe === true)
+  return creationFailuresAreSafe && timeRangeFailuresAreSafe
+}
+
 function clearExpiredPreparedJobs(now = Date.now()) {
   for (const [token, job] of preparedRoiJobs.entries()) {
+    // 已提交或结果未知的快照在 TTL 内保持锁定但不删除，既防重复提交，也保留
+    // 关键词和检查点供后续人工核对/恢复。
+    if (job?.consumed && job?.expiresAt > now) continue
     if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) deletePreparedJob(token)
   }
   const directory = getPreparedJobCacheDirectory()
@@ -1114,6 +1288,7 @@ function clearExpiredPreparedJobs(now = Date.now()) {
       const filePath = path.join(directory, entry.name)
       try {
         const job = JSON.parse(fs.readFileSync(filePath, 'utf8'))
+        if (job?.consumed && job?.expiresAt > now) continue
         if (job?.consumed || !job?.expiresAt || job.expiresAt <= now) fs.unlinkSync(filePath)
       } catch {
         fs.unlinkSync(filePath)
@@ -1499,23 +1674,60 @@ async function createPreparedSingleProductTest(storeId, payload = {}, dependenci
   }
   const eid = await getJdEidCookie(platformSession)
   const signingWindow = await openReadySigningWindow(normalizedStoreId)
+  let submissionJob = null
   try {
     assertCreationDates(prepared.config)
-    consumePreparedJob(preparationToken)
+    submissionJob = beginPreparedJobSubmission(preparationToken)
     const result = await createSingleProductTest({
       platformSession,
       prepared,
       requestJson,
       signBody: (body) => signBodyInWindow(signingWindow, body),
       eid,
-      onDiagnostic: dependencies.onCreationDiagnostic
+      onDiagnostic: dependencies.onCreationDiagnostic,
+      resumeState: submissionJob.resumeState,
+      onCheckpoint: (resumeState) => {
+        submissionJob = checkpointPreparedJobSubmission(preparationToken, submissionJob, resumeState)
+      }
     })
+    if (result.resumeState) {
+      submissionJob = checkpointPreparedJobSubmission(preparationToken, submissionJob, result.resumeState)
+    }
+    if (Number(result.timeRangeFailureCount || 0) > 0) {
+      const restoredJob = restorePreparedJobAfterDefinitiveRejection(preparationToken, submissionJob)
+      return {
+        success: true,
+        storeId: normalizedStoreId,
+        scope: job.scope,
+        ...result,
+        canRetryWithPreparedKeywords: true,
+        preparationToken,
+        preparationExpiresAt: restoredJob.expiresAt
+      }
+    }
+    deletePreparedJob(preparationToken)
     return {
       success: true,
       storeId: normalizedStoreId,
       scope: job.scope,
       ...result
     }
+  } catch (error) {
+    if (submissionJob) {
+      const noWriteStages = new Set(['suggestion', 'version', 'build_body', 'keyword_floor', 'sign', 'date_validation'])
+      const definitelyRejected = noWriteStages.has(error?.creationStage) ||
+        (error?.creationStage === 'submit' && error?.code === 'JD_EXPRESS_RESPONSE_FAILED' && error?.jdCode != null)
+      if (definitelyRejected) {
+        const restoredJob = restorePreparedJobAfterDefinitiveRejection(preparationToken, submissionJob)
+        error.preparationToken = preparationToken
+        error.preparationExpiresAt = restoredJob.expiresAt
+      } else {
+        const uncertainJob = markPreparedJobUncertain(preparationToken, submissionJob, error)
+        error.manualRecoveryToken = preparationToken
+        error.manualRecoveryExpiresAt = uncertainJob.expiresAt
+      }
+    }
+    throw error
   } finally {
     activeProbeWindows.delete(signingWindow)
     if (!signingWindow.isDestroyed()) signingWindow.destroy()
@@ -1546,10 +1758,12 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
   if (createMode === 'custom') assertCrowdSettings(prepared.config.dmpCrowdSettings)
   const eid = await getJdEidCookie(platformSession)
   const signingWindow = await openReadySigningWindow(normalizedStoreId)
+  let submissionJob = null
   try {
-    // 一旦开始真实批量提交即消费令牌，避免网络返回不确定时重复创建计划。
+    // 提交前先持久化锁定令牌；每成功创建一个单元都会更新 resumeState。
+    // 明确失败可按续传进度只补失败步骤，网络结果未知则保留但锁定，避免重复创建。
     assertCreationDates(prepared.config)
-    consumePreparedJob(preparationToken)
+    submissionJob = beginPreparedJobSubmission(preparationToken)
     onProgress({
       phase: 'creation_submission_start',
       totalCampaigns: job.data.summary?.campaignCount || job.data.campaigns?.length || 0,
@@ -1564,8 +1778,48 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
       eid,
       delay,
       onProgress,
-      onDiagnostic: dependencies.onCreationDiagnostic
+      onDiagnostic: dependencies.onCreationDiagnostic,
+      resumeState: submissionJob.resumeState,
+      onCheckpoint: (resumeState) => {
+        submissionJob = checkpointPreparedJobSubmission(preparationToken, submissionJob, resumeState)
+      }
     })
+    if (result.resumeState) {
+      submissionJob = checkpointPreparedJobSubmission(preparationToken, submissionJob, result.resumeState)
+    }
+    const canRetryWithPreparedKeywords = isRetryablePreparedResult(result)
+    if (canRetryWithPreparedKeywords) {
+      const restoredJob = restorePreparedJobAfterDefinitiveRejection(preparationToken, submissionJob)
+      return {
+        success: true,
+        storeId: normalizedStoreId,
+        scope: job.scope,
+        createMode,
+        ...result,
+        canRetryWithPreparedKeywords: true,
+        preparationToken,
+        preparationExpiresAt: restoredJob.expiresAt
+      }
+    }
+    const hasUncertainFailure = Number(result.failureCount || 0) > 0 ||
+      Number(result.timeRangeFailureCount || 0) > 0 || Number(result.skippedUnitCount || 0) > 0
+    if (hasUncertainFailure) {
+      const uncertainJob = markPreparedJobUncertain(preparationToken, submissionJob, {
+        code: 'JD_EXPRESS_SUBMISSION_UNCERTAIN',
+        message: '存在无法安全自动重试的失败步骤，请先到京准通核对'
+      })
+      return {
+        success: true,
+        storeId: normalizedStoreId,
+        scope: job.scope,
+        createMode,
+        ...result,
+        requiresManualVerification: true,
+        manualRecoveryToken: preparationToken,
+        manualRecoveryExpiresAt: uncertainJob.expiresAt
+      }
+    }
+    deletePreparedJob(preparationToken)
     return {
       success: true,
       storeId: normalizedStoreId,
@@ -1573,6 +1827,15 @@ async function createPreparedFullCampaigns(storeId, payload = {}, dependencies =
       createMode,
       ...result
     }
+  } catch (error) {
+    // 抛错可能发生在请求已发出但响应未知的阶段；保留关键词和续传进度但锁定令牌，
+    // 后续核对功能可据此恢复，当前绝不自动重放。
+    if (submissionJob) {
+      const uncertainJob = markPreparedJobUncertain(preparationToken, submissionJob, error)
+      error.manualRecoveryToken = preparationToken
+      error.manualRecoveryExpiresAt = uncertainJob.expiresAt
+    }
+    throw error
   } finally {
     activeProbeWindows.delete(signingWindow)
     if (!signingWindow.isDestroyed()) signingWindow.destroy()
@@ -1702,6 +1965,11 @@ function serializeError(error) {
       preparationToken: error.preparationToken,
       preparationExpiresAt: error.preparationExpiresAt,
       retryWithoutPreparation: true
+    } : {}),
+    ...(error?.manualRecoveryToken ? {
+      requiresManualVerification: true,
+      manualRecoveryToken: error.manualRecoveryToken,
+      manualRecoveryExpiresAt: error.manualRecoveryExpiresAt
     } : {})
   }
 }
@@ -1768,6 +2036,27 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
         `action=${action} store_id=${storeId || 0} phase=${phase}${recoveryResult ? ` recovery=${recoveryResult}` : ''}${error?.message ? ` message=${logSafe(error.message)}` : ''}`
       )
     }
+  })
+
+  ipcMain.handle('jd-express-config-audit', async (_event, payload = {}) => {
+    const eventName = logSafe(payload.event || 'unknown').slice(0, 80)
+    const snapshotId = logSafe(payload.snapshotId || '').slice(0, 100)
+    const signature = logSafe(payload.configSignature || '').slice(0, 100)
+    const detail = configAuditEventDetail(payload)
+    const persisted = appendConfigAuditRecord({
+      action: 'config_audit',
+      storeId: Number(payload.storeId) || 0,
+      createMode: resolveCreateMode(payload),
+      event: eventName,
+      snapshotId: snapshotId || null,
+      configSignature: signature || null,
+      detail
+    })
+    runtimeLog.writeLog(
+      'JD_EXPRESS',
+      `action=config_audit store_id=${Number(payload.storeId) || 0} create_mode=${resolveCreateMode(payload)} event=${eventName}${snapshotId ? ` snapshot_id=${snapshotId}` : ''}${signature ? ` config_signature=${signature}` : ''} persisted=${persisted} detail=${JSON.stringify(detail)}`
+    )
+    return { success: persisted }
   })
 
   ipcMain.handle('jd-express-home-spend', async (_event, payload = {}) => {
@@ -2078,9 +2367,48 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
     }
   })
 
+  ipcMain.handle('jd-express-recover-preparation', async (_event, payload = {}) => {
+    try {
+      const job = recoverUncertainPreparedJob(
+        payload.preparationToken,
+        payload.storeId,
+        payload.confirmation
+      )
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=recover_preparation store_id=${job.storeId} result=success`
+      )
+      return {
+        success: true,
+        preparationToken: String(payload.preparationToken),
+        preparationExpiresAt: job.expiresAt
+      }
+    } catch (error) {
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=recover_preparation store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${logSafe(error.message)}`
+      )
+      return serializeError(error)
+    }
+  })
+
   ipcMain.handle('jd-express-create-full', async (event, payload = {}) => {
     const startedAt = Date.now()
     const runId = randomUUID()
+    const suppliedSnapshotSignature = logSafe(payload.creationSnapshot?.configSignature || '').slice(0, 100)
+    const receivedSnapshotSignature = configurationSnapshotSignature(payload.config || {})
+    const snapshotId = logSafe(payload.creationSnapshot?.id || `main-${runId}`).slice(0, 100)
+    const snapshotIntegrity = suppliedSnapshotSignature
+      ? (suppliedSnapshotSignature === receivedSnapshotSignature ? 'match' : 'mismatch')
+      : 'not_provided'
+    const creationConfigSnapshot = {
+      id: snapshotId,
+      createdAt: logSafe(payload.creationSnapshot?.createdAt || '').slice(0, 40),
+      rendererSignature: suppliedSnapshotSignature || null,
+      mainSignature: receivedSnapshotSignature,
+      integrity: snapshotIntegrity,
+      config: creationConfigAuditSnapshot(payload.config || {})
+    }
     const onCreationDiagnostic = createCreationLogger({
       storeId: payload.storeId, runId, createMode: resolveCreateMode(payload), writeLog: runtimeLog.writeLog
     })
@@ -2093,15 +2421,37 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
         event.sender.send('jd-express-creation-progress', {
           ...progress,
           runId,
+          snapshotId,
           storeId: payload.storeId,
           createMode: resolveCreateMode(payload)
         })
       }
     }
     try {
+      const snapshotPersisted = appendConfigAuditRecord({
+        action: 'creation_config_snapshot',
+        runId,
+        snapshotId,
+        storeId: Number(payload.storeId) || 0,
+        createMode: resolveCreateMode(payload),
+        integrity: snapshotIntegrity,
+        rendererSignature: suppliedSnapshotSignature || null,
+        mainSignature: receivedSnapshotSignature,
+        config: creationConfigSnapshot.config
+      })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full run_id=${runId} store_id=${payload.storeId || 0} create_mode=${resolveCreateMode(payload)} phase=start mode=${payload.preparationToken ? 'resume' : 'automatic'}`
+        `action=creation_config_snapshot run_id=${runId} snapshot_id=${snapshotId} store_id=${payload.storeId || 0} create_mode=${resolveCreateMode(payload)} integrity=${snapshotIntegrity} persisted=${snapshotPersisted} renderer_signature=${suppliedSnapshotSignature || 'none'} main_signature=${receivedSnapshotSignature} config=${JSON.stringify(creationConfigSnapshot.config)}`
+      )
+      if (!snapshotPersisted) {
+        throw createRequestError('无法保存创建配置快照，已停止任务，请检查数据盘空间和权限', 'JD_EXPRESS_CONFIG_AUDIT_FAILED')
+      }
+      if (snapshotIntegrity === 'mismatch') {
+        throw createRequestError('创建配置快照校验失败，已停止任务，请重新确认配置', 'JD_EXPRESS_CONFIG_SNAPSHOT_MISMATCH')
+      }
+      runtimeLog.writeLog(
+        'JD_EXPRESS',
+        `action=create_full run_id=${runId} snapshot_id=${snapshotId} store_id=${payload.storeId || 0} create_mode=${resolveCreateMode(payload)} phase=start mode=${payload.preparationToken ? 'resume' : 'automatic'}`
       )
       const result = await runFullRoiCreation(
         payload.storeId,
@@ -2112,20 +2462,56 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
       const outcome = creationOutcome(result)
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full run_id=${runId} store_id=${result.storeId} campaigns=${result.successCampaignCount}/${result.campaignCount} units=${result.successUnitCount}/${result.unitCount} failures=${result.failureCount} skipped_units=${result.skippedUnitCount || 0} skipped_keywords=${result.skippedKeywordCount || 0} adjusted_keywords=${result.adjustedKeywordCount || 0} result=${outcome} elapsed_ms=${Date.now() - startedAt}`
+        `action=create_full run_id=${runId} snapshot_id=${snapshotId} store_id=${result.storeId} campaigns=${result.successCampaignCount}/${result.campaignCount} units=${result.successUnitCount}/${result.unitCount} failures=${result.failureCount} time_range_failures=${result.timeRangeFailureCount || 0} skipped_units=${result.skippedUnitCount || 0} skipped_keywords=${result.skippedKeywordCount || 0} adjusted_keywords=${result.adjustedKeywordCount || 0} result=${outcome} elapsed_ms=${Date.now() - startedAt}`
       )
+      appendConfigAuditRecord({
+        action: 'creation_result',
+        runId,
+        snapshotId,
+        storeId: Number(result.storeId || payload.storeId) || 0,
+        createMode: resolveCreateMode(payload),
+        outcome,
+        elapsedMs: Date.now() - startedAt,
+        campaigns: {
+          success: Number(result.successCampaignCount || 0),
+          total: Number(result.campaignCount || 0)
+        },
+        units: {
+          success: Number(result.successUnitCount || 0),
+          total: Number(result.unitCount || 0),
+          failures: Number(result.failureCount || 0),
+          skipped: Number(result.skippedUnitCount || 0)
+        },
+        keywords: {
+          skipped: Number(result.skippedKeywordCount || 0),
+          adjusted: Number(result.adjustedKeywordCount || 0)
+        },
+        timeRangeFailures: Number(result.timeRangeFailureCount || 0)
+      })
       if (result.successCampaignCount > 0) {
         // 核验与创建结果解耦：不等待、不改变创建结果，也绝不自动补建。
         void runPostCreationVerification(result.storeId, result, event.sender)
       }
       // success remains the IPC execution envelope so failed unit details are retained by the UI.
-      return { ...result, outcome, runId }
+      return { ...result, outcome, runId, creationConfigSnapshot }
     } catch (error) {
-      emitCreationDiagnostic(onCreationDiagnostic, { ...creationErrorDetails(error), result: 'failed' })
+      const errorDetails = creationErrorDetails(error)
+      emitCreationDiagnostic(onCreationDiagnostic, { ...errorDetails, result: 'failed' })
       runtimeLog.writeLog(
         'JD_EXPRESS',
-        `action=create_full run_id=${runId} store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${creationErrorDetails(error).message}`
+        `action=create_full run_id=${runId} snapshot_id=${snapshotId} store_id=${payload.storeId || 0} result=failed code=${error.code || 'unknown'} message=${errorDetails.message}`
       )
+      appendConfigAuditRecord({
+        action: 'creation_failure',
+        runId,
+        snapshotId,
+        storeId: Number(payload.storeId) || 0,
+        createMode: resolveCreateMode(payload),
+        elapsedMs: Date.now() - startedAt,
+        code: logSafe(error.code || 'unknown').slice(0, 100),
+        stage: logSafe(errorDetails.stage || '').slice(0, 100),
+        message: logSafe(errorDetails.message).slice(0, 300)
+      })
       return serializeError(error)
     }
   })

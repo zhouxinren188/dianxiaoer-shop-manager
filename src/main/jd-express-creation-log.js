@@ -128,10 +128,72 @@ function creationBodySummary(body = {}) {
   }
 }
 
+function configurationSnapshotSignature(config = {}) {
+  let text = '{}'
+  try {
+    const canonicalize = value => {
+      if (Array.isArray(value)) return value.map(canonicalize)
+      if (!value || typeof value !== 'object') return value
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]))
+    }
+    text = JSON.stringify(canonicalize(config ?? {}))
+  } catch {
+    text = '{}'
+  }
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+function finiteNumberOrNull(value) {
+  if (value == null || value === '') return null
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function creationConfigAuditSnapshot(config = {}) {
+  const schedule = Array.isArray(config.timeRangeSchedule) ? config.timeRangeSchedule : []
+  const coefficients = schedule.flatMap(day => Array.isArray(day) ? day : [])
+    .map(Number).filter(Number.isFinite)
+  const activeCoefficients = coefficients.filter(value => value > 0)
+  return {
+    schemaVersion: finiteNumberOrNull(config.schemaVersion),
+    createMode: config.createMode === 'custom' ? 'custom' : 'roi',
+    useMinKeywordBid: config.useMinKeywordBid !== false,
+    keywordBidIncrement: finiteNumberOrNull(config.keywordBidIncrement),
+    customKeywordBid: finiteNumberOrNull(config.customKeywordBid),
+    maxCustomKeywordBid: finiteNumberOrNull(config.maxCustomKeywordBid),
+    keywordMatchType: finiteNumberOrNull(config.keywordMatchType),
+    keywordTotalUsage: finiteNumberOrNull(config.keywordTotalUsage),
+    keywordSources: Array.isArray(config.keywordSources)
+      ? config.keywordSources.slice(0, 10).map(finiteNumberOrNull)
+      : [],
+    automatedBiddingType: finiteNumberOrNull(config.automatedBiddingType),
+    inSearchFee: finiteNumberOrNull(config.inSearchFee),
+    premiumCoef: finiteNumberOrNull(config.premiumCoef),
+    crowds: (Array.isArray(config.dmpCrowdSettings) ? config.dmpCrowdSettings : []).slice(0, 30).map(item => ({
+      crowdId: creationLogText(item?.crowdId, 80),
+      crowdType: creationLogText(item?.crowdType, 80),
+      adGroupPrice: finiteNumberOrNull(item?.adGroupPrice)
+    })),
+    unlimitedBudget: config.unlimitedBudget === true,
+    dailyBudget: finiteNumberOrNull(config.dailyBudget),
+    startDate: creationLogText(config.startDate, 20),
+    endDate: creationLogText(config.endDate, 20),
+    timeRangeMode: config.timeRangeMode === 'custom' ? 'custom' : 'all',
+    timeRangeActiveHours: activeCoefficients.length || (config.timeRangeMode === 'custom' ? 0 : 168),
+    timeRangeMinimumCoef: activeCoefficients.length ? Math.min(...activeCoefficients) : (config.timeRangeMode === 'custom' ? 0 : 100),
+    timeRangeMaximumCoef: activeCoefficients.length ? Math.max(...activeCoefficients) : (config.timeRangeMode === 'custom' ? 0 : 100)
+  }
+}
+
 function creationOutcome(result) {
   if (!(Number(result?.successUnitCount) > 0) && !Number(result?.failureCount) && Number(result?.skippedUnitCount) > 0) return 'skipped'
   if (!(Number(result?.successUnitCount) > 0)) return 'failed'
-  return Number(result?.failureCount) > 0 || Number(result?.skippedKeywordCount) > 0 || Number(result.successUnitCount) < Number(result.unitCount) ||
+  return Number(result?.failureCount) > 0 || Number(result?.timeRangeFailureCount) > 0 || Number(result?.skippedKeywordCount) > 0 || Number(result.successUnitCount) < Number(result.unitCount) ||
     Number(result.successCampaignCount) < Number(result.campaignCount) ? 'partial' : 'success'
 }
 
@@ -162,5 +224,7 @@ function createCreationLogger({ storeId, runId, createMode, writeLog }) {
 
 module.exports = {
   safeEndpoint, creationLogText, creationErrorDetails, creationResponseError,
-  emitCreationDiagnostic, runCreationStage, creationUnitContext, creationBodySummary, creationOutcome, createCreationLogger
+  emitCreationDiagnostic, runCreationStage, creationUnitContext, creationBodySummary,
+  configurationSnapshotSignature, creationConfigAuditSnapshot,
+  creationOutcome, createCreationLogger
 }

@@ -75,8 +75,8 @@ describe('京东快车投放时段与实时折扣', () => {
   it('页面使用紧凑入口和弹窗矩阵，并把设置排除在关键词准备签名之外', () => {
     expect(view).toContain('class="time-range-setting-row"')
     expect(view).toContain('title="投放时段与实时折扣系数"')
-    expect(view).toContain("delete preparedConfig.timeRangeMode")
-    expect(view).toContain("delete preparedConfig.timeRangeSchedule")
+    expect(view).toContain("'startDate', 'endDate', 'unlimitedEndDate', 'timeRangeMode', 'timeRangeSchedule'")
+    expect(view).toContain(']) delete preparedConfig[field]')
     expect(view).toContain('凌晨&nbsp; 00:00–06:00')
     expect(view).toContain('晚间&nbsp; 18:00–24:00')
     expect(view).toContain('class="time-range-selection-popover"')

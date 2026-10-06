@@ -4,7 +4,7 @@ const { adjustRoiBid, assertCreationDates, assertCustomKeywordBidConfig } = requ
 const { applyCustomKeywordBidLimit, KEYWORD_MIN_BID_URL } = require('./jd-express-keywords')
 const { isJdSessionExpiredPayload, isJdSessionFailure } = require('./jd-session-recovery')
 const { assertCrowdSettings, normalizeCrowdSettings } = require('./jd-express-crowds')
-const { normalizeTimeRangeConfig, serializeTimeRangePriceCoef } = require('./jd-express-time-range')
+const { normalizeTimeRangeConfig } = require('./jd-express-time-range')
 const {
   creationErrorDetails, creationResponseError, creationUnitContext, creationBodySummary,
   emitCreationDiagnostic, runCreationStage
@@ -14,6 +14,7 @@ const SUGGEST_PRICE_URL = 'https://jzt-api.jd.com/common/tcpa/suggest/price'
 const VERSION_ID_URL = 'https://jzt-api.jd.com/common/get/recommendautobidding/type'
 const CREATE_CAMPAIGN_URL = 'https://atoms-api.jd.com/dspad/msa/campaign/item/keyword/add'
 const ADD_ADGROUP_URL = 'https://atoms-api.jd.com/dspad/msa/adgroup/item/keyword/add'
+const TIME_RANGE_UPDATE_URL = 'https://atoms-api.jd.com/dspad/material/center/task/batchUpdate/timerange'
 
 function responseMessage(payload, fallback) {
   return payload?.subMsg || payload?.message || payload?.msg || fallback
@@ -127,7 +128,9 @@ function buildCampaignCreateBody(campaign, config, suggestion, recommendVersionI
       endTime: config.unlimitedEndDate ? null : config.endDate,
       dateRange: '',
       dayBudget: config.unlimitedBudget ? null : config.dailyBudget,
-      timeRangePriceCoef: serializeTimeRangePriceCoef(config),
+      // 京东的计划创建接口不接受这里直接携带 7x24 分时系数。计划创建成功并
+      // 获得 campaignId 后，再通过 batchUpdate/timerange 独立设置。
+      timeRangePriceCoef: '',
       subExpType: '',
       expTarget: '',
       requestFrom: 0,
@@ -233,7 +236,7 @@ function buildCustomCampaignCreateBody(campaign, config, recommendVersionId) {
       endTime: config.unlimitedEndDate ? null : config.endDate,
       dateRange: '',
       dayBudget: config.unlimitedBudget ? null : config.dailyBudget,
-      timeRangePriceCoef: serializeTimeRangePriceCoef(config),
+      timeRangePriceCoef: '',
       subExpType: '',
       expTarget: '',
       requestFrom: 0,
@@ -342,7 +345,9 @@ async function createSingleProductTest(options = {}) {
     requestJson,
     signBody,
     eid,
-    onDiagnostic
+    onDiagnostic,
+    resumeState: inputResumeState,
+    onCheckpoint
   } = options
   if (!prepared || prepared.summary?.productCount !== 1 || prepared.summary?.campaignCount !== 1 || prepared.summary?.unitCount !== 1) {
     throw new Error('安全校验失败：单商品测试只能提交 1 个商品、1 个计划和 1 个单元')
@@ -352,31 +357,60 @@ async function createSingleProductTest(options = {}) {
   normalizeTimeRangeConfig(prepared.config || {})
   const campaign = prepared.campaigns[0]
   const unit = campaign.units[0]
-  const context = creationUnitContext(campaign, unit, 0, 0)
-  const suggestion = await runCreationStage(onDiagnostic, context, 'suggestion', SUGGEST_PRICE_URL,
-    () => fetchSuggestion(platformSession, unit, prepared.config, requestJson))
-  const recommendVersionId = await runCreationStage(onDiagnostic, context, 'version', VERSION_ID_URL,
-    () => fetchRecommendVersionId(platformSession, requestJson))
-  const body = await runCreationStage(onDiagnostic, context, 'build_body', CREATE_CAMPAIGN_URL,
-    () => buildCampaignCreateBody(campaign, prepared.config, suggestion, recommendVersionId))
-  const payload = await submitSignedBody({
+  const resumeState = cloneResumeState(inputResumeState)
+  const resumedEntry = resumeState.campaigns['0']
+  let campaignId = resumedEntry?.campaignId
+  let campaignName = resumedEntry?.campaignName || campaign.planName
+  let unitName = unit.unitName
+  let tcpaBid
+  let response = null
+  if (!campaignId) {
+    const context = creationUnitContext(campaign, unit, 0, 0)
+    const suggestion = await runCreationStage(onDiagnostic, context, 'suggestion', SUGGEST_PRICE_URL,
+      () => fetchSuggestion(platformSession, unit, prepared.config, requestJson))
+    const recommendVersionId = await runCreationStage(onDiagnostic, context, 'version', VERSION_ID_URL,
+      () => fetchRecommendVersionId(platformSession, requestJson))
+    const body = await runCreationStage(onDiagnostic, context, 'build_body', CREATE_CAMPAIGN_URL,
+      () => buildCampaignCreateBody(campaign, prepared.config, suggestion, recommendVersionId))
+    response = await submitSignedBody({
+      platformSession,
+      endpoint: CREATE_CAMPAIGN_URL,
+      body,
+      requestJson,
+      signBody,
+      eid,
+      onDiagnostic,
+      context
+    })
+    campaignId = response?.data?.campaignId
+    if (!campaignId) {
+      throw creationResponseError(
+        '京东返回创建成功，但未返回计划 ID', response, 'validate_response', CREATE_CAMPAIGN_URL)
+    }
+    campaignName = body.campaignCreateCommand.name
+    unitName = body.adGroupCreateCommand.name
+    tcpaBid = body.adGroupCreateCommand.tcpaBid
+    await markCreatedUnit(resumeState, 0, campaignId, campaignName, 0, onCheckpoint)
+  }
+  const timeRangeResult = await applyCreatedCampaignTimeRanges({
     platformSession,
-    endpoint: CREATE_CAMPAIGN_URL,
-    body,
+    prepared,
     requestJson,
-    signBody,
-    eid,
+    resumeState,
+    delay: async () => {},
     onDiagnostic,
-    context
+    onCheckpoint
   })
   return {
-    campaignId: payload?.data?.campaignId,
-    campaignName: body.campaignCreateCommand.name,
-    unitName: body.adGroupCreateCommand.name,
+    campaignId,
+    campaignName,
+    unitName,
     skuId: unit.products[0]?.skuId,
     keywordCount: unit.keywordList.length,
-    tcpaBid: body.adGroupCreateCommand.tcpaBid,
-    response: payload
+    tcpaBid,
+    response,
+    resumeState,
+    ...timeRangeResult
   }
 }
 
@@ -389,6 +423,206 @@ function buildFailure(campaign, unit, error) {
   }
 }
 
+function cloneResumeState(resumeState = {}) {
+  const campaigns = {}
+  for (const [key, value] of Object.entries(resumeState?.campaigns || {})) {
+    if (!value || typeof value !== 'object') continue
+    campaigns[key] = {
+      campaignId: value.campaignId,
+      campaignName: value.campaignName || '',
+      completedUnitIndexes: [...new Set((value.completedUnitIndexes || []).map(Number)
+        .filter((index) => Number.isInteger(index) && index >= 0))],
+      timeRangeApplied: value.timeRangeApplied === true,
+      timeRangeSignature: typeof value.timeRangeSignature === 'string' ? value.timeRangeSignature : ''
+    }
+  }
+  return { campaigns }
+}
+
+function campaignResumeEntry(resumeState, campaignIndex) {
+  const key = String(campaignIndex)
+  if (!resumeState.campaigns[key]) {
+    resumeState.campaigns[key] = {
+      campaignId: null,
+      campaignName: '',
+      completedUnitIndexes: [],
+      timeRangeApplied: false,
+      timeRangeSignature: ''
+    }
+  }
+  return resumeState.campaigns[key]
+}
+
+async function saveCreationCheckpoint(onCheckpoint, resumeState) {
+  if (!onCheckpoint) return
+  try {
+    await onCheckpoint(cloneResumeState(resumeState))
+  } catch (cause) {
+    const error = new Error('计划已提交成功，但无法保存续传进度；为避免重复创建，本轮已停止，请先到京准通核对')
+    error.code = 'JD_EXPRESS_CHECKPOINT_FAILED'
+    error.creationStage = 'checkpoint'
+    error.cause = cause
+    throw error
+  }
+}
+
+async function markCreatedUnit(resumeState, campaignIndex, campaignId, campaignName, unitIndex, onCheckpoint) {
+  const entry = campaignResumeEntry(resumeState, campaignIndex)
+  entry.campaignId = campaignId
+  entry.campaignName = campaignName || entry.campaignName
+  if (!entry.completedUnitIndexes.includes(unitIndex)) entry.completedUnitIndexes.push(unitIndex)
+  await saveCreationCheckpoint(onCheckpoint, resumeState)
+}
+
+function restoredCreationRows(prepared, resumeState) {
+  const campaigns = []
+  const units = []
+  for (let campaignIndex = 0; campaignIndex < prepared.campaigns.length; campaignIndex += 1) {
+    const campaign = prepared.campaigns[campaignIndex]
+    const entry = resumeState.campaigns[String(campaignIndex)]
+    if (!entry?.campaignId) continue
+    campaigns.push({
+      campaignId: entry.campaignId,
+      campaignName: entry.campaignName || campaign.planName,
+      campaignIndex,
+      resumed: true
+    })
+    for (const unitIndex of entry.completedUnitIndexes) {
+      const unit = campaign.units[unitIndex]
+      if (!unit) continue
+      units.push({
+        campaignId: entry.campaignId,
+        unitName: unit.unitName,
+        keywordCount: unit.keywordList?.length || 0,
+        productCount: unit.products?.length || 0,
+        campaignIndex,
+        unitIndex,
+        resumed: true
+      })
+    }
+  }
+  return { campaigns, units }
+}
+
+function timeRangeResponseError(payload) {
+  const nested = payload?.data?.data ?? payload?.data ?? payload
+  const responseCode = nested?.code ?? payload?.code ?? nested?.subCode ?? payload?.subCode
+  const normalizedCode = responseCode == null ? '' : String(responseCode).trim().toLowerCase()
+  const sessionExpired = isJdSessionExpiredPayload(payload) || isJdSessionExpiredPayload(nested) ||
+    normalizedCode.includes('301')
+  const explicitFailure = payload?.success === false || nested?.success === false
+  const explicitSuccess = payload?.success === true || nested?.success === true
+  const acceptedCode = ['0', '1', '200', '0000', 'success', 'ok'].includes(normalizedCode)
+  const rejectedCode = Boolean(normalizedCode) && !acceptedCode
+  if (!sessionExpired && !explicitFailure && !rejectedCode && (explicitSuccess || acceptedCode)) return null
+  const responsePayload = nested?.code != null || nested?.subCode != null ? nested : payload
+  const error = creationResponseError(
+    responseMessage(nested, responseMessage(payload, '修改投放时段失败')),
+    responsePayload,
+    'time_range_apply',
+    TIME_RANGE_UPDATE_URL
+  )
+  if (sessionExpired) error.code = 'JD_SESSION_EXPIRED'
+  // 设置同一份分时表是幂等操作，重新登录后重复设置不会创建计划或单元。
+  error.retrySafe = true
+  return error
+}
+
+async function applyCreatedCampaignTimeRanges(options = {}) {
+  const {
+    platformSession,
+    prepared,
+    requestJson,
+    resumeState,
+    delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    onProgress = () => {},
+    onDiagnostic,
+    onCheckpoint
+  } = options
+  const normalized = normalizeTimeRangeConfig(prepared.config || {})
+  const available = prepared.campaigns.map((campaign, campaignIndex) => ({
+    campaign,
+    campaignIndex,
+    entry: resumeState.campaigns[String(campaignIndex)]
+  })).filter(({ entry }) => entry?.campaignId)
+  const targetSignature = JSON.stringify(normalized.timeRangeSchedule)
+  const requiresUpdate = ({ entry }) => normalized.timeRangeMode === 'custom'
+    ? entry.timeRangeSignature !== targetSignature
+    : Boolean(entry.timeRangeSignature && entry.timeRangeSignature !== targetSignature)
+  const pending = available.filter(requiresUpdate)
+  if (!pending.length) {
+    return { timeRangeCampaignCount: 0, timeRangeSuccessCount: 0, timeRangeFailureCount: 0, timeRangeFailures: [] }
+  }
+
+  const failures = []
+  let successCount = available.length - pending.length
+  for (let index = 0; index < pending.length; index += 1) {
+    const { campaign, campaignIndex, entry } = pending[index]
+    const context = {
+      campaignId: entry.campaignId,
+      campaignIndex: campaignIndex + 1,
+      planName: campaign.planName
+    }
+    onProgress({
+      phase: 'time_range_apply_start',
+      campaignId: entry.campaignId,
+      campaignIndex: campaignIndex + 1,
+      totalCampaigns: available.length
+    })
+    try {
+      const payload = await runCreationStage(onDiagnostic, context, 'time_range_apply', TIME_RANGE_UPDATE_URL,
+        () => requestJson(platformSession, TIME_RANGE_UPDATE_URL, {
+          method: 'POST',
+          referer: 'https://jzt.jd.com/',
+          headers: { origin: 'https://jzt.jd.com', loginmode: '0', siteid: '0' },
+          body: {
+            campaignSettings: [{
+              campaignId: Number(entry.campaignId),
+              timeRangeCoefSettings: normalized.timeRangeSchedule
+            }],
+            requestFrom: 0
+          }
+        }))
+      const responseError = timeRangeResponseError(payload)
+      if (responseError) throw responseError
+      entry.timeRangeApplied = true
+      entry.timeRangeSignature = targetSignature
+      await saveCreationCheckpoint(onCheckpoint, resumeState)
+      successCount += 1
+      onProgress({
+        phase: 'time_range_apply_complete',
+        campaignId: entry.campaignId,
+        campaignIndex: campaignIndex + 1,
+        totalCampaigns: available.length
+      })
+    } catch (error) {
+      if (error?.code === 'JD_EXPRESS_CHECKPOINT_FAILED') throw error
+      failures.push({
+        campaignId: entry.campaignId,
+        campaignIndex: campaignIndex + 1,
+        planName: campaign.planName,
+        // 分时接口只修改已有计划；网络超时后重放相同设置也不会重复建计划。
+        retrySafe: true,
+        ...creationErrorDetails(error)
+      })
+      onProgress({
+        phase: 'time_range_apply_failed',
+        campaignId: entry.campaignId,
+        campaignIndex: campaignIndex + 1,
+        totalCampaigns: available.length,
+        message: error?.message || '修改投放时段失败'
+      })
+    }
+    if (index < pending.length - 1) await delay(1000)
+  }
+  return {
+    timeRangeCampaignCount: available.length,
+    timeRangeSuccessCount: successCount,
+    timeRangeFailureCount: failures.length,
+    timeRangeFailures: failures
+  }
+}
+
 function recordCreationFailure(failures, campaign, unit, error, onDiagnostic, context, blockedByCampaign = false) {
   const failure = { ...buildFailure(campaign, unit, error),
     campaignIndex: context.campaignIndex, unitIndex: context.unitIndex, blockedByCampaign }
@@ -396,6 +630,17 @@ function recordCreationFailure(failures, campaign, unit, error, onDiagnostic, co
   emitCreationDiagnostic(onDiagnostic, {
     ...context, ...creationErrorDetails(error), result: 'unit_failed', blockedByCampaign
   })
+}
+
+const DEFINITIVE_NO_WRITE_STAGES = new Set([
+  'suggestion', 'version', 'build_body', 'keyword_floor', 'sign', 'date_validation'
+])
+
+function isSafeAnchorFailure(error) {
+  if (isJdSessionFailure(error)) return false
+  if (DEFINITIVE_NO_WRITE_STAGES.has(error?.creationStage)) return true
+  return error?.creationStage === 'submit' &&
+    error?.code === 'JD_EXPRESS_RESPONSE_FAILED' && error?.jdCode != null
 }
 
 async function createRoiCampaigns(options = {}) {
@@ -407,94 +652,39 @@ async function createRoiCampaigns(options = {}) {
     eid,
     delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     onProgress = () => {},
-    onDiagnostic
+    onDiagnostic,
+    resumeState: inputResumeState,
+    onCheckpoint
   } = options
   if (!prepared?.campaigns?.length) throw new Error('没有可提交的广告计划')
   if (!eid) throw new Error('京东 eid Cookie 缺失，请重新登录京准通')
   assertCreationDates(prepared.config || {})
   normalizeTimeRangeConfig(prepared.config || {})
 
-  const createdCampaigns = []
-  const createdUnits = []
+  const resumeState = cloneResumeState(inputResumeState)
+  const restored = restoredCreationRows(prepared, resumeState)
+  const createdCampaigns = restored.campaigns
+  const createdUnits = restored.units
   const failures = []
-  let completedUnits = 0
+  let completedUnits = createdUnits.length
   const totalUnits = prepared.campaigns.reduce((total, campaign) => total + campaign.units.length, 0)
 
   for (let campaignIndex = 0; campaignIndex < prepared.campaigns.length; campaignIndex += 1) {
     const campaign = prepared.campaigns[campaignIndex]
-    const firstUnit = campaign.units[0]
-    const context = creationUnitContext(campaign, firstUnit, campaignIndex, 0)
-    onProgress({
-      phase: 'create_campaign_start',
-      campaignIndex: campaignIndex + 1,
-      totalCampaigns: prepared.campaigns.length,
-      completedUnits,
-      totalUnits,
-      planName: campaign.planName
-    })
+    let campaignId = resumeState.campaigns[String(campaignIndex)]?.campaignId
+    const completedUnitIndexes = new Set(
+      resumeState.campaigns[String(campaignIndex)]?.completedUnitIndexes || [])
+    const unitQueue = campaign.units.map((_, index) => index)
+      .filter(index => !completedUnitIndexes.has(index))
+    const deferredAnchorFailures = new Map()
 
-    let campaignId
-    try {
-      const suggestion = await runCreationStage(onDiagnostic, context, 'suggestion', SUGGEST_PRICE_URL,
-        () => fetchSuggestion(platformSession, firstUnit, prepared.config, requestJson))
-      const recommendVersionId = await runCreationStage(onDiagnostic, context, 'version', VERSION_ID_URL,
-        () => fetchRecommendVersionId(platformSession, requestJson))
-      const body = await runCreationStage(onDiagnostic, context, 'build_body', CREATE_CAMPAIGN_URL,
-        () => buildCampaignCreateBody(campaign, prepared.config, suggestion, recommendVersionId))
-      const payload = await submitSignedBody({
-        platformSession,
-        endpoint: CREATE_CAMPAIGN_URL,
-        body,
-        requestJson,
-        signBody,
-        eid,
-        onDiagnostic,
-        context
-      })
-      campaignId = payload?.data?.campaignId
-      if (!campaignId) throw creationResponseError('京东返回创建成功，但未返回计划 ID', payload, 'validate_response', CREATE_CAMPAIGN_URL)
-      emitCreationDiagnostic(onDiagnostic, { ...context, campaignId, stage: 'campaign_complete', result: 'success' })
-      createdCampaigns.push({ campaignId, campaignName: body.campaignCreateCommand.name })
-      createdUnits.push({
-        campaignId,
-        unitName: body.adGroupCreateCommand.name,
-        keywordCount: firstUnit.keywordList.length,
-        productCount: firstUnit.products.length,
-        tcpaBid: body.adGroupCreateCommand.tcpaBid
-      })
-      completedUnits += 1
-      onProgress({
-        phase: 'create_campaign_complete',
-        campaignIndex: campaignIndex + 1,
-        totalCampaigns: prepared.campaigns.length,
-        completedUnits,
-        totalUnits,
-        campaignId,
-        planName: campaign.planName
-      })
-    } catch (error) {
-      campaign.units.forEach((unit, unitIndex) => recordCreationFailure(
-        failures, campaign, unit, error, onDiagnostic,
-        creationUnitContext(campaign, unit, campaignIndex, unitIndex), unitIndex > 0
-      ))
-      completedUnits += campaign.units.length
-      onProgress({
-        phase: 'create_campaign_failed',
-        campaignIndex: campaignIndex + 1,
-        totalCampaigns: prepared.campaigns.length,
-        completedUnits,
-        totalUnits,
-        planName: campaign.planName,
-        message: error?.message || '创建计划失败'
-      })
-      continue
-    }
-
-    for (let unitIndex = 1; unitIndex < campaign.units.length; unitIndex += 1) {
+    while (unitQueue.length) {
+      const unitIndex = unitQueue.shift()
+      if (completedUnitIndexes.has(unitIndex)) continue
       const unit = campaign.units[unitIndex]
+      const creatingCampaign = !campaignId
       const context = creationUnitContext(campaign, unit, campaignIndex, unitIndex, campaignId)
-      onProgress({
-        phase: 'create_adgroup_start',
+      const progress = {
         campaignIndex: campaignIndex + 1,
         totalCampaigns: prepared.campaigns.length,
         unitIndex: unitIndex + 1,
@@ -502,57 +692,146 @@ async function createRoiCampaigns(options = {}) {
         completedUnits,
         totalUnits,
         campaignId,
+        planName: campaign.planName,
         unitName: unit.unitName
-      })
+      }
+      onProgress({ ...progress, phase: creatingCampaign ? 'create_campaign_start' : 'create_adgroup_start' })
+
+      let body
       let unitFailed = false
       try {
         const suggestion = await runCreationStage(onDiagnostic, context, 'suggestion', SUGGEST_PRICE_URL,
           () => fetchSuggestion(platformSession, unit, prepared.config, requestJson))
         const recommendVersionId = await runCreationStage(onDiagnostic, context, 'version', VERSION_ID_URL,
           () => fetchRecommendVersionId(platformSession, requestJson))
-        const body = await runCreationStage(onDiagnostic, context, 'build_body', ADD_ADGROUP_URL, () => buildAdditionalAdGroupBody(
-          unit,
-          prepared.config,
-          suggestion,
-          recommendVersionId,
-          campaignId
-        ))
-        await submitSignedBody({
-          platformSession,
-          endpoint: ADD_ADGROUP_URL,
-          body,
-          requestJson,
-          signBody,
-          eid,
-          onDiagnostic,
-          context
+        const endpoint = creatingCampaign ? CREATE_CAMPAIGN_URL : ADD_ADGROUP_URL
+        body = await runCreationStage(onDiagnostic, context, 'build_body', endpoint, () => creatingCampaign
+          ? buildCampaignCreateBody({ ...campaign, units: [unit] }, prepared.config, suggestion, recommendVersionId)
+          : buildAdditionalAdGroupBody(unit, prepared.config, suggestion, recommendVersionId, campaignId))
+        const payload = await submitSignedBody({
+          platformSession, endpoint, body, requestJson, signBody, eid, onDiagnostic, context
         })
+        if (creatingCampaign) {
+          campaignId = payload?.data?.campaignId
+          if (!campaignId) {
+            throw creationResponseError(
+              '京东返回创建成功，但未返回计划 ID', payload, 'validate_response', endpoint)
+          }
+          await markCreatedUnit(
+            resumeState, campaignIndex, campaignId, body.campaignCreateCommand.name, unitIndex, onCheckpoint)
+          createdCampaigns.push({ campaignId, campaignName: body.campaignCreateCommand.name, campaignIndex })
+          emitCreationDiagnostic(onDiagnostic, {
+            ...context, campaignId, stage: 'campaign_complete', result: 'success'
+          })
+          if (deferredAnchorFailures.size) {
+            unitQueue.push(...deferredAnchorFailures.keys())
+            deferredAnchorFailures.clear()
+          }
+        } else {
+          await markCreatedUnit(
+            resumeState,
+            campaignIndex,
+            campaignId,
+            resumeState.campaigns[String(campaignIndex)]?.campaignName || campaign.planName,
+            unitIndex,
+            onCheckpoint
+          )
+        }
+        completedUnitIndexes.add(unitIndex)
+        const group = body.adGroupCreateCommand || body
         createdUnits.push({
           campaignId,
-          unitName: body.name,
+          unitName: group.name,
           keywordCount: unit.keywordList.length,
           productCount: unit.products.length,
-          tcpaBid: body.tcpaBid
+          tcpaBid: group.tcpaBid,
+          campaignIndex,
+          unitIndex
         })
       } catch (error) {
+        if (error?.code === 'JD_EXPRESS_CHECKPOINT_FAILED') throw error
+        const safeAnchorFailure = creatingCampaign && isSafeAnchorFailure(error)
+        if (safeAnchorFailure && unitQueue.length) {
+          deferredAnchorFailures.set(unitIndex, error)
+          onProgress({
+            ...progress,
+            phase: 'create_campaign_anchor_failed',
+            message: `${error?.message || '当前单元无法建立计划'}，正在尝试下一单元`
+          })
+          await delay(1000)
+          continue
+        }
+
         unitFailed = true
         recordCreationFailure(failures, campaign, unit, error, onDiagnostic, context)
+        completedUnits += 1
+        if (creatingCampaign) {
+          for (const [deferredIndex, deferredError] of deferredAnchorFailures.entries()) {
+            const deferredUnit = campaign.units[deferredIndex]
+            recordCreationFailure(
+              failures,
+              campaign,
+              deferredUnit,
+              deferredError,
+              onDiagnostic,
+              creationUnitContext(campaign, deferredUnit, campaignIndex, deferredIndex)
+            )
+            completedUnits += 1
+          }
+          deferredAnchorFailures.clear()
+          for (const blockedIndex of unitQueue.splice(0)) {
+            const blockedUnit = campaign.units[blockedIndex]
+            recordCreationFailure(
+              failures,
+              campaign,
+              blockedUnit,
+              error,
+              onDiagnostic,
+              creationUnitContext(campaign, blockedUnit, campaignIndex, blockedIndex),
+              !safeAnchorFailure
+            )
+            completedUnits += 1
+          }
+        }
       }
-      completedUnits += 1
+
+      if (!unitFailed) completedUnits += 1
       onProgress({
-        phase: unitFailed ? 'create_adgroup_failed' : 'create_adgroup_complete',
-        campaignIndex: campaignIndex + 1,
-        totalCampaigns: prepared.campaigns.length,
-        unitIndex: unitIndex + 1,
-        unitCount: campaign.units.length,
+        ...progress,
         completedUnits,
-        totalUnits,
         campaignId,
-        unitName: unit.unitName
+        phase: creatingCampaign
+          ? (unitFailed ? 'create_campaign_failed' : 'create_campaign_complete')
+          : (unitFailed ? 'create_adgroup_failed' : 'create_adgroup_complete')
       })
       await delay(1000)
     }
+    if (!campaignId && deferredAnchorFailures.size) {
+      for (const [deferredIndex, deferredError] of deferredAnchorFailures.entries()) {
+        const deferredUnit = campaign.units[deferredIndex]
+        recordCreationFailure(
+          failures,
+          campaign,
+          deferredUnit,
+          deferredError,
+          onDiagnostic,
+          creationUnitContext(campaign, deferredUnit, campaignIndex, deferredIndex)
+        )
+        completedUnits += 1
+      }
+    }
   }
+
+  const timeRangeResult = await applyCreatedCampaignTimeRanges({
+    platformSession,
+    prepared,
+    requestJson,
+    resumeState,
+    delay,
+    onProgress,
+    onDiagnostic,
+    onCheckpoint
+  })
 
   return {
     campaignCount: prepared.summary?.campaignCount || prepared.campaigns.length,
@@ -563,7 +842,9 @@ async function createRoiCampaigns(options = {}) {
     failureCount: failures.length,
     campaigns: createdCampaigns,
     units: createdUnits,
-    failures
+    failures,
+    resumeState,
+    ...timeRangeResult
   }
 }
 
@@ -576,7 +857,9 @@ async function createCustomCampaigns(options = {}) {
     eid,
     delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     onProgress = () => {},
-    onDiagnostic
+    onDiagnostic,
+    resumeState: inputResumeState,
+    onCheckpoint
   } = options
   if (!prepared?.campaigns?.length) throw new Error('没有可提交的广告计划')
   if (!eid) throw new Error('京东 eid Cookie 缺失，请重新登录京准通')
@@ -585,21 +868,30 @@ async function createCustomCampaigns(options = {}) {
   assertCustomKeywordBidConfig({ ...prepared.config, createMode: 'custom' })
   assertCrowdSettings(prepared.config.dmpCrowdSettings)
 
-  const createdCampaigns = []
-  const createdUnits = []
+  const resumeState = cloneResumeState(inputResumeState)
+  const restored = restoredCreationRows(prepared, resumeState)
+  const createdCampaigns = restored.campaigns
+  const createdUnits = restored.units
   const failures = []
   const skips = []
   let adjustedKeywordCount = 0
   let skippedKeywordCount = 0
   let sessionError = null
-  let completedUnits = 0
+  let completedUnits = createdUnits.length
   const totalUnits = prepared.campaigns.reduce((total, campaign) => total + campaign.units.length, 0)
 
   for (let campaignIndex = 0; campaignIndex < prepared.campaigns.length; campaignIndex += 1) {
     const campaign = prepared.campaigns[campaignIndex]
-    let campaignId
+    let campaignId = resumeState.campaigns[String(campaignIndex)]?.campaignId
+    const completedUnitIndexes = new Set(
+      resumeState.campaigns[String(campaignIndex)]?.completedUnitIndexes || [])
     let blockedError = null
-    for (let unitIndex = 0; unitIndex < campaign.units.length; unitIndex += 1) {
+    const unitQueue = campaign.units.map((_, index) => index)
+      .filter(index => !completedUnitIndexes.has(index))
+    const deferredAnchorFailures = new Map()
+    while (unitQueue.length) {
+      const unitIndex = unitQueue.shift()
+      if (completedUnitIndexes.has(unitIndex)) continue
       let unit = campaign.units[unitIndex]
       const context = creationUnitContext(campaign, unit, campaignIndex, unitIndex, campaignId)
       const creatingCampaign = !campaignId
@@ -659,19 +951,69 @@ async function createCustomCampaigns(options = {}) {
         if (creatingCampaign) {
           campaignId = payload?.data?.campaignId
           if (!campaignId) throw creationResponseError('京东返回创建成功，但未返回计划 ID', payload, 'validate_response', endpoint)
-          createdCampaigns.push({ campaignId, campaignName: body.campaignCreateCommand.name })
+          await markCreatedUnit(
+            resumeState, campaignIndex, campaignId, body.campaignCreateCommand.name, unitIndex, onCheckpoint)
+          completedUnitIndexes.add(unitIndex)
+          createdCampaigns.push({
+            campaignId,
+            campaignName: body.campaignCreateCommand.name,
+            campaignIndex
+          })
           emitCreationDiagnostic(onDiagnostic, { ...context, campaignId, stage: 'campaign_complete', result: 'success' })
+          if (deferredAnchorFailures.size) {
+            unitQueue.push(...deferredAnchorFailures.keys())
+            deferredAnchorFailures.clear()
+          }
+        } else {
+          await markCreatedUnit(
+            resumeState,
+            campaignIndex,
+            campaignId,
+            resumeState.campaigns[String(campaignIndex)]?.campaignName || campaign.planName,
+            unitIndex,
+            onCheckpoint
+          )
+          completedUnitIndexes.add(unitIndex)
         }
         const group = body.adGroupCreateCommand || body
         createdUnits.push({
           campaignId, unitName: group.name, keywordCount: unit.keywordList.length,
           productCount: unit.products.length, inSearchFee: group.inSearchFee,
-          automatedBiddingType: group.automatedBiddingType
+          automatedBiddingType: group.automatedBiddingType,
+          campaignIndex,
+          unitIndex
         })
       } catch (error) {
+        if (error?.code === 'JD_EXPRESS_CHECKPOINT_FAILED') throw error
+        const safeAnchorFailure = creatingCampaign && passedFloorCheck && isSafeAnchorFailure(error)
+        if (safeAnchorFailure && unitQueue.length) {
+          deferredAnchorFailures.set(unitIndex, error)
+          onProgress({
+            ...progress,
+            phase: 'create_campaign_anchor_failed',
+            message: `${error?.message || '当前单元无法建立计划'}，正在尝试下一单元`
+          })
+          await delay(1000)
+          continue
+        }
         unitFailed = true
         recordCreationFailure(failures, campaign, unit, error, onDiagnostic, context)
-        if (creatingCampaign && passedFloorCheck) blockedError = error
+        if (creatingCampaign) {
+          for (const [deferredIndex, deferredError] of deferredAnchorFailures.entries()) {
+            const deferredUnit = campaign.units[deferredIndex]
+            recordCreationFailure(
+              failures,
+              campaign,
+              deferredUnit,
+              deferredError,
+              onDiagnostic,
+              creationUnitContext(campaign, deferredUnit, campaignIndex, deferredIndex)
+            )
+            completedUnits += 1
+          }
+          deferredAnchorFailures.clear()
+        }
+        if (creatingCampaign && passedFloorCheck && !safeAnchorFailure) blockedError = error
         if (isJdSessionFailure(error)) sessionError = error
       }
       completedUnits += 1
@@ -682,7 +1024,34 @@ async function createCustomCampaigns(options = {}) {
       })
       await delay(1000)
     }
+    // All remaining candidates may have been skipped by keyword-floor policy after an
+    // earlier anchor failed. Surface that deferred failure instead of silently losing it.
+    if (!campaignId && deferredAnchorFailures.size) {
+      for (const [deferredIndex, deferredError] of deferredAnchorFailures.entries()) {
+        const deferredUnit = campaign.units[deferredIndex]
+        recordCreationFailure(
+          failures,
+          campaign,
+          deferredUnit,
+          deferredError,
+          onDiagnostic,
+          creationUnitContext(campaign, deferredUnit, campaignIndex, deferredIndex)
+        )
+        completedUnits += 1
+      }
+    }
   }
+
+  const timeRangeResult = await applyCreatedCampaignTimeRanges({
+    platformSession,
+    prepared,
+    requestJson,
+    resumeState,
+    delay,
+    onProgress,
+    onDiagnostic,
+    onCheckpoint
+  })
 
   return {
     campaignCount: prepared.summary?.campaignCount || prepared.campaigns.length,
@@ -697,13 +1066,17 @@ async function createCustomCampaigns(options = {}) {
     campaigns: createdCampaigns,
     units: createdUnits,
     failures,
-    skips
+    skips,
+    resumeState,
+    ...timeRangeResult
   }
 }
 
 module.exports = {
   ADD_ADGROUP_URL,
   CREATE_CAMPAIGN_URL,
+  TIME_RANGE_UPDATE_URL,
+  applyCreatedCampaignTimeRanges,
   buildAdditionalAdGroupBody,
   buildAdGroupCommand,
   buildCampaignCreateBody,

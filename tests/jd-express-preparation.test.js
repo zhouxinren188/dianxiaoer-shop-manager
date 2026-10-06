@@ -55,9 +55,11 @@ function cacheHarness() {
     fs, path, process: { pid: 1 }, preparedRoiJobs: memory,
     getManagedTempDirectory: () => path.resolve('managed-data', 'jd-express-prepared'),
     PREPARED_JOB_FILE_PATTERN: /^[0-9a-f-]{16,64}\.json$/i,
+    UNCERTAIN_JOB_TTL_MS: 7 * 24 * 60 * 60 * 1000,
     runtimeLog: { writeLog: vi.fn() }, logSafe: String,
+    normalizeStoreId: Number,
     createRequestError: (message, code) => Object.assign(new Error(message), { code })
-  }, '{ getPreparedJob, persistPreparedJob, consumePreparedJob, clearExpiredPreparedJobs, getPreparedJobFilePath }')
+  }, '{ getPreparedJob, persistPreparedJob, consumePreparedJob, beginPreparedJobSubmission, checkpointPreparedJobSubmission, markPreparedJobUncertain, getUncertainPreparedJob, recoverUncertainPreparedJob, restorePreparedJobAfterDefinitiveRejection, isDefinitiveZeroCreationResult, isRetryablePreparedResult, clearExpiredPreparedJobs, getPreparedJobFilePath, deletePreparedJob }')
   const job = { storeId: 230, scope: 'full', createdAt: Date.now(), expiresAt: Date.now() + ttl, data: preparedFixture() }
   cache.persistPreparedJob(token, job)
   return { ...cache, fs, files, memory, job }
@@ -130,6 +132,11 @@ describe('未提交的关键词跨夜恢复', () => {
     h.config.endDate = '2026-09-20'; h.config.unlimitedEndDate = false
     h.config.timeRangeMode = 'custom'
     h.config.timeRangeSchedule[0][0] = 0
+    h.config.unlimitedBudget = false
+    h.config.dailyBudget = 88
+    h.config.areaType = 2
+    h.config.areaIds = ['1', '2']
+    h.config.premiumCoef = 60
     await nextTick()
     expect(h.config.startDate).toBe('2026-09-16')
     expect(h.creationInputSignature()).toBe(signature)
@@ -163,7 +170,7 @@ describe('未提交的关键词跨夜恢复', () => {
     expect(h.readPreparationToken()).toBe('')
   })
 
-  it('只覆盖日期和分时折扣，保持原关键词和出价，不修改持久化准备数据', () => {
+  it('覆盖不参与关键词准备的投放参数，保持关键词出价和持久化准备数据', () => {
     const prepared = preparedFixture()
     vi.setSystemTime(new Date(2026, 8, 16, 8))
     const schedule = Array.from({ length: 7 }, () => Array(24).fill(100))
@@ -172,18 +179,29 @@ describe('未提交的关键词跨夜恢复', () => {
       startDate: '2026-09-16',
       timeRangeMode: 'custom',
       timeRangeSchedule: schedule,
+      unlimitedBudget: false,
+      dailyBudget: 88,
+      areaType: 2,
+      areaIds: ['1', '2'],
+      premiumCoef: 60,
       customKeywordBid: 99,
       namePrefix: 'bad'
     })
     expect(result.config.startDate).toBe('2026-09-16')
     expect(result.config.timeRangeMode).toBe('custom')
     expect(result.config.timeRangeSchedule[0][0]).toBe(0)
+    expect(result.config.dailyBudget).toBe(88)
+    expect(result.config.areaIds).toEqual(['1', '2'])
+    expect(result.config.premiumCoef).toBe(60)
     expect(result.config.customKeywordBid).toBe(0.1)
     expect(result.units[0].keywordList).toBe(prepared.units[0].keywordList)
     expect(prepared.config.startDate).toBe('2026-09-15')
     expect(prepared.config.timeRangeMode).toBe('all')
     expect(prepared.config.timeRangeSchedule[0][0]).toBe(100)
     expect(() => assertPreparedInputsMatch(prepared, { config: { customKeywordBid: 99 } })).toThrow('不匹配')
+    expect(() => assertPreparedInputsMatch(prepared, {
+      config: { dailyBudget: 88, unlimitedBudget: false, areaType: 2, areaIds: ['1'] }
+    })).not.toThrow()
     expect(() => assertPreparedInputsMatch(prepared, { products: [{ skuId: '2' }] })).toThrow('不匹配')
   })
 
@@ -215,6 +233,112 @@ describe('未提交的关键词跨夜恢复', () => {
 })
 
 describe('24小时缓存不允许重复创建', () => {
+  it('提交中的令牌拒绝并发复用，但清理任务不会误删当前提交的磁盘缓存', () => {
+    const cache = cacheHarness()
+    const job = cache.beginPreparedJobSubmission(token)
+    cache.clearExpiredPreparedJobs()
+    expect(cache.getPreparedJob(token)).toBeNull()
+    expect(JSON.parse(cache.files.get(cache.getPreparedJobFilePath(token)))).toMatchObject({ consumed: true })
+    cache.restorePreparedJobAfterDefinitiveRejection(token, job)
+    expect(cache.getPreparedJob(token)).toMatchObject({ consumed: false })
+  })
+
+  it('提交中软件退出后保留关键词快照，但重启后仍锁定令牌避免重复创建', () => {
+    const cache = cacheHarness()
+    cache.beginPreparedJobSubmission(token)
+    cache.memory.clear()
+    expect(cache.getPreparedJob(token)).toBeNull()
+    expect(cache.files.has(cache.getPreparedJobFilePath(token))).toBe(true)
+    cache.clearExpiredPreparedJobs()
+    expect(cache.files.has(cache.getPreparedJobFilePath(token))).toBe(true)
+  })
+
+  it('结果未知时保留7天，并且只有人工确认无检查点外创建后才能解锁', () => {
+    const cache = cacheHarness()
+    const submitting = cache.beginPreparedJobSubmission(token)
+    const uncertain = cache.markPreparedJobUncertain(token, submitting, new Error('network uncertain'))
+    expect(uncertain.expiresAt).toBe(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    expect(() => cache.recoverUncertainPreparedJob(token, 230, 'WRONG')).toThrow('请先核对')
+    const recovered = cache.recoverUncertainPreparedJob(token, 230, 'CONFIRM_NO_UNTRACKED_CREATION')
+    expect(recovered).toMatchObject({ consumed: false, storeId: 230 })
+    expect(cache.getPreparedJob(token)).not.toBeNull()
+  })
+
+  it('京东明确拒绝且零创建时恢复整批关键词，修改创建配置后可直接重试', async () => {
+    const h = creationHarness()
+    h.createCampaigns
+      .mockResolvedValueOnce({
+        campaignCount: 1,
+        unitCount: 1,
+        successCampaignCount: 0,
+        successUnitCount: 0,
+        failureCount: 1,
+        failures: [{
+          stage: 'submit',
+          code: 'JD_EXPRESS_RESPONSE_FAILED',
+          jdCode: '1',
+          message: '分时段溢价值设置有误',
+          blockedByCampaign: false
+        }]
+      })
+      .mockResolvedValueOnce({ successUnitCount: 1, successCampaignCount: 1, failureCount: 0, unitCount: 1, campaignCount: 1 })
+    const payload = { preparationToken: token, confirmation: 'CREATE_ALL_CUSTOM_CAMPAIGNS', config: h.prepared.config }
+    const rejected = await h.createFull(230, payload)
+    expect(rejected).toMatchObject({
+      successCampaignCount: 0,
+      canRetryWithPreparedKeywords: true,
+      preparationToken: token
+    })
+    expect(h.cache.getPreparedJob(token)).not.toBeNull()
+
+    const retried = await h.createFull(230, {
+      ...payload,
+      config: { ...h.prepared.config, timeRangeMode: 'custom', timeRangeSchedule: Array.from({ length: 7 }, () => Array(24).fill(75)) }
+    })
+    expect(retried).toMatchObject({ successCampaignCount: 1, successUnitCount: 1 })
+    expect(h.cache.getPreparedJob(token)).toBeNull()
+  })
+
+  it('部分成功时保存计划ID和单元进度，重试只续传失败步骤', async () => {
+    const h = creationHarness()
+    const resumeState = {
+      campaigns: {
+        0: { campaignId: 9001, campaignName: '计划1', completedUnitIndexes: [0], timeRangeApplied: false }
+      }
+    }
+    h.createCampaigns
+      .mockImplementationOnce(async options => {
+        await options.onCheckpoint(resumeState)
+        return {
+          campaignCount: 1,
+          unitCount: 2,
+          successCampaignCount: 1,
+          successUnitCount: 1,
+          failureCount: 1,
+          failures: [{
+            stage: 'submit', code: 'JD_EXPRESS_RESPONSE_FAILED', jdCode: '1',
+            message: '单元参数错误', blockedByCampaign: false
+          }],
+          resumeState
+        }
+      })
+      .mockImplementationOnce(async options => {
+        expect(options.resumeState).toEqual(resumeState)
+        return {
+          campaignCount: 1, unitCount: 2, successCampaignCount: 1,
+          successUnitCount: 2, failureCount: 0, resumeState
+        }
+      })
+    const payload = { preparationToken: token, confirmation: 'CREATE_ALL_CUSTOM_CAMPAIGNS', config: h.prepared.config }
+    const partial = await h.createFull(230, payload)
+    expect(partial).toMatchObject({ successUnitCount: 1, canRetryWithPreparedKeywords: true, preparationToken: token })
+    expect(h.cache.getPreparedJob(token).resumeState).toEqual(resumeState)
+
+    const completed = await h.createFull(230, payload)
+    expect(completed).toMatchObject({ successUnitCount: 2, failureCount: 0 })
+    expect(h.cache.getPreparedJob(token)).toBeNull()
+  })
+
   it('旧草稿含需要种子的人群时提前拒绝，保留未提交的关键词令牌', async () => {
     const h = creationHarness()
     const job = h.cache.getPreparedJob(token)
@@ -250,6 +374,20 @@ describe('24小时缓存不允许重复创建', () => {
     await expect(h.createSinglePrepared(230, { preparationToken: token, confirmation: 'CREATE_SINGLE_PRODUCT_TEST',
       creationDates: { startDate: '2026-09-16' } })).rejects.toThrow('network uncertain')
     expect(h.cache.getPreparedJob(token)).toBeNull()
+  })
+
+  it('单商品在京东明确拒绝且未写入时恢复关键词令牌', async () => {
+    const h = creationHarness()
+    h.cache.job.scope = 'single_product_test'
+    h.cache.persistPreparedJob(token, h.cache.job)
+    h.createSingle.mockRejectedValueOnce(Object.assign(new Error('参数错误'), {
+      creationStage: 'submit', code: 'JD_EXPRESS_RESPONSE_FAILED', jdCode: 400
+    }))
+    await expect(h.createSinglePrepared(230, {
+      preparationToken: token,
+      confirmation: 'CREATE_SINGLE_PRODUCT_TEST'
+    })).rejects.toMatchObject({ preparationToken: token })
+    expect(h.cache.getPreparedJob(token)).not.toBeNull()
   })
 
   it('即使磁盘文件删除失败，消费标记仍阻止重启后再次提交', () => {

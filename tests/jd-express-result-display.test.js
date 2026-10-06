@@ -18,9 +18,10 @@ function evaluate(code, bindings, returned) {
 }
 function harness(createResult = result, quotaResult = { success: true, pin: 'test', limitsAvailable: true,
   limits: { campaign: { surplus: 60 }, keyword: { surplus: 14763 } } }) {
+  const resumePreparationToken = ref('')
   const bindings = {
     ensureStoreSelected: () => true,
-    fullCreateLoading: ref(false), createdFullResult: ref(null), activeStep: ref(2),
+    fullCreateLoading: ref(false), createdFullResult: ref(null), canRetryFullCreation: ref(false), activeStep: ref(2),
     creationResultRef: ref({ scrollIntoView: vi.fn() }), creationDetailPanels: ref([]),
     creationQuotaRefreshFailed: ref(false), creationStartedAt: ref(0), creationSubmissionStarted: ref(false),
     refreshExpiredStartDate: () => false, startDateError: () => '',
@@ -30,23 +31,36 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
     preview: ref({ campaignCount: 61, unitCount: 133, productCount: 328, limitWarnings: [] }),
     config: { unlimitedBudget: true, useMinKeywordBid: false, customKeywordBid: 0.1,
       maxCustomKeywordBid: 0.5, inSearchFee: 0.1, startDate: '2026-09-15', keywordTotalUsage: 34935,
-      timeRangeMode: 'all', timeRangeSchedule: [] },
+      automatedBiddingType: 32768, premiumCoef: 30, timeRangeMode: 'all', timeRangeSchedule: [] },
     deliveryModeLabel: ref('智能调价'), bidModeLabel: ref('建议30%'), timeRangeSummary: ref('全天投放 · 100%'),
-    timeRangeScheduleError: () => '',
-    readPreparationToken: () => '', rememberPreparationToken: vi.fn(), clearPreparationToken: vi.fn(),
+    timeRangeScheduleError: () => '', summarizeTimeRangeSchedule: () => '全天投放 · 100%',
+    readPreparationToken: () => resumePreparationToken.value,
+    rememberPreparationToken: vi.fn(token => { resumePreparationToken.value = token }),
+    clearPreparationToken: vi.fn(() => { resumePreparationToken.value = '' }),
     ElMessageBox: { confirm: vi.fn(async () => {}) },
     ElMessage: { warning: vi.fn(), error: vi.fn(), success: vi.fn() }, showCenteredMessage: vi.fn(),
     toIpcPlainData: value => JSON.parse(JSON.stringify(value)),
+    deepFreezeSnapshot: value => value,
+    configurationSnapshotSignature: value => JSON.stringify(value), createSnapshotId: () => 'jd-snapshot-1',
+    configAuditView: () => ({ ...bindings.config }), recordConfigAudit: vi.fn(async () => ({ success: true })),
+    configFormRef: ref({ validate: vi.fn(async () => {}) }), document: { activeElement: { blur: vi.fn() } },
     creationVerification: { status: 'idle' }, keywordPrepareProgress: {},
+    manualRecovery: { token: '', expiresAt: 0 }, manualRecoveryLoading: ref(false),
     preparedFullResult: ref({}), preparedKeywordResult: ref({}), preflightLoading: ref(false),
     preflight: { pin: 'test', limitsAvailable: true, limits: { campaign: { surplus: 120 }, keyword: { surplus: 34935 } } },
     nextTick: async () => {},
     window: { electronAPI: { invoke: vi.fn(async channel => channel === 'jd-express-create-full' ? createResult : quotaResult) } }
   }
+  bindings.canRetryFullCreation = {
+    get value() {
+      return Boolean(bindings.createdFullResult.value?.canRetryWithPreparedKeywords && resumePreparationToken.value)
+    }
+  }
   bindings.runPreflight = evaluate(extract('async function runPreflight(', 'async function confirmDeleteAllCampaigns'), bindings, 'runPreflight')
   const create = evaluate(extract('async function createAllPlans(', 'async function showCreationDetails'), bindings, 'createAllPlans')
+  const recover = evaluate(extract('async function recoverUncertainPreparation(', 'async function showCreationDetails'), bindings, 'recoverUncertainPreparation')
   const newDraft = evaluate(extract('function startNewCreationDraft(', 'async function runPreflight'), bindings, 'startNewCreationDraft')
-  return { create, newDraft, bindings }
+  return { create, recover, newDraft, bindings }
 }
 
 describe('快车完成结果与下一轮额度严格区分', () => {
@@ -56,6 +70,7 @@ describe('快车完成结果与下一轮额度严格区分', () => {
     [{ successCampaignCount: 0, campaignCount: 61, successUnitCount: 0, unitCount: 133, failureCount: 133 }, 'error', '全部创建失败'],
     [{ successCampaignCount: 0, campaignCount: 61, successUnitCount: 0, unitCount: 133, skippedUnitCount: 133, skippedKeywordCount: 100 }, 'info', '全部跳过'],
     [{ successCampaignCount: 61, campaignCount: 61, successUnitCount: 133, unitCount: 133, skippedKeywordCount: 1 }, 'warning', '部分成功'],
+    [{ successCampaignCount: 61, campaignCount: 61, successUnitCount: 133, unitCount: 133, timeRangeFailureCount: 1 }, 'warning', '部分成功'],
     [{ successCampaignCount: 1, campaignCount: 2, successUnitCount: 1, unitCount: 2 }, 'warning', '部分成功']
   ])('结束状态不会把部分成功当作全部失败：%j', (input, type, title) => {
     expect(summarizeCreationResult(input)).toMatchObject({ type, title: expect.stringContaining(title) })
@@ -77,6 +92,55 @@ describe('快车完成结果与下一轮额度严格区分', () => {
     expect(h.bindings.window.electronAPI.invoke.mock.calls.map(call => call[0]))
       .toEqual(['jd-express-create-full', 'jd-express-preflight'])
   })
+  it('确认弹窗与主进程调用使用同一份冻结配置快照', async () => {
+    const h = harness()
+    await h.create()
+    const createCall = h.bindings.window.electronAPI.invoke.mock.calls.find(call => call[0] === 'jd-express-create-full')
+    expect(createCall[1]).toMatchObject({
+      config: { customKeywordBid: 0.1, maxCustomKeywordBid: 0.5 },
+      creationSnapshot: { id: 'jd-snapshot-1', productCount: 1 }
+    })
+    expect(createCall[1].creationSnapshot.configSignature).toBe(JSON.stringify(createCall[1].config))
+    expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('snapshot_created', expect.objectContaining({
+      snapshotId: 'jd-snapshot-1', after: expect.objectContaining({ maxCustomKeywordBid: 0.5 })
+    }))
+  })
+  it('确认弹窗打开期间配置被恢复时停止创建并留下快照失效记录', async () => {
+    const h = harness()
+    h.bindings.ElMessageBox.confirm.mockImplementationOnce(async () => {
+      h.bindings.config.maxCustomKeywordBid = 0.3
+    })
+    await h.create()
+    expect(h.bindings.window.electronAPI.invoke).not.toHaveBeenCalled()
+    expect(h.bindings.recordConfigAudit).toHaveBeenLastCalledWith('snapshot_invalidated', expect.objectContaining({
+      source: 'config_changed_during_confirmation',
+      before: expect.objectContaining({ maxCustomKeywordBid: 0.5 }),
+      after: expect.objectContaining({ maxCustomKeywordBid: 0.3 })
+    }))
+    expect(h.bindings.showCenteredMessage).toHaveBeenCalledWith('warning', expect.stringContaining('配置发生变化'))
+  })
+  it('最高出价输入记录明确的旧值、新值和用户输入来源', async () => {
+    const config = { createMode: 'custom', maxCustomKeywordBid: 0.5, dmpCrowdSettings: [],
+      keywordSources: [], timeRangeSchedule: [] }
+    const invoke = vi.fn(async () => ({ success: true }))
+    const code = extract('function configAuditView(', '// 仅关键词抓取')
+    const bindings = {
+      config,
+      toIpcPlainData: value => JSON.parse(JSON.stringify(value)),
+      configAuditSequence: 0,
+      storeId: ref(230),
+      activeTool: ref('custom'),
+      window: { electronAPI: { invoke } }
+    }
+    const update = evaluate(code, bindings, 'updateAuditedBidField')
+    update('maxCustomKeywordBid', 0.3)
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledOnce())
+    expect(config.maxCustomKeywordBid).toBe(0.3)
+    expect(invoke.mock.calls[0][1]).toMatchObject({
+      event: 'field_change', source: 'user_input', field: 'maxCustomKeywordBid',
+      before: { maxCustomKeywordBid: 0.5 }, after: { maxCustomKeywordBid: 0.3 }
+    })
+  })
   it.each([{ success: false, message: '超时' }, { success: true, limitsAvailable: false, limits: {} }])('后续额度读取失败不覆盖已经完成的结果：%j', async quota => {
     const h = harness(result, quota)
     await h.create()
@@ -93,12 +157,71 @@ describe('快车完成结果与下一轮额度严格区分', () => {
     expect(h.bindings.ElMessageBox.confirm).toHaveBeenCalledOnce()
     expect(h.bindings.showCenteredMessage).toHaveBeenCalledWith('warning', expect.stringContaining('本轮任务已结束'))
   })
+  it('京东明确拒绝且零创建时保留令牌，修改创建参数后允许复用关键词重试', async () => {
+    const retryable = {
+      success: true,
+      successCampaignCount: 0,
+      campaignCount: 1,
+      successUnitCount: 0,
+      unitCount: 1,
+      failureCount: 1,
+      failures: [{ message: '分时段溢价值设置有误' }],
+      canRetryWithPreparedKeywords: true,
+      preparationToken: 'prepared-token',
+      preparationExpiresAt: Date.now() + 60_000
+    }
+    const completed = { success: true, successCampaignCount: 1, campaignCount: 1, successUnitCount: 1, unitCount: 1, failureCount: 0 }
+    const h = harness(retryable)
+    let createCount = 0
+    h.bindings.window.electronAPI.invoke.mockImplementation(async channel => {
+      if (channel === 'jd-express-create-full') return createCount++ === 0 ? retryable : completed
+      return { success: true, pin: 'test', limitsAvailable: true, limits: {} }
+    })
+    await h.create()
+    expect(h.bindings.canRetryFullCreation.value).toBe(true)
+    await h.create()
+    const createCalls = h.bindings.window.electronAPI.invoke.mock.calls.filter(call => call[0] === 'jd-express-create-full')
+    expect(createCalls).toHaveLength(2)
+    expect(createCalls[1][1]).toMatchObject({ preparationToken: 'prepared-token' })
+    expect(h.bindings.canRetryFullCreation.value).toBe(false)
+  })
   it('真实创建前仍保留额度检查，不能以结果展示修复绕过上限', async () => {
     const h = harness()
     h.bindings.preview.value.limitWarnings = ['计划额度不足']
     await h.create()
     expect(h.bindings.window.electronAPI.invoke).not.toHaveBeenCalled()
     expect(h.bindings.ElMessageBox.confirm).not.toHaveBeenCalled()
+  })
+  it('结果未知时必须人工确认后才解锁续传令牌', async () => {
+    const uncertain = {
+      success: true,
+      successCampaignCount: 1,
+      campaignCount: 2,
+      successUnitCount: 1,
+      unitCount: 2,
+      failureCount: 1,
+      requiresManualVerification: true,
+      manualRecoveryToken: 'uncertain-token',
+      manualRecoveryExpiresAt: Date.now() + 60_000
+    }
+    const h = harness(uncertain)
+    h.bindings.window.electronAPI.invoke.mockImplementation(async channel => {
+      if (channel === 'jd-express-create-full') return uncertain
+      if (channel === 'jd-express-recover-preparation') {
+        return { success: true, preparationToken: 'uncertain-token', preparationExpiresAt: Date.now() + 60_000 }
+      }
+      return { success: true, pin: 'test', limitsAvailable: true, limits: {} }
+    })
+    await h.create()
+    expect(h.bindings.manualRecovery.token).toBe('uncertain-token')
+    expect(h.bindings.canRetryFullCreation.value).toBe(false)
+    await h.recover()
+    expect(h.bindings.ElMessageBox.confirm).toHaveBeenLastCalledWith(
+      expect.stringContaining('检查点之外'), expect.any(String), expect.any(Object))
+    expect(h.bindings.rememberPreparationToken).toHaveBeenCalledWith('uncertain-token', expect.any(Number))
+    expect(h.bindings.manualRecovery.token).toBe('')
+    expect(h.bindings.canRetryFullCreation.value).toBe(true)
+    expect(h.bindings.activeStep.value).toBe(1)
   })
   it('取消确认不创建、不生成完成结果', async () => {
     const h = harness()
@@ -163,6 +286,6 @@ describe('快车完成结果与下一轮额度严格区分', () => {
   it('完成摘要在预览数字和额度提示之前，额度警告只用于尚未结束的新批次', () => {
     expect(view.indexOf('class="creation-result-panel"')).toBeLessThan(view.indexOf('class="preview-metrics"'))
     expect(view).toContain('v-if="!createdFullResult && !fullCreateLoading && preview.limitWarnings.length"')
-    expect(view).toContain(':disabled="fullCreateLoading || Boolean(createdFullResult) || preview.limitWarnings.length > 0"')
+    expect(view).toContain(':disabled="fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"')
   })
 })

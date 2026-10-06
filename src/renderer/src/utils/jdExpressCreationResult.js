@@ -12,15 +12,19 @@ export function summarizeCreationResult(result) {
   const failures = count(result.failureCount)
   const skippedUnits = count(result.skippedUnitCount)
   const skippedKeywords = count(result.skippedKeywordCount)
+  const timeRangeFailures = count(result.timeRangeFailureCount)
   const allSkipped = !units && !failures && skippedUnits > 0
   const partial = units > 0 && (failures > 0 || skippedUnits > 0 || skippedKeywords > 0 ||
-    units < unitTotal || campaigns < campaignTotal)
+    timeRangeFailures > 0 || units < unitTotal || campaigns < campaignTotal)
   return {
     type: allSkipped ? 'info' : !units ? 'error' : partial ? 'warning' : 'success',
     title: `本轮任务已结束：${allSkipped ? '全部跳过，未创建计划' : !units ? '全部创建失败' : partial ? '部分成功' : '全部创建成功'}`,
     description: `成功 ${campaigns}/${campaignTotal} 个计划、${units}/${unitTotal} 个单元；失败 ${failures} 个单元` +
-      (skippedUnits || skippedKeywords ? `；跳过 ${skippedUnits} 个单元、${skippedKeywords} 个关键词` : ''),
-    safetyHint: campaigns || units
+      (skippedUnits || skippedKeywords ? `；跳过 ${skippedUnits} 个单元、${skippedKeywords} 个关键词` : '') +
+      (timeRangeFailures ? `；${timeRangeFailures} 个计划的投放时段待重试` : ''),
+    safetyHint: timeRangeFailures && !failures
+      ? '计划和推广单元已经创建成功，只需重试投放时段；系统不会重复创建计划或单元。'
+      : campaigns || units
       ? '已成功的计划无需重建。请先查看失败明细并到京准通核对，勿将原商品整批再次创建。'
       : '本轮没有创建成功的计划。请查看失败或跳过明细，调整后重新选品；不会自动重跑。'
   }

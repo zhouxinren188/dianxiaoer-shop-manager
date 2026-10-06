@@ -308,14 +308,20 @@ function assertCreationDates(config = {}, now = new Date()) {
 }
 
 const CREATION_ONLY_FIELDS = Object.freeze([
-  'startDate', 'endDate', 'unlimitedEndDate', 'timeRangeMode', 'timeRangeSchedule'
+  'startDate', 'endDate', 'unlimitedEndDate', 'timeRangeMode', 'timeRangeSchedule',
+  'unlimitedBudget', 'dailyBudget', 'areaType', 'areaIds',
+  'bidType', 'adjustDirection', 'adjustRatio', 'bottomLimit', 'customRoi', 'capCustomRoi',
+  'automatedBiddingType', 'orientationRangeOption', 'premiumType', 'premiumCoef', 'inSearchFee',
+  'dmpCrowdSettings'
 ])
 
 function withPreparedCreationDates(prepared, dates = {}) {
   const config = { ...prepared.config }
-  // 日期和分时折扣只影响计划提交，不参与关键词准备；不能借恢复令牌更改出价或商品。
+  // 这些字段只影响计划/单元提交，不参与关键词抓取、筛选、分组或关键词出价组装。
+  // 关键词来源、数量、匹配方式、关键词出价和商品变化仍必须重新准备。
+  const normalizedOverrides = normalizeRoiConfig({ ...config, ...dates })
   for (const field of CREATION_ONLY_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(dates, field)) config[field] = dates[field]
+    if (Object.prototype.hasOwnProperty.call(dates, field)) config[field] = normalizedOverrides[field]
   }
   config.startDate = assertCreationDates(config)
   Object.assign(config, normalizeTimeRangeConfig(config))

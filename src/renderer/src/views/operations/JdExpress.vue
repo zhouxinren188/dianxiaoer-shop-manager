@@ -369,22 +369,24 @@
                       <div v-else class="custom-keyword-bid-row">
                         <el-form-item label="起始出价" prop="customKeywordBid" class="fixed-keyword-bid-item">
                           <el-input-number
-                            v-model="config.customKeywordBid"
+                            :model-value="config.customKeywordBid"
                             :min="0.1"
                             :max="9999"
                             :step="0.1"
                             :precision="1"
+                            @update:model-value="updateAuditedBidField('customKeywordBid', $event)"
                           />
                           <span>元</span>
                         </el-form-item>
                         <el-form-item label="最高出价" prop="maxCustomKeywordBid" class="fixed-keyword-bid-item">
                           <el-input-number
-                            v-model="config.maxCustomKeywordBid"
+                            :model-value="config.maxCustomKeywordBid"
                             :min="0.1"
                             :max="9999"
                             :step="0.1"
                             :precision="1"
                             placeholder="请设置上限"
+                            @update:model-value="updateAuditedBidField('maxCustomKeywordBid', $event)"
                           />
                           <span>元</span>
                         </el-form-item>
@@ -789,6 +791,20 @@
         </div>
 
         <div v-show="activeStep === 2" class="step-panel">
+          <div v-if="manualRecovery.token" class="creation-result-panel">
+            <el-alert
+              title="提交结果需要人工核对"
+              description="关键词和已保存进度仍在数据盘中。请先到京准通确认不存在检查点之外的新计划或单元，再解锁续传，避免重复创建。"
+              type="warning"
+              :closable="false"
+              show-icon
+            />
+            <div class="creation-result-actions">
+              <el-button size="small" type="warning" :loading="manualRecoveryLoading" @click="recoverUncertainPreparation">
+                已核对，解锁续传
+              </el-button>
+            </div>
+          </div>
           <div v-if="creationResultSummary" ref="creationResultRef" class="creation-result-panel" tabindex="-1" role="status" aria-live="polite">
             <el-alert
               :title="creationResultSummary.title"
@@ -798,11 +814,19 @@
               show-icon
             />
             <p class="creation-result-hint">{{ creationResultSummary.safetyHint }}</p>
+            <p v-if="creationConfigSnapshotText" class="creation-result-verification">{{ creationConfigSnapshotText }}</p>
             <p v-if="creationVerificationMessage" class="creation-result-verification">{{ creationVerificationMessage }}</p>
             <p v-if="creationQuotaRefreshFailed" class="creation-result-verification">最新额度暂未刷新，不影响本轮创建结果，可稍后重新检测。</p>
+            <p v-if="createdFullResult.timeRangeFailureCount" class="creation-result-verification">
+              计划和单元已创建，但有 {{ createdFullResult.timeRangeFailureCount }} 个计划的投放时段设置失败；点击重试只会补设时段，不会重复创建计划。
+            </p>
             <div class="creation-result-actions">
               <el-button v-if="creationFailureRows.length" size="small" @click="showCreationDetails('failures')">查看失败明细（{{ creationFailureRows.length }}）</el-button>
+              <el-button v-if="createdFullResult.timeRangeFailureCount" size="small" @click="showCreationDetails('timeRange')">查看时段失败（{{ createdFullResult.timeRangeFailureCount }}）</el-button>
               <el-button v-if="createdFullResult.skips?.length" size="small" @click="showCreationDetails('skips')">查看跳过明细（{{ createdFullResult.skips.length }}）</el-button>
+              <el-button v-if="canRetryFullCreation" size="small" type="warning" @click="activeStep = 1">
+                {{ createdFullResult.timeRangeFailureCount && !createdFullResult.failureCount ? '重试投放时段' : '修改配置后重试（保留关键词）' }}
+              </el-button>
               <el-button size="small" plain @click="startNewCreationDraft">重新选品，开始下一轮</el-button>
               <span v-if="createdFullResult.runId" class="creation-run-id">任务编号：{{ createdFullResult.runId }}</span>
             </div>
@@ -850,9 +874,9 @@
           <div class="submit-placeholder">
             <el-button
               type="primary"
-              :disabled="fullCreateLoading || Boolean(createdFullResult) || preview.limitWarnings.length > 0"
+              :disabled="fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"
               @click="createAllPlans"
-            >{{ createdFullResult ? '本轮任务已结束' : '确认创建全部计划' }}</el-button>
+            >{{ canRetryFullCreation ? '复用关键词重新提交' : createdFullResult ? '本轮任务已结束' : '确认创建全部计划' }}</el-button>
           </div>
           <el-collapse v-if="creationFailureRows.length" ref="creationFailureDetailsRef" v-model="creationDetailPanels" class="creation-failures">
             <el-collapse-item :title="`失败明细（${creationFailureRows.length} 个单元）`" name="failures">
@@ -874,6 +898,16 @@
                 <el-table-column prop="unitName" label="单元" min-width="150" show-overflow-tooltip />
                 <el-table-column prop="message" label="跳过原因" min-width="320" show-overflow-tooltip />
               </el-table>
+            </el-collapse-item>
+          </el-collapse>
+          <el-collapse v-if="createdFullResult?.timeRangeFailures?.length" ref="creationTimeRangeDetailsRef" v-model="creationDetailPanels" class="creation-failures">
+            <el-collapse-item :title="`投放时段设置失败（${createdFullResult.timeRangeFailures.length} 个计划）`" name="timeRange">
+              <el-table :data="createdFullResult.timeRangeFailures" border :max-height="260">
+                <el-table-column prop="planName" label="计划" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="campaignId" label="计划 ID" width="180" show-overflow-tooltip />
+                <el-table-column prop="message" label="失败原因" min-width="360" show-overflow-tooltip />
+              </el-table>
+              <p class="creation-run-id">重试时只会调用投放时段接口，不会重新创建已成功的计划和推广单元。</p>
             </el-collapse-item>
           </el-collapse>
         </div>
@@ -1146,6 +1180,7 @@ const activeStep = ref(0)
 const stores = ref([])
 const storeId = ref(null)
 const storeLoading = ref(false)
+let storeRequestId = 0
 const preflightLoading = ref(false)
 const deleteCampaignLoading = ref(false)
 const signingLoading = ref(false)
@@ -1161,13 +1196,29 @@ const createdFullResult = ref(null)
 const creationResultRef = ref(null)
 const creationFailureDetailsRef = ref(null)
 const creationSkipDetailsRef = ref(null)
+const creationTimeRangeDetailsRef = ref(null)
 const creationDetailPanels = ref([])
 const creationQuotaRefreshFailed = ref(false)
 const creationVerification = reactive({ status: 'idle', expected: null, actual: null, missing: null, message: '' })
+const manualRecovery = reactive({ token: '', expiresAt: 0 })
+const manualRecoveryLoading = ref(false)
 const creationResultSummary = computed(() => summarizeCreationResult(createdFullResult.value))
 const creationVerificationMessage = computed(() => creationVerificationHint(creationVerification))
+const creationConfigSnapshotText = computed(() => {
+  const snapshot = createdFullResult.value?.creationConfigSnapshot
+  const value = snapshot?.config
+  if (!value) return ''
+  const bidText = value.useMinKeywordBid
+    ? `关键词最低出价＋¥${Number(value.keywordBidIncrement || 0).toFixed(1)}`
+    : `关键词起始 ¥${Number(value.customKeywordBid).toFixed(1)}，最高 ¥${Number(value.maxCustomKeywordBid).toFixed(1)}`
+  return `本次配置快照：${bidText}；智能匹配 ¥${Number(value.inSearchFee || 0).toFixed(1)}；全能调价 ${Number(value.premiumCoef || 0)}%。快照编号：${snapshot.id}`
+})
 const keywordPrepareProgress = reactive({ phase: '', unitIndex: 0, totalUnits: 0, secondsRemaining: 0 })
 const resumePreparationToken = ref('')
+let configAuditSequence = 0
+const canRetryFullCreation = computed(() => Boolean(
+  createdFullResult.value?.canRetryWithPreparedKeywords && resumePreparationToken.value
+))
 const creationStartedAt = ref(0)
 const creationSubmissionStarted = ref(false)
 const allProductLoading = ref(false)
@@ -1525,6 +1576,7 @@ const creationProgressTitle = computed(() => {
   if (phase === 'creation_submission_start') return '正在提交至京准通'
   if (phase.startsWith('create_campaign_')) return '正在创建推广计划'
   if (phase.startsWith('create_adgroup_')) return '正在创建推广单元'
+  if (phase.startsWith('time_range_apply_')) return '正在设置计划投放时段'
   if (phase === 'creation_complete') return '批量创建完成'
   return '正在准备创建任务'
 })
@@ -1548,6 +1600,9 @@ const creationProgressDetail = computed(() => {
   if (phase.startsWith('create_keyword_bid_')) {
     const current = Math.min(Number(progress.completedUnits || 0) + 1, totalUnits || preview.value.unitCount)
     return `正在核对第 ${current}/${totalUnits || preview.value.unitCount} 个单元的关键词底价与上限${phase === 'create_keyword_bid_retry_wait' ? `，${progress.secondsRemaining || 0} 秒后重试底价查询` : ''}`
+  }
+  if (phase.startsWith('time_range_apply_')) {
+    return `正在设置第 ${progress.campaignIndex || 1}/${progress.totalCampaigns || preview.value.campaignCount} 个计划的投放时段${phase === 'time_range_apply_failed' ? '，本计划设置失败并已保留重试进度' : ''}`
   }
   if (phase === 'product_keyword_rate_limit_wait') {
     return `第 ${currentUnit || 1}/${totalUnits || preview.value.unitCount} 个单元推词受限，${progress.secondsRemaining || 0} 秒后重试`
@@ -1628,7 +1683,6 @@ function updateResponsiveTableHeights() {
 }
 
 onMounted(() => {
-  loadStores()
   window.addEventListener('resize', updateResponsiveTableHeights)
   window.addEventListener('mouseup', stopTimeRangePaint)
   updateResponsiveTableHeights()
@@ -1659,12 +1713,12 @@ onMounted(() => {
     if (progress?.storeId && !storeId.value) {
       storeId.value = progress.storeId
       activeTool.value = progressMode
-      restoreConfig(progress.storeId, progressMode)
+      restoreConfig(progress.storeId, progressMode, 'creation_progress_store_restore')
     }
     if (progress?.storeId && String(progress.storeId) !== String(storeId.value)) return
     if (progress?.createMode && progressMode !== activeTool.value) {
       activeTool.value = progressMode
-      restoreConfig(storeId.value, progressMode)
+      restoreConfig(storeId.value, progressMode, 'creation_progress_mode_restore')
     }
     Object.assign(keywordPrepareProgress, progress || {})
     const phase = String(progress?.phase || '')
@@ -1709,6 +1763,9 @@ onBeforeUnmount(() => {
 })
 
 onActivated(() => {
+  // 页面由 keep-alive 缓存，店铺新增、迁移或重新分配后不会重新 mounted。
+  // 每次回到快车页都刷新可用店铺；loadStores 会保留仍然有效的当前选择。
+  void loadStores()
   if (!fullCreateLoading.value && refreshExpiredStartDate()) {
     showCenteredMessage('info', '开始日期已更新为今天，已准备的关键词不会因日期修改而清空')
   }
@@ -1727,7 +1784,62 @@ watch(config, () => {
   if (storeId.value) localStorage.setItem(configStorageKey(storeId.value), JSON.stringify(config))
 }, { deep: true })
 
-// 开始/截止日期只影响提交，不影响已查询的关键词；商品、出价等变化才失效。
+function configAuditView(value = config) {
+  return {
+    schemaVersion: value.schemaVersion,
+    createMode: value.createMode,
+    useMinKeywordBid: value.useMinKeywordBid,
+    keywordBidIncrement: value.keywordBidIncrement,
+    customKeywordBid: value.customKeywordBid,
+    maxCustomKeywordBid: value.maxCustomKeywordBid,
+    keywordMatchType: value.keywordMatchType,
+    keywordTotalUsage: value.keywordTotalUsage,
+    keywordSources: Array.isArray(value.keywordSources) ? [...value.keywordSources] : [],
+    automatedBiddingType: value.automatedBiddingType,
+    inSearchFee: value.inSearchFee,
+    premiumCoef: value.premiumCoef,
+    dmpCrowdSettings: toIpcPlainData(value.dmpCrowdSettings || []),
+    unlimitedBudget: value.unlimitedBudget,
+    dailyBudget: value.dailyBudget,
+    startDate: value.startDate,
+    endDate: value.endDate,
+    timeRangeMode: value.timeRangeMode,
+    timeRangeSchedule: toIpcPlainData(value.timeRangeSchedule || [])
+  }
+}
+
+function recordConfigAudit(event, options = {}) {
+  const payload = {
+    event,
+    sequence: ++configAuditSequence,
+    rendererTime: new Date().toISOString(),
+    storeId: storeId.value,
+    createMode: activeTool.value,
+    source: options.source || 'renderer',
+    field: options.field || '',
+    before: options.before || {},
+    after: options.after || configAuditView(),
+    snapshotId: options.snapshotId || '',
+    configSignature: options.configSignature || ''
+  }
+  return window.electronAPI.invoke('jd-express-config-audit', payload).catch(() => ({ success: false }))
+}
+
+function updateAuditedBidField(field, value) {
+  const before = configAuditView()
+  const previous = config[field]
+  config[field] = value
+  if (!Object.is(previous, value)) {
+    void recordConfigAudit('field_change', {
+      source: 'user_input',
+      field,
+      before,
+      after: configAuditView()
+    })
+  }
+}
+
+// 仅关键词抓取、分组、匹配或关键词出价相关变化才使准备结果失效。
 watch(creationInputSignature, () => {
   if (preparedKeywordResult.value) preparedKeywordResult.value = null
   if (preparedFullResult.value) preparedFullResult.value = null
@@ -1952,13 +2064,14 @@ function selectTool(tool) {
   if (!tool?.available || tool.key === activeTool.value) return
   if (storeId.value) localStorage.setItem(configStorageKey(storeId.value, activeTool.value), JSON.stringify(config))
   activeTool.value = tool.key
-  restoreConfig(storeId.value, tool.key)
+  restoreConfig(storeId.value, tool.key, 'tool_switch')
   activeStep.value = 0
   preparedKeywordResult.value = null
   preparedFullResult.value = null
   createdSingleResult.value = null
   createdFullResult.value = null
   Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
+  Object.assign(manualRecovery, { token: '', expiresAt: 0 })
   resumePreparationToken.value = ''
   creationSubmissionStarted.value = false
   if (!Number.isFinite(config.keywordTotalUsage) && preflight.limitsAvailable && Number(preflight.limits.keyword.surplus) > 0) {
@@ -2194,6 +2307,7 @@ function collectLeafAreaIds(nodes) {
 }
 
 async function loadStores() {
+  const requestId = ++storeRequestId
   storeLoading.value = true
   try {
     const response = await fetchStores({
@@ -2203,15 +2317,30 @@ async function loadStores() {
       pageSize: 1000
     })
     const list = response?.list || response?.data?.list || []
-    stores.value = list.filter((store) => store.platform === 'jd' && store.status === 'enabled')
-    if (stores.value.length === 1) {
-      storeId.value = stores.value[0].id
-      handleStoreChange(storeId.value)
+    if (requestId !== storeRequestId) return
+
+    const nextStores = list.filter((store) => store.platform === 'jd' && store.status === 'enabled')
+    const currentStoreStillAvailable = nextStores.some(
+      (store) => String(store.id) === String(storeId.value)
+    )
+    stores.value = nextStores
+
+    // 列表刷新不应重置仍有效店铺正在编辑的快车配置。
+    if (storeId.value != null && currentStoreStillAvailable) return
+
+    if (nextStores.length === 1) {
+      storeId.value = nextStores[0].id
+      await handleStoreChange(storeId.value)
+    } else if (storeId.value != null) {
+      // 原选择已被删除、停用或移出当前用户，清除其残留配置和商品状态。
+      storeId.value = null
+      await handleStoreChange(null)
     }
   } catch (error) {
+    if (requestId !== storeRequestId) return
     ElMessage.error('加载京东店铺失败：' + (error.message || '未知错误'))
   } finally {
-    storeLoading.value = false
+    if (requestId === storeRequestId) storeLoading.value = false
   }
 }
 
@@ -2253,11 +2382,13 @@ async function handleStoreChange(value) {
   fullCreateLoading.value = false
   createdFullResult.value = null
   Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
+  Object.assign(manualRecovery, { token: '', expiresAt: 0 })
   resumePreparationToken.value = ''
   creationStartedAt.value = 0
   creationSubmissionStarted.value = false
   Object.assign(keywordPrepareProgress, { phase: '', unitIndex: 0, totalUnits: 0, secondsRemaining: 0 })
-  restoreConfig(value)
+  restoreConfig(value, activeTool.value, 'store_change')
+  if (!value) return
   await runPreflight({ silent: true })
   if (config.areaType === 2) await loadAreas()
   if (activeTool.value === 'custom') await loadCrowds(true)
@@ -2355,9 +2486,21 @@ async function createSingleProductPlan() {
     })
     if (!result?.success) throw new Error(result?.message || '创建测试计划失败')
     createdSingleResult.value = result
-    preparedKeywordResult.value = null
-    preparedFullResult.value = null
-    ElMessage.success(`测试计划创建成功，计划 ID：${result.campaignId || '京东未返回'}`)
+    if (result.canRetryWithPreparedKeywords && result.preparationToken) {
+      preparedKeywordResult.value = {
+        ...preparedKeywordResult.value,
+        preparationToken: result.preparationToken,
+        expiresAt: result.preparationExpiresAt
+      }
+    } else {
+      preparedKeywordResult.value = null
+      preparedFullResult.value = null
+    }
+    if (result.timeRangeFailureCount) {
+      ElMessage.warning(`测试计划已创建（ID：${result.campaignId}），但投放时段设置失败；可直接再次确认，只补设时段`)
+    } else {
+      ElMessage.success(`测试计划创建成功，计划 ID：${result.campaignId || '京东未返回'}`)
+    }
     await runPreflight({ silent: true })
   } catch (error) {
     ElMessage.error(error.message || '创建测试计划失败')
@@ -2403,11 +2546,20 @@ async function prepareFullKeywords() {
 
 async function createAllPlans() {
   if (!ensureStoreSelected() || fullCreateLoading.value) return
-  if (createdFullResult.value) {
+  if (createdFullResult.value && !canRetryFullCreation.value) {
     showCenteredMessage('warning', '本轮任务已结束。请先核对创建结果，需要下一轮时重新选品，勿整批重复创建')
     return
   }
   refreshExpiredStartDate()
+  // 先让仍聚焦的数字输入框提交最后一次编辑，再校验并冻结配置。
+  if (typeof document.activeElement?.blur === 'function') document.activeElement.blur()
+  await nextTick()
+  try {
+    await configFormRef.value?.validate()
+  } catch {
+    showCenteredMessage('warning', '请完善投放配置')
+    return
+  }
   const dateError = startDateError(config.startDate)
   if (dateError) {
     showCenteredMessage('warning', dateError)
@@ -2426,20 +2578,39 @@ async function createAllPlans() {
     showCenteredMessage('warning', '请先处理创建预览中的额度或配置问题')
     return
   }
-  const summary = preview.value
+  const summary = toIpcPlainData(preview.value)
   const requestedStoreId = storeId.value
   const requestedTool = activeTool.value
   const savedPreparationToken = readPreparationToken()
-  const budgetText = config.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${config.dailyBudget}`
-  const keywordBidText = config.useMinKeywordBid
-    ? `关键词按京东最低出价＋¥${Number(config.keywordBidIncrement || 0).toFixed(1)}`
-    : `关键词起始出价 ¥${Number(config.customKeywordBid).toFixed(1)}，允许自动抬至京东底价，最高 ¥${Number(config.maxCustomKeywordBid).toFixed(1)}，超价词跳过`
-  const createModeText = activeTool.value === 'custom'
-    ? `自定义投放（${keywordBidText}，${deliveryModeLabel.value}，智能匹配出价 ¥${Number(config.inSearchFee || 0).toFixed(1)}）`
+  const configSnapshot = deepFreezeSnapshot(toIpcPlainData(config))
+  const productsSnapshot = toIpcPlainData(Array.from(selectedProducts.values()))
+  const configSignature = configurationSnapshotSignature(configSnapshot)
+  const creationSnapshot = Object.freeze({
+    id: createSnapshotId(),
+    createdAt: new Date().toISOString(),
+    configSignature,
+    productCount: productsSnapshot.length
+  })
+  await recordConfigAudit('snapshot_created', {
+    source: savedPreparationToken ? 'resume_confirmation' : 'automatic_confirmation',
+    after: configSnapshot,
+    snapshotId: creationSnapshot.id,
+    configSignature
+  })
+  const budgetText = configSnapshot.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${configSnapshot.dailyBudget}`
+  const keywordBidText = configSnapshot.useMinKeywordBid
+    ? `关键词按京东最低出价＋¥${Number(configSnapshot.keywordBidIncrement || 0).toFixed(1)}`
+    : `关键词起始出价 ¥${Number(configSnapshot.customKeywordBid).toFixed(1)}，允许自动抬至京东底价，最高 ¥${Number(configSnapshot.maxCustomKeywordBid).toFixed(1)}，超价词跳过`
+  const deliveryText = Number(configSnapshot.automatedBiddingType) === 0
+    ? `关闭全能调价 · 匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}`
+    : `全能调价 · 最高溢价 ${Number(configSnapshot.premiumCoef || 0)}%`
+  const createModeText = requestedTool === 'custom'
+    ? `自定义投放（${keywordBidText}，${deliveryText}，智能匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}）`
     : `目标投产比 ${bidModeLabel.value}`
+  const snapshotTimeRangeSummary = summarizeTimeRangeSchedule(configSnapshot.timeRangeMode, configSnapshot.timeRangeSchedule)
   try {
     await ElMessageBox.confirm(
-      `将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${config.startDate}，${budgetText}，${timeRangeSummary.value}，${createModeText}。是否继续？`,
+      `配置快照 ${creationSnapshot.id}：将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${configSnapshot.startDate}，${budgetText}，${snapshotTimeRangeSummary}，${createModeText}。是否继续？`,
       '确认批量创建京东快车计划',
       {
         confirmButtonText: '确认创建全部计划',
@@ -2455,6 +2626,18 @@ async function createAllPlans() {
     showCenteredMessage('warning', '店铺或投放模式已变化，请重新确认创建预览')
     return
   }
+  const currentSignature = configurationSnapshotSignature(toIpcPlainData(config))
+  if (currentSignature !== configSignature) {
+    await recordConfigAudit('snapshot_invalidated', {
+      source: 'config_changed_during_confirmation',
+      before: configSnapshot,
+      after: configAuditView(),
+      snapshotId: creationSnapshot.id,
+      configSignature: currentSignature
+    })
+    showCenteredMessage('warning', '确认期间投放配置发生变化，已停止创建，请重新核对后提交')
+    return
+  }
 
   fullCreateLoading.value = true
   creationStartedAt.value = Date.now()
@@ -2463,13 +2646,15 @@ async function createAllPlans() {
   creationDetailPanels.value = []
   creationQuotaRefreshFailed.value = false
   Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
+  Object.assign(manualRecovery, { token: '', expiresAt: 0 })
   Object.assign(keywordPrepareProgress, { phase: 'prepare_start', unitIndex: 0, totalUnits: summary.unitCount, secondsRemaining: 0 })
   try {
     const result = await window.electronAPI.invoke('jd-express-create-full', {
       storeId: requestedStoreId,
       createMode: requestedTool,
-      products: toIpcPlainData(Array.from(selectedProducts.values())),
-      config: toIpcPlainData(config),
+      products: productsSnapshot,
+      config: configSnapshot,
+      creationSnapshot,
       ...(savedPreparationToken ? { preparationToken: savedPreparationToken } : {}),
       confirmation: requestedTool === 'custom' ? 'CREATE_ALL_CUSTOM_CAMPAIGNS' : 'CREATE_ALL_ROI_CAMPAIGNS'
     })
@@ -2482,19 +2667,30 @@ async function createAllPlans() {
       const requestError = new Error(result?.message || '批量创建计划失败')
       requestError.code = result?.code
       requestError.retryWithoutPreparation = result?.retryWithoutPreparation === true
+      requestError.manualRecoveryToken = result?.manualRecoveryToken
+      requestError.manualRecoveryExpiresAt = result?.manualRecoveryExpiresAt
       throw requestError
     }
     createdFullResult.value = result
+    Object.assign(manualRecovery, result.requiresManualVerification && result.manualRecoveryToken
+      ? { token: String(result.manualRecoveryToken), expiresAt: Number(result.manualRecoveryExpiresAt || 0) }
+      : { token: '', expiresAt: 0 })
     activeStep.value = 2
     await nextTick()
     creationResultRef.value?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-    clearPreparationToken()
-    preparedFullResult.value = null
-    preparedKeywordResult.value = null
+    if (result.canRetryWithPreparedKeywords && result.preparationToken) {
+      rememberPreparationToken(result.preparationToken, result.preparationExpiresAt)
+    } else {
+      clearPreparationToken()
+      preparedFullResult.value = null
+      preparedKeywordResult.value = null
+    }
     if (result.successUnitCount === 0 && !result.failureCount && result.skippedUnitCount) {
       ElMessage.warning(`全部跳过：${result.skippedUnitCount} 个单元没有上限内可用的关键词，未创建计划；请检查最高出价和跳过明细`)
     } else if (result.successUnitCount === 0) {
       ElMessage.error(`全部创建失败：${result.failureCount} 个单元；${String(result.failures?.[0]?.message || '请展开失败明细查看原因').slice(0, 180)}`)
+    } else if (result.timeRangeFailureCount) {
+      ElMessage.warning(`计划和单元创建完成；${result.timeRangeFailureCount} 个计划的投放时段设置失败，可直接重试失败步骤`)
     } else if (result.failureCount || result.skippedKeywordCount) {
       ElMessage.warning(`批量创建完成：成功 ${result.successCampaignCount}/${result.campaignCount} 个计划、${result.successUnitCount}/${result.unitCount} 个单元，失败 ${result.failureCount} 个单元，跳过 ${result.skippedKeywordCount || 0} 个关键词、${result.skippedUnitCount || 0} 个单元`)
     } else {
@@ -2503,6 +2699,13 @@ async function createAllPlans() {
     const quotaRefreshed = await runPreflight({ silent: true, preserveKeywordUsage: true })
     creationQuotaRefreshFailed.value = !quotaRefreshed || !preflight.limitsAvailable
   } catch (error) {
+    if (error?.manualRecoveryToken) {
+      Object.assign(manualRecovery, {
+        token: String(error.manualRecoveryToken),
+        expiresAt: Number(error.manualRecoveryExpiresAt || 0)
+      })
+      activeStep.value = 2
+    }
     const dateUpdated = error?.code === 'JD_EXPRESS_DATE_INVALID' && refreshExpiredStartDate()
     const canResume = Boolean(readPreparationToken()) || error?.retryWithoutPreparation
     const message = error?.message || '批量创建计划失败'
@@ -2518,20 +2721,72 @@ async function createAllPlans() {
   }
 }
 
+async function recoverUncertainPreparation() {
+  if (!manualRecovery.token || manualRecoveryLoading.value) return
+  try {
+    await ElMessageBox.confirm(
+      '只有在京准通确认没有“检查点之外”的新增计划或单元时才能继续。确认后，系统只补建检查点中未完成的步骤。',
+      '确认解锁续传',
+      {
+        confirmButtonText: '已核对，解锁',
+        cancelButtonText: '暂不处理',
+        type: 'warning',
+        dangerouslyUseHTMLString: false
+      }
+    )
+  } catch {
+    return
+  }
+  manualRecoveryLoading.value = true
+  try {
+    const result = await window.electronAPI.invoke('jd-express-recover-preparation', {
+      storeId: storeId.value,
+      preparationToken: manualRecovery.token,
+      confirmation: 'CONFIRM_NO_UNTRACKED_CREATION'
+    })
+    if (!result?.success) throw new Error(result?.message || '解锁续传失败')
+    rememberPreparationToken(result.preparationToken, result.preparationExpiresAt)
+    if (createdFullResult.value) {
+      createdFullResult.value = {
+        ...createdFullResult.value,
+        requiresManualVerification: false,
+        canRetryWithPreparedKeywords: true,
+        preparationToken: result.preparationToken,
+        preparationExpiresAt: result.preparationExpiresAt
+      }
+    }
+    Object.assign(manualRecovery, { token: '', expiresAt: 0 })
+    activeStep.value = 1
+    showCenteredMessage('success', '续传已解锁；可修改不影响关键词的投放参数后重新提交')
+  } catch (error) {
+    showCenteredMessage('error', error?.message || '解锁续传失败')
+  } finally {
+    manualRecoveryLoading.value = false
+  }
+}
+
 async function showCreationDetails(panel) {
   creationDetailPanels.value = [...new Set([...creationDetailPanels.value, panel])]
   await nextTick()
-  const details = panel === 'failures' ? creationFailureDetailsRef.value : creationSkipDetailsRef.value
+  const details = panel === 'failures'
+    ? creationFailureDetailsRef.value
+    : panel === 'timeRange'
+      ? creationTimeRangeDetailsRef.value
+      : creationSkipDetailsRef.value
   const element = details?.$el || details
   element?.scrollIntoView({ block: 'start', behavior: 'smooth' })
 }
 
 function startNewCreationDraft() {
   if (fullCreateLoading.value) return
+  clearPreparationToken()
+  preparedFullResult.value = null
+  preparedKeywordResult.value = null
   createdFullResult.value = null
   creationDetailPanels.value = []
   creationQuotaRefreshFailed.value = false
   Object.assign(creationVerification, { status: 'idle', expected: null, actual: null, missing: null, message: '' })
+  Object.assign(manualRecovery, { token: '', expiresAt: 0 })
   selectedProducts.clear()
   excludedProducts.clear()
   products.value = []
@@ -2929,13 +3184,21 @@ function appendLimitWarning(warnings, label, required, surplus) {
   }
 }
 
-function restoreConfig(value, mode = activeTool.value) {
+function restoreConfig(value, mode = activeTool.value, source = 'restore_config') {
+  const before = configAuditView()
+  const finishRestore = (result) => {
+    const after = configAuditView()
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      void recordConfigAudit('config_restore', { source, before, after })
+    }
+    return result
+  }
   const defaults = createDefaultConfig(mode)
   Object.assign(config, defaults)
-  if (!value) return false
+  if (!value) return finishRestore(false)
   try {
     const saved = JSON.parse(localStorage.getItem(configStorageKey(value, mode)) || 'null')
-    if (!saved || typeof saved !== 'object') return false
+    if (!saved || typeof saved !== 'object') return finishRestore(false)
     const knownValues = {}
     for (const key of Object.keys(defaults)) {
       if (Object.prototype.hasOwnProperty.call(saved, key)) knownValues[key] = saved[key]
@@ -2972,10 +3235,10 @@ function restoreConfig(value, mode = activeTool.value) {
     config.areaIds = Array.isArray(config.areaIds) ? [...new Set(config.areaIds.map(String).filter(Boolean))] : []
     config.timeRangeMode = config.timeRangeMode === 'custom' ? 'custom' : 'all'
     config.timeRangeSchedule = normalizeTimeRangeSchedule(config.timeRangeSchedule)
-    return Number(saved.schemaVersion) >= CONFIG_SCHEMA_VERSION
+    return finishRestore(Number(saved.schemaVersion) >= CONFIG_SCHEMA_VERSION)
   } catch {
     localStorage.removeItem(configStorageKey(value, mode))
-    return false
+    return finishRestore(false)
   }
 }
 
@@ -2991,11 +3254,13 @@ function preparationStorageKey(value = storeId.value, mode = activeTool.value) {
 
 function keywordPreparationConfig() {
   const preparedConfig = toIpcPlainData(config)
-  delete preparedConfig.startDate
-  delete preparedConfig.endDate
-  delete preparedConfig.unlimitedEndDate
-  delete preparedConfig.timeRangeMode
-  delete preparedConfig.timeRangeSchedule
+  for (const field of [
+    'startDate', 'endDate', 'unlimitedEndDate', 'timeRangeMode', 'timeRangeSchedule',
+    'unlimitedBudget', 'dailyBudget', 'areaType', 'areaIds',
+    'bidType', 'adjustDirection', 'adjustRatio', 'bottomLimit', 'customRoi', 'capCustomRoi',
+    'automatedBiddingType', 'orientationRangeOption', 'premiumType', 'premiumCoef', 'inSearchFee',
+    'dmpCrowdSettings'
+  ]) delete preparedConfig[field]
   return preparedConfig
 }
 
@@ -3098,6 +3363,32 @@ function chunk(list, size) {
 
 function toIpcPlainData(value) {
   return JSON.parse(JSON.stringify(value))
+}
+
+function deepFreezeSnapshot(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreezeSnapshot(child)
+  return Object.freeze(value)
+}
+
+function configurationSnapshotSignature(value) {
+  const canonicalize = input => {
+    if (Array.isArray(input)) return input.map(canonicalize)
+    if (!input || typeof input !== 'object') return input
+    return Object.fromEntries(Object.keys(input).sort().map(key => [key, canonicalize(input[key])]))
+  }
+  const text = JSON.stringify(canonicalize(value ?? {}))
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, '0')}`
+}
+
+function createSnapshotId() {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return uuid ? `jd-${uuid}` : `jd-${Date.now().toString(36)}-${configAuditSequence + 1}`
 }
 
 function addDays(date, days) {

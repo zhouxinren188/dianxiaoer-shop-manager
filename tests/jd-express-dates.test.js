@@ -67,12 +67,51 @@ describe('快车开始日期规则', () => {
       const bindings = { createDefaultConfig: () => defaults, config, CONFIG_SCHEMA_VERSION: 1,
         localStorage: { getItem: () => JSON.stringify({ startDate: savedDate, dailyBudget: 80, namePrefix: 'saved', schemaVersion: 1 }), removeItem: vi.fn() },
         configStorageKey: () => 'config', keywordSourceOptions: [], keywordMatchTypeOptions: [],
-        startDateError: viewDates().startDateError }
+        startDateError: viewDates().startDateError,
+        configAuditView: () => ({ ...config }), recordConfigAudit: vi.fn(() => Promise.resolve({ success: true })) }
       const code = view.slice(view.indexOf('function restoreConfig('), view.indexOf('\nfunction configStorageKey('))
       const restore = new Function(...Object.keys(bindings), code + '\nreturn restoreConfig')(...Object.values(bindings))
       restore(230, mode)
       expect(config).toMatchObject({ startDate: expected, dailyBudget: 80, namePrefix: 'saved' })
     }
+  })
+
+  it('恢复配置覆盖最高出价时留下0.3到0.5及恢复来源', () => {
+    const config = { maxCustomKeywordBid: 0.3 }
+    const defaults = {
+      schemaVersion: 1, createMode: 'custom', startDate: '2026-09-15', biddingTarget: 1,
+      automatedBiddingType: 32768, keywordSources: [], keywordMatchType: 8,
+      maxCustomKeywordBid: null,
+      orientationRangeOption: [1], dmpCrowdSettings: [], areaIds: [],
+      timeRangeMode: 'all', timeRangeSchedule: []
+    }
+    const recordConfigAudit = vi.fn(() => Promise.resolve({ success: true }))
+    const bindings = {
+      createDefaultConfig: () => defaults,
+      config,
+      CONFIG_SCHEMA_VERSION: 1,
+      localStorage: {
+        getItem: () => JSON.stringify({ ...defaults, maxCustomKeywordBid: 0.5 }),
+        removeItem: vi.fn()
+      },
+      configStorageKey: () => 'config',
+      keywordSourceOptions: [],
+      keywordMatchTypeOptions: [{ value: 8 }],
+      startDateError: viewDates().startDateError,
+      crowdKey: () => '',
+      normalizeTimeRangeSchedule: schedule => schedule,
+      configAuditView: () => ({ maxCustomKeywordBid: config.maxCustomKeywordBid }),
+      recordConfigAudit
+    }
+    const code = view.slice(view.indexOf('function restoreConfig('), view.indexOf('\nfunction configStorageKey('))
+    const restore = new Function(...Object.keys(bindings), code + '\nreturn restoreConfig')(...Object.values(bindings))
+    expect(restore(230, 'custom', 'store_change')).toBe(true)
+    expect(config.maxCustomKeywordBid).toBe(0.5)
+    expect(recordConfigAudit).toHaveBeenCalledWith('config_restore', {
+      source: 'store_change',
+      before: { maxCustomKeywordBid: 0.3 },
+      after: { maxCustomKeywordBid: 0.5 }
+    })
   })
 
   it('页面跨午夜后，再点击创建会发现昨日日期已失效', () => {

@@ -6,7 +6,8 @@ const require = createRequire(import.meta.url)
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(2026, 8, 15, 12)) })
 afterEach(() => vi.useRealTimers())
 const { createCustomCampaigns, createRoiCampaigns, CREATE_CAMPAIGN_URL, ADD_ADGROUP_URL } = require('../src/main/jd-express-create')
-const { createCreationLogger, creationBodySummary, creationErrorDetails, creationOutcome, runCreationStage } = require('../src/main/jd-express-creation-log')
+const { createCreationLogger, creationBodySummary, creationErrorDetails, creationOutcome, runCreationStage,
+  configurationSnapshotSignature, creationConfigAuditSnapshot } = require('../src/main/jd-express-creation-log')
 const unit = {
   unitName: '单元1', products: [{ skuId: '1001', name: '测试商品', raw: {} }],
   keywordList: [{ keywordName: '商品', keywordMobilePrice: 0.1 }]
@@ -31,7 +32,7 @@ function options(overrides = {}) {
 }
 
 describe('快车逐计划/单元创建诊断', () => {
-  it('全部失败保留京东返回码，所有受影响单元落日志，而且不补建或重试', async () => {
+  it('锚点被京东明确拒绝时逐个尝试候选单元，并保留每次返回码', async () => {
     const opts = options({
       prepared: { config, campaigns: [
         { planName: '计划1', units: [unit, { ...unit, unitName: '单元2' }] },
@@ -43,15 +44,35 @@ describe('快车逐计划/单元创建诊断', () => {
     })
     const result = await createCustomCampaigns(opts)
     expect(result).toMatchObject({ successCampaignCount: 0, successUnitCount: 0, failureCount: 3 })
-    expect(result.failures[1]).toMatchObject({ stage: 'submit', jdCode: '0', jdSubCode: '400',
-      endpoint: CREATE_CAMPAIGN_URL, traceId: 'trace-1', blockedByCampaign: true, unitIndex: 2 })
-    expect(opts.requestJson).toHaveBeenCalledTimes(4)
-    expect(opts.signBody).toHaveBeenCalledTimes(2)
+    expect(result.failures).toHaveLength(3)
+    for (const failure of result.failures) {
+      expect(failure).toMatchObject({ stage: 'submit', jdCode: '0', jdSubCode: '400',
+        endpoint: CREATE_CAMPAIGN_URL, traceId: 'trace-1', blockedByCampaign: false })
+    }
+    expect(opts.requestJson).toHaveBeenCalledTimes(6)
+    expect(opts.signBody).toHaveBeenCalledTimes(3)
     const diagnostics = opts.onDiagnostic.mock.calls.map(([event]) => event)
     expect(diagnostics.filter(event => event.result === 'unit_failed')).toHaveLength(3)
-    expect(diagnostics.filter(event => event.stage === 'submit' && event.result === 'failed')).toHaveLength(2)
+    expect(diagnostics.filter(event => event.stage === 'submit' && event.result === 'failed')).toHaveLength(3)
     expect(JSON.stringify(diagnostics)).not.toMatch(/private-eid|private-signature|h5st=/)
     expect(creationOutcome(result)).toBe('failed')
+  })
+
+  it.each([createCustomCampaigns, createRoiCampaigns])('计划提交结果未知时不换锚点，避免重复创建', async create => {
+    const opts = options({
+      prepared: { config, campaigns: [{ planName: '计划1', units: [unit, { ...unit, unitName: '单元2' }] }] },
+      requestJson: vi.fn(async (_session, url) => {
+        if (url.includes('suggest/price')) return { code: 1, data: { recommendFloorBid: 3 } }
+        if (url.includes('recommendautobidding')) return { code: 1, data: [{ sid: 'v1' }] }
+        throw Object.assign(new Error('连接中断，提交结果未知'), { code: 'ECONNRESET' })
+      })
+    })
+    const result = await create(opts)
+    expect(result).toMatchObject({ successCampaignCount: 0, successUnitCount: 0, failureCount: 2 })
+    expect(opts.requestJson.mock.calls.filter(([, url]) => url.startsWith(CREATE_CAMPAIGN_URL))).toHaveLength(1)
+    expect(opts.signBody).toHaveBeenCalledTimes(1)
+    expect(result.failures[0]).toMatchObject({ stage: 'submit', code: 'ECONNRESET', unitIndex: 1 })
+    expect(result.failures[1]).toMatchObject({ blockedByCampaign: true, unitIndex: 2 })
   })
 
   it.each([['自定义', createCustomCampaigns], ['ROI', createRoiCampaigns]])('%s 模式签名失败时记录阶段且不提交创建接口', async (_name, create) => {
@@ -171,9 +192,15 @@ describe('诊断日志脱敏和接口异常信息', () => {
     const view = readFileSync(new URL('../src/renderer/src/views/operations/JdExpress.vue', import.meta.url), 'utf8')
     expect(main).toContain('const outcome = creationOutcome(result)')
     expect(main).toContain('result=${outcome} elapsed_ms=')
-    expect(main).toContain('return { ...result, outcome, runId }')
+    expect(main).toContain('return { ...result, outcome, runId, creationConfigSnapshot }')
+    expect(main).toContain("if (snapshotIntegrity === 'mismatch')")
+    expect(main).toContain("'JD_EXPRESS_CONFIG_SNAPSHOT_MISMATCH'")
+    expect(main).toContain("'JD_EXPRESS_CONFIG_AUDIT_FAILED'")
+    expect(main).toContain("'config-snapshots.jsonl'")
     expect(view).toContain(':data="creationFailureRows"')
     expect(view).toContain('全部创建失败：')
+    expect(view).toContain('config: configSnapshot')
+    expect(view).toContain('currentSignature !== configSignature')
   })
 
   it.each([
@@ -193,11 +220,15 @@ describe('诊断日志脱敏和接口异常信息', () => {
     })
     const verify = vi.fn()
     const dependencies = { refreshCookies: vi.fn() }
+    const appendAudit = vi.fn(() => true)
     const bindings = { ipcMain: { handle: (_name, callback) => { handler = callback } },
       randomUUID: () => 'run-123', createCreationLogger, emitCreationDiagnostic: (callback, event) => callback(event),
       resolveCreateMode: () => 'custom', runtimeLog: { writeLog }, dependencies,
       runFullRoiCreation: run, creationOutcome, runPostCreationVerification: verify,
-      creationErrorDetails, serializeError: vi.fn() }
+      creationErrorDetails, serializeError: vi.fn(), logSafe: value => String(value || ''),
+      configurationSnapshotSignature, creationConfigAuditSnapshot,
+      appendConfigAuditRecord: appendAudit,
+      createRequestError: (message, code) => Object.assign(new Error(message), { code }) }
     new Function(...Object.keys(bindings), registration)(...Object.values(bindings))
     const sender = { isDestroyed: () => false, send: vi.fn() }
     const result = await handler({ sender }, { storeId: 230 })
@@ -208,5 +239,57 @@ describe('诊断日志脱敏和接口异常信息', () => {
     expect(run).toHaveBeenCalledTimes(1)
     expect(run.mock.calls[0][2].refreshCookies).toBe(dependencies.refreshCookies)
     expect(verify).toHaveBeenCalledTimes(counts.successCampaignCount > 0 ? 1 : 0)
+    expect(appendAudit.mock.calls.map(([record]) => record.action))
+      .toEqual(['creation_config_snapshot', 'creation_result'])
+    expect(appendAudit.mock.calls[1][0]).toMatchObject({
+      runId: 'run-123', snapshotId: 'main-run-123', outcome: expected,
+      campaigns: { success: counts.successCampaignCount, total: counts.campaignCount },
+      units: { success: counts.successUnitCount, total: counts.unitCount, failures: counts.failureCount }
+    })
+  })
+
+  it('配置快照无法落盘时在调用京东前停止，并记录同一任务的失败结论', async () => {
+    const source = readFileSync(new URL('../src/main/jd-express.js', import.meta.url), 'utf8')
+    const registration = source.slice(source.indexOf("  ipcMain.handle('jd-express-create-full'"),
+      source.indexOf('\n}\n\nmodule.exports =', source.indexOf("  ipcMain.handle('jd-express-create-full'")))
+    let handler
+    const run = vi.fn()
+    const appendAudit = vi.fn(() => false)
+    const writeLog = vi.fn()
+    const bindings = { ipcMain: { handle: (_name, callback) => { handler = callback } },
+      randomUUID: () => 'run-audit-failed', createCreationLogger,
+      emitCreationDiagnostic: (callback, event) => callback(event), resolveCreateMode: () => 'custom',
+      runtimeLog: { writeLog }, dependencies: {}, runFullRoiCreation: run, creationOutcome,
+      runPostCreationVerification: vi.fn(), creationErrorDetails,
+      serializeError: error => ({ success: false, code: error.code, message: error.message }),
+      logSafe: value => String(value || ''), configurationSnapshotSignature, creationConfigAuditSnapshot,
+      appendConfigAuditRecord: appendAudit,
+      createRequestError: (message, code) => Object.assign(new Error(message), { code }) }
+    new Function(...Object.keys(bindings), registration)(...Object.values(bindings))
+    const result = await handler({ sender: { isDestroyed: () => false, send: vi.fn() } }, {
+      storeId: 230,
+      config: { createMode: 'custom', customKeywordBid: 0.1, maxCustomKeywordBid: 0.3 }
+    })
+    expect(result).toMatchObject({ success: false, code: 'JD_EXPRESS_CONFIG_AUDIT_FAILED' })
+    expect(run).not.toHaveBeenCalled()
+    expect(appendAudit.mock.calls.map(([record]) => record.action))
+      .toEqual(['creation_config_snapshot', 'creation_failure'])
+    expect(appendAudit.mock.calls[1][0]).toMatchObject({
+      runId: 'run-audit-failed', snapshotId: 'main-run-audit-failed',
+      code: 'JD_EXPRESS_CONFIG_AUDIT_FAILED'
+    })
+  })
+
+  it('配置快照固定记录出价参数，签名能识别0.3与0.5的差异', () => {
+    const lower = { createMode: 'custom', useMinKeywordBid: false, customKeywordBid: 0.1,
+      maxCustomKeywordBid: 0.3, inSearchFee: 0.1, premiumCoef: 30,
+      dmpCrowdSettings: [{ crowdId: 100, crowdType: 1, adGroupPrice: 30 }] }
+    const higher = { ...lower, maxCustomKeywordBid: 0.5 }
+    expect(configurationSnapshotSignature(lower)).not.toBe(configurationSnapshotSignature(higher))
+    expect(creationConfigAuditSnapshot(lower)).toMatchObject({
+      createMode: 'custom', useMinKeywordBid: false, customKeywordBid: 0.1,
+      maxCustomKeywordBid: 0.3, inSearchFee: 0.1, premiumCoef: 30,
+      crowds: [{ crowdId: '100', crowdType: '1', adGroupPrice: 30 }]
+    })
   })
 })

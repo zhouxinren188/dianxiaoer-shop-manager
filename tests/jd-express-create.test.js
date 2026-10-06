@@ -7,6 +7,7 @@ afterEach(() => vi.useRealTimers())
 const {
   ADD_ADGROUP_URL,
   CREATE_CAMPAIGN_URL,
+  TIME_RANGE_UPDATE_URL,
   buildAdditionalAdGroupBody,
   buildCampaignCreateBody,
   buildCustomAdditionalAdGroupBody,
@@ -96,7 +97,7 @@ describe('京东快车单商品创建组包', () => {
     })
   })
 
-  it('ROI 与自定义计划都提交同一份分时折扣数据', () => {
+  it('ROI 与自定义计划创建时都不夹带分时折扣', () => {
     const schedule = Array.from({ length: 7 }, () => Array(24).fill(100))
     schedule[0][0] = 0
     schedule[1][8] = 80
@@ -118,11 +119,88 @@ describe('京东快车单商品创建组包', () => {
       ...timeConfig
     }, 'version')
 
-    const roiTimeRange = JSON.parse(roiBody.campaignCreateCommand.timeRangePriceCoef)
-    expect(roiTimeRange.detail['0'].price_coef[0]).toBe(0)
-    expect(roiTimeRange.detail['1'].price_coef[8]).toBe(80)
-    expect(customBody.campaignCreateCommand.timeRangePriceCoef)
-      .toBe(roiBody.campaignCreateCommand.timeRangePriceCoef)
+    expect(roiBody.campaignCreateCommand.timeRangePriceCoef).toBe('')
+    expect(customBody.campaignCreateCommand.timeRangePriceCoef).toBe('')
+  })
+
+  it('计划创建成功后再通过独立接口逐个设置7×24分时折扣', async () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(100))
+    schedule[0][0] = 0
+    schedule[1][8] = 80
+    const submitted = []
+    const signBody = vi.fn(async () => ({ h5st: 'signed' }))
+    const requestJson = async (_session, url, options) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      submitted.push({ url, body: options.body })
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) return { subCode: 1, data: { campaignId: 9001 } }
+      if (url === TIME_RANGE_UPDATE_URL) return { success: true, data: { success: true } }
+      throw new Error(`未处理的请求：${url}`)
+    }
+
+    const result = await createRoiCampaigns({
+      platformSession: {},
+      prepared: {
+        config: { ...config, timeRangeMode: 'custom', timeRangeSchedule: schedule },
+        summary: { productCount: 1, campaignCount: 1, unitCount: 1 },
+        campaigns: [{ planName: '计划1', cid2Name: '杯具', units: [unit] }]
+      },
+      requestJson,
+      signBody,
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+
+    expect(submitted).toHaveLength(2)
+    expect(submitted[0].body.campaignCreateCommand.timeRangePriceCoef).toBe('')
+    expect(submitted[1]).toMatchObject({
+      url: TIME_RANGE_UPDATE_URL,
+      body: {
+        campaignSettings: [{ campaignId: 9001, timeRangeCoefSettings: schedule }],
+        requestFrom: 0
+      }
+    })
+    expect(signBody).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({ timeRangeCampaignCount: 1, timeRangeSuccessCount: 1, timeRangeFailureCount: 0 })
+  })
+
+  it('分时折扣失败不抹掉已创建计划，并返回只重试时段所需状态', async () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(75))
+    const requestJson = async (_session, url) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) return { subCode: 1, data: { campaignId: 9001 } }
+      if (url === TIME_RANGE_UPDATE_URL) return { success: true, data: { success: false, message: '修改时段失败' } }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createRoiCampaigns({
+      platformSession: {},
+      prepared: {
+        config: { ...config, timeRangeMode: 'custom', timeRangeSchedule: schedule },
+        summary: { productCount: 1, campaignCount: 1, unitCount: 1 },
+        campaigns: [{ planName: '计划1', cid2Name: '杯具', units: [unit] }]
+      },
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+    expect(result).toMatchObject({
+      successCampaignCount: 1,
+      successUnitCount: 1,
+      failureCount: 0,
+      timeRangeFailureCount: 1
+    })
+    expect(result.timeRangeFailures[0]).toMatchObject({ campaignId: 9001, retrySafe: true, stage: 'time_range_apply' })
+    expect(result.resumeState.campaigns['0']).toMatchObject({
+      campaignId: 9001,
+      completedUnitIndexes: [0],
+      timeRangeApplied: false
+    })
   })
 
   it('拒绝把多商品准备结果提交到单商品测试接口', async () => {
@@ -131,6 +209,63 @@ describe('京东快车单商品创建组包', () => {
         summary: { productCount: 2, campaignCount: 1, unitCount: 1 }
       }
     })).rejects.toThrow('单商品测试只能提交')
+  })
+
+  it('单商品测试也在创建后独立设置分时折扣', async () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(90))
+    const submitted = []
+    const requestJson = async (_session, url, options) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      submitted.push({ url, body: options.body })
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) return { subCode: 1, data: { campaignId: 9001 } }
+      if (url === TIME_RANGE_UPDATE_URL) return { success: true, data: { success: true } }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createSingleProductTest({
+      platformSession: {},
+      prepared: {
+        config: { ...config, timeRangeMode: 'custom', timeRangeSchedule: schedule },
+        summary: { productCount: 1, campaignCount: 1, unitCount: 1 },
+        campaigns: [{ planName: '单品测试', cid2Name: '杯具', units: [unit] }]
+      },
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie'
+    })
+    expect(submitted.map(item => item.url.split('?')[0])).toEqual([CREATE_CAMPAIGN_URL, TIME_RANGE_UPDATE_URL])
+    expect(result).toMatchObject({ campaignId: 9001, timeRangeSuccessCount: 1, timeRangeFailureCount: 0 })
+  })
+
+  it('单商品分时失败后续传时不重复创建计划，只补设分时', async () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(90))
+    const submitted = []
+    const signBody = vi.fn(async () => ({ h5st: 'signed' }))
+    const result = await createSingleProductTest({
+      platformSession: {},
+      prepared: {
+        config: { ...config, timeRangeMode: 'custom', timeRangeSchedule: schedule },
+        summary: { productCount: 1, campaignCount: 1, unitCount: 1 },
+        campaigns: [{ planName: '单品测试', cid2Name: '杯具', units: [unit] }]
+      },
+      resumeState: {
+        campaigns: {
+          0: { campaignId: 9001, campaignName: '单品测试', completedUnitIndexes: [0], timeRangeSignature: '' }
+        }
+      },
+      requestJson: async (_session, url, options) => {
+        submitted.push({ url, body: options.body })
+        return { code: 0, data: { success: true } }
+      },
+      signBody,
+      eid: 'eid-cookie'
+    })
+    expect(submitted).toHaveLength(1)
+    expect(submitted[0].url).toBe(TIME_RANGE_UPDATE_URL)
+    expect(signBody).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ campaignId: 9001, timeRangeSuccessCount: 1, timeRangeFailureCount: 0 })
   })
 
   it('后续单元使用原工具的新增单元字段', () => {
@@ -212,6 +347,122 @@ describe('京东快车单商品创建组包', () => {
     expect(submitted[0].body.adGroupCreateCommand.name).toBe('杯具')
     expect(submitted[1].body).toMatchObject({ campaignId: 9001, name: '水杯(2)_2' })
     expect(submitted[2].body.adGroupCreateCommand.name).toBe('日用')
+  })
+
+  it('续传时跳过已成功单元并把失败单元追加到原计划', async () => {
+    const unit2 = {
+      ...unit,
+      unitName: '水杯(2)_2',
+      products: [{ ...unit.products[0], skuId: '1002' }]
+    }
+    const submitted = []
+    const checkpoints = []
+    const requestJson = async (_session, url, options) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      submitted.push({ url, body: options.body })
+      if (url.startsWith(ADD_ADGROUP_URL)) return { subCode: 1, data: {} }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createRoiCampaigns({
+      platformSession: {},
+      prepared: {
+        config,
+        summary: { productCount: 2, campaignCount: 1, unitCount: 2 },
+        campaigns: [{ planName: '计划1', cid2Name: '杯具', units: [unit, unit2] }]
+      },
+      resumeState: {
+        campaigns: {
+          0: { campaignId: 9001, campaignName: '计划1', completedUnitIndexes: [0], timeRangeApplied: false }
+        }
+      },
+      onCheckpoint: async state => checkpoints.push(state),
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+
+    expect(submitted).toHaveLength(1)
+    expect(submitted[0].url.startsWith(ADD_ADGROUP_URL)).toBe(true)
+    expect(submitted[0].body).toMatchObject({ campaignId: 9001, name: '水杯(2)_2' })
+    expect(result).toMatchObject({ successCampaignCount: 1, successUnitCount: 2, failureCount: 0 })
+    expect(checkpoints.at(-1).campaigns['0'].completedUnitIndexes).toEqual([0, 1])
+  })
+
+  it('首单元被明确拒绝时改用下一单元建计划，再回补首单元', async () => {
+    const unit2 = {
+      ...unit,
+      unitName: '水杯(2)_2',
+      products: [{ ...unit.products[0], skuId: '1002', raw: { ...unit.products[0].raw, adName: '玻璃杯' } }]
+    }
+    const writes = []
+    let createCount = 0
+    const requestJson = async (_session, url, options) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      writes.push({ url: url.split('?')[0], body: options.body })
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) {
+        createCount += 1
+        return createCount === 1
+          ? { code: 400, subCode: 0, message: '当前商品不可作为首单元' }
+          : { subCode: 1, data: { campaignId: 9200 } }
+      }
+      if (url.startsWith(ADD_ADGROUP_URL)) return { subCode: 1, data: {} }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createRoiCampaigns({
+      platformSession: {},
+      prepared: {
+        config,
+        summary: { productCount: 2, campaignCount: 1, unitCount: 2 },
+        campaigns: [{ planName: '计划1', cid2Name: '杯具', units: [unit, unit2] }]
+      },
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+    expect(writes.map(item => item.url)).toEqual([
+      CREATE_CAMPAIGN_URL,
+      CREATE_CAMPAIGN_URL,
+      ADD_ADGROUP_URL
+    ])
+    expect(writes[1].body.adGroupCreateCommand.adList[0].skuId).toBe('1002')
+    expect(writes[2].body.adList[0].skuId).toBe('1001')
+    expect(result).toMatchObject({ successCampaignCount: 1, successUnitCount: 2, failureCount: 0 })
+    expect(result.resumeState.campaigns['0'].completedUnitIndexes.sort()).toEqual([0, 1])
+  })
+
+  it('分时接口只返回错误码时不能误判成功', async () => {
+    const schedule = Array.from({ length: 7 }, () => Array(24).fill(80))
+    const requestJson = async (_session, url) => {
+      if (url.includes('/common/tcpa/suggest/price')) {
+        return { code: 1, data: { sid: 'suggest-version', recommendFloorBid: 4, top_price_troi: 10 } }
+      }
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) return { subCode: 1, data: { campaignId: 9201 } }
+      if (url === TIME_RANGE_UPDATE_URL) return { success: true, code: 500, message: '系统繁忙' }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createRoiCampaigns({
+      platformSession: {},
+      prepared: {
+        config: { ...config, timeRangeMode: 'custom', timeRangeSchedule: schedule },
+        summary: { productCount: 1, campaignCount: 1, unitCount: 1 },
+        campaigns: [{ planName: '计划1', cid2Name: '杯具', units: [unit] }]
+      },
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+    expect(result).toMatchObject({ timeRangeSuccessCount: 0, timeRangeFailureCount: 1 })
+    expect(result.timeRangeFailures[0]).toMatchObject({ jdCode: '500', retrySafe: true })
   })
 })
 
@@ -317,5 +568,45 @@ describe('京东快车一键自定义创建组包', () => {
     expect(result).toMatchObject({ successCampaignCount: 1, successUnitCount: 1, failureCount: 0 })
     expect(submitted).toHaveLength(1)
     expect(submitted[0].body.adGroupCreateCommand.automatedBiddingType).toBe(32768)
+  })
+
+  it('自定义模式首锚点明确失败时也会换下一单元并回补', async () => {
+    const unit2 = {
+      ...unit,
+      unitName: '水杯(2)_2',
+      products: [{ ...unit.products[0], skuId: '1002' }]
+    }
+    const writes = []
+    let createCount = 0
+    const requestJson = async (_session, url, options) => {
+      if (url.includes('/common/get/recommendautobidding/type')) return { code: 1, data: [{ sid: 'version' }] }
+      writes.push({ url: url.split('?')[0], body: options.body })
+      if (url.startsWith(CREATE_CAMPAIGN_URL)) {
+        createCount += 1
+        return createCount === 1
+          ? { code: 422, subCode: 0, message: '首商品不可投放' }
+          : { subCode: 1, data: { campaignId: 9300 } }
+      }
+      if (url.startsWith(ADD_ADGROUP_URL)) return { subCode: 1, data: {} }
+      throw new Error(`未处理的请求：${url}`)
+    }
+    const result = await createCustomCampaigns({
+      platformSession: {},
+      prepared: {
+        config: customConfig,
+        summary: { productCount: 2, campaignCount: 1, unitCount: 2 },
+        campaigns: [{ planName: '自定义计划', units: [unit, unit2] }]
+      },
+      requestJson,
+      signBody: async () => ({ h5st: 'signed' }),
+      eid: 'eid-cookie',
+      delay: async () => {}
+    })
+    expect(writes.map(item => item.url)).toEqual([
+      CREATE_CAMPAIGN_URL,
+      CREATE_CAMPAIGN_URL,
+      ADD_ADGROUP_URL
+    ])
+    expect(result).toMatchObject({ successCampaignCount: 1, successUnitCount: 2, failureCount: 0 })
   })
 })
