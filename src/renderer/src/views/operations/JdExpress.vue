@@ -887,9 +887,10 @@
           <div class="submit-placeholder">
             <el-button
               type="primary"
-              :disabled="fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"
+              :loading="creationConfirmLoading"
+              :disabled="creationConfirmLoading || fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"
               @click="createAllPlans"
-            >{{ canRetryFullCreation ? '复用关键词重新提交' : createdFullResult ? '本轮任务已结束' : '确认创建全部计划' }}</el-button>
+            >{{ creationConfirmLoading ? '正在校验配置' : canRetryFullCreation ? '复用关键词重新提交' : createdFullResult ? '本轮任务已结束' : '确认创建全部计划' }}</el-button>
           </div>
           <el-collapse v-if="creationFailureRows.length" ref="creationFailureDetailsRef" v-model="creationDetailPanels" class="creation-failures">
             <el-collapse-item :title="`失败明细（${creationFailureRows.length} 个单元）`" name="failures">
@@ -1205,6 +1206,7 @@ const singleCreateLoading = ref(false)
 const createdSingleResult = ref(null)
 const fullPrepareLoading = ref(false)
 const preparedFullResult = ref(null)
+const creationConfirmLoading = ref(false)
 const fullCreateLoading = ref(false)
 const createdFullResult = ref(null)
 const creationResultRef = ref(null)
@@ -2565,101 +2567,162 @@ async function prepareFullKeywords() {
 }
 
 async function createAllPlans() {
-  if (!ensureStoreSelected() || fullCreateLoading.value) return
+  if (!ensureStoreSelected() || creationConfirmLoading.value || fullCreateLoading.value) return
   if (createdFullResult.value && !canRetryFullCreation.value) {
     showCenteredMessage('warning', '本轮任务已结束。请先核对创建结果，需要下一轮时重新选品，勿整批重复创建')
     return
   }
-  refreshExpiredStartDate()
-  // 先让仍聚焦的数字输入框提交最后一次编辑，再校验并冻结配置。
-  if (typeof document.activeElement?.blur === 'function') document.activeElement.blur()
-  await nextTick()
-  try {
-    await configFormRef.value?.validate()
-  } catch {
-    showCenteredMessage('warning', '请完善投放配置')
-    return
+
+  const audit = (event, options = {}) => {
+    try {
+      void recordConfigAudit(event, options)
+    } catch {
+      // 审计失败不能阻断真实创建，但创建入口本身仍会显示明确结果。
+    }
   }
-  const dateError = startDateError(config.startDate)
-  if (dateError) {
-    showCenteredMessage('warning', dateError)
-    return
-  }
-  const scheduleError = config.timeRangeMode === 'custom' ? timeRangeScheduleError(config.timeRangeSchedule) : ''
-  if (scheduleError) {
-    showCenteredMessage('warning', scheduleError)
-    return
-  }
-  if (!selectedProducts.size) {
-    showCenteredMessage('warning', '请先查询待推广商品')
-    return
-  }
-  if (preview.value.limitWarnings.length) {
-    showCenteredMessage('warning', '请先处理创建预览中的额度或配置问题')
-    return
-  }
-  const summary = toIpcPlainData(preview.value)
-  const requestedStoreId = storeId.value
-  const requestedTool = activeTool.value
-  const savedPreparationToken = readPreparationToken()
-  const configSnapshot = deepFreezeSnapshot(toIpcPlainData(config))
-  const productsSnapshot = toIpcPlainData(Array.from(selectedProducts.values()))
-  const configSignature = configurationSnapshotSignature(configSnapshot)
-  const creationSnapshot = Object.freeze({
-    id: createSnapshotId(),
-    createdAt: new Date().toISOString(),
-    configSignature,
-    productCount: productsSnapshot.length
-  })
-  await recordConfigAudit('snapshot_created', {
-    source: savedPreparationToken ? 'resume_confirmation' : 'automatic_confirmation',
-    after: configSnapshot,
-    snapshotId: creationSnapshot.id,
-    configSignature
-  })
-  const budgetText = configSnapshot.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${configSnapshot.dailyBudget}`
-  const keywordBidText = configSnapshot.useMinKeywordBid
-    ? `关键词按京东最低出价＋¥${Number(configSnapshot.keywordBidIncrement || 0).toFixed(1)}`
-    : `关键词起始出价 ¥${Number(configSnapshot.customKeywordBid).toFixed(1)}，允许自动抬至京东底价，最高 ¥${Number(configSnapshot.maxCustomKeywordBid).toFixed(1)}，超价词跳过`
-  const deliveryText = Number(configSnapshot.automatedBiddingType) === 0
-    ? `关闭全能调价 · 匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}`
-    : `全能调价 · 最高溢价 ${Number(configSnapshot.premiumCoef || 0)}%`
-  const createModeText = requestedTool === 'custom'
-    ? `自定义投放（${keywordBidText}，${deliveryText}，智能匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}）`
-    : `目标投产比 ${bidModeLabel.value}`
-  const snapshotTimeRangeSummary = summarizeTimeRangeSchedule(configSnapshot.timeRangeMode, configSnapshot.timeRangeSchedule)
-  try {
-    await ElMessageBox.confirm(
-      `配置快照 ${creationSnapshot.id}：将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${configSnapshot.startDate}，${budgetText}，${snapshotTimeRangeSummary}，${createModeText}。是否继续？`,
-      '确认批量创建京东快车计划',
-      {
-        confirmButtonText: '确认创建全部计划',
-        cancelButtonText: '取消',
-        type: 'warning',
-        dangerouslyUseHTMLString: false
-      }
-    )
-  } catch {
-    return
-  }
-  if (String(requestedStoreId) !== String(storeId.value) || requestedTool !== activeTool.value) {
-    showCenteredMessage('warning', '店铺或投放模式已变化，请重新确认创建预览')
-    return
-  }
-  const currentSignature = configurationSnapshotSignature(toIpcPlainData(config))
-  if (currentSignature !== configSignature) {
-    await recordConfigAudit('snapshot_invalidated', {
-      source: 'config_changed_during_confirmation',
-      before: configSnapshot,
-      after: configAuditView(),
-      snapshotId: creationSnapshot.id,
-      configSignature: currentSignature
-    })
-    showCenteredMessage('warning', '确认期间投放配置发生变化，已停止创建，请重新核对后提交')
-    return
+  const blockCreation = (reason, message, type = 'warning') => {
+    audit('create_precheck_blocked', { source: reason, field: reason })
+    showCenteredMessage(type, message)
   }
 
-  fullCreateLoading.value = true
+  let summary
+  let requestedStoreId
+  let requestedTool
+  let savedPreparationToken
+  let configSnapshot
+  let productsSnapshot
+  let configSignature
+  let creationSnapshot
+  creationConfirmLoading.value = true
+  audit('create_click', { source: 'create_button' })
+  try {
+    refreshExpiredStartDate()
+    // 先让仍聚焦的数字输入框提交最后一次编辑，再校验并冻结配置。
+    if (typeof document.activeElement?.blur === 'function') document.activeElement.blur()
+    await nextTick()
+
+    let validationTimer
+    try {
+      await Promise.race([
+        Promise.resolve(configFormRef.value?.validate()),
+        new Promise((_, reject) => {
+          validationTimer = setTimeout(() => {
+            const timeoutError = new Error('配置校验超时，请重新点击创建；如仍失败请导出运行日志')
+            timeoutError.code = 'JD_EXPRESS_CONFIG_VALIDATION_TIMEOUT'
+            reject(timeoutError)
+          }, 8000)
+        })
+      ])
+    } catch (error) {
+      if (error?.code === 'JD_EXPRESS_CONFIG_VALIDATION_TIMEOUT') throw error
+      const validationError = new Error('请完善投放配置')
+      validationError.code = 'JD_EXPRESS_CONFIG_INVALID'
+      throw validationError
+    } finally {
+      clearTimeout(validationTimer)
+    }
+    audit('create_validation_passed', { source: 'config_form' })
+
+    const dateError = startDateError(config.startDate)
+    if (dateError) {
+      blockCreation('start_date', dateError)
+      return
+    }
+    const scheduleError = config.timeRangeMode === 'custom' ? timeRangeScheduleError(config.timeRangeSchedule) : ''
+    if (scheduleError) {
+      blockCreation('time_range', scheduleError)
+      return
+    }
+    if (!selectedProducts.size) {
+      blockCreation('selected_products', '请先查询待推广商品')
+      return
+    }
+    if (preview.value.limitWarnings.length) {
+      blockCreation('preview_limits', '请先处理创建预览中的额度或配置问题')
+      return
+    }
+
+    summary = toIpcPlainData(preview.value)
+    requestedStoreId = storeId.value
+    requestedTool = activeTool.value
+    savedPreparationToken = readPreparationToken()
+    configSnapshot = deepFreezeSnapshot(toIpcPlainData(config))
+    productsSnapshot = toIpcPlainData(Array.from(selectedProducts.values()))
+    configSignature = configurationSnapshotSignature(configSnapshot)
+    creationSnapshot = Object.freeze({
+      id: createSnapshotId(),
+      createdAt: new Date().toISOString(),
+      configSignature,
+      productCount: productsSnapshot.length
+    })
+    audit('snapshot_created', {
+      source: savedPreparationToken ? 'resume_confirmation' : 'automatic_confirmation',
+      after: configSnapshot,
+      snapshotId: creationSnapshot.id,
+      configSignature
+    })
+
+    const budgetText = configSnapshot.unlimitedBudget ? '每日预算不限' : `每个计划每日预算 ¥${configSnapshot.dailyBudget}`
+    const keywordBidText = configSnapshot.useMinKeywordBid
+      ? `关键词按京东最低出价＋¥${Number(configSnapshot.keywordBidIncrement || 0).toFixed(1)}`
+      : `关键词起始出价 ¥${Number(configSnapshot.customKeywordBid).toFixed(1)}，允许自动抬至京东底价，最高 ¥${Number(configSnapshot.maxCustomKeywordBid).toFixed(1)}，超价词跳过`
+    const deliveryText = Number(configSnapshot.automatedBiddingType) === 0
+      ? `关闭全能调价 · 匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}`
+      : `全能调价 · 最高溢价 ${Number(configSnapshot.premiumCoef || 0)}%`
+    const createModeText = requestedTool === 'custom'
+      ? `自定义投放（${keywordBidText}，${deliveryText}，智能匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}）`
+      : `目标投产比 ${bidModeLabel.value}`
+    const snapshotTimeRangeSummary = summarizeTimeRangeSchedule(configSnapshot.timeRangeMode, configSnapshot.timeRangeSchedule)
+    try {
+      await ElMessageBox.confirm(
+        `配置快照 ${creationSnapshot.id}：将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${configSnapshot.startDate}，${budgetText}，${snapshotTimeRangeSummary}，${createModeText}。是否继续？`,
+        '确认批量创建京东快车计划',
+        {
+          confirmButtonText: '确认创建全部计划',
+          cancelButtonText: '取消',
+          type: 'warning',
+          dangerouslyUseHTMLString: false
+        }
+      )
+    } catch {
+      audit('create_confirmation_cancelled', { source: 'confirmation_dialog' })
+      return
+    }
+    if (String(requestedStoreId) !== String(storeId.value) || requestedTool !== activeTool.value) {
+      blockCreation('store_or_mode_changed', '店铺或投放模式已变化，请重新确认创建预览')
+      return
+    }
+    const currentSignature = configurationSnapshotSignature(toIpcPlainData(config))
+    if (currentSignature !== configSignature) {
+      audit('snapshot_invalidated', {
+        source: 'config_changed_during_confirmation',
+        before: configSnapshot,
+        after: configAuditView(),
+        snapshotId: creationSnapshot.id,
+        configSignature: currentSignature
+      })
+      showCenteredMessage('warning', '确认期间投放配置发生变化，已停止创建，请重新核对后提交')
+      return
+    }
+    fullCreateLoading.value = true
+    audit('create_submission_started', {
+      source: savedPreparationToken ? 'resume_submission' : 'new_submission',
+      after: configSnapshot,
+      snapshotId: creationSnapshot.id,
+      configSignature
+    })
+  } catch (error) {
+    const message = error?.message || '创建前配置检查失败，请重试'
+    audit('create_precheck_failed', {
+      source: error?.code || 'precheck_exception',
+      field: String(message).slice(0, 80)
+    })
+    showCenteredMessage(error?.code === 'JD_EXPRESS_CONFIG_INVALID' ? 'warning' : 'error', message)
+    return
+  } finally {
+    creationConfirmLoading.value = false
+  }
+
   creationStartedAt.value = Date.now()
   creationSubmissionStarted.value = false
   createdFullResult.value = null
@@ -2798,7 +2861,7 @@ async function showCreationDetails(panel) {
 }
 
 function startNewCreationDraft() {
-  if (fullCreateLoading.value) return
+  if (creationConfirmLoading.value || fullCreateLoading.value) return
   clearPreparationToken()
   preparedFullResult.value = null
   preparedKeywordResult.value = null

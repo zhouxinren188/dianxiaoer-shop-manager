@@ -21,7 +21,7 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
   const resumePreparationToken = ref('')
   const bindings = {
     ensureStoreSelected: () => true,
-    fullCreateLoading: ref(false), createdFullResult: ref(null), canRetryFullCreation: ref(false), activeStep: ref(2),
+    creationConfirmLoading: ref(false), fullCreateLoading: ref(false), createdFullResult: ref(null), canRetryFullCreation: ref(false), activeStep: ref(2),
     creationResultRef: ref({ scrollIntoView: vi.fn() }), creationDetailPanels: ref([]),
     creationQuotaRefreshFailed: ref(false), creationStartedAt: ref(0), creationSubmissionStarted: ref(false),
     refreshExpiredStartDate: () => false, startDateError: () => '',
@@ -39,7 +39,7 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
     clearPreparationToken: vi.fn(() => { resumePreparationToken.value = '' }),
     ElMessageBox: { confirm: vi.fn(async () => {}) },
     ElMessage: { warning: vi.fn(), error: vi.fn(), success: vi.fn() }, showCenteredMessage: vi.fn(),
-    toIpcPlainData: value => JSON.parse(JSON.stringify(value)),
+    toIpcPlainData: vi.fn(value => JSON.parse(JSON.stringify(value))),
     deepFreezeSnapshot: value => value,
     configurationSnapshotSignature: value => JSON.stringify(value), createSnapshotId: () => 'jd-snapshot-1',
     configAuditView: () => ({ ...bindings.config }), recordConfigAudit: vi.fn(async () => ({ success: true })),
@@ -105,6 +105,43 @@ describe('快车完成结果与下一轮额度严格区分', () => {
     expect(createCall[1].creationSnapshot.configSignature).toBe(JSON.stringify(createCall[1].config))
     expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('snapshot_created', expect.objectContaining({
       snapshotId: 'jd-snapshot-1', after: expect.objectContaining({ maxCustomKeywordBid: 0.5 })
+    }))
+  })
+  it('点击后立即进入可见校验状态，校验卡死会在 8 秒后明确报错并留下阶段日志', async () => {
+    vi.useFakeTimers()
+    try {
+      const h = harness()
+      h.bindings.configFormRef.value.validate.mockImplementation(() => new Promise(() => {}))
+      const creating = h.create()
+      await Promise.resolve()
+      expect(h.bindings.creationConfirmLoading.value).toBe(true)
+      await vi.advanceTimersByTimeAsync(8000)
+      await creating
+      expect(h.bindings.creationConfirmLoading.value).toBe(false)
+      expect(h.bindings.fullCreateLoading.value).toBe(false)
+      expect(h.bindings.ElMessageBox.confirm).not.toHaveBeenCalled()
+      expect(h.bindings.window.electronAPI.invoke).not.toHaveBeenCalled()
+      expect(h.bindings.showCenteredMessage).toHaveBeenCalledWith('error', expect.stringContaining('配置校验超时'))
+      expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('create_click', expect.objectContaining({ source: 'create_button' }))
+      expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('create_precheck_failed', expect.objectContaining({
+        source: 'JD_EXPRESS_CONFIG_VALIDATION_TIMEOUT'
+      }))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('生成配置快照异常时给出错误，不再静默停在深蓝按钮', async () => {
+    const h = harness()
+    h.bindings.toIpcPlainData.mockImplementationOnce(() => {
+      throw new Error('快照序列化失败')
+    })
+    await h.create()
+    expect(h.bindings.creationConfirmLoading.value).toBe(false)
+    expect(h.bindings.ElMessageBox.confirm).not.toHaveBeenCalled()
+    expect(h.bindings.window.electronAPI.invoke).not.toHaveBeenCalled()
+    expect(h.bindings.showCenteredMessage).toHaveBeenCalledWith('error', '快照序列化失败')
+    expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('create_precheck_failed', expect.objectContaining({
+      source: 'precheck_exception', field: '快照序列化失败'
     }))
   })
   it('确认弹窗打开期间配置被恢复时停止创建并留下快照失效记录', async () => {
@@ -288,6 +325,8 @@ describe('快车完成结果与下一轮额度严格区分', () => {
   it('完成摘要在预览数字和额度提示之前，额度警告只用于尚未结束的新批次', () => {
     expect(view.indexOf('class="creation-result-panel"')).toBeLessThan(view.indexOf('class="preview-metrics"'))
     expect(view).toContain('v-if="!createdFullResult && !fullCreateLoading && preview.limitWarnings.length"')
-    expect(view).toContain(':disabled="fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"')
+    expect(view).toContain(':loading="creationConfirmLoading"')
+    expect(view).toContain("creationConfirmLoading ? '正在校验配置'")
+    expect(view).toContain(':disabled="creationConfirmLoading || fullCreateLoading || (Boolean(createdFullResult) && !canRetryFullCreation) || preview.limitWarnings.length > 0"')
   })
 })
