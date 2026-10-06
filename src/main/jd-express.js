@@ -339,6 +339,12 @@ function readLimit(payload) {
   }
 }
 
+function hasLimitPayload(payload) {
+  const ext = payload?.ext || payload?.data?.ext || payload?.data
+  return !!ext && typeof ext === 'object' && ['pinTotal', 'pinCurrent', 'pinSurplus']
+    .some((key) => Number.isFinite(Number(ext[key])))
+}
+
 async function waitForRateLimit(onProgress, reason, totalMs = SKU_RATE_LIMIT_WAIT_MS) {
   let secondsRemaining = Math.ceil(totalMs / 1000)
   while (secondsRemaining > 0) {
@@ -427,34 +433,38 @@ async function preflightStore(storeId, dependencies = {}) {
     dependencies.refreshCookies
   )
   const loginPayload = assertSuccess(
-    await requestJson(platformSession, JZT_LOGIN_URL, { method: 'POST' }),
+    await requestJson(platformSession, JZT_LOGIN_URL, { method: 'POST', timeoutMs: 12000 }),
     1
   )
 
   const limitEntries = []
   const limitErrors = []
-  for (const [key, request] of Object.entries(LIMIT_REQUESTS)) {
+  const limitResults = await Promise.all(Object.entries(LIMIT_REQUESTS).map(async ([key, request]) => {
     try {
       const payload = await requestJson(platformSession, request.url, {
         method: 'GET',
-        body: request.body
+        body: request.body,
+        timeoutMs: 12000
       })
       if (isJdSessionExpiredPayload(payload)) {
         throw createRequestError('店铺登录已失效，正在尝试恢复登录状态', 'JD_SESSION_EXPIRED')
       }
-      if (payload?.success === false || !payload?.ext) {
+      if (payload?.success === false || !hasLimitPayload(payload)) {
         throw createRequestError(getMessage(payload, `读取${key}额度失败`))
       }
-      limitEntries.push([key, readLimit(payload)])
+      return { key, limit: readLimit(payload) }
     } catch (error) {
       if (isJdSessionFailure(error)) throw error
-      limitEntries.push([key, readLimit({})])
-      limitErrors.push({ key, message: error?.message || '读取失败' })
       runtimeLog.writeLog(
         'JD_EXPRESS',
         `action=preflight_limit store_id=${normalizedStoreId} limit=${key} result=unavailable message=${logSafe(error?.message)}`
       )
+      return { key, limit: readLimit({}), error: error?.message || '读取失败' }
     }
+  }))
+  for (const result of limitResults) {
+    limitEntries.push([result.key, result.limit])
+    if (result.error) limitErrors.push({ key: result.key, message: result.error })
   }
 
   return {
@@ -2111,6 +2121,10 @@ function registerJdExpressIpc(ipcMain, dependencies = {}) {
 
   ipcMain.handle('jd-express-preflight', async (_event, payload = {}) => {
     const startedAt = Date.now()
+    runtimeLog.writeLog(
+      'JD_EXPRESS',
+      `action=preflight store_id=${payload.storeId || 0} result=start`
+    )
     try {
       const result = await runRecoverableRead(
         'preflight',

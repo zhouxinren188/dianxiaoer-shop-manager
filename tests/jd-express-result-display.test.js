@@ -47,6 +47,8 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
     creationVerification: { status: 'idle' }, keywordPrepareProgress: {},
     manualRecovery: { token: '', expiresAt: 0 }, manualRecoveryLoading: ref(false),
     preparedFullResult: ref({}), preparedKeywordResult: ref({}), preflightLoading: ref(false),
+    preflightRequestId: 0,
+    resetLimits: vi.fn(),
     preflight: { pin: 'test', limitsAvailable: true, limits: { campaign: { surplus: 120 }, keyword: { surplus: 34935 } } },
     nextTick: async () => {},
     window: { electronAPI: { invoke: vi.fn(async channel => channel === 'jd-express-create-full' ? createResult : quotaResult) } }

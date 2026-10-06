@@ -59,16 +59,29 @@
           <div class="card-title">
             <span>店铺投放环境</span>
             <div class="status-tags">
-              <el-tag v-if="preflight.pin" type="success">已登录：{{ preflight.pin }}</el-tag>
-              <el-tag v-else type="info">待检测</el-tag>
+              <el-tag v-if="preflight.pin && preflight.limitsAvailable" type="success">
+                已登录：{{ preflight.pin }}
+              </el-tag>
+              <el-button
+                v-else-if="storeId"
+                type="primary"
+                plain
+                size="small"
+                :loading="preflightLoading"
+                @click="runPreflight({ silent: false })"
+              >
+                {{ preflightLoading ? '检测中' : '重新检测' }}
+              </el-button>
+              <el-tag v-else type="info">请选择店铺</el-tag>
             </div>
           </div>
         </template>
         <div class="limit-grid">
           <div v-for="item in limitItems" :key="item.key" class="limit-item">
             <span>{{ item.label }}</span>
-            <strong>{{ item.surplus }}</strong>
-            <small>已用 {{ item.current }} / 总量 {{ item.total }}</small>
+            <strong>{{ preflight.limitsAvailable ? item.surplus : '--' }}</strong>
+            <small v-if="preflight.limitsAvailable">已用 {{ item.current }} / 总量 {{ item.total }}</small>
+            <small v-else>{{ preflightLoading ? '正在读取投放环境' : '尚未完成检测' }}</small>
           </div>
         </div>
       </el-card>
@@ -1182,6 +1195,7 @@ const storeId = ref(null)
 const storeLoading = ref(false)
 let storeRequestId = 0
 const preflightLoading = ref(false)
+let preflightRequestId = 0
 const deleteCampaignLoading = ref(false)
 const signingLoading = ref(false)
 const signingReady = ref(false)
@@ -2325,8 +2339,12 @@ async function loadStores() {
     )
     stores.value = nextStores
 
-    // 列表刷新不应重置仍有效店铺正在编辑的快车配置。
-    if (storeId.value != null && currentStoreStillAvailable) return
+    // 列表刷新不应重置仍有效店铺正在编辑的快车配置，但必须重新检测投放环境。
+    // 否则 keep-alive 恢复后会保留店铺选择，却一直停留在“待检测”。
+    if (storeId.value != null && currentStoreStillAvailable) {
+      await runPreflight({ silent: true })
+      return
+    }
 
     if (nextStores.length === 1) {
       storeId.value = nextStores[0].id
@@ -2345,6 +2363,8 @@ async function loadStores() {
 }
 
 async function handleStoreChange(value) {
+  preflightRequestId += 1
+  preflightLoading.value = false
   deleteCampaignLoading.value = false
   preflight.pin = ''
   preflight.limitsAvailable = false
@@ -2797,12 +2817,16 @@ function startNewCreationDraft() {
 
 async function runPreflight(options = {}) {
   if (!ensureStoreSelected()) return false
+  const targetStoreId = storeId.value
+  const requestId = ++preflightRequestId
   preflightLoading.value = true
   try {
-    const result = await window.electronAPI.invoke('jd-express-preflight', { storeId: storeId.value })
+    const result = await window.electronAPI.invoke('jd-express-preflight', { storeId: targetStoreId })
+    if (requestId !== preflightRequestId || String(targetStoreId) !== String(storeId.value)) return false
     if (!result?.success) throw new Error(result?.message || '检测失败')
+    if (!result.pin) throw new Error('京准通登录信息读取失败，请重新检测')
     preflight.pin = result.pin || ''
-    preflight.limitsAvailable = result.limitsAvailable !== false
+    preflight.limitsAvailable = result.limitsAvailable === true
     Object.assign(preflight.limits, result.limits || {})
     if (!options.preserveKeywordUsage && preflight.limitsAvailable && Number(preflight.limits.keyword.surplus) > 0) {
       config.keywordTotalUsage = Number(preflight.limits.keyword.surplus)
@@ -2812,12 +2836,16 @@ async function runPreflight(options = {}) {
     } else if (!options.silent) {
       ElMessage.success('京准通投放环境检测通过')
     }
-    return true
+    return Boolean(preflight.pin && preflight.limitsAvailable)
   } catch (error) {
+    if (requestId !== preflightRequestId || String(targetStoreId) !== String(storeId.value)) return false
+    preflight.pin = ''
+    preflight.limitsAvailable = false
+    resetLimits()
     if (!options.silent) ElMessage.error(error.message || '检测失败')
     return false
   } finally {
-    preflightLoading.value = false
+    if (requestId === preflightRequestId) preflightLoading.value = false
   }
 }
 
@@ -3066,8 +3094,8 @@ async function goNext() {
     return
   }
   if (activeStep.value === 0) {
-    if (!preflight.pin) {
-      const passed = await runPreflight({ silent: true })
+    if (!preflight.pin || !preflight.limitsAvailable) {
+      const passed = await runPreflight({ silent: false })
       if (!passed) return
     }
     if (!selectedProducts.size) {
