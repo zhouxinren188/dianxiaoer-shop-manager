@@ -9,6 +9,10 @@ const storeApiSource = readFileSync(
   new URL('../src/renderer/src/api/store.js', import.meta.url),
   'utf8'
 )
+const jdExpressSource = readFileSync(
+  new URL('../src/renderer/src/views/operations/JdExpress.vue', import.meta.url),
+  'utf8'
+)
 const appLayoutSource = readFileSync(
   new URL('../src/renderer/src/layout/AppLayout.vue', import.meta.url),
   'utf8'
@@ -92,6 +96,18 @@ describe('店铺列表登录切换恢复', () => {
     expect(storeManageSource).toContain('onActivated(() => {')
     expect(storeManageSource).toContain('scheduleStoreRefresh()')
     expect(storeManageSource).toContain('不能继续展示旧登录会话留下的空列表')
+  })
+
+  it('京东快车每次从 keep-alive 恢复时刷新店铺并保留有效选择', () => {
+    const activatedBlock = jdExpressSource.slice(
+      jdExpressSource.indexOf('onActivated(() => {'),
+      jdExpressSource.indexOf('watch(activeStep')
+    )
+    expect(activatedBlock).toContain('void loadStores()')
+    expect(jdExpressSource).toContain('currentStoreStillAvailable')
+    expect(jdExpressSource).toContain('if (storeId.value != null && currentStoreStillAvailable) {')
+    expect(jdExpressSource).toContain('await runPreflight({ silent: true, preserveKeywordUsage: true })')
+    expect(jdExpressSource).toContain('await handleStoreChange(null)')
   })
 
   it('单个可选 IPC 通道不兼容时不会中断页面挂载', () => {

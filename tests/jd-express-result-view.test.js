@@ -16,6 +16,10 @@ const artifactRoot = path.resolve('node_modules/.cache/jd-express-result-qa')
 const scopeId = 'data-v-jd-result-qa'
 const fixture = { success: true, runId: 'local-qa-no-advertising-request', successCampaignCount: 60,
   campaignCount: 61, successUnitCount: 127, unitCount: 133, failureCount: 6,
+  skippedKeywordCount: 13143,
+  keywordSummary: { actualKeywordCount: 25969 },
+  units: [{ keywordCount: 11738 }],
+  creationConfigSnapshot: { config: { maxCustomKeywordBid: 0.3 } },
   failures: [{ planName: '测试计划', unitName: '测试单元', message: '测试：关键词出价低于底价', stage: 'submit' }] }
 
 async function renderFixture(result) {
@@ -64,7 +68,11 @@ describe('真实快车预览组件的完成状态展示', () => {
   it('顶部明确部分成功，缺少关键词单独提示，不显示整批额度错误', async () => {
     const { html, css } = await renderFixture(fixture)
     expect(html).toContain('本轮任务已结束：部分成功')
-    expect(html).toContain('成功 60/61 个计划、127/133 个单元；失败 6 个单元')
+    expect(html).toContain('计划：成功 60/61 个。推广单元：成功 127/133 个，失败 6 个。')
+    expect(html).toContain('实际准备')
+    expect(html).toContain('出价规则过滤')
+    expect(html).toContain('成功写入')
+    expect(html).toContain('这个数字不是创建成功数量')
     expect(html).toContain('后台核验发现：关键词少 4 个')
     expect(html).not.toContain('当前仅剩 0 个额度')
     expect(html.indexOf('本轮任务已结束：部分成功')).toBeLessThan(html.indexOf('preview-metrics'))
@@ -73,9 +81,11 @@ describe('真实快车预览组件的完成状态展示', () => {
     writeFileSync(path.join(artifactRoot, 'partial.html'), `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>快车结果展示本机检查</title><style>${elementCss}\n${css}\nbody{margin:0;background:#f1f3f7;font-family:Microsoft YaHei,Arial}.jd-express-page{padding:16px}</style>${html}</html>`)
   })
   it.each([
-    [{ ...fixture, successUnitCount: 0, successCampaignCount: 0, failureCount: 133 }, '全部创建失败'],
-    [{ ...fixture, successUnitCount: 133, successCampaignCount: 61, failureCount: 0 }, '全部创建成功'],
-    [{ ...fixture, successUnitCount: 0, successCampaignCount: 0, failureCount: 0, skippedUnitCount: 133 }, '全部跳过']
+    [{ ...fixture, successUnitCount: 0, successCampaignCount: 0, failureCount: 133, units: [] }, '全部创建失败'],
+    [{ ...fixture, successUnitCount: 133, successCampaignCount: 61, failureCount: 0,
+      skippedKeywordCount: 0, keywordSummary: { actualKeywordCount: 11738 } }, '全部创建成功'],
+    [{ ...fixture, successUnitCount: 0, successCampaignCount: 0, failureCount: 0,
+      skippedUnitCount: 133, units: [] }, '全部跳过']
   ])('终态在真实模板中正确显示：%s', async (result, expected) => {
     const { html } = await renderFixture(result)
     expect(html).toContain(`本轮任务已结束：${expected}`)

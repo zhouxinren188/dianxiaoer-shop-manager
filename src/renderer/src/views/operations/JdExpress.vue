@@ -1,38 +1,61 @@
 <template>
   <div class="jd-express-page">
-    <div class="page-header">
-      <div>
-        <h2>京东快车</h2>
-        <p>集中管理京准通快车投放工具</p>
+    <el-card class="status-card environment-card" shadow="never">
+      <div class="environment-card-header">
+        <div class="environment-status-title">
+          <strong>店铺投放环境</strong>
+          <el-button
+            v-if="storeId && !preflight.limitsAvailable"
+            type="primary"
+            plain
+            size="small"
+            :loading="preflightLoading"
+            @click="runPreflight({ silent: false })"
+          >
+            {{ preflightLoading ? '检测中' : '重新检测' }}
+          </el-button>
+          <el-tag v-else-if="preflight.limitsAvailable" type="success">
+            {{ preflight.pin ? `已登录：${preflight.pin}` : '投放环境已就绪' }}
+          </el-tag>
+          <el-tag v-else type="info">请选择店铺</el-tag>
+        </div>
+        <div class="header-actions">
+          <el-select
+            v-model="storeId"
+            placeholder="请选择京东店铺"
+            filterable
+            :loading="storeLoading"
+            class="store-select"
+          >
+            <el-option
+              v-for="store in stores"
+              :key="store.id"
+              :label="store.name"
+              :value="store.id"
+            />
+          </el-select>
+          <el-button
+            type="danger"
+            plain
+            :loading="deleteCampaignLoading"
+            :disabled="fullCreateLoading || keywordPrepareLoading || fullPrepareLoading"
+            @click="confirmDeleteAllCampaigns"
+          >
+            一键删除计划
+          </el-button>
+          <el-button type="primary" plain @click="openJzt">打开京准通</el-button>
+        </div>
       </div>
-      <div class="header-actions">
-        <el-select
-          v-model="storeId"
-          placeholder="请选择京东店铺"
-          filterable
-          :loading="storeLoading"
-          class="store-select"
-          @change="handleStoreChange"
-        >
-          <el-option
-            v-for="store in stores"
-            :key="store.id"
-            :label="store.name"
-            :value="store.id"
-          />
-        </el-select>
-        <el-button
-          type="danger"
-          plain
-          :loading="deleteCampaignLoading"
-          :disabled="fullCreateLoading || keywordPrepareLoading || fullPrepareLoading"
-          @click="confirmDeleteAllCampaigns"
-        >
-          一键删除计划
-        </el-button>
-        <el-button type="primary" plain @click="openJzt">打开京准通</el-button>
+
+      <div class="limit-grid">
+        <div v-for="item in limitItems" :key="item.key" class="limit-item">
+          <span>{{ item.label }}</span>
+          <strong>{{ preflight.limitsAvailable ? item.surplus : '--' }}</strong>
+          <small v-if="preflight.limitsAvailable">已用 {{ item.current }} / 总量 {{ item.total }}</small>
+          <small v-else>{{ preflightLoading ? '正在读取投放环境' : '尚未完成检测' }}</small>
+        </div>
       </div>
-    </div>
+    </el-card>
 
     <div class="tool-tabs">
       <button
@@ -54,38 +77,6 @@
     </div>
 
     <div v-show="activeTool === 'roi' || activeTool === 'custom'" class="roi-tool-content">
-      <el-card class="status-card" shadow="never">
-        <template #header>
-          <div class="card-title">
-            <span>店铺投放环境</span>
-            <div class="status-tags">
-              <el-tag v-if="preflight.pin && preflight.limitsAvailable" type="success">
-                已登录：{{ preflight.pin }}
-              </el-tag>
-              <el-button
-                v-else-if="storeId"
-                type="primary"
-                plain
-                size="small"
-                :loading="preflightLoading"
-                @click="runPreflight({ silent: false })"
-              >
-                {{ preflightLoading ? '检测中' : '重新检测' }}
-              </el-button>
-              <el-tag v-else type="info">请选择店铺</el-tag>
-            </div>
-          </div>
-        </template>
-        <div class="limit-grid">
-          <div v-for="item in limitItems" :key="item.key" class="limit-item">
-            <span>{{ item.label }}</span>
-            <strong>{{ preflight.limitsAvailable ? item.surplus : '--' }}</strong>
-            <small v-if="preflight.limitsAvailable">已用 {{ item.current }} / 总量 {{ item.total }}</small>
-            <small v-else>{{ preflightLoading ? '正在读取投放环境' : '尚未完成检测' }}</small>
-          </div>
-        </div>
-      </el-card>
-
       <el-card class="work-card" shadow="never">
         <div class="workflow-nav">
           <div
@@ -744,26 +735,47 @@
                       <p>默认不限，也可指定投放区域</p>
                     </div>
                   </div>
-                  <el-form-item label="地域设置" prop="areaType" class="compact-control">
-                    <el-radio-group v-model="config.areaType" @change="handleAreaTypeChange">
-                      <el-radio :value="1">不限</el-radio>
-                      <el-radio :value="2">特定区域</el-radio>
-                    </el-radio-group>
-                  </el-form-item>
-                  <el-form-item v-if="config.areaType === 2" label="选择投放区域" prop="areaIds">
-                    <div v-loading="areaLoading" class="area-selector">
-                      <el-checkbox v-model="allAreasSelected" @change="toggleAllAreas">全选/全不选</el-checkbox>
-                      <el-tree
-                        ref="areaTreeRef"
-                        :data="areaTree"
-                        node-key="id"
-                        :props="{ label: 'name', children: 'children' }"
-                        show-checkbox
-                        default-expand-all
-                        @check="handleAreaCheck"
-                      />
-                    </div>
-                  </el-form-item>
+                  <div class="area-config-panel">
+                    <el-form-item prop="areaType" class="area-mode-form-item">
+                      <div class="area-mode-row">
+                        <div class="area-mode-copy">
+                          <strong>投放范围</strong>
+                          <small>全国投放，或按地区精确选择城市</small>
+                        </div>
+                        <el-radio-group
+                          v-model="config.areaType"
+                          class="area-mode-group"
+                          @change="handleAreaTypeChange"
+                        >
+                          <el-radio-button :value="1">全国不限</el-radio-button>
+                          <el-radio-button :value="2">指定区域</el-radio-button>
+                        </el-radio-group>
+                      </div>
+                    </el-form-item>
+                    <el-form-item v-if="config.areaType === 2" prop="areaIds" class="area-tree-form-item">
+                      <div v-loading="areaLoading" class="area-selector">
+                        <div class="area-selector-toolbar">
+                          <div>
+                            <strong>选择投放区域</strong>
+                            <small>按大区展开勾选，可选择整个省份或具体城市</small>
+                          </div>
+                          <div class="area-selector-actions">
+                            <el-tag type="primary" effect="plain">已选 {{ config.areaIds.length }} 个</el-tag>
+                            <el-checkbox v-model="allAreasSelected" @change="toggleAllAreas">全部区域</el-checkbox>
+                          </div>
+                        </div>
+                        <el-tree
+                          ref="areaTreeRef"
+                          :data="areaTree"
+                          node-key="id"
+                          :props="{ label: 'name', children: 'children' }"
+                          show-checkbox
+                          default-expand-all
+                          @check="handleAreaCheck"
+                        />
+                      </div>
+                    </el-form-item>
+                  </div>
                 </section>
               </div>
 
@@ -826,6 +838,21 @@
               :closable="false"
               show-icon
             />
+            <div v-if="creationResultSummary.keywordBreakdown" class="creation-keyword-breakdown">
+              <div class="creation-keyword-flow" aria-label="关键词创建结果">
+                <div
+                  v-for="item in creationResultSummary.keywordBreakdown.steps"
+                  :key="item.key"
+                  class="creation-keyword-step"
+                  :class="`is-${item.tone}`"
+                >
+                  <span>{{ item.label }}</span>
+                  <strong>{{ item.value.toLocaleString('zh-CN') }}</strong>
+                  <em>个关键词</em>
+                </div>
+              </div>
+              <p class="creation-keyword-note">{{ creationResultSummary.keywordBreakdown.note }}</p>
+            </div>
             <p class="creation-result-hint">{{ creationResultSummary.safetyHint }}</p>
             <p v-if="creationConfigSnapshotText" class="creation-result-verification">{{ creationConfigSnapshotText }}</p>
             <p v-if="creationVerificationMessage" class="creation-result-verification">{{ creationVerificationMessage }}</p>
@@ -1140,7 +1167,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, EditPen, MagicStick, QuestionFilled, TrendCharts } from '@element-plus/icons-vue'
 import { fetchStores } from '@/api/store'
@@ -1195,6 +1222,8 @@ const stores = ref([])
 const storeId = ref(null)
 const storeLoading = ref(false)
 let storeRequestId = 0
+let storeSelectionRequestId = 0
+let skipNextStoreWatch = false
 const preflightLoading = ref(false)
 let preflightRequestId = 0
 const deleteCampaignLoading = ref(false)
@@ -1241,7 +1270,7 @@ const allProductLoading = ref(false)
 const retryLoading = ref(false)
 const configFormRef = ref(null)
 const productTableRef = ref(null)
-const productTableHeight = ref(560)
+const productTableHeight = ref(360)
 const previewTableHeight = ref(460)
 const areaTreeRef = ref(null)
 const areaTree = ref([])
@@ -1682,7 +1711,7 @@ function updateProductTableHeight() {
     const tableTop = tableElement.getBoundingClientRect().top
     const paginationAndBottomSpace = 58
     const availableHeight = Math.floor(contentBottom - tableTop - paginationAndBottomSpace)
-    productTableHeight.value = Math.max(480, Math.min(720, availableHeight))
+    productTableHeight.value = Math.max(240, Math.min(720, availableHeight))
   })
 }
 
@@ -1727,6 +1756,9 @@ onMounted(() => {
   removeCreationProgressListener = window.electronAPI.onUpdate('jd-express-creation-progress', (progress) => {
     const progressMode = progress?.createMode === 'custom' ? 'custom' : 'roi'
     if (progress?.storeId && !storeId.value) {
+      // 后台任务恢复店铺时由本监听器恢复创建进度，不能再触发普通换店流程，
+      // 否则 handleStoreChange 会把刚恢复的 loading、步骤和进度清空。
+      skipNextStoreWatch = true
       storeId.value = progress.storeId
       activeTool.value = progressMode
       restoreConfig(progress.storeId, progressMode, 'creation_progress_store_restore')
@@ -1787,6 +1819,19 @@ onActivated(() => {
   }
   readPreparationToken()
 })
+
+// 店铺既可能由用户下拉选择，也可能由单店自动选择、任务恢复或热更新恢复。
+// 统一监听 storeId，避免只依赖 el-select 的 change 事件导致界面已有店铺、
+// 但投放环境没有自动检测。immediate 还能覆盖开发版热更新保留了店铺值的场景。
+watch(storeId, (value, previousValue) => {
+  if (skipNextStoreWatch) {
+    skipNextStoreWatch = false
+    return
+  }
+  if (value == null && previousValue === undefined) return
+  if (String(value ?? '') === String(previousValue ?? '')) return
+  void handleStoreChange(value)
+}, { immediate: true })
 
 watch(activeStep, (step) => {
   if (step === 0) updateProductTableHeight()
@@ -2344,15 +2389,15 @@ async function loadStores() {
     // 列表刷新不应重置仍有效店铺正在编辑的快车配置，但必须重新检测投放环境。
     // 否则 keep-alive 恢复后会保留店铺选择，却一直停留在“待检测”。
     if (storeId.value != null && currentStoreStillAvailable) {
-      await runPreflight({ silent: true })
+      await runPreflight({ silent: true, preserveKeywordUsage: true })
       return
     }
 
     if (nextStores.length === 1) {
       storeId.value = nextStores[0].id
-      await handleStoreChange(storeId.value)
     } else if (storeId.value != null) {
       // 原选择已被删除、停用或移出当前用户，清除其残留配置和商品状态。
+      skipNextStoreWatch = true
       storeId.value = null
       await handleStoreChange(null)
     }
@@ -2365,6 +2410,8 @@ async function loadStores() {
 }
 
 async function handleStoreChange(value) {
+  const targetStoreId = value
+  const selectionRequestId = ++storeSelectionRequestId
   preflightRequestId += 1
   preflightLoading.value = false
   deleteCampaignLoading.value = false
@@ -2409,10 +2456,12 @@ async function handleStoreChange(value) {
   creationStartedAt.value = 0
   creationSubmissionStarted.value = false
   Object.assign(keywordPrepareProgress, { phase: '', unitIndex: 0, totalUnits: 0, secondsRemaining: 0 })
-  restoreConfig(value, activeTool.value, 'store_change')
-  if (!value) return
+  restoreConfig(targetStoreId, activeTool.value, 'store_change')
+  if (!targetStoreId) return
   await runPreflight({ silent: true })
+  if (selectionRequestId !== storeSelectionRequestId || String(targetStoreId) !== String(storeId.value)) return
   if (config.areaType === 2) await loadAreas()
+  if (selectionRequestId !== storeSelectionRequestId || String(targetStoreId) !== String(storeId.value)) return
   if (activeTool.value === 'custom') await loadCrowds(true)
 }
 
@@ -2566,6 +2615,44 @@ async function prepareFullKeywords() {
   }
 }
 
+function buildCreationConfirmContent(details) {
+  const metric = (label, value, suffix) => h('div', { class: 'creation-confirm-metric' }, [
+    h('span', label),
+    h('strong', [String(value), h('small', suffix)])
+  ])
+  const detail = (label, value) => h('div', { class: 'creation-confirm-detail' }, [
+    h('span', label),
+    h('strong', String(value))
+  ])
+  return h('div', { class: 'creation-confirm-content' }, [
+    h('div', { class: 'creation-confirm-intro' }, [
+      h('i', '!'),
+      h('div', [
+        h('strong', details.preparationText),
+        h('span', '请确认数量与投放参数，确认后将开始真实创建。')
+      ])
+    ]),
+    h('div', { class: 'creation-confirm-metrics' }, [
+      metric('计划', details.campaignCount, '个'),
+      metric('推广单元', details.unitCount, '个'),
+      metric('商品', details.productCount, '个')
+    ]),
+    h('div', { class: 'creation-confirm-details' }, [
+      detail('开始日期', details.startDate),
+      detail('每日预算', details.budgetText),
+      detail('投放时段', details.timeRangeText)
+    ]),
+    h('div', { class: 'creation-confirm-strategy' }, [
+      h('span', details.modeLabel),
+      ...details.strategyLines.map((line) => h('p', line))
+    ]),
+    h('div', { class: 'creation-confirm-snapshot' }, [
+      h('span', '配置快照'),
+      h('code', details.snapshotId)
+    ])
+  ])
+}
+
 async function createAllPlans() {
   if (!ensureStoreSelected() || creationConfirmLoading.value || fullCreateLoading.value) return
   if (createdFullResult.value && !canRetryFullCreation.value) {
@@ -2669,19 +2756,35 @@ async function createAllPlans() {
     const deliveryText = Number(configSnapshot.automatedBiddingType) === 0
       ? `关闭全能调价 · 匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}`
       : `全能调价 · 最高溢价 ${Number(configSnapshot.premiumCoef || 0)}%`
-    const createModeText = requestedTool === 'custom'
-      ? `自定义投放（${keywordBidText}，${deliveryText}，智能匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}）`
-      : `目标投产比 ${bidModeLabel.value}`
     const snapshotTimeRangeSummary = summarizeTimeRangeSchedule(configSnapshot.timeRangeMode, configSnapshot.timeRangeSchedule)
     try {
       await ElMessageBox.confirm(
-        `配置快照 ${creationSnapshot.id}：将${savedPreparationToken ? '复用已准备的关键词' : '自动准备关键词'}并真实创建 ${summary.campaignCount} 个计划、${summary.unitCount} 个推广单元，包含 ${summary.productCount} 个商品；开始日期 ${configSnapshot.startDate}，${budgetText}，${snapshotTimeRangeSummary}，${createModeText}。是否继续？`,
+        buildCreationConfirmContent({
+          preparationText: savedPreparationToken ? '复用已准备的关键词并继续创建' : '自动准备关键词并批量创建',
+          campaignCount: summary.campaignCount,
+          unitCount: summary.unitCount,
+          productCount: summary.productCount,
+          startDate: configSnapshot.startDate,
+          budgetText,
+          timeRangeText: snapshotTimeRangeSummary,
+          modeLabel: requestedTool === 'custom' ? '自定义投放' : '目标投产比',
+          strategyLines: requestedTool === 'custom'
+            ? [
+                keywordBidText,
+                deliveryText,
+                ...(Number(configSnapshot.automatedBiddingType) === 0
+                  ? []
+                  : [`智能匹配出价 ¥${Number(configSnapshot.inSearchFee || 0).toFixed(1)}`])
+              ]
+            : [`目标投产比 ${bidModeLabel.value}`],
+          snapshotId: creationSnapshot.id
+        }),
         '确认批量创建京东快车计划',
         {
           confirmButtonText: '确认创建全部计划',
           cancelButtonText: '取消',
           type: 'warning',
-          dangerouslyUseHTMLString: false
+          customClass: 'jd-express-create-message-box'
         }
       )
     } catch {
@@ -2775,7 +2878,7 @@ async function createAllPlans() {
     } else if (result.timeRangeFailureCount) {
       ElMessage.warning(`计划和单元创建完成；${result.timeRangeFailureCount} 个计划的投放时段设置失败，可直接重试失败步骤`)
     } else if (result.failureCount || result.skippedKeywordCount) {
-      ElMessage.warning(`批量创建完成：成功 ${result.successCampaignCount}/${result.campaignCount} 个计划、${result.successUnitCount}/${result.unitCount} 个单元，失败 ${result.failureCount} 个单元，跳过 ${result.skippedKeywordCount || 0} 个关键词、${result.skippedUnitCount || 0} 个单元`)
+      ElMessage.warning(summarizeCreationResult(result)?.toastMessage || '批量创建已结束，请查看本轮创建结果')
     } else {
       ElMessage.success(`批量创建成功：${result.successCampaignCount} 个计划、${result.successUnitCount} 个单元`)
     }
@@ -2887,7 +2990,6 @@ async function runPreflight(options = {}) {
     const result = await window.electronAPI.invoke('jd-express-preflight', { storeId: targetStoreId })
     if (requestId !== preflightRequestId || String(targetStoreId) !== String(storeId.value)) return false
     if (!result?.success) throw new Error(result?.message || '检测失败')
-    if (!result.pin) throw new Error('京准通登录信息读取失败，请重新检测')
     preflight.pin = result.pin || ''
     preflight.limitsAvailable = result.limitsAvailable === true
     Object.assign(preflight.limits, result.limits || {})
@@ -2899,7 +3001,9 @@ async function runPreflight(options = {}) {
     } else if (!options.silent) {
       ElMessage.success('京准通投放环境检测通过')
     }
-    return Boolean(preflight.pin && preflight.limitsAvailable)
+    // 四项额度全部读取成功已经证明 Cookie 与京准通后台连通；pin 仅用于展示，
+    // 京东首次响应偶尔不返回昵称，不能因此丢弃已经读取到的有效额度。
+    return Boolean(preflight.limitsAvailable)
   } catch (error) {
     if (requestId !== preflightRequestId || String(targetStoreId) !== String(storeId.value)) return false
     preflight.pin = ''
@@ -3157,7 +3261,7 @@ async function goNext() {
     return
   }
   if (activeStep.value === 0) {
-    if (!preflight.pin || !preflight.limitsAvailable) {
+    if (!preflight.limitsAvailable) {
       const passed = await runPreflight({ silent: false })
       if (!passed) return
     }
@@ -3551,28 +3655,12 @@ function formatDuration(milliseconds) {
   padding: 0;
 }
 
-.page-header {
+.environment-card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 20px 24px;
-  margin-bottom: 16px;
-  background: #fff;
-  border: 1px solid #e5e9f2;
-  border-radius: 10px;
-}
-
-.page-header h2 {
-  margin: 0 0 6px;
-  font-size: 22px;
-  color: #1d2433;
-}
-
-.page-header p {
-  margin: 0;
-  color: #9098a8;
-  font-size: 13px;
+  margin-bottom: 12px;
 }
 
 .header-actions {
@@ -3589,7 +3677,7 @@ function formatDuration(milliseconds) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
+  margin-top: 16px;
 }
 
 .tool-tab {
@@ -3661,10 +3749,30 @@ function formatDuration(milliseconds) {
   border-color: rgba(255, 255, 255, 0.35);
 }
 
-.status-card,
 .work-card {
   margin-top: 16px;
   border-radius: 10px;
+}
+
+.status-card {
+  margin: 0;
+  border-radius: 10px;
+}
+
+.environment-card :deep(.el-card__body) {
+  padding: 14px 18px 16px;
+}
+
+.environment-status-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.environment-status-title strong {
+  color: #25324b;
+  font-size: 15px;
 }
 
 .work-card :deep(.el-card__body) {
@@ -3758,18 +3866,6 @@ function formatDuration(milliseconds) {
 
 .workflow-step.done .workflow-copy small {
   color: #7c91cc;
-}
-
-.card-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-weight: 600;
-}
-
-.status-tags {
-  display: flex;
-  gap: 8px;
 }
 
 .limit-grid {
@@ -4823,14 +4919,115 @@ function formatDuration(milliseconds) {
   margin-top: 10px;
 }
 
+.area-config-panel {
+  padding: 14px;
+  margin-bottom: 16px;
+  background: #f8faff;
+  border: 1px solid #e3e9f6;
+  border-radius: 9px;
+}
+
+.area-mode-form-item,
+.area-tree-form-item {
+  margin-bottom: 0 !important;
+}
+
+.area-mode-form-item :deep(.el-form-item__content),
+.area-tree-form-item :deep(.el-form-item__content) {
+  display: block;
+  width: 100%;
+}
+
+.area-mode-row,
+.area-selector-toolbar,
+.area-selector-actions {
+  display: flex;
+  align-items: center;
+}
+
+.area-mode-row,
+.area-selector-toolbar {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.area-mode-copy,
+.area-selector-toolbar > div:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.area-mode-copy strong,
+.area-selector-toolbar strong {
+  color: #344054;
+  font-size: 14px;
+}
+
+.area-mode-copy small,
+.area-selector-toolbar small {
+  color: #8a94a5;
+  font-size: 12px;
+}
+
+.area-mode-group {
+  flex-shrink: 0;
+}
+
 .area-selector {
-  min-height: 150px;
-  max-height: 320px;
-  padding: 10px 12px;
+  min-height: 190px;
+  max-height: 390px;
+  padding: 0 14px 14px;
+  margin-top: 14px;
   overflow: auto;
   background: #fff;
   border: 1px solid #dfe4ec;
-  border-radius: 6px;
+  border-radius: 8px;
+}
+
+.area-selector-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 12px 0;
+  margin-bottom: 10px;
+  background: #fff;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.area-selector-actions {
+  flex-shrink: 0;
+  gap: 16px;
+}
+
+.area-selector-actions :deep(.el-checkbox) {
+  margin-right: 0;
+}
+
+.area-selector :deep(.el-tree) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  align-items: start;
+  gap: 10px;
+  background: transparent;
+}
+
+.area-selector :deep(.el-tree > .el-tree-node) {
+  min-width: 0;
+  padding: 8px 10px;
+  background: #fbfcff;
+  border: 1px solid #edf0f6;
+  border-radius: 7px;
+}
+
+.area-selector :deep(.el-tree-node__content) {
+  min-height: 28px;
+  border-radius: 4px;
+}
+
+.area-selector :deep(.el-tree-node__content:hover) {
+  background: #eef3ff;
 }
 
 .unit-suffix {
@@ -4925,6 +5122,54 @@ function formatDuration(milliseconds) {
 
 .creation-result-panel :deep(.el-alert__description) {
   font-size: 14px;
+  line-height: 1.6;
+}
+
+.creation-keyword-breakdown {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dfe7f4;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.creation-keyword-flow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.creation-keyword-step {
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 5px;
+  background: #f5f7fa;
+}
+
+.creation-keyword-step span,
+.creation-keyword-step em {
+  display: block;
+  color: #77849a;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.creation-keyword-step strong {
+  display: block;
+  margin: 3px 0;
+  color: #303b4d;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.creation-keyword-step.is-warning strong { color: #d98b16; }
+.creation-keyword-step.is-success strong { color: #2b8a57; }
+.creation-keyword-step.is-danger strong { color: #cf4d4d; }
+
+.creation-keyword-note {
+  margin: 9px 0 0;
+  color: #5f6f86;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -5129,8 +5374,206 @@ function formatDuration(milliseconds) {
   padding: 0 26px 22px;
 }
 
+:global(.jd-express-create-message-box) {
+  width: 640px;
+  max-width: calc(100vw - 32px);
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 20px 54px rgba(24, 39, 75, 0.2);
+}
+
+:global(.jd-express-create-message-box .el-message-box__header) {
+  padding: 20px 24px 14px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+:global(.jd-express-create-message-box .el-message-box__title) {
+  color: #1f2a44;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+:global(.jd-express-create-message-box .el-message-box__content) {
+  padding: 18px 24px 8px;
+}
+
+:global(.jd-express-create-message-box .el-message-box__container) {
+  display: block;
+}
+
+:global(.jd-express-create-message-box .el-message-box__status) {
+  display: none;
+}
+
+:global(.jd-express-create-message-box .el-message-box__message) {
+  width: 100%;
+  padding: 0;
+}
+
+:global(.jd-express-create-message-box .el-message-box__btns) {
+  padding: 12px 24px 20px;
+  border-top: 1px solid #f0f2f6;
+}
+
+:global(.jd-express-create-message-box .el-message-box__btns .el-button) {
+  min-width: 96px;
+}
+
+:global(.creation-confirm-content) {
+  color: #4a5568;
+}
+
+:global(.creation-confirm-intro) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  color: #8a5a00;
+  background: #fff8e8;
+  border: 1px solid #f6dda5;
+  border-radius: 9px;
+}
+
+:global(.creation-confirm-intro i) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  color: #fff;
+  background: #e6a23c;
+  border-radius: 50%;
+  font-style: normal;
+  font-weight: 700;
+}
+
+:global(.creation-confirm-intro strong),
+:global(.creation-confirm-intro span) {
+  display: block;
+}
+
+:global(.creation-confirm-intro strong) {
+  margin-bottom: 3px;
+  color: #684100;
+  font-size: 14px;
+}
+
+:global(.creation-confirm-intro span) {
+  color: #9a6b1a;
+  font-size: 12px;
+}
+
+:global(.creation-confirm-metrics) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+:global(.creation-confirm-metric) {
+  padding: 12px 14px;
+  background: #f5f7fb;
+  border-radius: 9px;
+}
+
+:global(.creation-confirm-metric > span) {
+  display: block;
+  margin-bottom: 4px;
+  color: #8a93a3;
+  font-size: 12px;
+}
+
+:global(.creation-confirm-metric strong) {
+  color: #2b5aed;
+  font-size: 22px;
+}
+
+:global(.creation-confirm-metric small) {
+  margin-left: 3px;
+  color: #657087;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+:global(.creation-confirm-details) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+:global(.creation-confirm-detail) {
+  min-width: 0;
+  padding: 0 2px;
+}
+
+:global(.creation-confirm-detail span),
+:global(.creation-confirm-detail strong) {
+  display: block;
+}
+
+:global(.creation-confirm-detail span) {
+  margin-bottom: 4px;
+  color: #98a1b0;
+  font-size: 12px;
+}
+
+:global(.creation-confirm-detail strong) {
+  overflow: hidden;
+  color: #27344d;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.creation-confirm-strategy) {
+  padding: 12px 14px 8px;
+  margin-top: 14px;
+  background: #f8faff;
+  border: 1px solid #e2e9ff;
+  border-radius: 9px;
+}
+
+:global(.creation-confirm-strategy > span) {
+  display: inline-block;
+  padding: 2px 8px;
+  margin-bottom: 7px;
+  color: #2b5aed;
+  background: #eaf0ff;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+:global(.creation-confirm-strategy p) {
+  margin: 0 0 5px;
+  color: #566176;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+:global(.creation-confirm-snapshot) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 11px;
+  color: #a0a7b4;
+  font-size: 11px;
+}
+
+:global(.creation-confirm-snapshot code) {
+  overflow: hidden;
+  color: #8b95a7;
+  font-family: Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 1200px) {
-  .page-header {
+  .environment-card-header {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -5165,6 +5608,10 @@ function formatDuration(milliseconds) {
 
   .custom-control-grid {
     grid-template-columns: repeat(2, minmax(240px, 1fr));
+  }
+
+  .area-selector :deep(.el-tree) {
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
   }
 }
 
@@ -5230,6 +5677,16 @@ function formatDuration(milliseconds) {
   .crowd-setting-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .area-mode-row,
+  .area-selector-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .area-selector :deep(.el-tree) {
+    grid-template-columns: 1fr;
   }
 
   .summary-metrics {

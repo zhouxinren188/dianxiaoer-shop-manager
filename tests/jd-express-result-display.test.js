@@ -34,6 +34,7 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
       automatedBiddingType: 32768, premiumCoef: 30, timeRangeMode: 'all', timeRangeSchedule: [] },
     deliveryModeLabel: ref('智能调价'), bidModeLabel: ref('建议30%'), timeRangeSummary: ref('全天投放 · 100%'),
     timeRangeScheduleError: () => '', summarizeTimeRangeSchedule: () => '全天投放 · 100%',
+    summarizeCreationResult,
     readPreparationToken: () => resumePreparationToken.value,
     rememberPreparationToken: vi.fn(token => { resumePreparationToken.value = token }),
     clearPreparationToken: vi.fn(() => { resumePreparationToken.value = '' }),
@@ -41,6 +42,7 @@ function harness(createResult = result, quotaResult = { success: true, pin: 'tes
     ElMessage: { warning: vi.fn(), error: vi.fn(), success: vi.fn() }, showCenteredMessage: vi.fn(),
     toIpcPlainData: vi.fn(value => JSON.parse(JSON.stringify(value))),
     deepFreezeSnapshot: value => value,
+    buildCreationConfirmContent: vi.fn(value => value),
     configurationSnapshotSignature: value => JSON.stringify(value), createSnapshotId: () => 'jd-snapshot-1',
     configAuditView: () => ({ ...bindings.config }), recordConfigAudit: vi.fn(async () => ({ success: true })),
     configFormRef: ref({ validate: vi.fn(async () => {}) }), document: { activeElement: { blur: vi.fn() } },
@@ -79,7 +81,38 @@ describe('快车完成结果与下一轮额度严格区分', () => {
   })
   it('没有结束结果时不显示完成；数量来自实际返回值，不来自刷新后的预览', () => {
     expect(summarizeCreationResult(null)).toBeNull()
-    expect(summarizeCreationResult(result).description).toBe('成功 60/61 个计划、127/133 个单元；失败 6 个单元')
+    expect(summarizeCreationResult(result).description).toBe('计划：成功 60/61 个。推广单元：成功 127/133 个，失败 6 个。')
+  })
+  it('把准备、价格过滤、成功写入和随失败单元未写入的关键词分开说明', () => {
+    const summary = summarizeCreationResult({
+      successCampaignCount: 4,
+      campaignCount: 4,
+      successUnitCount: 296,
+      unitCount: 319,
+      failureCount: 23,
+      skippedKeywordCount: 13143,
+      keywordSummary: { actualKeywordCount: 25969 },
+      units: Array.from({ length: 296 }, (_, index) => ({ keywordCount: index === 0 ? 11738 : 0 })),
+      creationConfigSnapshot: { config: { maxCustomKeywordBid: 0.3 } }
+    })
+    expect(summary.keywordBreakdown).toMatchObject({
+      prepared: 25969,
+      filtered: 13143,
+      eligible: 12826,
+      written: 11738,
+      notWritten: 1088
+    })
+    expect(summary.keywordBreakdown.note).toContain('过滤，未提交到京东；这个数字不是创建成功数量')
+    expect(summary.keywordBreakdown.note).toContain('1,088 个关键词已通过出价过滤')
+    expect(summary.toastMessage).toContain('成功写入 11,738 个')
+  })
+  it('续传检查点缺少历史过滤后数量时不拼凑关键词总账', () => {
+    const summary = summarizeCreationResult({
+      successCampaignCount: 1, campaignCount: 1, successUnitCount: 1, unitCount: 1,
+      keywordSummary: { actualKeywordCount: 100 }, units: [{ keywordCount: 100, resumed: true }]
+    })
+    expect(summary.keywordBreakdown).toBeNull()
+    expect(summary.toastMessage).not.toContain('关键词实际准备')
   })
   it('成功后额度刷新为 60，仍保留本轮部分成功状态和原关键词配置', async () => {
     const h = harness()
@@ -106,6 +139,18 @@ describe('快车完成结果与下一轮额度严格区分', () => {
     expect(h.bindings.recordConfigAudit).toHaveBeenCalledWith('snapshot_created', expect.objectContaining({
       snapshotId: 'jd-snapshot-1', after: expect.objectContaining({ maxCustomKeywordBid: 0.5 })
     }))
+    expect(h.bindings.buildCreationConfirmContent).toHaveBeenCalledWith(expect.objectContaining({
+      campaignCount: 61,
+      unitCount: 133,
+      productCount: 328,
+      modeLabel: '自定义投放',
+      snapshotId: 'jd-snapshot-1'
+    }))
+    expect(h.bindings.ElMessageBox.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ snapshotId: 'jd-snapshot-1' }),
+      '确认批量创建京东快车计划',
+      expect.objectContaining({ customClass: 'jd-express-create-message-box' })
+    )
   })
   it('点击后立即进入可见校验状态，校验卡死会在 8 秒后明确报错并留下阶段日志', async () => {
     vi.useFakeTimers()
