@@ -222,6 +222,7 @@
     await chrome.storage.local.set({[PROCESSED_INFO_PRODUCT_STORAGE_KEY]: processedInfoProductRecords});
     ensureInformationViolationRows();
     ensureLegalQueryDetailRows();
+    ensurePriceOperationRows();
   }
 
   async function markInfoProductDeleted(productId, salesVolume) {
@@ -815,6 +816,11 @@
     return Boolean(document.querySelector(".conent_wrap_spu, .content_wrap_spu"));
   }
 
+  function isPriceOperationView() {
+    return location.hostname.toLowerCase() === "shop.jd.com"
+      && /^\/jdm\/cz\/price(?:\/|$)/i.test(location.pathname);
+  }
+
   async function bridgeRequest(type, payload = {}, timeoutMs = 50000) {
     let timeoutId;
     const timeout = new Promise((_, reject) => {
@@ -1241,6 +1247,7 @@
       .et-c-actions{display:grid;grid-template-columns:1fr 1.45fr;gap:9px}.et-c-btn{height:40px;border:0;border-radius:10px;cursor:pointer;font-weight:700}.et-c-read{background:#eef2ff;color:#3558d9;border:1px solid #cbd6ff}.et-c-run{background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}.et-c-btn:disabled{cursor:not-allowed;opacity:.45}.et-c-fail{cursor:help;color:#d94834!important}
       .et-c-operation-cell{height:100%!important;padding-top:0!important;padding-bottom:0!important;line-height:normal!important}.et-c-operation-cell>.ag-cell-wrapper{display:flex!important;align-items:center!important;width:100%!important;height:100%!important;min-height:0!important}.et-c-operation-actions-container{display:flex!important;align-items:center!important;flex-wrap:wrap!important;column-gap:10px!important;row-gap:0!important;width:100%!important;max-width:100%!important;overflow:visible!important;line-height:24px!important;white-space:normal!important}.et-c-operation-actions-container>div{width:auto!important;min-width:0!important;margin:0!important}.et-c-status-actions{display:inline-flex!important;align-items:center!important;width:auto!important;min-width:0!important;max-width:100%!important;margin:0!important;line-height:24px!important;white-space:nowrap!important}.et-c-status-delete{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:auto!important;height:24px!important;margin:0!important;padding:0!important;border:0!important;background:transparent!important;color:#f5222d!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important;cursor:pointer!important}.et-c-status-delete:hover{background:transparent!important;color:#cf1322!important}.et-c-status-delete.is-done{color:#168044!important;cursor:default!important}.et-c-status-delete.is-failed{color:#c93320!important}.et-c-status-actions .et-c-processed-badge{margin-left:0!important}.et-c-processed-badge{display:inline-block!important;margin-left:7px!important;padding:1px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font:700 12px/19px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:middle!important;white-space:nowrap!important}.et-c-state-deleted{border-color:#97d7ad!important;background:#eaf8ef!important;color:#168044!important}.et-c-state-onsale{border-color:#8db7ff!important;background:#eaf2ff!important;color:#2464cb!important}.et-c-state-offsale{border-color:#c7ceda!important;background:#f1f3f6!important;color:#596274!important}.et-c-state-unknown{border-color:#f0bd70!important;background:#fff5e5!important;color:#b46b08!important}.et-c-state-nonexistent{border-color:#c8cdd5!important;background:#eef0f3!important;color:#666d78!important}
       .et-c-info-action{display:flex!important;align-items:center!important;gap:7px!important;width:max-content!important;margin-top:4px!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}.et-c-info-select{width:14px!important;height:14px!important;margin:0!important;accent-color:#f05236!important}.et-c-info-sales{color:#657087!important}.et-c-info-sales-number{color:inherit!important;font-weight:400!important}.et-c-info-sales-number.is-positive{color:#169653!important;font-weight:700!important}.et-c-info-delete{height:24px!important;padding:0 8px!important;border:1px solid #ffb7a8!important;border-radius:5px!important;background:#fff2ef!important;color:#e44029!important;font:12px/22px Arial,"Microsoft YaHei",sans-serif!important;cursor:pointer!important}.et-c-info-delete:hover{border-color:#f06a52!important;background:#ffe8e2!important}.et-c-info-delete.is-done{border-color:#9dd8af!important;background:#eaf8ef!important;color:#178044!important;cursor:default!important}.et-c-info-delete.is-failed{border-color:#ef8a78!important;background:#fff0ed!important;color:#c93320!important}.et-c-detail-action{display:inline-flex!important;align-items:center!important;gap:7px!important;margin-left:10px!important;font:12px/24px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}.et-c-detail-status{display:inline-block!important;padding:1px 7px!important;border:1px solid transparent!important;border-radius:999px!important;font-weight:700!important;line-height:19px!important}.et-c-detail-action .et-c-info-delete[hidden]{display:none!important}#et-c-info-batch-toolbar{display:inline-flex!important;align-items:center!important;gap:8px!important;margin-left:9px!important;vertical-align:middle!important;font:13px/28px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important}#et-c-info-batch-toolbar .et-c-info-select-all{width:15px!important;height:15px!important;margin:0!important;accent-color:#f05236!important;cursor:pointer!important}.et-c-info-batch-delete{display:inline-flex!important;align-items:center!important;justify-content:center!important;width:auto!important;min-width:0!important;max-width:none!important;height:28px!important;padding:0 6px!important;border:1px solid #f36b55!important;border-radius:5px!important;background:#fff4f1!important;color:#df4029!important;font:12px/26px Arial,"Microsoft YaHei",sans-serif!important;white-space:nowrap!important;cursor:pointer!important}.et-c-info-batch-delete.is-failed{border-color:#dc3825!important;background:#ffe7e2!important;color:#bd2818!important}.et-c-info-batch-delete:disabled{opacity:.45!important;cursor:not-allowed!important}
+      .et-c-price-status{display:inline-block!important;margin-right:7px!important;padding:0 6px!important;border:1px solid transparent!important;border-radius:999px!important;font:700 12px/18px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:middle!important;white-space:nowrap!important}.et-c-price-sales{display:inline-block!important;margin-left:9px!important;color:#657087!important;font:12px/20px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:middle!important;white-space:nowrap!important}.et-c-price-sales b{font-weight:400!important;color:inherit!important}.et-c-price-sales b.is-positive{font-weight:700!important;color:#169653!important}.et-c-price-delete{display:inline!important;width:auto!important;height:auto!important;margin:0 0 0 10px!important;padding:0!important;border:0!important;background:transparent!important;color:#f5222d!important;font:12px/20px Arial,"Microsoft YaHei",sans-serif!important;vertical-align:baseline!important;white-space:nowrap!important;cursor:pointer!important}.et-c-price-delete:hover{color:#cf1322!important;text-decoration:underline!important}.et-c-price-delete:disabled{color:#9aa2b1!important;cursor:not-allowed!important;text-decoration:none!important}.et-c-price-delete.is-done{color:#168044!important}.et-c-price-delete.is-failed{color:#c93320!important}
       .et-c-info-confirm-mask{position:fixed;inset:0;z-index:2147483646;display:grid;place-items:center;padding:18px;background:transparent;backdrop-filter:none;font:14px/1.45 Arial,"Microsoft YaHei",sans-serif}.et-c-info-confirm-box{width:min(360px,calc(100vw - 36px));padding:20px;border:1px solid #e3e7ef;border-radius:15px;background:#fff;box-shadow:0 18px 44px #15204738;text-align:center}.et-c-info-confirm-box h3{margin:0 0 12px;font-size:18px;color:#26324b}.et-c-info-confirm-box p{margin:0;color:#59657e;line-height:1.75;white-space:pre-line}.et-c-info-confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.et-c-info-confirm-actions button{height:38px;border-radius:9px;font-weight:700;cursor:pointer}.et-c-info-confirm-cancel{border:1px solid #d4daea;background:#fff;color:#536079}.et-c-info-confirm-ok{border:0;background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}
       .et-c-confirm-mask{position:absolute;inset:0;z-index:20;display:grid;place-items:center;padding:18px;border-radius:18px;background:#17213b73;backdrop-filter:blur(2px)}.et-c-confirm-box{width:100%;max-width:350px;padding:20px;border-radius:15px;background:#fff;box-shadow:0 18px 44px #1520474d;text-align:center}.et-c-confirm-box h3{margin:0 0 12px;font-size:18px;color:#26324b}.et-c-confirm-box p{margin:0;color:#59657e;line-height:1.75;white-space:pre-line}.et-c-confirm-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px}.et-c-confirm-actions button{height:38px;border-radius:9px;font-weight:700;cursor:pointer}.et-c-confirm-cancel{border:1px solid #d4daea;background:#fff;color:#536079}.et-c-confirm-ok{border:0;background:linear-gradient(90deg,#ff643c,#ee4025);color:#fff}
     `;
@@ -1573,6 +1580,141 @@
     return Number.isFinite(value) ? Math.max(0, value) : null;
   }
 
+  function priceOperationTextNode(row, pattern) {
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode) {
+      const parent = textNode.parentElement;
+      if (parent && !parent.closest(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
+        && pattern.test(textNode.nodeValue || "")) return textNode;
+      textNode = walker.nextNode();
+    }
+    return null;
+  }
+
+  function priceTrafficControl(row) {
+    const textNode = priceOperationTextNode(row, /^\s*调价提流量\s*$/);
+    if (!textNode?.parentElement) return null;
+    return textNode.parentElement.closest("button, a, [role='button']") || textNode.parentElement;
+  }
+
+  function priceOperationProductEntries() {
+    if (!isPriceOperationView() || !document.body) return [];
+    return [...document.querySelectorAll("tbody tr, tr.render-row, [role='row']")]
+      .filter((row) => visible(row))
+      .map((row) => {
+        const text = row.innerText || row.textContent || "";
+        const skuId = text.match(/SKU\s*(?:编号)?\s*[:：]\s*(\d{8,20})/i)?.[1] || "";
+        const productId = text.match(/商品编码\s*[:：]\s*(\d{8,20})/)?.[1] || "";
+        const codeTextNode = productId
+          ? priceOperationTextNode(row, new RegExp(`商品编码\\s*[:：]\\s*${productId}(?!\\d)`))
+          : null;
+        return {row, skuId, productId, codeTextNode, trafficControl: priceTrafficControl(row)};
+      })
+      .filter(({skuId, productId, codeTextNode}) =>
+        /^\d{8,20}$/.test(skuId) && /^\d{8,20}$/.test(productId) && codeTextNode
+      );
+  }
+
+  function priceOperationStatus(detail, deletedRecord) {
+    if (deletedRecord) return {kind: "deleted", label: "已删除", title: "该商品已下架并删除"};
+    if (!detail) return {kind: "unknown", label: "状态查询中", title: "正在查询京麦商品状态"};
+    if (detail.error) return {kind: "unknown", label: "查询失败", title: detail.error};
+    if (!detail.item) return {kind: "unknown", label: "状态未知", title: "商品接口未返回状态"};
+    return productStatusRecord({
+      productState: itemState(detail.item),
+      statusDescription: itemStatusDescription(detail.item)
+    });
+  }
+
+  function ensurePriceOperationRows() {
+    if (!isPriceOperationView()) {
+      document.querySelectorAll(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
+        .forEach((element) => element.remove());
+      return;
+    }
+    const entries = priceOperationProductEntries();
+    const visibleProductIds = new Set(entries.map(({productId}) => productId));
+    document.querySelectorAll(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
+      .forEach((element) => {
+        if (!visibleProductIds.has(element.dataset.productId || "")) element.remove();
+      });
+    const missingProductIds = [];
+    for (const {row, skuId, productId, codeTextNode, trafficControl} of entries) {
+      row.querySelectorAll(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
+        .forEach((element) => {
+          if (element.dataset.productId !== productId) element.remove();
+        });
+      const detail = infoProductCache.get(productId);
+      const deletedRecord = processedInfoProductRecords[productId];
+      const statusRecord = priceOperationStatus(detail, deletedRecord);
+
+      let status = row.querySelector(`.et-c-price-status[data-product-id="${productId}"]`);
+      if (!status) {
+        status = document.createElement("span");
+        status.className = "et-c-price-status";
+        status.dataset.productId = productId;
+        codeTextNode.before(status);
+      }
+      const statusClassName = `et-c-price-status et-c-state-${statusRecord.kind}`;
+      if (status.className !== statusClassName) status.className = statusClassName;
+      if (status.textContent !== statusRecord.label) status.textContent = statusRecord.label;
+      if (status.title !== statusRecord.title) status.title = statusRecord.title;
+
+      let sales = row.querySelector(`.et-c-price-sales[data-product-id="${productId}"]`);
+      if (!sales) {
+        sales = document.createElement("span");
+        sales.className = "et-c-price-sales";
+        sales.dataset.productId = productId;
+        codeTextNode.after(sales);
+      }
+      const numericSales = Number(detail?.salesVolume ?? deletedRecord?.salesVolume);
+      const hasNumericSales = (detail?.salesVolume ?? deletedRecord?.salesVolume) !== null
+        && (detail?.salesVolume ?? deletedRecord?.salesVolume) !== undefined
+        && Number.isFinite(numericSales);
+      const salesHtml = hasNumericSales
+        ? `近30天销售 <b class="${numericSales > 0 ? "is-positive" : ""}">${numericSales}</b> 件`
+        : detail?.error ? "近30天销售 -- 件" : "近30天销售 查询中";
+      if (sales.innerHTML !== salesHtml) sales.innerHTML = salesHtml;
+
+      if (trafficControl) {
+        let button = row.querySelector(`.et-c-price-delete[data-product-id="${productId}"]`);
+        if (!button) {
+          button = document.createElement("button");
+          button.type = "button";
+          button.className = "et-c-price-delete";
+          button.dataset.productId = productId;
+          button.dataset.skuId = skuId;
+          button.textContent = "下架删除";
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void deleteInformationProduct(productId, event.currentTarget, skuId);
+          });
+          trafficControl.insertAdjacentElement("afterend", button);
+        }
+        if (trafficControl.nextElementSibling !== button) {
+          trafficControl.insertAdjacentElement("afterend", button);
+        }
+        if (deletedRecord) {
+          if (!button.disabled) button.disabled = true;
+          button.classList.add("is-done");
+          if (button.textContent !== "已删除") button.textContent = "已删除";
+          const deletedTitle = `已于 ${new Date(deletedRecord.deletedAt).toLocaleString("zh-CN", {hour12: false})} 下架并删除`;
+          if (button.title !== deletedTitle) button.title = deletedTitle;
+        } else if (button.dataset.running !== "1" && !button.classList.contains("is-failed")) {
+          const disabled = !detail?.item;
+          const title = detail?.error ? detail.error : detail?.item ? "在售商品将先下架，再删除" : "正在查询商品状态";
+          if (button.disabled !== disabled) button.disabled = disabled;
+          if (button.textContent !== "下架删除") button.textContent = "下架删除";
+          if (button.title !== title) button.title = title;
+        }
+      }
+      if (!detail && !deletedRecord && !infoProductPending.has(productId)) missingProductIds.push(productId);
+    }
+    if (missingProductIds.length) void loadInformationProductDetails(missingProductIds);
+  }
+
   async function loadInformationProductDetails(productIds) {
     const ids = [...new Set(productIds.map((value) => String(value ?? "").trim()))]
       .filter((productId) => /^\d{8,20}$/.test(productId) && !infoProductCache.has(productId) && !infoProductPending.has(productId));
@@ -1600,6 +1742,7 @@
       }
     }
     ensureInformationViolationRows();
+    ensurePriceOperationRows();
   }
 
   function showInformationProductConfirm(productId = "", skuId = "", count = 0, alignUpper = false) {
@@ -1714,6 +1857,7 @@
       ?? processedInfoProductRecords[productId]?.salesVolume
       ?? null;
     button.disabled = true;
+    button.dataset.running = "1";
     button.classList.remove("is-failed");
     button.textContent = "处理中";
     try {
@@ -1733,7 +1877,15 @@
         relatedButton.textContent = "已删除";
         relatedButton.title = "该商品已下架并删除";
       });
+      document.querySelectorAll(`.et-c-price-delete[data-product-id="${productId}"]`).forEach((relatedButton) => {
+        delete relatedButton.dataset.running;
+        relatedButton.disabled = true;
+        relatedButton.classList.add("is-done");
+        relatedButton.textContent = "已删除";
+        relatedButton.title = "该商品已下架并删除";
+      });
     } catch (error) {
+      delete button.dataset.running;
       button.disabled = false;
       button.classList.add("is-failed");
       button.textContent = "重试删除";
@@ -2225,18 +2377,23 @@
     suppressInitialJdAiPanel(complianceSection);
     const informationViolationView = isInformationViolationView();
     const legalDetailView = isLegalQueryDetailView();
+    const priceOperationView = isPriceOperationView();
     const productNodeCount = document.querySelectorAll(".conent_wrap_spu, .content_wrap_spu").length;
     const actionCount = document.querySelectorAll(".et-c-info-action").length;
     const detailSkuNodeCount = legalDetailView ? legalDetailSkuEntries().length : 0;
     const detailActionCount = document.querySelectorAll(".et-c-detail-action").length;
-    const nextFingerprint = `${complianceSection}|${informationViolationView}|${legalDetailView}|${productNodeCount}|${actionCount}|${detailSkuNodeCount}|${detailActionCount}|${location.href}`;
+    const priceEntryCount = priceOperationView ? priceOperationProductEntries().length : 0;
+    const priceActionCount = document.querySelectorAll(".et-c-price-delete").length;
+    const nextFingerprint = `${complianceSection}|${informationViolationView}|${legalDetailView}|${priceOperationView}|${productNodeCount}|${actionCount}|${detailSkuNodeCount}|${detailActionCount}|${priceEntryCount}|${priceActionCount}|${location.href}`;
     if (nextFingerprint !== diagnosticFingerprint) {
       diagnosticFingerprint = nextFingerprint;
-      diagnosticLog("ui_probe", {complianceSection, informationViolationView, legalDetailView, productNodeCount, actionCount, detailSkuNodeCount, detailActionCount});
+      diagnosticLog("ui_probe", {complianceSection, informationViolationView, legalDetailView, priceOperationView, productNodeCount, actionCount, detailSkuNodeCount, detailActionCount, priceEntryCount, priceActionCount});
     }
-    if (!complianceSection && !informationViolationView) {
+    if (!complianceSection && !informationViolationView && !priceOperationView) {
       document.getElementById("et-compliance-launcher")?.remove();
       document.getElementById("et-compliance-panel")?.remove();
+      document.querySelectorAll(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
+        .forEach((element) => element.remove());
       return;
     }
     ensureStyle();
@@ -2252,6 +2409,13 @@
         ensureLegalQueryDetailRows();
       } catch (error) {
         diagnosticLog("detail_injection_error", {message: error?.message || String(error)});
+      }
+    }
+    if (priceOperationView) {
+      try {
+        ensurePriceOperationRows();
+      } catch (error) {
+        diagnosticLog("price_operation_injection_error", {message: error?.message || String(error)});
       }
     }
     let created = false;
@@ -2328,7 +2492,7 @@
     new MutationObserver((mutations) => {
       const hasExternalChange = mutations.some((mutation) => {
         const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
-        return !target?.closest?.("#et-compliance-panel, #et-compliance-launcher");
+        return !target?.closest?.("#et-compliance-panel, #et-compliance-launcher, .et-c-price-status, .et-c-price-sales, .et-c-price-delete");
       });
       if (hasExternalChange) scheduleEnsureUi();
     }).observe(document.documentElement, {childList: true, subtree: true});

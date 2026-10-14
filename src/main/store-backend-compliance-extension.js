@@ -83,6 +83,7 @@ function isStoreBackendComplianceUrl(value) {
     const hostname = target.hostname.toLowerCase()
     return hostname === 'keeper-jdm.jd.com'
       || (hostname === 'illegal-jdm.shop.jd.com' && /^\/legal(?:\/|$)/i.test(target.pathname))
+      || (hostname === 'shop.jd.com' && /^\/jdm\/cz\/price(?:\/|$)/i.test(target.pathname))
   } catch (_error) {
     return false
   }

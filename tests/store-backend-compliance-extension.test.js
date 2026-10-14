@@ -156,6 +156,26 @@ describe('店铺后台违规商品清理内置模块', () => {
     expect(detailFlow).toContain('button.hidden = !canDelete')
   })
 
+  it('价格运营页展示状态与近30天销量，并复用下架删除流程', () => {
+    expect(isStoreBackendComplianceUrl('https://shop.jd.com/jdm/cz/price')).toBe(true)
+    expect(isStoreBackendComplianceUrl('https://shop.jd.com/jdm/cz/price?source=menu')).toBe(true)
+    expect(isStoreBackendComplianceUrl('https://shop.jd.com/jdm/cz/prices')).toBe(false)
+
+    const priceStart = cleaner.indexOf('function priceOperationProductEntries()')
+    const priceEnd = cleaner.indexOf('async function loadInformationProductDetails', priceStart)
+    const priceFlow = cleaner.slice(priceStart, priceEnd)
+    expect(priceFlow).toContain('商品编码\\s*[:：]\\s*')
+    expect(priceFlow).toContain('codeTextNode.before(status)')
+    expect(priceFlow).toContain('codeTextNode.after(sales)')
+    expect(priceFlow).toContain('近30天销售')
+    expect(priceFlow).toContain('button.textContent = "下架删除"')
+    expect(priceFlow).toContain('trafficControl.insertAdjacentElement("afterend", button)')
+    expect(priceFlow).toContain('void deleteInformationProduct(productId, event.currentTarget, skuId)')
+    expect(cleaner).toContain('ensurePriceOperationRows();')
+    expect(cleaner).toContain('operation: "down"')
+    expect(cleaner).toContain('operation: "del"')
+  })
+
   it('从开发目录或打包解包目录定位内置扩展', () => {
     expect(resolveComplianceExtensionPath(path.resolve('.'))).toBe(extensionRoot)
     expect(isStoreBackendComplianceUrl('https://illegal-jdm.shop.jd.com/legal?tabsActiveName=8')).toBe(true)
