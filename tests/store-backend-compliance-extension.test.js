@@ -15,6 +15,7 @@ describe('店铺后台违规商品清理内置模块', () => {
   const cleaner = fs.readFileSync(path.join(extensionRoot, 'compliance-product-cleaner.js'), 'utf8')
   const bridge = fs.readFileSync(path.join(extensionRoot, 'compliance-product-bridge.js'), 'utf8')
   const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8')
+  const backendBrowser = fs.readFileSync(path.resolve('src/main/store-backend-browser.js'), 'utf8')
 
   it('只打包违规清理所需页面和脚本，不带入插件其他模块', () => {
     const contentScriptFiles = manifest.content_scripts.flatMap((entry) => entry.js || [])
@@ -171,9 +172,50 @@ describe('店铺后台违规商品清理内置模块', () => {
     expect(priceFlow).toContain('button.textContent = "下架删除"')
     expect(priceFlow).toContain('trafficControl.insertAdjacentElement("afterend", button)')
     expect(priceFlow).toContain('void deleteInformationProduct(productId, event.currentTarget, skuId)')
+    expect(priceFlow).toContain('function priceOperationDeletedRecord(productId, skuId)')
+    expect(priceFlow).toContain('processedSkuRecords[skuId]')
     expect(cleaner).toContain('ensurePriceOperationRows();')
     expect(cleaner).toContain('operation: "down"')
     expect(cleaner).toContain('operation: "del"')
+  })
+
+  it('价格运营页提供按当前筛选结果批量清理的助手，并防止页面变化后误删旧结果', () => {
+    expect(cleaner).toContain('if (isPriceOperationView()) return "价格运营当前筛选结果"')
+    expect(cleaner).toContain('IS_TOP_FRAME && (complianceSection || priceOperationView)')
+    expect(cleaner).toContain('价格运营商品清理助手')
+    expect(cleaner).toContain('读取筛选商品')
+    expect(cleaner).toContain('priceMode ? "可处理 SPU" : "SPU 商品"')
+    expect(cleaner).toContain('未设置筛选条件时将包含整个列表')
+    expect(cleaner).toContain('SKU\\s*(?:编号)?\\s*[:：]\\s*')
+    expect(cleaner).toContain('preparedPriceViewSignature = priceOperationVisibleSignature()')
+    expect(cleaner).toContain('价格运营筛选结果已变化，请重新读取后再执行删除')
+    expect(cleaner).toContain('处理范围：价格运营当前筛选结果；未设置筛选条件时即为整个列表')
+    expect(cleaner).toContain('if (complianceSection && !informationViolationView && !legalDetailView)')
+  })
+
+  it('批量统计只计算能和筛选 SKU 对应的商品，并记录接口额外返回项', () => {
+    const scanFlow = cleaner.slice(
+      cleaner.indexOf('async function scanProducts()'),
+      cleaner.indexOf('function operationResultMap')
+    )
+    expect(scanFlow).toContain('ignoredAnonymousProductIds = [...new Set(anonymousProductIds')
+    expect(scanFlow).toContain('!knownProductIds.has(productId)')
+    expect(scanFlow).not.toContain('...anonymousProductIds,')
+    expect(scanFlow).toContain('state.productCount = products.length')
+    expect(scanFlow).toContain('state.identifiedProductCount = knownProductIds.size')
+    expect(scanFlow).toContain('state.alreadyDeletedProductCount = alreadyDeletedProductIds.size')
+    expect(scanFlow).toContain('state.previouslyDeletedProductCount = previouslyDeletedOnlyProductIds.size')
+    expect(scanFlow).toContain('state.recycleConfirmedProductCount = recycleConfirmedOnlyProductIds.size')
+    expect(scanFlow).toContain('diagnosticLog("bulk_scan_finished"')
+    expect(scanFlow).toContain('ignoredAnonymousProductCount: ignoredAnonymousProductIds.length')
+    expect(scanFlow).toContain('已安全忽略且不计入处理数')
+    expect(scanFlow).toContain('个本次在回收站确认')
+    expect(cleaner).toContain('diagnosticLog("bulk_process_finished"')
+    expect(cleaner).toContain('个此前已删除（')
+    expect(cleaner).toContain('个在回收站确认），未重复处理')
+    expect(cleaner).toContain('[DXE_COMPLIANCE_DIAG]')
+    expect(backendBrowser).toContain("const COMPLIANCE_DIAGNOSTIC_PREFIX = '[DXE_COMPLIANCE_DIAG]'")
+    expect(backendBrowser).toContain('compliance_diagnostic=${diagnostic}')
   })
 
   it('从开发目录或打包解包目录定位内置扩展', () => {

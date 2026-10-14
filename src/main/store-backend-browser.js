@@ -17,6 +17,7 @@ const TOOLBAR_HEIGHT = 84
 const WINDOW_BORDER_SIZE = 1
 const DEFAULT_MAX_TABS = 10
 const DEFAULT_NEW_TAB_URL = 'https://shop.jd.com/'
+const COMPLIANCE_DIAGNOSTIC_PREFIX = '[DXE_COMPLIANCE_DIAG]'
 const backendBrowsers = new Map()
 const toolbarOwners = new Map()
 let tabSequence = 0
@@ -257,6 +258,19 @@ class StoreBackendBrowser {
 
   attachTabEvents(tab) {
     const contents = tab.view.webContents
+
+    contents.on('console-message', (_event, levelOrDetails, ...legacyArgs) => {
+      const message = String(
+        levelOrDetails && typeof levelOrDetails === 'object'
+          ? levelOrDetails.message || ''
+          : legacyArgs[0] || ''
+      )
+      if (!message.startsWith(COMPLIANCE_DIAGNOSTIC_PREFIX)) return
+      const diagnostic = message
+        .slice(COMPLIANCE_DIAGNOSTIC_PREFIX.length, COMPLIANCE_DIAGNOSTIC_PREFIX.length + 3500)
+        .replace(/[\r\n\t]+/g, ' ')
+      if (diagnostic) this.log(`compliance_diagnostic=${diagnostic}`)
+    })
 
     contents.setWindowOpenHandler(details => {
       if (isHttpUrl(details.url) || details.url === 'about:blank') {

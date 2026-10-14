@@ -21,6 +21,7 @@
   const ON_SALE_STATE = 4;
   const PRODUCT_BATCH_SIZE = 100;
   const DIAGNOSTIC_LIMIT = 120;
+  const DIAGNOSTIC_CONSOLE_PREFIX = "[DXE_COMPLIANCE_DIAG]";
   const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
   const diagnosticLogs = [];
@@ -33,7 +34,7 @@
     };
     diagnosticLogs.push(entry);
     if (diagnosticLogs.length > DIAGNOSTIC_LIMIT) diagnosticLogs.splice(0, diagnosticLogs.length - DIAGNOSTIC_LIMIT);
-    console.info("[电商综合工具箱][合规]", event, details);
+    console.info(`${DIAGNOSTIC_CONSOLE_PREFIX}${JSON.stringify(entry)}`);
     void chrome.runtime.sendMessage({type: "TOOLBOX_COMPLIANCE_DIAGNOSTIC", entry}).catch(() => {});
   }
 
@@ -76,6 +77,9 @@
   let visibleSkuStatusRunning = false;
   let visibleSkuStatusQueued = false;
   let visibleSkuStatusLastFailureAt = 0;
+  let cleanerScopeKey = "";
+  let preparedPriceViewSignature = "";
+  let ignoredAnonymousProductIds = [];
   let failureDetails = [];
   const infoProductCache = new Map();
   const infoProductPending = new Set();
@@ -91,6 +95,10 @@
     skuCount: 0,
     markedCount: 0,
     productCount: 0,
+    identifiedProductCount: 0,
+    alreadyDeletedProductCount: 0,
+    previouslyDeletedProductCount: 0,
+    recycleConfirmedProductCount: 0,
     onSaleCount: 0,
     success: 0,
     failed: 0,
@@ -278,7 +286,7 @@
   }
 
   function findSkuTextContainer(row, skuId) {
-    const skuPattern = new RegExp(`SKU\\s*[:：]\\s*${skuId}(?!\\d)`, 'i');
+    const skuPattern = new RegExp(`SKU\\s*(?:编号)?\\s*[:：]\\s*${skuId}(?!\\d)`, 'i');
     const walker = document.createTreeWalker(row, 4);
     let textNode = walker.nextNode();
     while (textNode) {
@@ -406,23 +414,27 @@
   }
 
   function annotateProcessedRows() {
+    if (isPriceOperationView()) {
+      ensurePriceOperationRows();
+      return;
+    }
     if (!Object.keys(processedSkuRecords).length && !Object.keys(skuStatusRecords).length && !visibleSkuStatusPending.size) return;
     const rows = [...document.querySelectorAll("tbody tr, tr.render-row, [role='row']")];
     for (const row of rows) {
       const text = row.innerText || row.textContent || "";
-      const skuIds = [...new Set([...text.matchAll(/SKU\s*[:：]\s*(\d{8,20})/gi)].map((match) => match[1]))];
+      const skuIds = [...new Set([...text.matchAll(/SKU\s*(?:编号)?\s*[:：]\s*(\d{8,20})/gi)].map((match) => match[1]))];
       if (!skuIds.length) continue;
       for (const badge of row.querySelectorAll(".et-c-processed-badge[data-sku-id]")) {
         const badgeSkuId = badge.dataset.skuId || "";
-        if (!new RegExp(`SKU\\s*[:：]\\s*${badgeSkuId}(?!\\d)`, "i").test(text)) badge.remove();
+        if (!new RegExp(`SKU\\s*(?:编号)?\\s*[:：]\\s*${badgeSkuId}(?!\\d)`, "i").test(text)) badge.remove();
       }
       for (const button of row.querySelectorAll(".et-c-status-delete[data-sku-id]")) {
         const buttonSkuId = button.dataset.skuId || "";
-        if (!new RegExp(`SKU\\s*[:：]\\s*${buttonSkuId}(?!\\d)`, "i").test(text)) button.remove();
+        if (!new RegExp(`SKU\\s*(?:编号)?\\s*[:：]\\s*${buttonSkuId}(?!\\d)`, "i").test(text)) button.remove();
       }
       for (const controls of row.querySelectorAll(".et-c-status-actions[data-sku-id]")) {
         const controlsSkuId = controls.dataset.skuId || "";
-        if (!new RegExp(`SKU\\s*[:：]\\s*${controlsSkuId}(?!\\d)`, "i").test(text)) controls.remove();
+        if (!new RegExp(`SKU\\s*(?:编号)?\\s*[:：]\\s*${controlsSkuId}(?!\\d)`, "i").test(text)) controls.remove();
       }
       const operationCell = findRowOperationCell(row);
       const actionContainer = findOperationActionsContainer(operationCell);
@@ -801,6 +813,7 @@
   }
 
   function targetPageName() {
+    if (isPriceOperationView()) return "价格运营当前筛选结果";
     if (!isComplianceSection()) return "";
     const tabValue = new URL(location.href).searchParams.get("tabsActiveName") || "";
     if (!TARGET_TAB_VALUES.has(tabValue)) return "";
@@ -819,6 +832,47 @@
   function isPriceOperationView() {
     return location.hostname.toLowerCase() === "shop.jd.com"
       && /^\/jdm\/cz\/price(?:\/|$)/i.test(location.pathname);
+  }
+
+  function currentCleanerScopeKey() {
+    if (isPriceOperationView()) return "price-operation";
+    if (!isComplianceSection()) return "";
+    const tabValue = new URL(location.href).searchParams.get("tabsActiveName") || "";
+    return `compliance:${tabValue || selectedComplianceTab() || "default"}`;
+  }
+
+  function priceOperationVisibleSignature() {
+    return priceOperationProductEntries()
+      .map(({skuId, productId}) => `${skuId}:${productId}`)
+      .join("|");
+  }
+
+  function resetCleanerSession(message = "先读取当前筛选结果，不会立即修改商品") {
+    scanToken += 1;
+    runToken += 1;
+    products = [];
+    allSourceSkuIds = [];
+    sourceSkuIds = [];
+    ignoredAnonymousProductIds = [];
+    failureDetails = [];
+    preparedPriceViewSignature = "";
+    Object.assign(state, {
+      status: "idle",
+      message,
+      scannedPages: 0,
+      skuCount: 0,
+      markedCount: 0,
+      productCount: 0,
+      identifiedProductCount: 0,
+      alreadyDeletedProductCount: 0,
+      previouslyDeletedProductCount: 0,
+      recycleConfirmedProductCount: 0,
+      onSaleCount: 0,
+      success: 0,
+      failed: 0,
+      processed: 0,
+      total: 0
+    });
   }
 
   async function bridgeRequest(type, payload = {}, timeoutMs = 50000) {
@@ -849,7 +903,7 @@
     const result = new Set();
     for (const row of rows) {
       const text = row.innerText || row.textContent || "";
-      for (const match of text.matchAll(/SKU\s*[:：]\s*(\d{8,20})/gi)) result.add(match[1]);
+      for (const match of text.matchAll(/SKU\s*(?:编号)?\s*[:：]\s*(\d{8,20})/gi)) result.add(match[1]);
     }
     return [...result];
   }
@@ -1266,10 +1320,21 @@
     const failureTitle = failureDetails.length
       ? failureDetails.slice(0, 30).map((item) => `${item.id || "-"}：${item.error}`).join("\n")
       : "无失败商品";
+    const priceMode = isPriceOperationView();
+    const assistantTitle = priceMode ? "价格运营商品清理助手" : "违规商品清理助手";
+    const assistantSubtitle = priceMode
+      ? "读取当前筛选结果，按状态批量下架并删除"
+      : "SKU 查询商品编码后，按状态下架并删除";
+    const skuLabel = priceMode ? "筛选 SKU" : "违规 SKU";
+    const productLabel = priceMode ? "可处理 SPU" : "SPU 商品";
+    const notice = priceMode
+      ? "温馨提示：仅处理价格运营当前筛选结果；未设置筛选条件时将包含整个列表。删除后商品进入回收站，45 天内可还原。"
+      : "温馨提示：仅处理当前合规页签及其筛选结果。删除后商品进入回收站，45 天内可还原，超时将无法恢复。";
+    const readLabel = products.length ? "重新读取" : priceMode ? "读取筛选商品" : "读取违规商品";
     panel.innerHTML = `
       <div class="et-c-head">
         <img src="${chrome.runtime.getURL("assets/wolf-logo.png")}" alt="小灰狼">
-        <div class="et-c-head-text"><strong>违规商品清理助手</strong><small>SKU 查询商品编码后，按状态下架并删除</small></div>
+        <div class="et-c-head-text"><strong>${assistantTitle}</strong><small>${assistantSubtitle}</small></div>
         <button class="et-c-close" type="button" aria-label="关闭">×</button>
       </div>
       <div class="et-c-body">
@@ -1282,8 +1347,8 @@
             <div class="et-c-count"><b>${state.processed}/${state.total}</b><span>已处理</span></div>
           </div>
           <div class="et-c-summary">
-            <div><b>${state.skuCount}</b><span>违规 SKU</span></div>
-            <div><b>${state.productCount}</b><span>SPU 商品</span></div>
+            <div><b>${state.skuCount}</b><span>${skuLabel}</span></div>
+            <div><b>${state.productCount}</b><span>${productLabel}</span></div>
             <div><b>${state.onSaleCount}</b><span>当前在售</span></div>
             <div><b>${state.markedCount}</b><span>已标记删除</span></div>
           </div>
@@ -1291,10 +1356,10 @@
         </section>
         <section class="et-c-card">
           <div class="et-c-row"><label>每批处理间隔（${PRODUCT_BATCH_SIZE} 个商品）</label><span class="et-c-delay"><input id="et-c-delay" type="number" min="0.5" max="10" step="0.5" value="${state.delayMs / 1000}" ${busy ? "disabled" : ""}> 秒</span></div>
-          <div class="et-c-note">温馨提示：仅处理当前合规页签及其筛选结果。删除后商品进入回收站，45 天内可还原，超时将无法恢复。</div>
+          <div class="et-c-note">${notice}</div>
         </section>
         <div class="et-c-actions">
-          <button class="et-c-btn et-c-read" type="button" ${busy ? "disabled" : ""}>${products.length ? "重新读取" : "读取违规商品"}</button>
+          <button class="et-c-btn et-c-read" type="button" ${busy ? "disabled" : ""}>${readLabel}</button>
           <button class="et-c-btn et-c-run" type="button" ${state.status === "running" || ready ? "" : "disabled"}>${state.status === "running" ? "停止处理" : "下架并删除"}</button>
         </div>
       </div>`;
@@ -1319,14 +1384,18 @@
     if (state.status === "scanning" || state.status === "running") return;
     if (!targetPageName()) {
       state.status = "error";
-      state.message = "请打开指定合规页面（tabsActiveName=2 或 6）";
+      state.message = "请打开支持批量清理的合规页面或价格运营页面";
       render();
       return;
     }
+    const priceMode = isPriceOperationView();
+    const skuScope = priceMode ? "筛选 SKU" : "违规 SKU";
+    preparedPriceViewSignature = "";
     const token = ++scanToken;
     products = [];
     allSourceSkuIds = [];
     sourceSkuIds = [];
+    ignoredAnonymousProductIds = [];
     failureDetails = [];
     Object.assign(state, {
       status: "scanning",
@@ -1335,6 +1404,10 @@
       skuCount: 0,
       markedCount: 0,
       productCount: 0,
+      identifiedProductCount: 0,
+      alreadyDeletedProductCount: 0,
+      previouslyDeletedProductCount: 0,
+      recycleConfirmedProductCount: 0,
       onSaleCount: 0,
       success: 0,
       failed: 0,
@@ -1351,12 +1424,33 @@
       sourceSkuIds = allSourceSkuIds.filter((skuId) => !processedSkuRecords[skuId]);
       state.skuCount = allSourceSkuIds.length;
       state.markedCount = allSourceSkuIds.length - sourceSkuIds.length;
-      state.productCount = new Set(allSourceSkuIds
+      const previouslyDeletedSkuCount = state.markedCount;
+      const previouslyDeletedProductIds = new Set(allSourceSkuIds
         .map((skuId) => String(processedSkuRecords[skuId]?.productId ?? ""))
-        .filter((productId) => /^\d{8,20}$/.test(productId))).size;
+        .filter((productId) => /^\d{8,20}$/.test(productId)));
+      state.productCount = 0;
+      state.identifiedProductCount = previouslyDeletedProductIds.size;
+      state.alreadyDeletedProductCount = previouslyDeletedProductIds.size;
+      state.previouslyDeletedProductCount = previouslyDeletedProductIds.size;
+      state.recycleConfirmedProductCount = 0;
       if (!sourceSkuIds.length) {
         state.status = "done";
-        state.message = `当前 ${allSourceSkuIds.length} 个违规 SKU 均已标记为删除，无需重复处理`;
+        state.message = `读取完成：共识别 ${state.identifiedProductCount} 个 SPU，均已有删除记录；${allSourceSkuIds.length} 个${skuScope}无需重复处理`;
+        diagnosticLog("bulk_scan_finished", {
+          page: targetPageName(),
+          inputSkuCount: allSourceSkuIds.length,
+          processableProductCount: 0,
+          identifiedProductCount: state.identifiedProductCount,
+          alreadyDeletedProductCount: state.alreadyDeletedProductCount,
+          previouslyDeletedSkuCount,
+          previouslyDeletedProductCount: state.previouslyDeletedProductCount,
+          recycleConfirmedSkuCount: 0,
+          recycleConfirmedProductCount: 0,
+          ignoredAnonymousProductCount: 0,
+          confirmedDeletedSkuCount: state.markedCount,
+          unknownSkuCount: 0,
+          nonexistentSkuCount: 0
+        });
         render();
         return;
       }
@@ -1376,23 +1470,64 @@
       state.skuCount = allSourceSkuIds.length;
       const knownProductIds = new Set([
         ...products.map((item) => String(item.productId)),
-        ...anonymousProductIds,
         ...allSourceSkuIds.map((skuId) => String(processedSkuRecords[skuId]?.productId ?? ""))
       ].filter((productId) => /^\d{8,20}$/.test(productId)));
-      state.productCount = knownProductIds.size;
+      ignoredAnonymousProductIds = [...new Set(anonymousProductIds
+        .map((productId) => String(productId))
+        .filter((productId) => /^\d{8,20}$/.test(productId) && !knownProductIds.has(productId)))];
+      const processableProductIds = new Set(products.map((item) => String(item.productId)));
+      const alreadyDeletedProductIds = new Set([...knownProductIds]
+        .filter((productId) => !processableProductIds.has(productId)));
+      const previouslyDeletedOnlyProductIds = new Set([...previouslyDeletedProductIds]
+        .filter((productId) => alreadyDeletedProductIds.has(productId)));
+      const recycleConfirmedOnlyProductIds = new Set(recycleCheck.confirmed
+        .map((record) => String(record.productId || ""))
+        .filter((productId) => alreadyDeletedProductIds.has(productId)
+          && !previouslyDeletedOnlyProductIds.has(productId)));
+      state.productCount = products.length;
+      state.identifiedProductCount = knownProductIds.size;
+      state.alreadyDeletedProductCount = alreadyDeletedProductIds.size;
+      state.previouslyDeletedProductCount = previouslyDeletedOnlyProductIds.size;
+      state.recycleConfirmedProductCount = recycleConfirmedOnlyProductIds.size;
       state.onSaleCount = products.filter((item) => item.productState === ON_SALE_STATE).length;
       state.total = products.length;
+      diagnosticLog("bulk_scan_finished", {
+        page: targetPageName(),
+        inputSkuCount: allSourceSkuIds.length,
+        pendingSkuCount: sourceSkuIds.length,
+        processableProductCount: products.length,
+        identifiedProductCount: state.identifiedProductCount,
+        alreadyDeletedProductCount: state.alreadyDeletedProductCount,
+        previouslyDeletedSkuCount,
+        previouslyDeletedProductCount: state.previouslyDeletedProductCount,
+        recycleConfirmedSkuCount: recycleCheck.confirmed.length,
+        recycleConfirmedProductCount: state.recycleConfirmedProductCount,
+        ignoredAnonymousProductCount: ignoredAnonymousProductIds.length,
+        ignoredAnonymousProductIds: ignoredAnonymousProductIds.slice(0, 30),
+        confirmedDeletedSkuCount: state.markedCount,
+        unknownSkuCount: unknown.length,
+        nonexistentSkuCount: nonexistent.length
+      });
+      const ignoredSuffix = ignoredAnonymousProductIds.length
+        ? `，接口另返回 ${ignoredAnonymousProductIds.length} 个无法与当前筛选 SKU 对应的商品，已安全忽略且不计入处理数`
+        : "";
+      const alreadyDeletedBreakdown = state.alreadyDeletedProductCount
+        ? `，${state.alreadyDeletedProductCount} 个已删除（${state.previouslyDeletedProductCount} 个此前已有记录，${state.recycleConfirmedProductCount} 个本次在回收站确认）`
+        : "";
       state.message = products.length
-        ? `读取完成：本次 ${sourceSkuIds.length} 个 SKU 对应 ${products.length} 个商品${state.markedCount ? `，已确认 ${state.markedCount} 个已删除 SKU` : ""}${unknown.length ? `，${unknown.length} 个状态未知` : ""}${nonexistent.length ? `，另有 ${nonexistent.length} 个商品不存在` : ""}`
+        ? `读取完成：共识别 ${state.identifiedProductCount} 个 SPU，其中 ${products.length} 个待处理${alreadyDeletedBreakdown}${state.markedCount ? `；已确认 ${state.markedCount} 个已删除 SKU` : ""}${unknown.length ? `，${unknown.length} 个状态未知` : ""}${nonexistent.length ? `，另有 ${nonexistent.length} 个商品不存在` : ""}${ignoredSuffix}`
         : unknown.length || nonexistent.length
           ? `读取完成：${state.markedCount} 个 SKU 已删除${unknown.length ? `，${unknown.length} 个状态未知` : ""}${nonexistent.length ? `，${nonexistent.length} 个商品不存在` : ""}，无需处理`
-          : `读取完成：当前 ${state.markedCount} 个违规 SKU 均已在回收站，无需重复处理`;
+          : `读取完成：当前 ${state.markedCount} 个${skuScope}均已在回收站，无需重复处理`;
       state.status = products.length ? "ready" : "done";
+      if (priceMode && state.status === "ready") {
+        preparedPriceViewSignature = priceOperationVisibleSignature();
+      }
       render();
     } catch (error) {
       if (token !== scanToken) return;
       state.status = "error";
-      state.message = error?.message || "读取违规商品失败";
+      state.message = error?.message || (priceMode ? "读取筛选商品失败" : "读取违规商品失败");
       render();
     }
   }
@@ -1627,6 +1762,13 @@
     });
   }
 
+  function priceOperationDeletedRecord(productId, skuId) {
+    const informationRecord = processedInfoProductRecords[productId];
+    if (informationRecord) return informationRecord;
+    const skuRecord = processedSkuRecords[skuId];
+    return String(skuRecord?.productId || "") === String(productId) ? skuRecord : null;
+  }
+
   function ensurePriceOperationRows() {
     if (!isPriceOperationView()) {
       document.querySelectorAll(".et-c-price-status, .et-c-price-sales, .et-c-price-delete")
@@ -1646,7 +1788,7 @@
           if (element.dataset.productId !== productId) element.remove();
         });
       const detail = infoProductCache.get(productId);
-      const deletedRecord = processedInfoProductRecords[productId];
+      const deletedRecord = priceOperationDeletedRecord(productId, skuId);
       const statusRecord = priceOperationStatus(detail, deletedRecord);
 
       let status = row.querySelector(`.et-c-price-status[data-product-id="${productId}"]`);
@@ -2300,8 +2442,12 @@
   async function processProducts() {
     if (!products.length || state.status === "running") return;
     const onSale = products.filter((item) => item.productState === ON_SALE_STATE).length;
+    const scopeWarning = isPriceOperationView()
+      ? "处理范围：价格运营当前筛选结果；未设置筛选条件时即为整个列表。\n"
+      : "处理范围：当前合规页签及其筛选结果。\n";
     const confirmed = await confirmInWorkbench(
-      `共处理 ${products.length} 个商品，其中 ${onSale} 个需先下架。\n`
+      scopeWarning
+      + `共处理 ${products.length} 个商品，其中 ${onSale} 个需先下架。\n`
       + "删除后进入回收站，45 天内可恢复。"
     );
     if (!confirmed) return;
@@ -2358,9 +2504,29 @@
     }
     if (token !== runToken) return;
     state.status = "done";
+    diagnosticLog("bulk_process_finished", {
+      page: targetPageName(),
+      inputSkuCount: state.skuCount,
+      processableProductCount: state.total,
+      identifiedProductCount: state.identifiedProductCount,
+      alreadyDeletedProductCount: state.alreadyDeletedProductCount,
+      previouslyDeletedProductCount: state.previouslyDeletedProductCount,
+      recycleConfirmedProductCount: state.recycleConfirmedProductCount,
+      successCount: state.success,
+      failureCount: state.failed,
+      ignoredAnonymousProductCount: ignoredAnonymousProductIds.length,
+      ignoredAnonymousProductIds: ignoredAnonymousProductIds.slice(0, 30),
+      markedDeletedSkuCount: state.markedCount
+    });
+    const ignoredSuffix = ignoredAnonymousProductIds.length
+      ? `；另有 ${ignoredAnonymousProductIds.length} 个接口额外返回项无法与筛选 SKU 对应，已安全忽略`
+      : "";
+    const alreadyDeletedSuffix = state.alreadyDeletedProductCount
+      ? `；本次共识别 ${state.identifiedProductCount} 个 SPU，另有 ${state.alreadyDeletedProductCount} 个此前已删除（${state.previouslyDeletedProductCount} 个已有记录，${state.recycleConfirmedProductCount} 个在回收站确认），未重复处理`
+      : "";
     state.message = state.failed
-      ? `处理完成：成功 ${state.success}，失败 ${state.failed}；鼠标停在失败数量上查看原因`
-      : `处理完成：${state.success} 个商品已删除`;
+      ? `处理完成：成功 ${state.success}，失败 ${state.failed}；鼠标停在失败数量上查看原因${alreadyDeletedSuffix}${ignoredSuffix}`
+      : `处理完成：${state.success} 个商品已删除${alreadyDeletedSuffix}${ignoredSuffix}`;
     render();
   }
 
@@ -2378,6 +2544,20 @@
     const informationViolationView = isInformationViolationView();
     const legalDetailView = isLegalQueryDetailView();
     const priceOperationView = isPriceOperationView();
+    const nextScopeKey = currentCleanerScopeKey();
+    if (cleanerScopeKey && !nextScopeKey) {
+      resetCleanerSession();
+      cleanerScopeKey = "";
+    } else if (cleanerScopeKey && nextScopeKey && cleanerScopeKey !== nextScopeKey) {
+      resetCleanerSession("页面范围已变化，请重新读取当前筛选结果");
+    }
+    if (nextScopeKey) cleanerScopeKey = nextScopeKey;
+    if (priceOperationView && state.status === "ready" && preparedPriceViewSignature && !tableIsLoading()) {
+      const currentSignature = priceOperationVisibleSignature();
+      if (currentSignature !== preparedPriceViewSignature) {
+        resetCleanerSession("价格运营筛选结果已变化，请重新读取后再执行删除");
+      }
+    }
     const productNodeCount = document.querySelectorAll(".conent_wrap_spu, .content_wrap_spu").length;
     const actionCount = document.querySelectorAll(".et-c-info-action").length;
     const detailSkuNodeCount = legalDetailView ? legalDetailSkuEntries().length : 0;
@@ -2419,12 +2599,12 @@
       }
     }
     let created = false;
-    if (IS_TOP_FRAME && complianceSection) {
+    if (IS_TOP_FRAME && (complianceSection || priceOperationView)) {
       if (!document.getElementById("et-compliance-launcher")) {
         const launcher = document.createElement("button");
         launcher.id = "et-compliance-launcher";
         launcher.type = "button";
-        launcher.title = "打开电商综合工具箱";
+        launcher.title = priceOperationView ? "打开价格运营商品清理助手" : "打开电商综合工具箱";
         launcher.innerHTML = `<img src="${chrome.runtime.getURL("assets/wolf-logo.png")}" alt="小灰狼">`;
         launcher.addEventListener("click", () => {
           state.panelOpen = true;
@@ -2440,7 +2620,7 @@
         created = true;
       }
       if (created) render();
-      if (!informationViolationView && !legalDetailView) {
+      if (complianceSection && !informationViolationView && !legalDetailView) {
         annotateProcessedRows();
         ensureSubjectColumnWidth();
         scheduleVisibleSkuStatusRefresh();
