@@ -13,6 +13,7 @@
 const { execSync } = require('child_process')
 const { Client } = require('ssh2')
 const http = require('http')
+const { validatePackagedExecutable } = require('./validate-windows-executable')
 const path = require('path')
 const fs = require('fs')
 
@@ -406,6 +407,20 @@ async function main() {
   } else {
     console.log('\n[1/5] 构建安装程序...')
     execSync('npx electron-vite build && node scripts/compile-bytecode.js && npx electron-builder --win', { cwd: ROOT, stdio: 'inherit' })
+  }
+
+  // Never publish an installer containing a truncated Electron executable.
+  // The custom icon hook once returned success after the C: temp drive filled
+  // up, reducing a ~223 MB executable to ~89 MB. Windows then rejected every
+  // upgraded client with "This app can't run on your PC".
+  const packagedExecutable = path.join(DIST_DIR, 'win-unpacked', 'dianxiaoer.exe')
+  const referenceExecutable = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe')
+  try {
+    const executableInfo = validatePackagedExecutable(packagedExecutable, referenceExecutable)
+    console.log(`  主程序校验通过: ${(executableInfo.size / 1024 / 1024).toFixed(1)} MB`)
+  } catch (error) {
+    console.error(`构建失败：主程序不可执行或已被截断：${error.message}`)
+    process.exit(1)
   }
 
   // 检查产物

@@ -12,6 +12,20 @@ function uniquePaths(paths) {
   })
 }
 
+function buildRuntimeLogCandidates({
+  managedDataRoot,
+  packaged,
+  executablePath,
+  userDataPath,
+  fileName
+}) {
+  return uniquePaths([
+    managedDataRoot ? path.join(managedDataRoot, fileName) : null,
+    packaged && executablePath ? path.join(path.dirname(executablePath), fileName) : null,
+    userDataPath ? path.join(userDataPath, fileName) : null
+  ])
+}
+
 function selectRuntimeLogPath(candidates, legacyPath, fsModule = fs) {
   let lastError = null
   for (const candidate of uniquePaths(candidates)) {
@@ -34,6 +48,7 @@ function selectRuntimeLogPath(candidates, legacyPath, fsModule = fs) {
 }
 
 module.exports = {
+  buildRuntimeLogCandidates,
   selectRuntimeLogPath,
   uniquePaths
 }

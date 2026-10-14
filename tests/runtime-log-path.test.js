@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import runtimeLogPath from '../src/main/runtime-log-path.js'
 
-const { selectRuntimeLogPath } = runtimeLogPath
+const { buildRuntimeLogCandidates, selectRuntimeLogPath } = runtimeLogPath
 const temporaryRoots = []
 
 function makeTemporaryRoot() {
@@ -20,6 +20,22 @@ afterEach(() => {
 })
 
 describe('运行日志路径', () => {
+  it('优先使用升级时不会被替换的受管数据目录', () => {
+    const candidates = buildRuntimeLogCandidates({
+      managedDataRoot: 'D:\\Programs\\dianxiaoer-data',
+      packaged: true,
+      executablePath: 'D:\\Programs\\dianxiaoer\\dianxiaoer.exe',
+      userDataPath: 'C:\\Users\\tester\\AppData\\Roaming\\dianxiaoer-shop-manager',
+      fileName: '店小二运行日志.txt'
+    })
+
+    expect(candidates).toEqual([
+      path.resolve('D:\\Programs\\dianxiaoer-data\\店小二运行日志.txt'),
+      path.resolve('D:\\Programs\\dianxiaoer\\店小二运行日志.txt'),
+      path.resolve('C:\\Users\\tester\\AppData\\Roaming\\dianxiaoer-shop-manager\\店小二运行日志.txt')
+    ])
+  })
+
   it('优先使用安装目录并复制旧日志历史', () => {
     const root = makeTemporaryRoot()
     const legacyPath = path.join(root, 'appdata', '店小二运行日志.txt')

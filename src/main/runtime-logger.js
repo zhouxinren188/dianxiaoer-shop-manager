@@ -1,11 +1,11 @@
 /**
  * runtime-logger.js — 运行日志写入模块
  *
- * 将关键运行日志优先写入用户安装目录下的 "店小二运行日志.txt" 文件，
- * 方便用户版出现问题时导出日志给开发者排查。
+ * 将关键运行日志优先写入安装盘持久数据目录下的 "店小二运行日志.txt" 文件，
+ * 避免全量升级替换安装目录时把故障日志一并删除。
  *
- * 用户版日志位置: 店小二.exe 同目录 / 店小二运行日志.txt
- * 回退位置: 安装盘 dianxiaoer-data，最后才回退到 app.getPath('userData')
+ * 用户版日志位置: 安装盘 dianxiaoer-data / 店小二运行日志.txt
+ * 回退位置: 店小二.exe 同目录，最后才回退到 app.getPath('userData')
  * 每次启动自动追加，不清空旧日志（保留历史上下文）
  * 日志超过 8MB 自动截断保留尾部，便于回溯最近数天的跨设备 Cookie 流程
  */
@@ -14,7 +14,7 @@ const fs = require('fs')
 const path = require('path')
 const { app } = require('electron')
 const { getStoragePaths } = require('./storage-manager')
-const { selectRuntimeLogPath } = require('./runtime-log-path')
+const { buildRuntimeLogCandidates, selectRuntimeLogPath } = require('./runtime-log-path')
 
 const LOG_FILE_NAME = '店小二运行日志.txt'
 const MAX_LOG_SIZE = 8 * 1024 * 1024 // 约保留数天诊断信息
@@ -26,20 +26,21 @@ function getLogFilePath() {
   if (logFilePath) return logFilePath
   const userDataPath = app.getPath('userData')
   const legacyPath = path.join(userDataPath, LOG_FILE_NAME)
-  const candidates = []
-
-  if (app.isPackaged) {
-    candidates.push(path.join(path.dirname(process.execPath), LOG_FILE_NAME))
-  }
+  let managedDataRoot = null
 
   try {
-    const managedDataRoot = getStoragePaths()?.dataRoot
-    if (managedDataRoot) candidates.push(path.join(managedDataRoot, LOG_FILE_NAME))
+    managedDataRoot = getStoragePaths()?.dataRoot || null
   } catch {
     // 存储管理器尚未初始化时继续使用旧目录兜底。
   }
 
-  candidates.push(legacyPath)
+  const candidates = buildRuntimeLogCandidates({
+    managedDataRoot,
+    packaged: app.isPackaged,
+    executablePath: process.execPath,
+    userDataPath,
+    fileName: LOG_FILE_NAME
+  })
   logFilePath = selectRuntimeLogPath(candidates, legacyPath)
   return logFilePath
 }
